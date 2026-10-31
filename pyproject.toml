@@ -1,0 +1,32 @@
+[project]
+name = "tagplatform"
+version = "0.1.0"
+description = "影视智能标签平台——阶段 1：数据底座与导入治理"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic>=2",
+    "pydantic-settings",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # starlette 1.10 弃用提示（其 testclient 的 httpx 集成建议迁移 httpx2），
+    # 由 fastapi 自身 import 触发，与本项目代码无关，待 fastapi 官方跟进后再处理
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:UserWarning",
+]

@@ -1,0 +1,10 @@
+# 任务 1 约定（docs/superpowers/plans/2026-10-31-phase1-data-foundation.md）
+data/
+__pycache__/
+.venv/
+*.db
+dist/
+
+# 测试与打包产生的本地产物
+.pytest_cache/
+*.egg-info/
