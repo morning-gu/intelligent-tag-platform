@@ -1,0 +1,124 @@
+"""TagProducer 协议、生成契约 dataclass 与生产器注册表（Task 3）。
+
+生成引擎的协议层：四个 dataclass（GenerationPolicy/GenerationSpec/
+Evidence/ProducedTag）定义调度与审核两侧共享的契约；TagProducer 协议
+约定一种生成模式实现的最小接口；注册表为模块级 dict（照抄阶段 1
+`tagplatform/adapters/base.py` 模式，单进程足够，不做插件发现）。
+
+反失败承诺一（设计文档 §9.2）：新增第三种生成模式 = 新实现类 +
+`register_producer` 注册即可，调度（Task 8 经 `get_producer(task.mode)`
+分发）、审核与前端自动兼容。closed/open 两个实现在任务 5/6 的各自
+模块导入时自动注册，本模块不含任何实现。
+
+分层红线：本模块不得 import fastapi（设计文档 §9.4）。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from sqlalchemy.orm import Session
+
+from tagplatform.schemas import ContentJSON
+
+
+@dataclass
+class GenerationPolicy:
+    """单任务生成策略：产出上限与入库置信度门槛。"""
+
+    max_tags: int = 30
+    min_confidence: float = 0.7
+
+
+@dataclass
+class Evidence:
+    """单条标签证据：锚定到统一内容 JSON 的场景时间区间。"""
+
+    scene_id: str
+    start_ms: int
+    end_ms: int
+    description: str
+
+
+@dataclass
+class ProducedTag:
+    """Producer 产出的一枚候选标签（审核前的中间态，不直接入库）。
+
+    - origin="catalog"：命中既有目录标签，tag_id 必填、candidate_* 为
+      None；
+    - origin="generated"：模型新造候选，tag_id 为 None、candidate_*
+      描述新标签候选（type/description）。
+    """
+
+    origin: str  # "catalog" | "generated"
+    tag_id: str | None
+    tag_name: str
+    candidate_type: str | None
+    candidate_description: str | None
+    relevance_score: float | None
+    confidence: float
+    evidence: list[Evidence]
+
+
+@dataclass
+class GenerationSpec:
+    """单次生成的完整输入：任务标识 + 内容 + 策略 + 渲染后 prompt。"""
+
+    task_id: str
+    asset_id: str
+    content: ContentJSON
+    policy: GenerationPolicy
+    prompt_text: str
+    run_id: str
+
+
+class TagProducer(Protocol):
+    """标签生成器协议。
+
+    约定：
+    - `mode` 唯一标识生成模式（closed/open 在任务 5/6 注册），同一
+      mode 不可重复注册；
+    - `produce` 返回 ProducedTag 列表，允许返回空列表（生成不出来
+      不算失败）。
+    """
+
+    mode: str
+
+    def produce(
+        self,
+        spec: GenerationSpec,
+        session: Session,
+        llm,
+        embedder,
+    ) -> list[ProducedTag]:
+        """按 spec 生成候选标签列表。"""
+        ...
+
+
+# 模块级注册表：mode -> 生成器实例（同 adapters 模式，单进程足够）
+_REGISTRY: dict[str, TagProducer] = {}
+
+
+def register_producer(producer: TagProducer) -> None:
+    """注册生成器；mode 重复抛 ValueError。"""
+    if producer.mode in _REGISTRY:
+        raise ValueError(
+            f"生成器 mode 已注册: {producer.mode}（可用: {list_producers()}）"
+        )
+    _REGISTRY[producer.mode] = producer
+
+
+def get_producer(mode: str) -> TagProducer:
+    """按 mode 取生成器；未注册抛 KeyError，信息列出可用 mode。"""
+    try:
+        return _REGISTRY[mode]
+    except KeyError:
+        raise KeyError(
+            f"未注册的生成器 mode: {mode!r}（可用: {list_producers()}）"
+        ) from None
+
+
+def list_producers() -> list[str]:
+    """列出全部已注册 mode（排序返回，保证确定性）。"""
+    return sorted(_REGISTRY)
