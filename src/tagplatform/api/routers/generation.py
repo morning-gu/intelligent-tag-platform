@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
@@ -120,7 +120,9 @@ class AssetTagOut(GenerationResultOut):
 # ---------- 组装辅助 ----------
 
 def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
-    """evidence_json → 证据列表；空/损坏 JSON 按空列表兜底（同 tags 路由别名解析模式）。"""
+    """evidence_json → 证据列表；空/损坏 JSON/条目 shape 非法（缺必填字段
+    或类型不符 → ValidationError）一律按空列表兜底（终审 deferred 落地：
+    审核列表与任务详情两条消费路径对坏证据均不再 500）。"""
     if not raw:
         return []
     try:
@@ -129,7 +131,10 @@ def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
         return []
     if not isinstance(data, list):
         return []
-    return [EvidenceOut(**item) for item in data if isinstance(item, dict)]
+    try:
+        return [EvidenceOut(**item) for item in data if isinstance(item, dict)]
+    except ValidationError:
+        return []
 
 
 def _catalog_names(session: Session, rows: list[AssetTag]) -> dict[str, str]:

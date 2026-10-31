@@ -1,4 +1,4 @@
-"""`/api/v1/asset-tags` 审核操作路由：单条审核与批量审核（Task 4）。
+"""`/api/v1/asset-tags` 审核操作与 `/api/v1/review` 审核列表路由（Task 4/5）。
 
 薄路由层：业务规则全部在 tagplatform.review 服务（四动作语义、前置校验、
 记录写入、服务内提交），router 只做协议转换与错误映射：
@@ -12,22 +12,42 @@
 取会话用户名；登录门槛由 create_app include 时的 protected_deps 统一挂载。
 响应复用 generation.py 的行输出形状（AssetTagOut 及其组装辅助——同包内
 复用，避免形状漂移）。
+
+审核列表（Task 5，审核中心页面数据源）：
+- GET /review/items：join media_asset（asset_title）/tag_catalog（目录名
+  与类型）/generation_task（mode），七筛选参数（status/confidence_min/
+  confidence_max/tag_type/mode/asset_id/origin），默认 confidence 升序
+  （低分先审），page/page_size 分页，响应 {items, total, page}；行
+  tag_name/tag_type origin 感知并含 merged 回退——行带 tag_id（catalog
+  行或已并入目录的 merged 行）取 tag_catalog 字典，generated 行无 tag_id
+  取 candidate_*（同任务详情 results 的 origin 感知形状）；
+- GET /review/filters：前端筛选下拉（tag_types 库内去重 + statuses/modes
+  契约固定枚举）。
 """
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import nullslast
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.depends import get_current_user
 from tagplatform.api.routers.generation import (
     AssetTagOut,
+    EvidenceOut,
     _catalog_names,
+    _parse_evidence,
     _result_out,
 )
-from tagplatform.db.models import AssetTag, UserAccount
+from tagplatform.db.models import (
+    AssetTag,
+    GenerationTask,
+    MediaAsset,
+    TagCatalog,
+    UserAccount,
+)
 from tagplatform.review import ConflictError, apply_review
 
 router = APIRouter(prefix="/api/v1")
@@ -110,9 +130,164 @@ def batch_review_asset_tags(
                          user.username, body.payload)
             results.append(BatchReviewItemOut(id=asset_tag_id, ok=True))
         except (ConflictError, ValueError) as exc:
-            # 回滚保险：服务层校验前置，正常路径无未提交变更；此处防御
-            # 提交中途异常（如唯一索引冲突）污染后续条目的事务
+            # 两类异常均在服务层任何行变更之前抛出（载荷校验全部前置），
+            # 正常路径本无未提交变更；rollback 为防御性冗余，保留以兜底
+            # 服务层未来改动引入中途变更的情形
             session.rollback()
             results.append(BatchReviewItemOut(id=asset_tag_id, ok=False,
                                               detail=str(exc)))
     return BatchReviewResponse(results=results)
+
+
+# ---------- 审核列表与筛选（Task 5，审核中心页面数据源） ----------
+
+# 契约固定枚举（statuses/modes 不查库，与数据模型注释的取值集合同源）
+_REVIEW_STATUSES = ["pending", "approved", "rejected", "merged"]
+_GENERATION_MODES = ["closed", "open"]
+
+
+class ReviewItemOut(BaseModel):
+    """审核列表单行。
+
+    tag_name/tag_type origin 感知并含 merged 回退：行带 tag_id（catalog
+    行或已并入目录的 merged 行）→ tag_catalog 字典名/类型；generated 行
+    无 tag_id → 候选名/类型（同任务详情 results 的 origin 感知形状）。
+    """
+
+    id: int
+    asset_id: str
+    asset_title: str | None = None
+    tag_name: str
+    origin: str
+    mode: str | None = None
+    tag_type: str | None = None
+    confidence: float | None = None
+    relevance: float | None = None
+    review_status: str
+    evidence: list[EvidenceOut] = []
+    task_id: str | None = None
+
+
+class ReviewItemsResponse(BaseModel):
+    """审核列表响应：当前页行 + 过滤后总数 + 页码（前端分页用）。"""
+
+    items: list[ReviewItemOut]
+    total: int
+    page: int
+
+
+class ReviewFiltersOut(BaseModel):
+    """筛选下拉选项：tag_types 为 tag_catalog 库内去重，statuses/modes
+    为契约固定枚举。"""
+
+    tag_types: list[str]
+    statuses: list[str]
+    modes: list[str]
+
+
+@router.get("/review/items", response_model=ReviewItemsResponse)
+def list_review_items(
+    status: str | None = Query(None),
+    confidence_min: float | None = Query(None),
+    confidence_max: float | None = Query(None),
+    tag_type: str | None = Query(None),
+    mode: str | None = Query(None),
+    asset_id: str | None = Query(None),
+    origin: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1),
+    session: Session = Depends(get_session),
+) -> ReviewItemsResponse:
+    """审核列表：待审核/已审行，七筛选参数自由组合。
+
+    join media_asset（asset_title）/tag_catalog（目录名与类型）/
+    generation_task（mode）；默认 confidence 升序（低分先审，无置信度行
+    置后——不挡低分行审核）、id 决胜保证确定性；page/page_size 分页，
+    total 为过滤后总数；未知筛选值一律空列表（不报错）。三个 outerjoin
+    均按对方主键 1:1 关联，无行放大，count 直接可用。
+    """
+    query = (
+        session.query(
+            AssetTag, MediaAsset.title, TagCatalog.tag_type, GenerationTask.mode,
+        )
+        .outerjoin(MediaAsset, AssetTag.asset_id == MediaAsset.asset_id)
+        .outerjoin(TagCatalog, AssetTag.tag_id == TagCatalog.tag_id)
+        .outerjoin(GenerationTask, AssetTag.task_id == GenerationTask.task_id)
+    )
+    if status is not None:
+        query = query.filter(AssetTag.review_status == status)
+    if confidence_min is not None:
+        query = query.filter(AssetTag.confidence >= confidence_min)
+    if confidence_max is not None:
+        query = query.filter(AssetTag.confidence <= confidence_max)
+    if tag_type is not None:
+        # 行类型 origin 感知：带 tag_id 行（catalog/merged）按目录类型，
+        # generated 行按候选类型（merged 行 candidate 已清空不会误配）
+        query = query.filter(
+            (TagCatalog.tag_type == tag_type)
+            | (AssetTag.candidate_type == tag_type))
+    if mode is not None:
+        query = query.filter(GenerationTask.mode == mode)
+    if asset_id is not None:
+        query = query.filter(AssetTag.asset_id == asset_id)
+    if origin is not None:
+        query = query.filter(AssetTag.origin == origin)
+
+    total = query.count()
+    rows = (
+        query
+        .order_by(nullslast(AssetTag.confidence.asc()), AssetTag.id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    # 目录名批量解析（限本页行集）。与 generation._catalog_names 不同：
+    # 这里按"行带 tag_id 即取"——含 merged 行（origin=generated 但已并入
+    # 目录）的 tag_name 回退，不做 origin 过滤
+    tag_ids = {row.tag_id for row, _, _, _ in rows if row.tag_id}
+    names = (
+        {t.tag_id: t.tag_name
+         for t in session.query(TagCatalog).filter(TagCatalog.tag_id.in_(tag_ids))}
+        if tag_ids else {}
+    )
+
+    items = [
+        ReviewItemOut(
+            id=row.id,
+            asset_id=row.asset_id,
+            asset_title=asset_title,
+            tag_name=(names.get(row.tag_id, "") if row.tag_id is not None
+                      else (row.candidate_name or "")),
+            origin=row.origin,
+            mode=task_mode,
+            tag_type=(catalog_tag_type if row.tag_id is not None
+                      else row.candidate_type),
+            confidence=row.confidence,
+            relevance=row.relevance_score,
+            review_status=row.review_status,
+            evidence=_parse_evidence(row.evidence_json),
+            task_id=row.task_id,
+        )
+        for row, asset_title, catalog_tag_type, task_mode in rows
+    ]
+    return ReviewItemsResponse(items=items, total=total, page=page)
+
+
+@router.get("/review/filters", response_model=ReviewFiltersOut)
+def get_review_filters(
+    session: Session = Depends(get_session),
+) -> ReviewFiltersOut:
+    """筛选下拉选项：tag_types 为 tag_catalog 库内去重（排序保证确定性
+    下拉顺序）；statuses/modes 为契约固定枚举，不查库。"""
+    tag_types = [
+        row[0]
+        for row in session.query(TagCatalog.tag_type)
+        .distinct()
+        .order_by(TagCatalog.tag_type)
+    ]
+    return ReviewFiltersOut(
+        tag_types=tag_types,
+        statuses=list(_REVIEW_STATUSES),
+        modes=list(_GENERATION_MODES),
+    )

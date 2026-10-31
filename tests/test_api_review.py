@@ -1,6 +1,6 @@
-"""审核操作 API 测试（Task 4）。
+"""审核操作 API 测试（Task 4）与审核列表/筛选 API 测试（Task 5）。
 
-覆盖契约（错误映射 + 批量逐条独立）：
+Task 4 覆盖契约（错误映射 + 批量逐条独立）：
 - POST /api/v1/asset-tags/{id}/review：approve 200 回行摘要（与
   AssetTagOut 同形）、重复审核 409（Review Focus 1 并发保护，detail
   "该标签已被处理"）、未知行 404、非法 action 422、modify 空值 422、
@@ -10,6 +10,14 @@
   action 级 422 整请求拒绝且零副作用（DB 仍全 pending）、空 ids 422；
 - reviewer 取会话用户名（client fixture 已 admin 登录 → reviewer_id
   "admin"）；未登录 401（create_app protected_deps 统一挂载验证）。
+
+Task 5 覆盖契约（审核中心页面数据源）：
+- GET /api/v1/review/items：七筛选参数逐个 + 组合、默认 confidence 升序
+  （低分先审）、分页与 total、行形状（asset_title/tag_name origin 感知 +
+  merged 回退目录名/mode 经 generation_task 关联/tag_type origin 感知）、
+  evidence shape 非法降级空列表（不再 500，任务详情路径同步收紧）；
+- GET /api/v1/review/filters：tag_types 库内去重 + statuses/modes 固定枚举；
+- 新端点未登录 401。
 
 播种模式（计划指定）：参照 tests/test_results.py 的父行播种——经
 client.app.state.session_factory 直接向 client fixture 的临时文件库补
@@ -21,7 +29,13 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import AssetTag, MediaAsset, ReviewRecord, TagCatalog
+from tagplatform.db.models import (
+    AssetTag,
+    GenerationTask,
+    MediaAsset,
+    ReviewRecord,
+    TagCatalog,
+)
 
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -245,3 +259,298 @@ def test_review_requires_login(client):
                           json={"action": "approve"}).status_code == 401
         assert fresh.post("/api/v1/asset-tags/batch-review",
                           json={"ids": [1], "action": "approve"}).status_code == 401
+
+
+# ---------- 审核列表与筛选（Task 5） ----------
+
+# 审核列表行键集契约（计划：id/asset_id/asset_title/tag_name/origin/mode/
+# tag_type/confidence/relevance/review_status/evidence/task_id）
+REVIEW_ITEM_KEYS = {"id", "asset_id", "asset_title", "tag_name", "origin",
+                    "mode", "tag_type", "confidence", "relevance",
+                    "review_status", "evidence", "task_id"}
+
+
+def _seed_list_scene(client) -> dict[str, int]:
+    """播种审核列表场景：两资产、两类型目录标签、closed/open 两任务、
+    五行错开置信度与状态（0.3/0.5/0.6/0.7/0.95），覆盖四种行形态——
+    generated（带/不带任务）、catalog、merged（generated 行并入目录，
+    candidate_* 清空）。返回 键 → 行 id 映射。
+
+    行清单（键 → 语义）：
+    - r1：generated 候选"反转"（narrative），conf 0.3，pending，closed 任务，
+      带真实 evidence（排序与形状断言用）；
+    - r2：catalog 挂 tag_1（悬疑/genre），conf 0.7，rel 0.9，pending，closed 任务；
+    - r3：merged 行（origin=generated + tag_id=tag_2 紧张/mood，candidate
+      已清空），conf 0.5，approved，无任务——tag_name 回退断言用；
+    - r4：generated 候选"群像"（candidate_type=genre），conf 0.95，rejected，
+      无任务——generated 行按候选类型命中 tag_type 筛选用；
+    - r5：generated 候选"老友重逢"（candidate_type=mood），conf 0.6，pending，
+      open 任务。
+    """
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(MediaAsset(asset_id="a1", asset_type="movie", title="悬疑片A",
+                         created_at=_NOW))
+        s.add(MediaAsset(asset_id="a2", asset_type="series", title="剧集B",
+                         created_at=_NOW))
+        s.add(TagCatalog(tag_id="tag_1", tag_name="悬疑", tag_type="genre",
+                         description="以悬念和谜题为核心"))
+        s.add(TagCatalog(tag_id="tag_2", tag_name="紧张", tag_type="mood",
+                         description="以紧张氛围为核心"))
+        s.add(GenerationTask(task_id="gen_closed", mode="closed",
+                             status="succeeded", created_at=_NOW))
+        s.add(GenerationTask(task_id="gen_open", mode="open",
+                             status="succeeded", created_at=_NOW))
+        s.flush()
+
+        def _row(**kw) -> int:
+            base = dict(created_at=_NOW, updated_at=_NOW,
+                        review_status="pending", evidence_json="[]")
+            base.update(kw)
+            row = AssetTag(**base)
+            s.add(row)
+            s.flush()
+            return row.id
+
+        ids = {
+            "r1": _row(asset_id="a1", tag_id=None, candidate_name="反转",
+                       candidate_type="narrative", origin="generated",
+                       confidence=0.3, relevance_score=None,
+                       evidence_json='[{"scene_id": "s1", "start_ms": 0, '
+                                     '"end_ms": 100, "description": "开场反转"}]',
+                       task_id="gen_closed"),
+            "r2": _row(asset_id="a1", tag_id="tag_1", origin="catalog",
+                       relevance_score=0.9, confidence=0.7,
+                       task_id="gen_closed"),
+            "r3": _row(asset_id="a2", tag_id="tag_2", origin="generated",
+                       candidate_name=None, candidate_type=None,
+                       candidate_description=None, confidence=0.5,
+                       relevance_score=None, review_status="approved",
+                       task_id=None),
+            "r4": _row(asset_id="a2", tag_id=None, candidate_name="群像",
+                       candidate_type="genre", origin="generated",
+                       confidence=0.95, relevance_score=None,
+                       review_status="rejected", task_id=None),
+            "r5": _row(asset_id="a1", tag_id=None, candidate_name="老友重逢",
+                       candidate_type="mood", origin="generated",
+                       confidence=0.6, relevance_score=None,
+                       task_id="gen_open"),
+        }
+        s.commit()
+    return ids
+
+
+def test_review_items_default_ordering_and_row_shape(client):
+    """默认列表：confidence 升序（低分先审，0.3→0.95）；行键集与 origin
+    感知取值齐全——tag_name/tag_type 按行形态取（catalog 取目录、generated
+    取候选、merged 回退目录名）、mode 经 generation_task 关联（无任务 None）、
+    asset_title 取 MediaAsset.title、evidence 解析 evidence_json。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["page"] == 1 and body["total"] == 5
+    assert [it["id"] for it in body["items"]] == [
+        ids["r1"], ids["r3"], ids["r5"], ids["r2"], ids["r4"]]
+
+    by_id = {it["id"]: it for it in body["items"]}
+    # r1：generated + closed 任务 + 真实 evidence
+    r1 = by_id[ids["r1"]]
+    assert set(r1.keys()) == REVIEW_ITEM_KEYS
+    assert r1["tag_name"] == "反转" and r1["tag_type"] == "narrative"
+    assert r1["origin"] == "generated" and r1["mode"] == "closed"
+    assert r1["asset_id"] == "a1" and r1["asset_title"] == "悬疑片A"
+    assert r1["confidence"] == 0.3 and r1["relevance"] is None
+    assert r1["review_status"] == "pending" and r1["task_id"] == "gen_closed"
+    assert r1["evidence"] == [{"scene_id": "s1", "start_ms": 0, "end_ms": 100,
+                               "description": "开场反转"}]
+    # r2：catalog 行取目录名/类型 + 关联度
+    r2 = by_id[ids["r2"]]
+    assert r2["tag_name"] == "悬疑" and r2["tag_type"] == "genre"
+    assert r2["relevance"] == 0.9
+    # r3：merged 行（origin=generated）tag_name 回退目录名——candidate 已清空
+    r3 = by_id[ids["r3"]]
+    assert r3["tag_name"] == "紧张" and r3["tag_type"] == "mood"
+    assert r3["origin"] == "generated" and r3["review_status"] == "approved"
+    # r4：无任务 → mode/task_id 为 None
+    r4 = by_id[ids["r4"]]
+    assert r4["mode"] is None and r4["task_id"] is None
+    assert r4["tag_name"] == "群像" and r4["review_status"] == "rejected"
+    # r5：open 任务
+    assert by_id[ids["r5"]]["mode"] == "open"
+
+
+def test_review_items_filter_status(client):
+    """status 筛选：review_status 精确匹配；未知状态 → 空列表不报错。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={"status": "approved"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1 and [it["id"] for it in body["items"]] == [ids["r3"]]
+
+    resp = client.get("/api/v1/review/items", params={"status": "pending"})
+    assert resp.json()["total"] == 3
+    assert client.get("/api/v1/review/items",
+                      params={"status": "nonexistent"}).json()["total"] == 0
+
+
+def test_review_items_filter_confidence_bounds(client):
+    """confidence_min/max 闭区间筛选：上下界同时给与单独给均可。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={
+        "confidence_min": 0.5, "confidence_max": 0.7})
+    body = resp.json()
+    assert body["total"] == 3
+    assert [it["id"] for it in body["items"]] == [
+        ids["r3"], ids["r5"], ids["r2"]]  # 区间内仍按升序
+    assert client.get("/api/v1/review/items",
+                      params={"confidence_min": 0.8}).json()["total"] == 1
+    assert client.get("/api/v1/review/items",
+                      params={"confidence_max": 0.5}).json()["total"] == 2
+
+
+def test_review_items_filter_tag_type(client):
+    """tag_type 筛选 origin 感知：catalog/merged 行按目录类型命中，
+    generated 行按候选类型命中（merged 行 candidate 已清空不误配）。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={"tag_type": "genre"})
+    assert resp.json()["total"] == 2
+    assert {it["id"] for it in resp.json()["items"]} == {ids["r2"], ids["r4"]}
+
+    resp = client.get("/api/v1/review/items", params={"tag_type": "mood"})
+    assert resp.json()["total"] == 2
+    assert {it["id"] for it in resp.json()["items"]} == {ids["r3"], ids["r5"]}
+
+    resp = client.get("/api/v1/review/items", params={"tag_type": "narrative"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["id"] == ids["r1"]
+
+
+def test_review_items_filter_mode(client):
+    """mode 筛选：行 task_id → generation_task.mode 关联过滤；无任务行
+    （mode 为 None）不被任何 mode 值命中。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={"mode": "closed"})
+    assert resp.json()["total"] == 2
+    assert {it["id"] for it in resp.json()["items"]} == {ids["r1"], ids["r2"]}
+
+    resp = client.get("/api/v1/review/items", params={"mode": "open"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["id"] == ids["r5"]
+
+
+def test_review_items_filter_asset_and_origin(client):
+    """asset_id 与 origin 筛选各自生效且可组合。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={"asset_id": "a1"})
+    assert resp.json()["total"] == 3
+    assert {it["id"] for it in resp.json()["items"]} == {
+        ids["r1"], ids["r2"], ids["r5"]}
+
+    resp = client.get("/api/v1/review/items", params={"origin": "catalog"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["id"] == ids["r2"]
+
+    assert client.get("/api/v1/review/items",
+                      params={"origin": "generated"}).json()["total"] == 4
+
+    # 组合：a1 上的 catalog 行只剩 r2
+    resp = client.get("/api/v1/review/items", params={
+        "asset_id": "a1", "origin": "catalog"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["id"] == ids["r2"]
+
+
+def test_review_items_pagination(client):
+    """分页：page/page_size 截断且 total 恒为过滤后总数、page 回显请求页；
+    末页之后为空列表；默认 page_size=50 一页全收。"""
+    ids = _seed_list_scene(client)
+    resp = client.get("/api/v1/review/items", params={"page": 2, "page_size": 2})
+    body = resp.json()
+    assert body["page"] == 2 and body["total"] == 5
+    assert [it["id"] for it in body["items"]] == [ids["r5"], ids["r2"]]
+
+    resp = client.get("/api/v1/review/items", params={"page": 3, "page_size": 2})
+    body = resp.json()
+    assert [it["id"] for it in body["items"]] == [ids["r4"]]  # 末页剩余 1 行
+    assert body["total"] == 5
+
+    resp = client.get("/api/v1/review/items", params={"page": 4, "page_size": 2})
+    assert resp.json()["items"] == [] and resp.json()["total"] == 5
+
+    assert len(client.get("/api/v1/review/items").json()["items"]) == 5
+
+
+def test_review_items_merged_row_uses_catalog_name(client):
+    """Task 4 遗留修复验证：generated 行经 merge 动作并入目录后，列表
+    tag_name/tag_type 按目录回退（candidate_* 已清空，不再显示空候选名）。"""
+    (row_id,) = _seed_rows(client)  # generated 候选"候选0" + 目录 tag_1（悬疑/genre）
+    merged = client.post(f"/api/v1/asset-tags/{row_id}/review",
+                         json={"action": "merge",
+                               "payload": {"merge_to_tag_id": "tag_1"}})
+    assert merged.status_code == 200
+
+    resp = client.get("/api/v1/review/items", params={"status": "merged"})
+    body = resp.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["id"] == row_id
+    assert item["tag_name"] == "悬疑" and item["tag_type"] == "genre"
+    assert item["origin"] == "generated"
+
+
+def test_bad_evidence_degrades_to_empty_list(client):
+    """evidence 条目 shape 非法（JSON 合法但缺必填字段 → pydantic
+    ValidationError）：审核列表与生成任务详情两条消费路径均 200 且该行
+    evidence 降级空列表（终审 deferred 落地——不再 500）。"""
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(MediaAsset(asset_id="a_bad", asset_type="movie", title="坏证据影片",
+                         created_at=_NOW))
+        s.add(GenerationTask(task_id="gen_bad", mode="closed",
+                             status="succeeded", created_at=_NOW))
+        s.flush()
+        s.add(AssetTag(
+            asset_id="a_bad", tag_id=None, candidate_name="坏证据行",
+            candidate_type="mood", origin="generated", confidence=0.4,
+            evidence_json='[{"scene_id": "s1"}]',  # 缺 start_ms/end_ms/description
+            review_status="pending", task_id="gen_bad",
+            created_at=_NOW, updated_at=_NOW))
+        s.commit()
+
+    listing = client.get("/api/v1/review/items").json()
+    assert listing["total"] == 1
+    assert listing["items"][0]["evidence"] == []
+
+    detail = client.get("/api/v1/generation/tasks/gen_bad")
+    assert detail.status_code == 200  # 收紧前此处 500
+    assert detail.json()["results"][0]["evidence"] == []
+
+
+def test_review_filters_endpoint(client):
+    """filters 端点：tag_types 为 tag_catalog 库内去重（确定性排序），
+    statuses/modes 为契约固定枚举。"""
+    _seed_list_scene(client)
+    resp = client.get("/api/v1/review/filters")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"tag_types", "statuses", "modes"}
+    assert body["tag_types"] == ["genre", "mood"]
+    assert body["statuses"] == ["pending", "approved", "rejected", "merged"]
+    assert body["modes"] == ["closed", "open"]
+
+
+def test_review_filters_empty_catalog(client):
+    """空库：tag_types 为空列表（statuses/modes 仍回固定枚举）。"""
+    resp = client.get("/api/v1/review/filters")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tag_types"] == []
+    assert body["statuses"] == ["pending", "approved", "rejected", "merged"]
+
+
+def test_review_list_and_filters_require_login(client):
+    """新端点同受全 API 保护：未登录 401（protected_deps 挂载覆盖）。"""
+    with TestClient(client.app) as fresh:
+        assert fresh.get("/api/v1/review/items").status_code == 401
+        assert fresh.get("/api/v1/review/filters").status_code == 401
