@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # 生成任务线程池大小；0 = 同步执行（测试与单步调试）
     generation_workers: int = 2
 
+    # ---------- 阶段 3：审核后台（会话认证） ----------
+
+    # 会话令牌 HMAC 密钥（TAGPLT_SESSION_SECRET）；默认值仅供开发/测试，
+    # 生产必改（泄漏即可伪造任意用户登录态，README 环境变量表警告）
+    session_secret: str = "dev-secret"
+
 
 @lru_cache
 def get_settings() -> Settings:

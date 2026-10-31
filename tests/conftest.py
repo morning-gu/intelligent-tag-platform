@@ -11,6 +11,8 @@ TestClient——同为 httpx 之上的同步封装，契约（同步、进程内
 `:memory:` 引擎并按 `Base.metadata` 建表，测试间零残留。
 """
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -37,7 +39,12 @@ def client(tmp_path):
       生成路由端到端可用，Task 9）；
     - generation_workers=0 钉死同步执行：executor.submit 返回即任务完成，
       POST /generation/tasks 响应已是终态（T9 的端到端测试模式）；
-    - 表结构先经 Base.metadata.create_all 写入临时库（应用不负责建表）。
+    - 表结构先经 Base.metadata.create_all 写入临时库（应用不负责建表）；
+    - 启动（lifespan 引导 admin）后即以 admin 登录：cookie 随 TestClient
+      会话自动携带，既有 API 测试断言零改动即处于已认证上下文（阶段 3 B2
+      全 API 保护）。密码与 lifespan 同源（TAGPLT_ADMIN_PASSWORD，默认
+      admin123）——在 fixture 内读取环境变量而非依赖测试内 monkeypatch
+      （fixture 与测试体的执行顺序不保证）。
     """
     from tagplatform.db import create_engine_for
     from tagplatform.db.models import Base
@@ -51,6 +58,11 @@ def client(tmp_path):
 
     app = create_app(settings)
     with TestClient(app) as http_client:
+        login = http_client.post("/api/v1/auth/login", json={
+            "username": "admin",
+            "password": os.environ.get("TAGPLT_ADMIN_PASSWORD", "admin123"),
+        })
+        assert login.status_code == 200, f"client fixture 登录失败：{login.text}"
         yield http_client
     app.state.engine.dispose()  # 释放 app 级连接（Windows 文件句柄）
 

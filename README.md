@@ -49,6 +49,8 @@ curl http://127.0.0.1:8000/health        # {"status":"ok"}
 |---|---|---|
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | 无 | OpenAI 兼容端点地址与密钥；LLM 生成必需，未设置时 complete 报错指引复制 `.env.example` |
 | `TAGPLT_DATABASE_PATH` | `data/tagplatform.db` | SQLite 数据库文件路径（迁移与应用共用） |
+| `TAGPLT_ADMIN_PASSWORD` | `admin123` | 首管理员启动引导密码（user_account 空表时创建 admin 账号；生产务必经本变量改强密码） |
+| `TAGPLT_SESSION_SECRET` | `dev-secret` | 会话令牌 HMAC 密钥；**生产必改**（默认值仅供开发/测试，泄漏即可伪造任意用户登录态） |
 | `TAGPLT_USE_MOCK_LLM` | `false` | true = 确定性 MockLLMClient（零网络，测试/冒烟） |
 | `TAGPLT_USE_MOCK_EMBEDDER` | `false` | true = 确定性 MockEmbedder（不下载模型） |
 | `TAGPLT_GENERATION_WORKERS` | `2` | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成） |
