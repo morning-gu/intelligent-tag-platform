@@ -9,20 +9,24 @@
 - `get_executor`：app 级生成任务执行器单例（lifespan 启动时按
   `settings.generation_workers` 构建，0 = 同步执行，Task 9）。
 
-生命周期（lifespan）：启动时构建执行器并孤儿清理（进程重启留下的
-running 任务复位 failed）；关停时 `executor.shutdown()` 等待在途任务。
+生命周期（lifespan）：启动时先做首管理员引导（user_account 空表经
+`bootstrap_admin` 创建 admin，密码取 `TAGPLT_ADMIN_PASSWORD`，默认
+admin123），随后构建执行器并孤儿清理（进程重启留下的 running 任务复位
+failed）；关停时 `executor.shutdown()` 等待在途任务。
 
 注意：本模块的 router 导入语句必须放在依赖函数定义**之后**——router
 模块会 `from tagplatform.api import get_session` 反向引用本模块，若
 router 先导入则依赖函数尚不存在（循环导入）。
 """
 
+import os
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from sqlalchemy.orm import Session
 
+from tagplatform.auth import bootstrap_admin
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, make_embedder
 from tagplatform.llm import make_llm_client
@@ -75,16 +79,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
       create_engine_for 确保；表结构由 alembic 迁移管理，应用不建表）；
     - 嵌入器按 use_mock_embedder 构建单例（mock 用于测试与冒烟）；
     - LLM 客户端按 use_mock_llm 构建单例（mock 零网络，测试与冒烟）。
-    lifespan：启动时按 generation_workers 构建 TaskExecutor（0 = 同步
-    执行）并孤儿清理（running 任务复位 failed）；关停时关线程池等待在途
-    任务结束。
+    lifespan：启动时先做首管理员引导（空表创建 admin，密码取
+    TAGPLT_ADMIN_PASSWORD，默认 admin123），随后按 generation_workers 构建
+    TaskExecutor（0 = 同步执行）并孤儿清理（running 任务复位 failed）；关停
+    时关线程池等待在途任务结束。
     """
     if settings is None:
         settings = get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """启动：executor 构建 + 孤儿清理；关停：线程池等待在途任务。"""
+        """启动：首管理员引导（最前）+ executor 构建 + 孤儿清理；关停：线程池等待在途任务。"""
+        # 启动引导放最前（先于 executor 构建与孤儿清理）：user_account 空表
+        # 时创建首管理员 admin（密码取 TAGPLT_ADMIN_PASSWORD，默认 admin123，
+        # 生产环境务必经环境变量改密——README 注明）
+        session = app.state.session_factory()
+        try:
+            bootstrap_admin(
+                session,
+                os.environ.get("TAGPLT_ADMIN_PASSWORD", "admin123"))
+        finally:
+            session.close()
         app.state.executor = TaskExecutor(
             app.state.session_factory, app.state.llm, app.state.embedder,
             workers=settings.generation_workers)

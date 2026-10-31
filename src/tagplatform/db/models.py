@@ -1,4 +1,4 @@
-"""9 张核心表 ORM 模型（数据底座的列契约）。
+"""10 张核心表 ORM 模型（数据底座的列契约）。
 
 本模块的属性名即平台契约：后续任务（治理流水线、内容导入、API 层）一律
 按这些属性读写数据库。列定义与设计文档逐字对应；括号注记的枚举取值
@@ -307,3 +307,22 @@ def _seed_prompt_v1(target, connection, **kw):
     bulk_insert 播种——两条路径互斥，不会重复插入。
     """
     connection.execute(target.insert(), [dict(row) for row in PROMPT_V1_SEED])
+
+
+class UserAccount(Base):
+    """用户账号：审核后台登录账户（阶段 3 第 10 张表）。
+
+    role 取值 admin|reviewer（括号注记枚举以注释记录，不加 CHECK 约束，
+    合法性由服务层保证）；username 唯一约束是登录与重名校验的依据；
+    password_hash 存 `pbkdf2$200000$salt_hex$hash_hex`（见 auth/password）。
+    user_id 由服务层生成（`user_`+uuid4().hex[:8]），created_at 显式赋值。
+    """
+
+    __tablename__ = "user_account"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # 取值 admin|reviewer
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
