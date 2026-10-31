@@ -8,6 +8,12 @@
 - 语义阈值含等于：MockEmbedder 同形文本同向量 → 余弦 1.0 ≥ 0.90；
 - parent 缺失（parent_not_found）与批内父子成环（parent_cycle）；
 - 批内父子链拓扑序插入（child.parent_id 指向批内父行 tag_id）。
+
+修复轮补充（审查驱动）：
+- 兜底级联：三行链祖先的父被拒时，批内子孙逐级兜底拦截，零静默搁浅
+  （记账不变量：{入库行} ∪ {有 issue 行} == 全部输入行）；
+- 顺序对齐（控制器裁决，按处理规则序）：tag_type_invalid 提前至
+  semantic_similar 之前——非法类型报 tag_type_invalid 而非 semantic_similar。
 """
 
 import json
@@ -15,6 +21,7 @@ import json
 from conftest import MOCK_EMBEDDER
 from tagplatform.db.models import ImportBatch, TagCatalog, TagChangeLog
 from tagplatform.governance import TagRow, run_governance
+from tagplatform.settings import get_settings
 
 
 def test_clean_rows_inserted_with_embedding_and_log(session):
@@ -74,3 +81,30 @@ def test_batch_parent_chain_inserts(session):
     child = next(t for t in session.query(TagCatalog).all() if t.tag_name == "悬疑")
     parent = next(t for t in session.query(TagCatalog).all() if t.tag_name == "剧情")
     assert child.parent_id == parent.tag_id
+
+def test_valve_cascade_no_silent_strand(session):
+    # 兜底级联：三行链 甲←乙←丙，丙被拒（别名撞批内行名）且其名不在库内、
+    # 不在有效行集 → 乙、甲在第二遍逐级兜底拦截。缺陷回归位：若跳过行不
+    # 从 valid_by_name 摘除，子孙的父仍"看似有效"，就绪集变空 → 甲被静默
+    # 搁浅（未入库且零 issue）。
+    # 注：拒绝码用 alias_conflict 构造——semantic_similar 拒绝要求父名与
+    # 库内/有效行同形（余弦 1.0），该名必然可经库内或有效行解析，兜底不触发。
+    res = run_governance([
+        TagRow(None, "甲", "genre", "d1", "乙", [], None, None),
+        TagRow(None, "乙", "genre", "d2", "丙", [], None, None),
+        TagRow(None, "丙", "genre", "d3", None, ["甲"], None, None)], session, MOCK_EMBEDDER)
+    assert res.inserted == []
+    by_name = {i.tag_name: i.code for i in res.issues}
+    assert by_name["丙"] == "alias_conflict"
+    assert by_name["乙"] == "parent_not_found" and by_name["甲"] == "parent_not_found"
+    # 记账不变量：{入库行名} ∪ {有 issue 行名} == 全部输入行名（零静默丢弃）
+    inserted_names = {t.tag_name for t in session.query(TagCatalog).all() if t.tag_id in res.inserted}
+    assert inserted_names | set(by_name) == {"甲", "乙", "丙"}
+
+def test_tag_type_invalid_precedes_semantic(session, monkeypatch):
+    # 顺序对齐（控制器裁决）：类型非法先于语义检查判定——非法类型不付
+    # embed 开销，报 tag_type_invalid 而非 semantic_similar
+    monkeypatch.setattr(get_settings(), "allowed_tag_types", "genre,style")
+    run_governance([TagRow(None, "推理", "genre", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
+    res = run_governance([TagRow(None, "推理", "mood", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
+    assert res.issues[0].code == "tag_type_invalid" and res.inserted == []

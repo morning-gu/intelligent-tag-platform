@@ -7,9 +7,10 @@
   TagCatalog 自引用外键无 relationship()，同批 flush 会按类名字母序
   先插子行而炸外键），最后写 import_batch 摘要并提交。
 
-判定顺序（契约行 `按上述顺序判定，判定即停`）：
-    duplicate_name → alias_conflict → semantic_similar →
-    parent_not_found → parent_cycle → tag_type_invalid
+判定顺序（控制器裁决：按处理规则序，tag_type_invalid 提前至语义检查
+之前——类型非法的行不付 embed 开销）：
+    duplicate_name → alias_conflict → tag_type_invalid →
+    semantic_similar → parent_not_found → parent_cycle
 
 契约细则的实现解读（详见 task-7-report）：
 - duplicate_name 对"同名不同 tag_type"的行不立即判停：test_semantic_
@@ -22,7 +23,10 @@
 - parent_not_found 的"批内有效行"按名取自整批行集（含尚未判定的行）：
   test_parent_missing_and_cycle 中甲行判定时乙行尚未过检，若只看已过检
   行会误报 parent_not_found。父名只命中批内未通过校验行的情况在第二遍
-  插入时兜底拦截（报 parent_not_found、不插入），避免悬空外键。
+  插入时兜底拦截（报 parent_not_found、不插入）；兜底跳过时把该行从
+  valid_by_name 摘除**级联**——其批内子孙下一轮因父不在有效行集而就绪，
+  同样走兜底逐一拦截。记账不变量：每行要么入库要么有 issue，零静默丢弃
+  （否则被跳过行的子孙会因就绪集为空而无声搁浅）。
 - parent_cycle 只查批内新增边：父链走出批内（命中库内名）即止，库内
   已有链由库保证无环。
 - 时间戳列无默认值，插入时显式赋 UTC now（Task 3 审查遗留注意项）。
@@ -182,7 +186,16 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 3) semantic_similar：与库内向量（含本批已过检行）余弦 ≥ 阈值（含等于）
+        # 3) tag_type_invalid：白名单非空且不在白名单（先于语义：类型非法
+        #    不付 embed 开销，报 tag_type_invalid 而非 semantic_similar）
+        if allowed_types and r.tag_type not in allowed_types:
+            issues.append(Issue(
+                r.tag_name, "tag_type_invalid",
+                f"tag_type「{r.tag_type}」不在白名单：{'、'.join(sorted(allowed_types))}"))
+            earlier.append((r.tag_name, r.tag_type))
+            continue
+
+        # 4) semantic_similar：与库内向量（含本批已过检行）余弦 ≥ 阈值（含等于）
         text = f"{r.tag_name}。{r.description}"
         vec = embedder.embed([text])[0]
         hits = search_similar(
@@ -196,14 +209,14 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 3.5) 同名不同 type 且语义未命中 → 回填 duplicate_name
+        # 5) 同名不同 type 且语义未命中 → 回填 duplicate_name
         #      （tag_name 唯一约束，放行必然 IntegrityError，必须拦截）
         if dup_deferred is not None:
             issues.append(Issue(r.tag_name, "duplicate_name", dup_deferred))
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 4) parent_not_found：父名既不在库内也不在批内任一行
+        # 6) parent_not_found：父名既不在库内也不在批内任一行
         if r.parent_tag is not None and r.parent_tag not in db_by_name \
                 and r.parent_tag not in batch_by_name:
             issues.append(Issue(
@@ -211,19 +224,11 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 5) parent_cycle：只查批内新增边（父链走出批内即无环风险）
+        # 7) parent_cycle：只查批内新增边（父链走出批内即无环风险）
         if r.parent_tag is not None and r.parent_tag in batch_by_name \
                 and _chain_reaches_cycle(r, batch_by_name):
             issues.append(Issue(
                 r.tag_name, "parent_cycle", f"批内父链成环（涉及「{r.parent_tag}」）"))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
-
-        # 6) tag_type_invalid：白名单非空且不在白名单（契约序末位）
-        if allowed_types and r.tag_type not in allowed_types:
-            issues.append(Issue(
-                r.tag_name, "tag_type_invalid",
-                f"tag_type「{r.tag_type}」不在白名单：{'、'.join(sorted(allowed_types))}"))
             earlier.append((r.tag_name, r.tag_type))
             continue
 
@@ -244,13 +249,15 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
     inserted_names: set[str] = set()
     pending = list(valid)
     while pending:
-        # 就绪 = 无批内父、父已插入、或父不在有效行集（库内父 / 兜底拦截两种情形）
+        # 就绪 = 无批内父、父已插入、或父已不在有效行集（库内父 / 已被
+        # 兜底级联摘除两种情形）
         ready = [v for v in pending
                  if v.row.parent_tag is None
                  or v.row.parent_tag in inserted_names
                  or v.row.parent_tag not in valid_by_name]
         if not ready:
-            # 理论不可达：parent_cycle 已拦截全部批内环，有效行集父链无环
+            # 防御性兜底：环行已在第一遍全部拦截，有效行集批内父链无环，
+            # 就绪集理应非空；此处仅防御未来改动引入死循环
             break
         for v in ready:
             pending.remove(v)
@@ -262,10 +269,15 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
                 elif parent_name in valid_by_name:
                     parent_id = valid_by_name[parent_name].tag_id
                 else:
-                    # 父名只命中批内未通过校验的行：不插入，避免悬空外键
+                    # 父名只命中批内未通过校验的行：本行不插入，并从
+                    # valid_by_name 摘除以级联——其批内子孙下一轮因父不在
+                    # 有效行集而就绪，同样走此兜底逐一报 parent_not_found。
+                    # 若只摘 pending 不摘 valid_by_name，子孙的父仍"看似
+                    # 有效"，就绪集变空会静默搁浅整条子孙链（零 issue）。
                     issues.append(Issue(
                         v.row.tag_name, "parent_not_found",
                         f"父标签「{parent_name}」在本批未通过校验"))
+                    valid_by_name.pop(v.row.tag_name, None)
                     continue
             status = v.row.status or "active"  # status 缺省语义由入库层决定
             session.add(TagCatalog(
