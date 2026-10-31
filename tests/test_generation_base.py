@@ -1,8 +1,9 @@
 """TagProducer 协议、生成契约 dataclass 与注册表测试（Task 3）。
 
 覆盖契约：
-- 注册表：本任务不注册任何实现 → 初始态 list_producers() == []（注册
-  发生在任务 5/6 各自模块导入时）；重复注册同 mode 抛 ValueError；
+- 注册表：Task 5 起 closed 生成器随包导入自动注册 → 初始态
+  list_producers() == ["closed"]（open 在任务 6 加入）；重复注册同 mode
+  抛 ValueError；
   未知 mode 抛 KeyError 且信息列出可用 mode（同 adapters 注册表测试
   模式）；
 - dataclass：GenerationPolicy 默认值（max_tags=30, min_confidence=0.7）、
@@ -58,15 +59,16 @@ def _make_content() -> ContentJSON:
 
 
 def test_registry_empty_initial_state():
-    # 本任务不注册任何实现：空注册表是可测初始态
-    assert list_producers() == []
+    # Task 5 起 closed 生成器随包导入自动注册（open 在任务 6 加入）
+    assert list_producers() == ["closed"]
 
 
 def test_register_and_get_producer(restore_registry):
     p = _DummyProducer()
     register_producer(p)
     assert get_producer("dummy") is p
-    assert list_producers() == ["dummy"]
+    # closed 随包导入已注册（Task 5），dummy 为本测试追加
+    assert list_producers() == ["closed", "dummy"]
 
 
 def test_register_duplicate_mode_raises_valueerror(restore_registry):
