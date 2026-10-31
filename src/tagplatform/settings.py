@@ -29,6 +29,26 @@ class Settings(BaseSettings):
     # 标签类型逗号分隔白名单；空 = 不校验
     allowed_tag_types: str = ""
 
+    # ---------- 阶段 2：智能标签生产（LLM 客户端与生成流水线） ----------
+
+    # LLM 模型名（OpenAI 兼容端点）
+    llm_model: str = "qwen3.7-plus"
+    # Base URL / API Key 的环境变量名（.env 提供，make_llm_client 构建 transport 时读取）
+    llm_base_url_env: str = "OPENAI_BASE_URL"
+    llm_api_key_env: str = "OPENAI_API_KEY"
+    # 采样温度
+    llm_temperature: float = 0.7
+    # 相邻 LLM 请求最小间隔秒数（限速）
+    llm_request_interval: float = 0.5
+    # True 时用确定性 MockLLMClient（测试专用，零网络）
+    use_mock_llm: bool = False
+    # 模式 A 召回：每 tag_type 召回上限
+    recall_top_k_per_type: int = 50
+    # 模式 B 归一匹配阈值：与库内标签相似度 >= 该值（含等于）归入 catalog
+    open_match_threshold: float = 0.85
+    # 生成任务线程池大小；0 = 同步执行（测试与单步调试）
+    generation_workers: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:

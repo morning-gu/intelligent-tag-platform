@@ -15,6 +15,10 @@ dependencies = [
     "numpy",
     "sentence-transformers",
     "openpyxl",
+    # OpenAI 兼容 LLM SDK（懒导入：mock/测试路径不触发 import）
+    "openai",
+    # make_llm_client 工厂内 load_dotenv 读 .env
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
