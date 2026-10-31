@@ -6,9 +6,10 @@
   保持原值）；
 - pending 覆盖：重跑命中 pending 行 → 覆盖更新（confidence/task_id
   刷新为新任务的值）；
-- generated 候选 upsert：按 (asset_id, candidate_name) 同规则，且
-  approved/merged 均视为已定跳过（brief 对 generated 的附加规则；
-  catalog 仅 approved 跳过）。
+- generated 候选 upsert：按 (asset_id, candidate_name) 同规则；
+- 已定跳过两 origin 统一 {approved, merged}（controller ruling：merged
+  与 approved 同属人工已定，计划 catalog 侧漏写 merged 系计划文本
+  缺陷——catalog 与 generated 侧各有 approved/merged 跳过锁定测试）。
 
 附加锁定：evidence_json 为 Evidence asdict 序列化、插入行时间戳显式
 非空、未知 origin 与 catalog 缺 tag_id 报 ValueError（零副作用）。
@@ -61,6 +62,17 @@ def test_persist_rerun_overwrites_pending_keeps_approved(session):
     assert s.skipped_approved == 1 and row.confidence == 0.95 and row.task_id == "t1"  # 原值未动
 
 
+def test_persist_catalog_merged_skipped(session):
+    """catalog 行 merged 后重跑亦跳过（controller ruling：已定跳过集两
+    origin 统一为 approved/merged；与 approved 保留测试同构，一行状态差）。"""
+    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
+    session.query(AssetTag).one().review_status = "merged"
+    session.commit()
+    s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
+    row = session.query(AssetTag).one()
+    assert s.skipped_approved == 1 and row.confidence == 0.95 and row.task_id == "t1"  # 原值未动
+
+
 def test_persist_pending_overwritten(session):
     persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
     s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
@@ -89,7 +101,7 @@ def test_persist_generated_candidate_upsert(session):
 
 
 def test_persist_generated_merged_skipped(session):
-    """brief：generated 侧 approved/merged 均视为已定跳过（catalog 仅 approved）。"""
+    """generated 行 merged 后重跑跳过（brief 原文规则，与 ruling 统一集合一致）。"""
     persist_tags(session, "a1", "t1",
                  [_ptag(None, "多线叙事", origin="generated", conf=0.8)], "r1")
     session.query(AssetTag).one().review_status = "merged"

@@ -2,11 +2,12 @@
 
 阶段 1 设计的核心重跑语义在这里落地：同一资产生成结果重跑时——
 - 新标签 → 插入 pending 行；
-- 命中 approved（人工已定）→ 跳过什么都不动（skipped_approved+1）；
-- 命中其他状态（pending/rejected/...）→ 覆盖更新为本次产出；
-- generated 候选额外把 merged 也视为已定（brief 契约：开放候选被
-  人工合并进目录标签后，重跑不得复活该候选；catalog 行按 brief
-  原文仅 approved 跳过）。
+- 命中审核已定状态 → 跳过什么都不动（skipped_approved+1）；
+- 命中其他状态（pending/rejected/...）→ 覆盖更新为本次产出。
+
+已定状态两 origin 统一为 {approved, merged}（controller ruling）：
+merged = 审核时人工合并到标准标签的决定，与 approved 同属"人工已定"，
+重跑覆盖会毁掉审核成果；计划 catalog 侧只写 approved 系计划文本缺陷。
 
 实现注意：
 - **服务内不 commit**：调用方（Task 8 runner）统一事务控制，保证
@@ -38,12 +39,17 @@ from tagplatform.generation.base import ProducedTag
 
 @dataclass
 class PersistSummary:
-    """入库结果摘要：新插行数 / 覆盖更新行数 / 跳过行数（approved 或
-    generated 行的 merged，均属审核已定）。"""
+    """入库结果摘要：新插行数 / 覆盖更新行数 / 跳过行数（审核已定，
+    两 origin 统一为 approved/merged）。"""
 
     inserted: int
     updated: int
     skipped_approved: int
+
+
+# 审核已定状态：重跑一律跳过（approved/merged 同属人工已定，两 origin
+# 统一——controller ruling，计划 catalog 侧漏写 merged 系计划文本缺陷）
+FINALIZED_STATUSES = ("approved", "merged")
 
 
 def _evidence_json(tag: ProducedTag) -> str:
@@ -60,11 +66,12 @@ def persist_tags(
 ) -> PersistSummary:
     """将 Producer 产出逐条 upsert 进 asset_tag（不 commit，调用方提交）。
 
-    逐条规则（brief 契约）：
+    逐条规则（brief 契约 + controller ruling）：
     - origin="catalog"：按 (asset_id, tag_id) 查——无则插入 pending；
-      有且 approved 跳过不动；有且其他状态覆盖更新（candidate_* 置 None）。
-    - origin="generated"：按 (asset_id, candidate_name) 同规则，且
-      approved/merged 均视为已定跳过（重跑不得复活人工已定的候选）。
+      有且已定（approved/merged）跳过不动；其他状态覆盖更新
+      （candidate_* 置 None）。
+    - origin="generated"：按 (asset_id, candidate_name) 同规则（已定
+      跳过集合同为 approved/merged，重跑不得复活人工已定的候选）。
     - 更新刷新 relevance/confidence/evidence_json/task_id/origin/candidate_*
       与 updated_at；插入行 created_at/updated_at 显式赋值。
     """
@@ -83,23 +90,19 @@ def persist_tags(
                 .filter_by(asset_id=asset_id, tag_id=tag.tag_id)
                 .one_or_none()
             )
-            finalized = row is not None and row.review_status == "approved"
         elif tag.origin == "generated":
             row = (
                 session.query(AssetTag)
                 .filter_by(asset_id=asset_id, candidate_name=tag.tag_name)
                 .one_or_none()
             )
-            # generated 侧 approved/merged 均为人工已定（brief 附加规则）
-            finalized = (
-                row is not None and row.review_status in ("approved", "merged")
-            )
         else:
             raise ValueError(
                 f"未知 origin: {tag.origin!r}（合法取值 catalog|generated）"
             )
 
-        if finalized:
+        # 已定（approved/merged，两 origin 统一）→ 跳过什么都不动
+        if row is not None and row.review_status in FINALIZED_STATUSES:
             summary.skipped_approved += 1
             continue
 
