@@ -60,7 +60,7 @@ frontend/
 
 ---
 
-### Task B1: 账号表、密码与启动引导
+### Task 1: [B1] 账号表、密码与启动引导
 
 **Files:** Create `auth/__init__.py`、`auth/password.py`、`auth/service.py`、`alembic/versions/0003_user_accounts.py`、`tests/test_auth_password.py`；Modify `db/models.py`、`api/__init__.py`（lifespan 引导）
 
@@ -73,7 +73,7 @@ frontend/
 - [ ] **Step 4: 确认通过 + 全量**（130 既有零回归）
 - [ ] **Step 5: 提交** — `git commit -m "feat: 账号表/密码哈希/启动引导 admin"`
 
-### Task B2: 会话认证与 API 保护
+### Task 2: [B2] 会话认证与 API 保护
 
 **Files:** Create `auth/session.py`、`api/depends.py`、`api/routers/auth.py`、`api/routers/users.py`、`tests/test_auth_api.py`；Modify `api/__init__.py`（注册路由+依赖挂载）、`tests/conftest.py`
 
@@ -87,7 +87,7 @@ frontend/
 - [ ] **Step 2-4: 红绿实现**（过期测试用 ttl_days=0 或负构造）
 - [ ] **Step 5: 提交** — `git commit -m "feat: 会话认证与全 API 保护"`
 
-### Task B3: rejected 跳过集与结果 id 暴露
+### Task 3: [B3] rejected 跳过集与结果 id 暴露
 
 **Files:** Modify `src/tagplatform/results.py`、`tests/test_results.py`、`api/routers/generation.py`、`api/routers/content.py`、相关测试
 
@@ -99,7 +99,7 @@ frontend/
 - [ ] **Step 1-4: 红绿**（rejected 用例 + id 断言先写）
 - [ ] **Step 5: 提交** — `git commit -m "feat: rejected 入保护集与结果行 id 暴露"`
 
-### Task B4: 审核操作 API（单条 + 批量 + 并发保护）
+### Task 4: [B4] 审核操作 API（单条 + 批量 + 并发保护）
 
 **Files:** Create `review/__init__.py`、`review/service.py`、`api/routers/review.py`、`tests/test_review_service.py`、`tests/test_api_review.py`
 
@@ -116,7 +116,7 @@ frontend/
 - [ ] **Step 2-4: 红绿 + 全量**
 - [ ] **Step 5: 提交** — `git commit -m "feat: 审核操作 API（四动作/批量/并发冲突保护）"`
 
-### Task B5: 审核列表 API
+### Task 5: [B5] 审核列表 API
 
 **Files:** Create `api/routers/review.py` 内列表端点、`tests/test_api_review.py` 扩展
 
@@ -127,7 +127,7 @@ frontend/
 
 - [ ] **Step 1-5: 红绿提交** — `git commit -m "feat: 审核列表与筛选 API"`
 
-### Task B6: 视频流端点（Range）
+### Task 6: [B6] 视频流端点（Range）
 
 **Files:** Create `api/routers/video.py`、`tests/test_api_video.py`
 
@@ -138,7 +138,7 @@ frontend/
 
 - [ ] **Step 1-5: 红绿提交** — `git commit -m "feat: 视频流端点（Range/206/404）"`
 
-### Task B7: 质量指标 API
+### Task 7: [B7] 质量指标 API
 
 **Files:** Create `src/tagplatform/metrics.py`、`api/routers/metrics.py`、`tests/test_metrics.py`
 
@@ -156,7 +156,7 @@ frontend/
 
 ---
 
-### Task F1: 前端脚手架、登录与布局
+### Task 8: [F1] 前端脚手架、登录与布局
 
 **Files:** Create `frontend/`（package.json、vite.config.ts、tsconfig、index.html、src/main.tsx、App.tsx、api/client.ts、pages/Login.tsx、pages/Layout.tsx）、`frontend/src/api/client.test.ts`、`frontend/src/App.test.tsx`；Modify `.gitignore`
 
@@ -172,7 +172,7 @@ frontend/
 - [ ] **Step 4: 全量后端测试不受影响**（前端目录不进 pytest 收集路径）
 - [ ] **Step 5: 提交** — `git commit -m "feat: 前端脚手架/登录/布局（React+AntD）"`
 
-### Task F2: 工作台与质量评估中心
+### Task 9: [F2] 工作台与质量评估中心
 
 **Files:** Create `pages/Dashboard.tsx`、`pages/Quality.tsx`、`components/BarChart.tsx`（纯 CSS 条形）、对应 `*.test.tsx`
 
@@ -184,7 +184,7 @@ frontend/
 - [ ] **Step 1-3: 红绿 + 手动验收**（登录后两页数据正确渲染——用后端冒烟库）
 - [ ] **Step 4: 提交** — `git commit -m "feat: 工作台与质量评估中心（指标+分布图）"`
 
-### Task F3: 审核中心（核心页面）
+### Task 10: [F3] 审核中心（核心页面）
 
 **Files:** Create `pages/ReviewCenter.tsx`、`components/EvidenceCard.tsx`、对应测试
 
@@ -198,7 +198,7 @@ frontend/
 - [ ] **Step 1-3: 红绿 + 手动验收**（真实审核流：通过/拒绝/修改/合并/批量/冲突——两个浏览器会话模拟并发）
 - [ ] **Step 4: 提交** — `git commit -m "feat: 审核中心（筛选/单条与批量操作/证据卡/冲突处理）"`
 
-### Task F4: 内容详情与视频证据定位（承诺二核心）
+### Task 11: [F4] 内容详情与视频证据定位（承诺二核心）
 
 **Files:** Create `pages/AssetList.tsx`（轻量：资产表格→详情入口）、`pages/AssetDetail.tsx`、`components/VideoPlayer.tsx`、`components/SceneTimeline.tsx`、对应测试
 
@@ -211,7 +211,7 @@ frontend/
 - [ ] **Step 1-3: 红绿 + 手动验收**（需要真实 mp4：`ffmpeg -f lavfi -i testsrc=duration=10 ...` 生成或任意短视频文件登记导入；无 ffmpeg 则用 mock 视频接口冒烟 + 报告注明真实视频未验）
 - [ ] **Step 4: 提交** — `git commit -m "feat: 内容详情（视频流播放/场景时间轴/证据定位）"`
 
-### Task F5: 生产任务页
+### Task 12: [F5] 生产任务页
 
 **Files:** Create `pages/GenerationTasks.tsx` + 测试
 
@@ -219,7 +219,7 @@ frontend/
 
 - [ ] **Step 1-3: 红绿 + 手动验收 + 提交** — `git commit -m "feat: 生产任务页（列表/详情/重试/创建）"`
 
-### Task F6: 标签导入管理与标签库管理
+### Task 13: [F6] 标签导入管理与标签库管理
 
 **Files:** Create `pages/TagImports.tsx`、`pages/TagCatalog.tsx`、`pages/Users.tsx`（轻量收尾）+ 测试
 
