@@ -8,9 +8,16 @@
   先插子行而炸外键），最后写 import_batch 摘要并提交。
 
 判定顺序（控制器裁决：按处理规则序，tag_type_invalid 提前至语义检查
-之前——类型非法的行不付 embed 开销）：
+之前；Task 4 批量编码后各行统一预 embed，"非法类型省 embed 开销"不再
+是排序动机，但判定序本身为契约不变）：
     duplicate_name → alias_conflict → tag_type_invalid →
     semantic_similar → parent_not_found → parent_cycle
+
+Task 4（阶段 2 终审建议落地）：
+- 显式配置：run_governance 增可选 config（GovernanceConfig），None 回退
+  get_settings()——既有调用方与全部判定行为不变；
+- 批量编码：第一遍前对全部待检行一次 embed，语义检查与第二遍插入共用
+  同一批向量（_ValidRow.vec 缓存），embed 调用从逐行 N 次降为 1 次。
 
 契约细则的实现解读（详见 task-7-report）：
 - duplicate_name 对"同名不同 tag_type"的行不立即判停：test_semantic_
@@ -36,7 +43,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 import numpy as np
@@ -74,18 +81,44 @@ class GovernanceResult:
     issues: list[Issue]
 
 
+@dataclass
+class GovernanceConfig:
+    """治理显式配置（阶段 2 终审建议：显式传参替代全局依赖）。
+
+    run_governance(config=None) 时回退 get_settings()（向后兼容，行为
+    不变）；显式路径下 allowed_tag_types 直接收 set，逗号串解析仅发生
+    在全局回退路径。
+    """
+
+    similar_threshold: float = 0.90
+    allowed_tag_types: set[str] = field(default_factory=set)
+
+
 @dataclass(eq=False)
 class _ValidRow:
     """通过全部校验的行：预生成 tag_id（父子引用一致）并缓存查询向量。"""
 
     row: TagRow
     tag_id: str
-    vec: np.ndarray  # 1-D float32 归一化向量（embedder.embed 单行输出）
+    vec: np.ndarray  # 1-D float32 归一化向量（批量编码矩阵中本行向量，判定与插入共用）
 
 
 def _parse_allowed_types(raw: str) -> set[str]:
     """逗号分隔白名单解析；空串/纯分隔符 → 空集（不校验）。"""
     return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _load_config(config: GovernanceConfig | None) -> tuple[float, set[str]]:
+    """治理参数装载：显式 config 优先；None 回退全局 get_settings()。
+
+    返回 (similar_threshold, allowed_types 集合)；回退路径沿用逗号串
+    白名单解析（既有行为不变），显式路径浅拷贝入参集合防调用方突变。
+    """
+    if config is not None:
+        return config.similar_threshold, set(config.allowed_tag_types)
+    settings = get_settings()
+    return (settings.semantic_similar_threshold,
+            _parse_allowed_types(settings.allowed_tag_types))
 
 
 def _chain_reaches_cycle(row: TagRow, batch_by_name: dict[str, TagRow]) -> bool:
@@ -106,11 +139,14 @@ def _chain_reaches_cycle(row: TagRow, batch_by_name: dict[str, TagRow]) -> bool:
         current = batch_by_name[parent_name]
 
 
-def run_governance(rows: list[TagRow], session: Session, embedder) -> GovernanceResult:
-    """治理一批标签行：校验 → 拓扑序入库 → 批次摘要与审计日志落库并提交。"""
-    settings = get_settings()
-    threshold = settings.semantic_similar_threshold
-    allowed_types = _parse_allowed_types(settings.allowed_tag_types)
+def run_governance(rows: list[TagRow], session: Session, embedder,
+                   config: GovernanceConfig | None = None) -> GovernanceResult:
+    """治理一批标签行：校验 → 拓扑序入库 → 批次摘要与审计日志落库并提交。
+
+    config 为显式治理配置（GovernanceConfig）；None 回退 get_settings()，
+    既有调用方（API 路由等按三参调用）行为不变。
+    """
+    threshold, allowed_types = _load_config(config)
 
     # 库内基线：tag_name 唯一约束覆盖全部行（含废弃行——废弃同名行仍占用
     # 名称，判重必须含之，放行必然 IntegrityError 逃逸）；非废弃行用于父
@@ -136,6 +172,12 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
         for alias in (r.aliases or []):
             alias_owners.setdefault(alias, []).append(i)
         name_owners.setdefault(r.tag_name, []).append(i)
+
+    # ---------- 批量编码：全部待检行一次 embed（Task 4 终审建议） ----------
+    # 判定阶段的语义检查与第二遍插入共用同一批向量（_ValidRow.vec 缓存），
+    # embed 调用从逐行 N 次降为 1 次；空批不发起调用。向量与行按下标对齐。
+    texts = [f"{r.tag_name}。{r.description}" for r in rows]
+    batch_vecs = embedder.embed(texts) if texts else []
 
     # ---------- 第一遍：逐行判定，判定即停，累计有效行集 ----------
     issues: list[Issue] = []
@@ -192,8 +234,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 3) tag_type_invalid：白名单非空且不在白名单（先于语义：类型非法
-        #    不付 embed 开销，报 tag_type_invalid 而非 semantic_similar）
+        # 3) tag_type_invalid：白名单非空且不在白名单（先于语义检查判定，
+        #    报 tag_type_invalid 而非 semantic_similar——顺序为契约，见模块
+        #    docstring；向量已批量预取，此处判停不取用即可）
         if allowed_types and r.tag_type not in allowed_types:
             issues.append(Issue(
                 r.tag_name, "tag_type_invalid",
@@ -202,8 +245,8 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
             continue
 
         # 4) semantic_similar：与库内向量（含本批已过检行）余弦 ≥ 阈值（含等于）
-        text = f"{r.tag_name}。{r.description}"
-        vec = embedder.embed([text])[0]
+        #    （向量取自批量预取结果——与插入阶段同一批，不再逐行 embed）
+        vec = batch_vecs[i]
         hits = search_similar(
             vec, db_candidates + [(v.row.tag_name, v.vec) for v in valid], top_k=1)
         if hits and hits[0][1] >= threshold:

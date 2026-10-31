@@ -17,14 +17,23 @@
 - 修复 2：废弃同名标签仍占用唯一名称——再导入报 duplicate_name（detail
   注明已废弃），不逃逸 IntegrityError，批次照常落库；语义比对仍只对
   非废弃行。
+
+Task 4（阶段 2）补充：
+- 显式配置传参：GovernanceConfig 注入 run_governance，不触碰全局
+  get_settings 即可改变治理参数（allowed_tag_types 直接收 set）；
+- 批量编码：CountingEmbedder 断言全批一次 embed 调用（判定与插入共用
+  同一批向量，无逐行调用）。
 """
 
 import json
 from datetime import datetime, timezone
 
+import numpy as np
+
 from conftest import MOCK_EMBEDDER
 from tagplatform.db.models import ImportBatch, TagCatalog, TagChangeLog
 from tagplatform.governance import TagRow, run_governance
+from tagplatform.governance.pipeline import GovernanceConfig
 from tagplatform.settings import get_settings
 
 
@@ -133,3 +142,23 @@ def test_tag_type_invalid_precedes_semantic(session, monkeypatch):
     run_governance([TagRow(None, "推理", "genre", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
     res = run_governance([TagRow(None, "推理", "mood", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
     assert res.issues[0].code == "tag_type_invalid" and res.inserted == []
+
+
+# ---------- Task 4（阶段 2）：显式配置传参与批量编码 ----------
+
+def test_governance_explicit_config_no_global(session, monkeypatch):
+    # 不动 get_settings（monkeypatch 不设任何东西），显式传 allowed={"genre"}
+    cfg = GovernanceConfig(similar_threshold=0.99, allowed_tag_types={"genre"})
+    res = run_governance([TagRow(None, "悬疑", "bad_type", "以悬念为核心", None, [], None, None)],
+                         session, MOCK_EMBEDDER, config=cfg)
+    assert res.issues[0].code == "tag_type_invalid"
+
+def test_governance_batch_embedding_calls(session):
+    calls = []
+    class CountingEmbedder:
+        name, dim = "counting", 8
+        def embed(self, texts):
+            calls.append(len(texts)); return np.ones((len(texts), 8), np.float32)
+    run_governance([TagRow(None, f"标签{i}", "genre", f"描述{i}", None, [], None, None)
+                    for i in range(5)], session, CountingEmbedder())
+    assert calls == [5] or calls == [5, 0]  # 一次批量，无逐行调用；空批次容差
