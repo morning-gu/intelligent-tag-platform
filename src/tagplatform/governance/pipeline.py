@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 import numpy as np
@@ -316,7 +316,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
                 "total": total,
                 "inserted": len(inserted),
                 "skipped": total - len(inserted),
-                "issues": len(issues),
+                # issues 为明细列表（非计数）：GET /api/v1/import/batches/{batch_id}
+                # 与阶段 3 待处理列表按此解析（Task 10 消费契约）
+                "issues": [asdict(i) for i in issues],
             },
             ensure_ascii=False,
         ),

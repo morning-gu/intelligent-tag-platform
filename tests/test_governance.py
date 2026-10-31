@@ -26,6 +26,7 @@ def test_clean_rows_inserted_with_embedding_and_log(session):
     assert log.action == "import"
     batch = session.get(ImportBatch, res.batch_id)
     assert batch.status == "completed" and json.loads(batch.result_summary)["inserted"] == 1
+    assert json.loads(batch.result_summary)["issues"] == []  # issues 为明细列表：无问题时空列表
 
 def test_rerun_same_excel_all_skipped(session):
     rows = [TagRow(None, "悬疑", "genre", "以悬念为核心", None, [], None, None)]
@@ -50,6 +51,13 @@ def test_semantic_threshold_inclusive(session):
     run_governance([TagRow(None, "推理", "genre", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
     res = run_governance([TagRow(None, "推理", "style", "以解谜推进", None, [], None, None)], session, MOCK_EMBEDDER)
     assert res.issues[0].code == "semantic_similar" and res.issues[0].similar_to == "推理"
+    # result_summary.issues 为明细列表（非计数）：similar_to 进入序列化结果
+    # （Task 10 批次查询端点 / 阶段 3 待处理列表的消费契约）
+    summary = json.loads(session.get(ImportBatch, res.batch_id).result_summary)
+    assert isinstance(summary["issues"], list) and len(summary["issues"]) == 1
+    issue_detail = summary["issues"][0]
+    assert issue_detail["code"] == "semantic_similar" and issue_detail["tag_name"] == "推理"
+    assert issue_detail["similar_to"] == "推理"
 
 def test_parent_missing_and_cycle(session):
     res = run_governance([TagRow(None, "子", "genre", "d", "不存在的父", None, None, None)], session, MOCK_EMBEDDER)
