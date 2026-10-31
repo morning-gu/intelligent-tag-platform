@@ -5,6 +5,7 @@
   落库 + 详情 contexts 含 recognition_status + 完整 content JSON 取回）；
   video_root 不存在 → 422（Review Focus 4）；未知 kind → 422 且 detail
   列出可用 kind（含 "platform"）；data 校验失败 → 422 带摘要；
+  parent_id 指向不存在资产 → 422（修复 1：原先裸 IntegrityError 500）；
 - GET /api/v1/assets：asset_type 过滤 + q 对 title 子串匹配，含
   video_uri/parent_id；
 - GET /api/v1/assets/{asset_id}：详情含 contexts 摘要（不含 content_json
@@ -38,6 +39,16 @@ def test_content_import_bad_video_root_422(client):   # Review Focus 4
     resp = client.post("/api/v1/content/import", json={
         "kind": "platform", "video_root": "Z:/不存在", "data": CONTENT_FIXTURE_DICT})
     assert resp.status_code == 422
+
+
+def test_content_import_parent_missing_422(client):
+    """修复 1：parent_id 指向不存在资产 → 422（原先裸 IntegrityError 500）。"""
+    bad = {**CONTENT_FIXTURE_DICT,
+           "asset": {**CONTENT_FIXTURE_DICT["asset"], "parent_id": "asset_none"}}
+    resp = client.post("/api/v1/content/import", json={
+        "kind": "platform", "video_root": None, "data": bad})
+    assert resp.status_code == 422
+    assert "parent 资产不存在" in resp.json()["detail"]
 
 
 def test_content_import_unknown_kind_422(client):

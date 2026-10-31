@@ -6,6 +6,7 @@
 """
 
 import json
+import logging
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -19,6 +20,8 @@ from tagplatform.governance import parse_tag_excel, run_governance
 
 router = APIRouter(prefix="/api/v1/tags")
 
+logger = logging.getLogger(__name__)
+
 
 # ---------- 响应模型 ----------
 
@@ -31,18 +34,31 @@ class IssueOut(BaseModel):
     similar_to: str | None = None
 
 
+class ParseErrorOut(BaseModel):
+    """单行解析失败明细（与 governance.excel.RowError 字段一一对应）。"""
+
+    row_number: int
+    tag_name: str | None = None
+    code: str
+    detail: str
+
+
 class ImportSummary(BaseModel):
-    """导入结果摘要：total/inserted/skipped 计数 + issues 明细列表。
+    """导入结果摘要：total/inserted/skipped 计数 + issues/parse_errors 明细列表。
 
     语义与 import_batch.result_summary（治理流水线写入）一致：total 为
     传入治理的行数（行级解析错误的行不进 rows，不计入），skipped =
-    total - inserted，issues 为治理问题明细（与入库行不相交）。
+    total - inserted，issues 为治理问题明细（与入库行不相交）；
+    parse_errors 为行级解析错误明细（治理流水线不感知解析层 errors，
+    由本路由层与 file_name 回填同一模式并入 result_summary），计数以
+    列表长度为准（前端阶段 3 直接消费明细）。
     """
 
     total: int
     inserted: int
     skipped: int
     issues: list[IssueOut]
+    parse_errors: list[ParseErrorOut] = []
 
 
 class ImportResponse(BaseModel):
@@ -103,7 +119,9 @@ def import_tags(
         parsed = parse_tag_excel(data)
     except Exception:
         # openpyxl 对损坏/非 xlsx 字节抛多种异常（BadZipFile、
-        # InvalidFileException 等，Task 6 约定由本层捕获映射）：统一 422
+        # InvalidFileException 等，Task 6 约定由本层捕获映射）：统一 422。
+        # 保留宽捕获（openpyxl 异常族宽，收窄反而漏），记录堆栈便于排查
+        logger.exception("Excel 解析失败: %s", file.filename or "upload")
         raise HTTPException(status_code=422, detail="文件无法解析为 xlsx 表格")
     if parsed.header_error:
         # 缺必需表头列：422，detail 为解析层给出的错误说明
@@ -111,10 +129,16 @@ def import_tags(
 
     result = run_governance(parsed.rows, session, embedder)
 
-    # 回填真实上传文件名（治理流水线写入的是占位 "governance"）
+    # 回填真实上传文件名（治理流水线写入的是占位 "governance"），并把
+    # 行级解析错误明细并入 result_summary——治理流水线不感知 parsed.errors，
+    # 与 file_name 回填同一模式：本路由层更新已提交的批次行
+    parse_errors = [ParseErrorOut(**asdict(e)) for e in parsed.errors]
     batch = session.get(ImportBatch, result.batch_id)
     if batch is not None:
         batch.file_name = file.filename or "upload.xlsx"
+        summary_data = json.loads(batch.result_summary)
+        summary_data["parse_errors"] = [asdict(e) for e in parsed.errors]
+        batch.result_summary = json.dumps(summary_data, ensure_ascii=False)
         session.commit()
 
     return ImportResponse(
@@ -124,6 +148,7 @@ def import_tags(
             inserted=len(result.inserted),
             skipped=len(parsed.rows) - len(result.inserted),
             issues=[IssueOut(**asdict(issue)) for issue in result.issues],
+            parse_errors=parse_errors,
         ),
     )
 

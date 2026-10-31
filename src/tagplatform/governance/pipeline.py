@@ -112,8 +112,11 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
     threshold = settings.semantic_similar_threshold
     allowed_types = _parse_allowed_types(settings.allowed_tag_types)
 
-    # 库内基线（非废弃标签）：名称→行 用于判重/父解析；带向量行用于语义比对
+    # 库内基线：tag_name 唯一约束覆盖全部行（含废弃行——废弃同名行仍占用
+    # 名称，判重必须含之，放行必然 IntegrityError 逃逸）；非废弃行用于父
+    # 解析/别名冲突/语义比对（废弃标签不参与这些解析，行为不变）
     db_rows = session.query(TagCatalog).all()
+    db_all_by_name = {t.tag_name: t for t in db_rows}
     db_by_name = {t.tag_name: t for t in db_rows if t.status != "deprecate"}
     db_candidates = [
         (t.tag_name, decode_vector(t.embedding))
@@ -145,9 +148,12 @@ def run_governance(rows: list[TagRow], session: Session, embedder) -> Governance
         #    （见模块 docstring），先记为待定，语义未命中时回填
         dup_now: str | None = None
         dup_deferred: str | None = None
-        db_hit = db_by_name.get(r.tag_name)
+        db_hit = db_all_by_name.get(r.tag_name)
         if db_hit is not None:
-            if db_hit.tag_type == r.tag_type:
+            if db_hit.status == "deprecate":
+                # 废弃行仍占用唯一名称：无条件拦截（放行必然 IntegrityError）
+                dup_now = f"同名标签已废弃 tag_id={db_hit.tag_id}"
+            elif db_hit.tag_type == r.tag_type:
                 dup_now = f"已存在 tag_id={db_hit.tag_id}"
             else:
                 dup_deferred = (

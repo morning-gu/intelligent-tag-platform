@@ -6,6 +6,8 @@
 - 重复导入 upsert 语义：asset_id 不变、场景不重复、context 新建、
   file:// URI 无论 video_root 与否都解析为路径部分；
 - video_root 不存在 → ValueError；
+- parent_id 指向不存在资产 → ValueError（修复 1：写库前拦截，杜绝外键
+  IntegrityError 逃逸为 500）；
 - resolve_video_path 四规则（file:// 取路径部分 / 绝对路径原样 /
   相对路径 join video_root）。
 """
@@ -38,6 +40,18 @@ def test_reimport_new_context_upserts_assets(session, content_fixture):
 def test_import_video_root_missing(session, content_fixture):
     with pytest.raises(ValueError, match="video_root"):
         import_content(content_fixture, session, video_root="Z:/不存在")
+
+def test_import_parent_asset_missing(session, content_fixture):
+    """修复 1：parent_id 指向不存在资产 → 写库前 ValueError，零副作用。
+
+    MediaAsset.parent_id 有外键约束，非法值原先在影片行 flush 时抛未捕获
+    IntegrityError（客户端拿裸 500）；现于任何数据库写入之前拦截。
+    """
+    content_fixture.asset.parent_id = "asset_none"
+    with pytest.raises(ValueError, match="parent 资产不存在"):
+        import_content(content_fixture, session, video_root=None)
+    assert session.query(MediaAsset).count() == 0
+    assert session.query(MediaContext).count() == 0
 
 def test_resolve_video_path_rules(tmp_path):
     assert resolve_video_path("file:///data/a.mp4", None) == "/data/a.mp4"

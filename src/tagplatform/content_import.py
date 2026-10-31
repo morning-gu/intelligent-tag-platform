@@ -6,6 +6,9 @@
 契约规则（brief）：
 - **video_root 校验**：非 None 时必须为已存在目录（Path.is_dir()），否则
   抛 ValueError("video_root 不存在: ...")；
+- **parent 校验**：新建资产（库内无 asset_id）时 parent_id 非空则必须为
+  已存在资产，否则抛 ValueError("parent 资产不存在: ...")——拦截外键
+  IntegrityError 逃逸；upsert 路径 parent 冻结不校验；
 - **video 路径解析** resolve_video_path 四规则（见函数 docstring）；
 - **asset_id**：content.asset.asset_id 非空则 upsert（存在则仅更新
   title/duration_ms/video_uri，不动 parent——asset_id 是主键不允许变更，
@@ -97,6 +100,13 @@ def import_content(
     else:
         if not asset_id:
             asset_id = f"asset_{uuid.uuid4().hex[:8]}"
+        # 写库前校验父资产存在性：parent_id 有外键约束，指向不存在资产时
+        # 影片行 flush 会抛未捕获 IntegrityError（客户端拿裸 500）——在
+        # 任何数据库写入之前先拦截（同 video_root 校验模式，失败零副作用；
+        # upsert 路径 parent 冻结不参与写入，无需校验）
+        if content.asset.parent_id and session.get(
+                MediaAsset, content.asset.parent_id) is None:
+            raise ValueError(f"parent 资产不存在: {content.asset.parent_id}")
         session.add(MediaAsset(
             asset_id=asset_id,
             asset_type=content.asset.asset_type,

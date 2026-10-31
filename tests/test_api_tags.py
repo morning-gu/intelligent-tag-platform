@@ -9,6 +9,8 @@
   上传文件名（治理流水线写入的是占位 "governance"）；
 - GET /api/v1/import/batches/{batch_id}：result_summary 解析后的 issues 明细；
   未知批次 404；
+- 修复 3：上传含行级解析错误的 xlsx → 响应 parse_errors 明细 + 批次详情
+  result_summary 同样携带（该行不计入 total）；
 - GET /api/v1/tags/{tag_id}：未知 tag 404。
 
 xlsx 字节流由 build_xlsx 用 openpyxl 现场构造，不依赖外部文件。
@@ -92,6 +94,35 @@ def test_corrupt_xlsx_422(client):
     resp = client.post(
         "/api/v1/tags/import", files={"file": ("broken.xlsx", b"not an xlsx")})
     assert resp.status_code == 422
+
+
+def test_import_parse_errors_in_response_and_batch(client):
+    """修复 3：行级解析错误不再整条丢弃——响应 parse_errors 明细 + 回写批次
+    result_summary（total 语义维持"进入治理的行数"，坏行不计入）。
+    """
+    mixed = build_xlsx([
+        ["tag_name", "tag_type", "description", "parent_tag"],
+        ["悬疑", "genre", "以悬念为核心", None],   # 第 2 行：有效行
+        [None, "genre", "缺名称的坏行", None],     # 第 3 行：missing_field
+        ["坏单元格", "genre", "d", True],          # 第 4 行：bad_type（bool 不可文本化）
+    ])
+    resp = client.post("/api/v1/tags/import", files={"file": ("mixed.xlsx", mixed)})
+    assert resp.status_code == 200
+    summary = resp.json()["summary"]
+    assert summary["total"] == 1 and summary["inserted"] == 1
+    assert summary["skipped"] == 0
+    assert len(summary["parse_errors"]) == 2
+    by_row = {e["row_number"]: e for e in summary["parse_errors"]}
+    assert by_row[3]["code"] == "missing_field" and by_row[3]["tag_name"] is None
+    assert by_row[4]["code"] == "bad_type" and by_row[4]["tag_name"] == "坏单元格"
+
+    # 批次详情的 result_summary 同样带 parse_errors 明细（API 层回写）
+    detail = client.get(f"/api/v1/import/batches/{resp.json()['batch_id']}")
+    assert detail.status_code == 200
+    detail_summary = detail.json()["summary"]
+    assert len(detail_summary["parse_errors"]) == 2
+    assert {e["row_number"] for e in detail_summary["parse_errors"]} == {3, 4}
+    assert detail_summary["total"] == 1 and detail_summary["inserted"] == 1
 
 
 def test_batch_list_and_detail(client):

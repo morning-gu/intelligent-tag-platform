@@ -93,7 +93,8 @@ def import_content(
     池不占事件循环。错误映射（Task 8/9 约定由本层捕获）：
     - 未知 kind（KeyError，消息已列出可用 kind）→ 422；
     - 内容 JSON 校验失败（pydantic.ValidationError）→ 422 带摘要；
-    - video_root 不存在（ValueError）→ 422。
+    - video_root 不存在（ValueError）→ 422；
+    - parent_id 指向不存在资产（ValueError，新建资产写库前拦截）→ 422。
     """
     try:
         adapter = get_adapter(body.kind)

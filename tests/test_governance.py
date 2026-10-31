@@ -14,9 +14,13 @@
   （记账不变量：{入库行} ∪ {有 issue 行} == 全部输入行）；
 - 顺序对齐（控制器裁决，按处理规则序）：tag_type_invalid 提前至
   semantic_similar 之前——非法类型报 tag_type_invalid 而非 semantic_similar。
+- 修复 2：废弃同名标签仍占用唯一名称——再导入报 duplicate_name（detail
+  注明已废弃），不逃逸 IntegrityError，批次照常落库；语义比对仍只对
+  非废弃行。
 """
 
 import json
+from datetime import datetime, timezone
 
 from conftest import MOCK_EMBEDDER
 from tagplatform.db.models import ImportBatch, TagCatalog, TagChangeLog
@@ -100,6 +104,27 @@ def test_valve_cascade_no_silent_strand(session):
     # 记账不变量：{入库行名} ∪ {有 issue 行名} == 全部输入行名（零静默丢弃）
     inserted_names = {t.tag_name for t in session.query(TagCatalog).all() if t.tag_id in res.inserted}
     assert inserted_names | set(by_name) == {"甲", "乙", "丙"}
+
+def test_deprecated_same_name_blocks_import(session):
+    """修复 2：库内存在 status='deprecate' 同名标签时再导入——报 duplicate_name
+    （detail 注明已废弃），不逃逸 IntegrityError，批次摘要照常落库，库内计数不变。
+    """
+    now = datetime.now(timezone.utc)
+    session.add(TagCatalog(
+        tag_id="tag_dep0001", tag_name="悬疑", tag_type="genre",
+        description="已废弃的同名标签", parent_id=None, aliases=None,
+        applicable_scope=None, status="deprecate", embedding=None,
+        created_at=now, updated_at=now))
+    session.commit()
+    res = run_governance(
+        [TagRow(None, "悬疑", "genre", "以悬念为核心", None, [], None, None)],
+        session, MOCK_EMBEDDER)
+    assert res.inserted == []
+    assert res.issues[0].code == "duplicate_name"
+    assert "已废弃" in res.issues[0].detail and "tag_dep0001" in res.issues[0].detail
+    # run_governance 正常返回（原先 IntegrityError 逃逸导致批次整批作废不落库）
+    assert session.get(ImportBatch, res.batch_id) is not None
+    assert session.query(TagCatalog).count() == 1
 
 def test_tag_type_invalid_precedes_semantic(session, monkeypatch):
     # 顺序对齐（控制器裁决）：类型非法先于语义检查判定——非法类型不付
