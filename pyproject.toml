@@ -5,6 +5,8 @@ description = "影视智能标签平台——阶段 1：数据底座与导入治
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
+    # multipart 表单解析（FastAPI 文件上传路由的硬性依赖，导入接口必需）
+    "python-multipart",
     "uvicorn",
     "pydantic>=2",
     "pydantic-settings",
