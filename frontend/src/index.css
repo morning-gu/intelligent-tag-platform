@@ -9,3 +9,33 @@ body {
     'Microsoft YaHei',
     sans-serif;
 }
+
+/* 场景时间轴（Task 11）：横向条带分段。三态色：基色（灰）/ 证据高亮
+   （金）/ 选中（主蓝），选中态类声明在后保证同权重下覆盖证据高亮。 */
+.scene-timeline {
+  display: flex;
+  width: 100%;
+  gap: 2px;
+}
+
+.scene-timeline-segment {
+  height: 28px;
+  min-width: 12px; /* 极短场景保留可点击与可辨识区域 */
+  padding: 0;
+  border: none;
+  overflow: hidden;
+  cursor: pointer;
+  background: #d9d9d9;
+  font-size: 12px;
+  color: #00000073;
+}
+
+.scene-timeline-highlighted {
+  background: #ffd666;
+  color: #000000a6;
+}
+
+.scene-timeline-selected {
+  background: #1677ff;
+  color: #fff;
+}

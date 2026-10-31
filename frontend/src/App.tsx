@@ -1,10 +1,12 @@
 // 应用路由装配：/login 公开；其余页面统一套路由门禁（RequireAuth）与主布局。
 // Router 由 main.tsx 提供（BrowserRouter）——App 只含 Routes，测试以
-// MemoryRouter 注入。工作台/审核中心/质量评估已实现，其余业务页面仍为
-// 占位，由后续任务逐个填充。
+// MemoryRouter 注入。工作台/审核中心/质量评估/内容资产（列表+详情）已实现，
+// 其余业务页面仍为占位，由后续任务逐个填充。
 import { useEffect, useState } from 'react'
 import { Navigate, Outlet, Route, Routes, useOutletContext } from 'react-router-dom'
 import { getMe, type UserBrief } from './api/client'
+import AssetDetail from './pages/AssetDetail'
+import AssetList from './pages/AssetList'
 import Dashboard from './pages/Dashboard'
 import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
@@ -63,7 +65,8 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="review" element={<ReviewCenter />} />
-          <Route path="assets" element={<Placeholder title="内容资产" />} />
+          <Route path="assets" element={<AssetList />} />
+          <Route path="assets/:assetId" element={<AssetDetail />} />
           <Route path="tasks" element={<Placeholder title="生产任务" />} />
           <Route path="imports" element={<Placeholder title="标签导入" />} />
           <Route path="tags" element={<Placeholder title="标签库" />} />

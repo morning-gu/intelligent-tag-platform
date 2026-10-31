@@ -54,4 +54,17 @@ describe('EvidenceCard 证据卡', () => {
     expect(screen.getByText('暂无证据')).toBeInTheDocument()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
+
+  it('提供 onEvidenceClick 时点击不再跳转，原位回调证据对象（详情页 seek 用）', () => {
+    const navigate = vi.fn()
+    mockedUseNavigate.mockReturnValue(navigate)
+    const onEvidenceClick = vi.fn()
+
+    render(<EvidenceCard assetId="a1" evidence={EVIDENCE} onEvidenceClick={onEvidenceClick} />)
+    fireEvent.click(screen.getByRole('button', { name: /s2/ }))
+
+    expect(onEvidenceClick).toHaveBeenCalledTimes(1)
+    expect(onEvidenceClick).toHaveBeenCalledWith(EVIDENCE[0])
+    expect(navigate).not.toHaveBeenCalled()
+  })
 })
