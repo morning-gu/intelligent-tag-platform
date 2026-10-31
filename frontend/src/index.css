@@ -1,0 +1,11 @@
+/* 全局基础样式：界面样式由 AntD 组件承担，这里只做最小重置 */
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+}

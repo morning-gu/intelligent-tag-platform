@@ -8,3 +8,6 @@ dist/
 # 测试与打包产生的本地产物
 .pytest_cache/
 *.egg-info/
+
+# 前端（frontend/ 自带 .gitignore 亦含；根级兜底防误提交）
+node_modules/
