@@ -25,7 +25,9 @@ def test_mock_closed_selects_from_candidates():
 def test_mock_closed_item_shape():
     """模式 A 元素键形与分值域（parse_closed_output 的输入契约）。"""
     msgs = [{"role": "user", "content": "## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心"}]
-    items = json.loads(MockLLMClient().complete(msgs, "run_2").content)
+    # run_1: _hash_unit("run_1tag_001")=0.2787 < 0.4 → 必选中（run_2 会零选中空转）
+    items = json.loads(MockLLMClient().complete(msgs, "run_1").content)
+    assert items != []  # 防哈希扰动再退化成空转通过（false-green）
     for it in items:
         assert {"tag_id", "tag_name", "relevance", "confidence", "evidence"} <= set(it)
         assert 0.5 <= it["relevance"] < 1.0 and 0.5 <= it["confidence"] < 1.0
