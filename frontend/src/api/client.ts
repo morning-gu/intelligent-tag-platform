@@ -11,6 +11,18 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** 非 401 的请求失败错误：携带 HTTP 状态码（审核中心按 409 冲突等状态
+ * 分支处理），message 取后端 detail 文案。 */
+export class ApiError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 /** 登录态用户摘要（与后端 UserBrief 契约一致，绝不含密码字段）。 */
 export interface UserBrief {
   user_id: string
@@ -47,7 +59,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     throw new UnauthorizedError(await readErrorDetail(response))
   }
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response))
+    throw new ApiError(response.status, await readErrorDetail(response))
   }
   if (response.status === 204) {
     return undefined as T

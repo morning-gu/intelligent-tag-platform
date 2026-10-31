@@ -3,7 +3,7 @@
 // window.location 在 jsdom 为不可直赋属性（LegacyUnforgeable），
 // 以 Object.defineProperty 换成可写桩，断言 401 时 href 被置为 /login。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiFetch, getMe, login, logout, UnauthorizedError } from './client'
+import { ApiError, apiFetch, getMe, login, logout, UnauthorizedError } from './client'
 
 // 各用例可读写的 location 桩（beforeEach 复位为未跳转基线）
 const locationStub = { href: 'http://localhost/' }
@@ -83,6 +83,16 @@ describe('apiFetch', () => {
 
     await expect(apiFetch('/api/v1/tags')).rejects.toThrow('名称重复')
     expect(locationStub.href).toBe('http://localhost/')
+  })
+
+  it('非 401 错误抛 ApiError：携带 HTTP 状态码（409 冲突分支判断用）', async () => {
+    stubFetch(async () => jsonResponse(409, { detail: '该标签已被处理' }))
+
+    const err = await apiFetch('/api/v1/asset-tags/1/review').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(409)
+    expect((err as ApiError).message).toBe('该标签已被处理')
   })
 })
 
