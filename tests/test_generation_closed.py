@@ -10,8 +10,9 @@
   → LLM → 解析 → 过滤截断 → 映射），纯内存输出不写库。
 
 Mock 技巧（与 mock.py 咬合）：
-- MockEmbedder 哈希即向量、同形文本同向量——播种文本 f"{name}。{desc}"
-  规范化后为 "name desc"，query 取同形文本可精确控制余弦=1.0；
+- MockEmbedder 哈希即向量、同形文本同向量——注意 _canonical 丢弃标点
+  **不补空格**：播种文本 f"{name}。{desc}" 的真实 canonical 形为
+  "{name}{desc}" 直连（如 "悬疑推理"），query 取该形可精确控制余弦=1.0；
 - MockLLM 选中（sha256(run_id+tag_id) < 0.4）与打分哈希独立——run_id="r2"
   对 tag_001 必选中且 confidence≈0.856 ≥ 0.7，防过滤后空转（false-green）。
 """
@@ -34,8 +35,9 @@ from tagplatform.llm.parsing import (
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.vectors import encode_vector
 
-# 2 个 tag_type × 各 3 条：tag_001 文本 "悬疑。推理" 规范化后为 "悬疑 推理"，
-# 与召回 query 同形（余弦=1.0），命中可精确断言
+# 2 个 tag_type × 各 3 条：tag_001 文本 "悬疑。推理" 的真实 canonical 形为
+# "悬疑推理"（_canonical 丢标点不补空格），与召回 query 同形（余弦=1.0），
+# 命中为构造保证而非哈希运气
 _TAGS = [
     ("tag_001", "悬疑", "genre", "推理"),
     ("tag_002", "剧情", "genre", "人物关系驱动"),
@@ -71,11 +73,12 @@ def test_embed_content_texts(content_fixture):
 
 def test_closed_recall_groups_and_dedup(session):
     _seed_catalog(session)
-    cats = recall_by_type(session, ["悬疑 推理"], MOCK_EMBEDDER, top_k=2)
+    # query 取播种文本的真实 canonical 形（"悬疑。推理" → "悬疑推理"）：
+    # tag_001 余弦恰为 1.0，构造上必为 genre 组最高分命中
+    cats = recall_by_type(session, ["悬疑推理"], MOCK_EMBEDDER, top_k=2)
     # 每组 top-2 × 2 组 = 4，跨组按 tag_id 去重
     assert len({c.tag_id for c in cats}) == len(cats) == 4
     assert all(c.tag_type in {"genre", "mood"} for c in cats)
-    # 同形文本余弦=1.0：tag_001（"悬疑。推理"）必为 genre 组最高分命中
     assert any(c.tag_id == "tag_001" for c in cats)
 
 
@@ -89,7 +92,7 @@ def test_closed_recall_excludes_deprecate_and_empty_embedding(session):
     session.query(TagCatalog).filter(TagCatalog.tag_id == "tag_001").one().status = "deprecate"
     session.query(TagCatalog).filter(TagCatalog.tag_id == "tag_002").one().embedding = None
     session.commit()
-    cats = recall_by_type(session, ["悬疑 推理"], MOCK_EMBEDDER, top_k=50)
+    cats = recall_by_type(session, ["悬疑推理"], MOCK_EMBEDDER, top_k=50)
     ids = {c.tag_id for c in cats}
     assert "tag_001" not in ids and "tag_002" not in ids
     assert "tag_003" in ids  # 其余有效行正常召回
