@@ -5,7 +5,12 @@
 - `get_session`：每请求 ORM 会话（请求结束自动关闭，不做隐式提交——
   写路由自行 commit）；
 - `get_embedder`：app 级嵌入器单例（`create_app` 按
-  `settings.use_mock_embedder` 构建一次，mock 路径零模型下载）。
+  `settings.use_mock_embedder` 构建一次，mock 路径零模型下载）；
+- `get_executor`：app 级生成任务执行器单例（lifespan 启动时按
+  `settings.generation_workers` 构建，0 = 同步执行，Task 9）。
+
+生命周期（lifespan）：启动时构建执行器并孤儿清理（进程重启留下的
+running 任务复位 failed）；关停时 `executor.shutdown()` 等待在途任务。
 
 注意：本模块的 router 导入语句必须放在依赖函数定义**之后**——router
 模块会 `from tagplatform.api import get_session` 反向引用本模块，若
@@ -13,13 +18,16 @@ router 先导入则依赖函数尚不存在（循环导入）。
 """
 
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from sqlalchemy.orm import Session
 
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, make_embedder
+from tagplatform.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
+from tagplatform.tasks import TaskExecutor, reset_orphan_running
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -41,7 +49,19 @@ def get_embedder(request: Request) -> Embedder:
     return request.app.state.embedder
 
 
-from tagplatform.api.routers import batches, content, health, tags  # noqa: E402  (须在依赖定义之后)
+def get_executor(request: Request) -> TaskExecutor:
+    """生成任务执行器依赖：lifespan 启动时构建的单例（见 create_app）。"""
+    return request.app.state.executor
+
+
+from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
+    batches,
+    content,
+    generation,
+    health,
+    prompts,
+    tags,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -49,21 +69,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     未传入 settings 时回落到全局 `get_settings()`；
     传入的自定义 settings（如测试用临时文件库）挂到 `app.state.settings`
-    供依赖取用。app 级资源（引擎/会话工厂/嵌入器）各构建一次挂 state：
+    供依赖取用。app 级资源（引擎/会话工厂/嵌入器/LLM 客户端）各构建一次
+    挂 state：
     - 引擎与会话工厂绑定 settings.database_path（文件库父目录由
       create_engine_for 确保；表结构由 alembic 迁移管理，应用不建表）；
-    - 嵌入器按 use_mock_embedder 构建单例（mock 用于测试与冒烟）。
+    - 嵌入器按 use_mock_embedder 构建单例（mock 用于测试与冒烟）；
+    - LLM 客户端按 use_mock_llm 构建单例（mock 零网络，测试与冒烟）。
+    lifespan：启动时按 generation_workers 构建 TaskExecutor（0 = 同步
+    执行）并孤儿清理（running 任务复位 failed）；关停时关线程池等待在途
+    任务结束。
     """
     if settings is None:
         settings = get_settings()
-    app = FastAPI(title="影视智能标签平台")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """启动：executor 构建 + 孤儿清理；关停：线程池等待在途任务。"""
+        app.state.executor = TaskExecutor(
+            app.state.session_factory, app.state.llm, app.state.embedder,
+            workers=settings.generation_workers)
+        session = app.state.session_factory()
+        try:
+            reset_orphan_running(session)
+        finally:
+            session.close()
+        yield
+        app.state.executor.shutdown()
+
+    app = FastAPI(title="影视智能标签平台", lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = create_engine_for(settings.database_path)
     app.state.session_factory = make_session_factory(app.state.engine)
     app.state.embedder = make_embedder(
         settings.embedding_model, mock=settings.use_mock_embedder)
+    app.state.llm = make_llm_client(settings)
     app.include_router(health.router)
     app.include_router(tags.router)
     app.include_router(batches.router)
     app.include_router(content.router)
+    app.include_router(generation.router)
+    app.include_router(prompts.router)
     return app

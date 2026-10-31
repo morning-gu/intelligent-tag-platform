@@ -1,7 +1,7 @@
 """pytest 公共 fixture。
 
-`client` fixture 基于临时文件库 + mock 嵌入器配置构建 FastAPI 应用（真
-app、真文件 DB），经 TestClient 在进程内发请求（不起真实服务端口）。
+`client` fixture 基于临时文件库 + mock 嵌入器 + mock LLM 配置构建 FastAPI
+应用（真 app、真文件 DB），经 TestClient 在进程内发请求（不起真实服务端口）。
 注：计划原文为 `httpx.Client(transport=ASGITransport(app=...))`，但 httpx 的
 ASGITransport 仅支持异步（无同步 handle_request），故改用 FastAPI 官方推荐的
 TestClient——同为 httpx 之上的同步封装，契约（同步、进程内、临时库）不变。
@@ -28,18 +28,23 @@ MOCK_LLM = MockLLMClient()
 
 @pytest.fixture
 def client(tmp_path):
-    """进程内同步测试客户端：真 app + 临时文件 DB + mock 嵌入器。
+    """进程内同步测试客户端：真 app + 临时文件 DB + mock 嵌入器 + mock LLM。
 
-    API 层（Task 10）的导入/批次/标签路由需要文件库与嵌入器：
+    API 层（Task 10/11）的导入/批次/标签/生成路由需要文件库与嵌入器/LLM：
     - database_path 指向 tmp_path 下的临时文件（每测试隔离，测试间零残留）；
     - use_mock_embedder=True 使 create_app 构建确定性 MockEmbedder；
+    - use_mock_llm=True 使 create_app 构建确定性 MockLLMClient（零网络，
+      生成路由端到端可用，Task 9）；
+    - generation_workers=0 钉死同步执行：executor.submit 返回即任务完成，
+      POST /generation/tasks 响应已是终态（T9 的端到端测试模式）；
     - 表结构先经 Base.metadata.create_all 写入临时库（应用不负责建表）。
     """
     from tagplatform.db import create_engine_for
     from tagplatform.db.models import Base
 
     db_path = tmp_path / "tagplatform.db"
-    settings = Settings(database_path=str(db_path), use_mock_embedder=True)
+    settings = Settings(database_path=str(db_path), use_mock_embedder=True,
+                        use_mock_llm=True, generation_workers=0)
     engine = create_engine_for(str(db_path))
     Base.metadata.create_all(engine)
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎
