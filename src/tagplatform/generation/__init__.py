@@ -1,9 +1,9 @@
-"""生成引擎包出口：契约 dataclass、TagProducer 协议、注册表与 closed 生成器。
+"""生成引擎包出口：契约 dataclass、TagProducer 协议、注册表与 closed/open 生成器。
 
 分层红线：本包不得 import fastapi（设计文档 §9.4）。协议与注册表定义在
-`base` 子模块，此处重导出公共名字；closed 生成器（Task 5）在本包导入时
-经模块级 register_producer 自动注册（open 生成器在任务 6 加入），故导入
-本包后 list_producers() == ["closed"] 是预期初始态。
+`base` 子模块，此处重导出公共名字；closed（Task 5）与 open（Task 6）生成器
+在本包导入时经模块级 register_producer 自动注册，故导入本包后
+list_producers() == ["closed", "open"] 是预期初始态。
 """
 
 from tagplatform.generation.base import (
@@ -17,9 +17,11 @@ from tagplatform.generation.base import (
     register_producer,
 )
 from tagplatform.generation.closed import ClosedTagProducer
+from tagplatform.generation.open_gen import OpenTagProducer
 
 __all__ = [
     "ClosedTagProducer",
+    "OpenTagProducer",
     "Evidence",
     "GenerationPolicy",
     "GenerationSpec",
