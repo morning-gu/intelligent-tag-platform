@@ -41,7 +41,7 @@ def get_embedder(request: Request) -> Embedder:
     return request.app.state.embedder
 
 
-from tagplatform.api.routers import batches, health, tags  # noqa: E402  (须在依赖定义之后)
+from tagplatform.api.routers import batches, content, health, tags  # noqa: E402  (须在依赖定义之后)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -65,4 +65,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(tags.router)
     app.include_router(batches.router)
+    app.include_router(content.router)
     return app
