@@ -41,6 +41,26 @@ curl http://127.0.0.1:8000/health        # {"status":"ok"}
 - **嵌入器**：不设 `TAGPLT_USE_MOCK_EMBEDDER`，首次使用自动下载
   `intfloat/multilingual-e5-base`（768 维句向量）。
 
+### 前端启动（双进程开发流）
+
+前端为 React + AntD SPA（`frontend/`），开发时与后端**双进程并行**：
+
+```bash
+# 1) 安装依赖（Node >= 20）
+cd frontend && npm install
+
+# 2) 启动 Vite 开发服务器（默认 http://localhost:5173）
+npm run dev
+```
+
+- **代理说明**：`vite.config.ts` 将 `/api` 代理到 `http://127.0.0.1:8000`——
+  前端代码只写相对路径（免 CORS），需先按上文步骤把 FastAPI 跑在 8000 端口。
+- **登录**：浏览器打开 `http://localhost:5173`，用 admin 账号登录
+  （首管理员密码见环境变量 `TAGPLT_ADMIN_PASSWORD`，默认 `admin123`）；
+  会话为 HttpOnly cookie，401 统一跳登录页。
+- **测试与构建**：`npm test`（Vitest + Testing Library）、`npm run build`
+  （tsc 类型检查 + 产物输出 `dist/`）。
+
 ## 环境变量
 
 前缀 `TAGPLT_`（读 `.env` 与进程环境）：
@@ -67,7 +87,13 @@ curl http://127.0.0.1:8000/health        # {"status":"ok"}
 .venv/Scripts/python -m pytest
 ```
 
-全量约 130 条测试，默认全走 mock，不联网、不下载模型。
+全量约 252 条测试，默认全走 mock，不联网、不下载模型。
+
+前端测试（Vitest + Testing Library，含组件与 API 契约测试）：
+
+```bash
+cd frontend && npm test
+```
 
 ## 架构概览
 

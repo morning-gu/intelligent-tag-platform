@@ -44,10 +44,17 @@ async function readErrorDetail(response: Response): Promise<string> {
   return `请求失败（HTTP ${response.status}）`
 }
 
-/** 统一请求入口：自动 JSON、携带会话 cookie、401 拦截（跳 /login）。 */
+/** 统一请求入口：自动 JSON、携带会话 cookie、401 拦截（跳 /login）。
+ * body 为 FormData 时（multipart 上传，如标签 Excel 导入）不设 Content-Type
+ * ——浏览器自动补 `multipart/form-data; boundary=...`，强设 application/json
+ * 会覆盖 boundary 导致服务端无法解析。 */
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
-  if (init?.body !== undefined && !headers.has('Content-Type')) {
+  if (
+    init?.body !== undefined &&
+    !(init.body instanceof FormData) &&
+    !headers.has('Content-Type')
+  ) {
     headers.set('Content-Type', 'application/json')
   }
   const response = await fetch(path, { ...init, headers, credentials: 'include' })

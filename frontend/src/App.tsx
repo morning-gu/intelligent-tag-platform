@@ -1,7 +1,7 @@
 // 应用路由装配：/login 公开；其余页面统一套路由门禁（RequireAuth）与主布局。
 // Router 由 main.tsx 提供（BrowserRouter）——App 只含 Routes，测试以
-// MemoryRouter 注入。工作台/审核中心/质量评估/内容资产（列表+详情）/生产任务
-// 已实现，其余业务页面仍为占位，由后续任务逐个填充。
+// MemoryRouter 注入。全部业务页面已实现：工作台/审核中心/质量评估/内容资产
+// （列表+详情）/生产任务/标签导入/标签库/用户管理（admin）。
 import { useEffect, useState } from 'react'
 import { Navigate, Outlet, Route, Routes, useOutletContext } from 'react-router-dom'
 import { getMe, type UserBrief } from './api/client'
@@ -11,9 +11,11 @@ import Dashboard from './pages/Dashboard'
 import GenerationTasks from './pages/GenerationTasks'
 import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
-import Placeholder from './pages/Placeholder'
 import Quality from './pages/Quality'
 import ReviewCenter from './pages/ReviewCenter'
+import TagCatalog from './pages/TagCatalog'
+import TagImports from './pages/TagImports'
+import Users from './pages/Users'
 
 type GateState =
   | { phase: 'loading' }
@@ -69,11 +71,11 @@ export default function App() {
           <Route path="assets" element={<AssetList />} />
           <Route path="assets/:assetId" element={<AssetDetail />} />
           <Route path="tasks" element={<GenerationTasks />} />
-          <Route path="imports" element={<Placeholder title="标签导入" />} />
-          <Route path="tags" element={<Placeholder title="标签库" />} />
+          <Route path="imports" element={<TagImports />} />
+          <Route path="tags" element={<TagCatalog />} />
           <Route path="quality" element={<Quality />} />
           <Route element={<AdminRoute />}>
-            <Route path="users" element={<Placeholder title="用户管理" />} />
+            <Route path="users" element={<Users />} />
           </Route>
         </Route>
       </Route>

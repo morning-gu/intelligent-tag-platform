@@ -60,6 +60,20 @@ describe('apiFetch', () => {
     expect((init.headers as Headers).get('Content-Type')).toBe('application/json')
   })
 
+  it('FormData 载荷（multipart 上传）：不设 Content-Type（boundary 由浏览器补全）', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse(200, { batch_id: 'b1' }))
+
+    // multipart 表单若被强设 application/json，服务端将丢失 boundary 无法解析
+    const form = new FormData()
+    form.append('file', new File(['fake-xlsx'], 'tags.xlsx'))
+    await apiFetch('/api/v1/tags/import', { method: 'POST', body: form })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.method).toBe('POST')
+    expect(init.body).toBe(form)
+    expect((init.headers as Headers).has('Content-Type')).toBe(false)
+  })
+
   it('401（非登录请求）：抛 UnauthorizedError 且跳转 /login', async () => {
     stubFetch(async () => jsonResponse(401, { detail: '未登录' }))
 
