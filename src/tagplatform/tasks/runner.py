@@ -1,0 +1,233 @@
+"""生成任务执行器：任务状态机、prompt 组装、线程池执行与孤儿清理（Task 8）。
+
+把前序部件串成完整执行链（计划钉死的八步流程）：
+状态机（queued → running → succeeded|failed，running 置位先落库防长任务
+重复提交）→ 内容解析 → producer 分发（get_producer，closed/open 注册于
+tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用，
+candidates 文本仅 closed、行序 = 召回结果行序）→ policy 解析 → produce →
+persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量 → 终态一次性
+commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
+
+事务语义：
+- 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist/回填的未提交
+  写入，保证零半截 asset_tag；任务置 failed 后返回、不 re-raise——调用方
+  （API 层/线程池）经状态与 error 字段感知失败；
+- 捕获范围取 Exception 而非仅 brief 列举的 ValueError/RuntimeError/
+  LLMParseError：这三类覆盖 produce 的预期失败，其余未预期异常（坏 mode、
+  坏 content_json、缺激活模板等配置错误）若外抛会把任务永久滞留 running，
+  任务级事务必须保证任何失败都落终态（进程崩溃除外，由孤儿重置兜底）。
+
+TaskExecutor 为线程池封装：线程内独立 session（SQLite 文件库跨线程可见，
+:memory: 不可），异常吞并记日志；workers=0 同步执行（T9 钉死的测试模式）。
+reset_orphan_running 供 create_app 启动时清理进程重启留下的 running 孤儿。
+
+分层红线：本模块不得 import fastapi（设计文档 §9.4）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy.orm import Session
+
+from tagplatform.db.models import GenerationTask, MediaContext, TagCatalog
+from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
+from tagplatform.generation.recall import embed_content_texts, recall_by_type
+from tagplatform.prompts import get_active_prompt, render_prompt
+from tagplatform.results import persist_tags
+from tagplatform.schemas import ContentJSON, parse_content
+from tagplatform.settings import get_settings
+from tagplatform.vectors import encode_vector
+
+logger = logging.getLogger(__name__)
+
+
+def _render_content_text(content: ContentJSON) -> str:
+    """内容 JSON → prompt 的 content 文本（两模式共用，格式计划钉死）。
+
+    首行《标题》与摘要行，其后每场景一行：
+
+    《示例电影》
+    摘要：影片整体剧情摘要
+    - scene_001 [120000-180000] 两名人物在仓库中发生激烈争执
+    """
+    header = f"《{content.asset.title}》\n摘要：{content.content.summary}\n"
+    scene_lines = [
+        f"- {scene.scene_id}"
+        f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
+        f" {scene.description}"
+        for scene in content.content.scenes
+    ]
+    return header + "\n".join(scene_lines)
+
+
+def _render_candidates_text(candidates: list[TagCatalog]) -> str:
+    """召回候选 → prompt 的 candidates 文本（仅模式 A，行序 = 召回结果行序）。
+
+    每候选一行 `- {tag_id} | {tag_name} | {tag_type} | {description}`；
+    首行 "## 候选标签" 是模式 A 的标志节——MockLLM 按它识别模式 A 分支并
+    逐行解析候选（llm/mock.py _CLOSED_MARKER，与任务 5 测试的组装约定一致），
+    真模型下同样是有效的小节标题。
+    """
+    lines = [
+        f"- {c.tag_id} | {c.tag_name} | {c.tag_type} | {c.description}"
+        for c in candidates
+    ]
+    return "## 候选标签\n" + "\n".join(lines)
+
+
+def run_generation_task(task_id: str, session: Session, llm,
+                        embedder) -> GenerationTask:
+    """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
+
+    八步流程（计划钉死）：
+    1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
+    2. context 缺失 → failed + error、commit、返回 task；
+    3. parse_content(json.loads(context.content_json))；资产 id 取
+       content.asset.asset_id（缺省回落 context.asset_id）；
+    4. get_producer(task.mode)；closed 额外召回候选组装 candidates 文本，
+       render_prompt 渲染激活模板（open 模板无 candidates 占位符，只传 content）；
+    5. policy_json 空 → 默认 GenerationPolicy，否则按 JSON 构造；
+    6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
+       写入后置 failed（error=str(e)、finished_at）、commit、返回 task
+       （不 re-raise，调用方看状态）；
+    7. persist_tags（不 commit，随终态同事务落库）+ 模式 A 回填
+       context.embedding（摘要向量 runner 独立重算——计划定案，接口简单）；
+    8. task.model_version = llm.model、prompt_version = 激活模板版本、
+       succeeded、finished_at、一次性 commit、返回 task。
+    """
+    task = session.get(GenerationTask, task_id)
+    if task is None:
+        raise ValueError(f"任务不存在: {task_id}")
+    if task.status != "queued":
+        raise ValueError("任务状态非 queued")
+    # 1. running 置位先落库：长任务期间其余会话可见，防重复提交
+    task.status = "running"
+    session.commit()
+
+    # 2. 上下文缺失属数据错误：显式失败，不留 running 僵尸
+    context = session.get(MediaContext, task.context_id)
+    if context is None:
+        task.status = "failed"
+        task.error = f"媒体上下文不存在: {task.context_id}"
+        task.finished_at = datetime.now(timezone.utc)
+        session.commit()
+        return task
+
+    try:
+        # 3. 内容解析与资产归属
+        content = parse_content(json.loads(context.content_json))
+        asset_id = content.asset.asset_id or context.asset_id
+        # 4. producer 分发与 prompt 组装渲染
+        producer = get_producer(task.mode)
+        template = get_active_prompt(session, task.mode)
+        fields: dict[str, str] = {"content": _render_content_text(content)}
+        if task.mode == "closed":
+            candidates = recall_by_type(
+                session,
+                embed_content_texts(content),
+                embedder,
+                get_settings().recall_top_k_per_type,
+            )
+            fields["candidates"] = _render_candidates_text(candidates)
+        prompt_text = render_prompt(template, **fields)
+        # 5. 策略解析（空 policy_json → 默认）
+        raw_policy = (task.policy_json or "").strip()
+        policy = (GenerationPolicy(**json.loads(raw_policy))
+                  if raw_policy else GenerationPolicy())
+        # 6. 生成（run_id 含随机段：同任务重跑换 run_id，Mock 哈希采样随之变化）
+        run_id = f"{task.task_id}:{uuid4().hex[:6]}"
+        spec = GenerationSpec(
+            task_id=task.task_id, asset_id=asset_id, content=content,
+            policy=policy, prompt_text=prompt_text, run_id=run_id,
+        )
+        tags = producer.produce(spec, session, llm, embedder)
+        # 7. 结果入库（不 commit）+ 模式 A 回填上下文摘要向量（与 prompt
+        #    组装同源的摘要文本）
+        persist_tags(session, asset_id, task.task_id, tags, run_id)
+        if task.mode == "closed":
+            context.embedding = encode_vector(
+                embedder.embed([content.content.summary])[0])
+        # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
+        task.model_version = llm.model
+        task.prompt_version = template.version
+        task.status = "succeeded"
+        task.finished_at = datetime.now(timezone.utc)
+        session.commit()
+        return task
+    except Exception as e:  # noqa: BLE001 —— 任务级事务：任何失败都落任务终态
+        # 先回滚丢弃 persist/回填的未提交写入（零半截 asset_tag），再落
+        # failed 终态；不 re-raise，调用方经状态与 error 感知失败
+        session.rollback()
+        task.status = "failed"
+        task.error = str(e)
+        task.finished_at = datetime.now(timezone.utc)
+        session.commit()
+        return task
+
+
+class TaskExecutor:
+    """生成任务线程池执行器：线程内独立 session 跑 run_generation_task。
+
+    workers=0 时不建池、submit 即同步执行（Settings.generation_workers=0
+    的钉死语义，测试与单步调试用）；shutdown 供应用退出时关池（T9 lifespan）。
+    """
+
+    def __init__(self, session_factory, llm, embedder, workers: int = 2):
+        self._session_factory = session_factory
+        self._llm = llm
+        self._embedder = embedder
+        self._pool = (None if workers <= 0 else
+                      ThreadPoolExecutor(max_workers=workers,
+                                         thread_name_prefix="generation"))
+
+    def submit(self, task_id: str) -> None:
+        """提交任务执行；workers=0 时同步执行（submit 返回即完成）。"""
+        if self._pool is None:
+            self._run(task_id)
+            return
+        self._pool.submit(self._run, task_id)
+
+    def shutdown(self) -> None:
+        """关闭线程池并等待在途任务结束（同步模式无池，空操作）。"""
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+
+    def _run(self, task_id: str) -> None:
+        """工作线程体：线程内独立 session 执行单任务。
+
+        异常吞并记日志：任务自身失败已由 run_generation_task 落库为 failed，
+        能外抛的只剩基础设施级意外（会话工厂故障等）——记日志留痕，不向
+        线程池外传播；滞留 running 的极端情况由重启孤儿重置兜底。
+        """
+        session = self._session_factory()
+        try:
+            run_generation_task(task_id, session, self._llm, self._embedder)
+        except Exception:
+            logger.exception("生成任务线程执行异常 task_id=%s", task_id)
+        finally:
+            session.close()
+
+
+def reset_orphan_running(session: Session) -> int:
+    """进程重启后的孤儿清理：running 任务全部置 failed，返回复位数量。
+
+    进程崩溃时任务来不及走失败收尾，重启后永远滞留 running——create_app
+    启动时调用本函数一次性复位（error="进程重启中断"）。
+    """
+    orphans = (
+        session.query(GenerationTask)
+        .filter(GenerationTask.status == "running")
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for task in orphans:
+        task.status = "failed"
+        task.error = "进程重启中断"
+        task.finished_at = now
+    session.commit()
+    return len(orphans)
