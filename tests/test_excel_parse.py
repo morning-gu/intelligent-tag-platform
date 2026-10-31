@@ -1,0 +1,81 @@
+"""Excel 标签模板解析测试（Task 6）。
+
+覆盖契约：
+- 合法模板（含 aliases 中英文逗号分隔、可选列）解析出 TagRow；
+- 畸形行逐行报告 missing_field 且不中断：带错误的行不进入 rows（rows 与
+  errors 不相交，导入 API 将 rows 直接交给治理流水线）、空行跳过、
+  数字单元格转字符串；
+- 缺必需表头列 → header_error 非空且 rows 为空；
+- （补充）全 8 列模板：tag_id/applicable_scope 可选列、按列名映射、
+  数字 tag_id 转字符串、aliases 中英文分号/逗号混用去空段。
+
+xlsx 字节流由 build_xlsx 用 openpyxl 现场构造，不依赖外部文件。
+"""
+
+import io
+
+import openpyxl
+
+from tagplatform.governance import parse_tag_excel
+
+# 模板常用 6 列（tag_id/applicable_scope 两列可选，见 test_full_eight_column_template）；
+# 外层再包一行，使 build_xlsx(HEADERS + [...]) 拼出的都是"行"的列表
+HEADERS = [["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"]]
+
+
+def build_xlsx(rows: list[list]) -> bytes:
+    """用 openpyxl 现场构造 xlsx 字节流（首行为表头）。"""
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    for row in rows:
+        worksheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def test_valid_template():
+    r = parse_tag_excel(build_xlsx([
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["悬疑", "genre", "以悬念为核心", "剧情", "悬念,推理", "active"],
+    ]))
+    assert r.rows[0].aliases == ["悬念", "推理"] and r.rows[0].parent_tag == "剧情"
+
+
+def test_excel_malformed_rows_reported():
+    r = parse_tag_excel(build_xlsx(HEADERS + [
+        ["悬疑", "genre", "以悬念为核心"],              # 合法
+        [None, "genre", "缺名称"],                      # 行级 missing_field(tag_name)
+        ["数量", "genre"],                              # 行级 missing_field(description)
+        ["风格", "genre", "d", "aliases列乱填数字", 123],  # bad_type→aliases 数字转字符串"123"
+        [None, None, None],                             # 空行跳过
+    ]))
+    # 计划原文此处断言 len(r.rows) == 3，经核为笔误：5 条数据行中 2 行报
+    # missing_field（第 3、4 行），末条为空行跳过不产出行，合法行实为 2
+    # （悬疑、风格——风格行 aliases 的数字 123 转字符串）。rows 与 errors
+    # 必须不相交：导入 API 把 rows 原样交给治理流水线，带错误行混入会被
+    # 直接入库（详见 task-6-report）。
+    assert len(r.rows) == 2 and len(r.errors) == 2
+    assert {e.code for e in r.errors} == {"missing_field"}
+    assert r.errors[0].row_number == 3 and r.errors[0].tag_name is None
+    assert r.rows[1].aliases == ["123"]  # 数字单元格转字符串
+
+
+def test_header_missing_required():
+    r = parse_tag_excel(build_xlsx([["tag_name", "tag_type"]]))
+    assert r.header_error and not r.rows
+
+
+def test_full_eight_column_template():
+    r = parse_tag_excel(build_xlsx([
+        ["tag_id", "tag_name", "tag_type", "description", "parent_tag",
+         "aliases", "applicable_scope", "status"],
+        [42, "悬疑", "genre", "以悬念为核心", None, "悬念；推理，", "电影", "active"],
+        [None, "悬疑", "genre", "以悬念为核心"],  # 缺可选列单元格与可选列头 → 不报错
+    ]))
+    assert not r.errors and len(r.rows) == 2
+    first = r.rows[0]
+    assert first.tag_id == "42" and first.aliases == ["悬念", "推理"]
+    assert first.parent_tag is None and first.applicable_scope == "电影"
+    assert first.status == "active"
+    assert r.rows[1].aliases == [] and r.rows[1].parent_tag is None

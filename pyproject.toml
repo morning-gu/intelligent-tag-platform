@@ -12,6 +12,7 @@ dependencies = [
     "alembic",
     "numpy",
     "sentence-transformers",
+    "openpyxl",
 ]
 
 [project.optional-dependencies]
