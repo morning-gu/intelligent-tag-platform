@@ -29,7 +29,9 @@ def verify_password(pwd: str, stored: str) -> bool:
     """校验明文密码与存储串；坏格式返回 False 不抛。
 
     拆分段数不足/轮数非数字/十六进制非法/未知 scheme 一律 False；
-    None 等非字符串输入同样按坏格式处理（AttributeError 归入捕获）。
+    hash 段含非 ASCII 字符时 compare_digest 抛 TypeError，同样按坏格式
+    归入 False（损坏/手改的库值不得炸成 500）；None 等非字符串输入
+    （AttributeError）一并归入捕获。
     """
     try:
         scheme, rounds_str, salt_hex, hash_hex = stored.split("$")
@@ -39,5 +41,5 @@ def verify_password(pwd: str, stored: str) -> bool:
             "sha256", pwd.encode("utf-8"),
             bytes.fromhex(salt_hex), int(rounds_str))
         return hmac.compare_digest(digest.hex(), hash_hex)
-    except (ValueError, AttributeError):
+    except (ValueError, TypeError, AttributeError):
         return False

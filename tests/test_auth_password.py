@@ -71,6 +71,7 @@ def test_verify_wrong_password_false():
     "pbkdf2$200000$aa",  # 段数不足
     "pbkdf2$abc$0011$0011",  # 轮数非数字
     "pbkdf2$200000$zzzz$0011",  # 盐非十六进制
+    "pbkdf2$200000$0011$éé",  # hash 段非 ASCII（compare_digest 抛 TypeError）
 ])
 def test_verify_bad_format_false_no_raise(stored):
     """坏格式一律返回 False，绝不抛异常（与错密码同路径）。"""
