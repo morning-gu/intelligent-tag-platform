@@ -101,8 +101,8 @@ class MockLLMClient:
             out = _open_output(run_id)
         content = json.dumps(out, ensure_ascii=False)
         usage = {"prompt_tokens": 100, "completion_tokens": 50}
-        # raw 必须是 OpenAI 信封形状：下游缓存命中路径从 choices[0].message.content
-        # 还原文本，信封契约在 mock 路径下同样生效
+        # raw 保留 OpenAI 信封形状（choices[0].message.content），与真实
+        # 客户端成功响应结构一致，便于上层统一处理与调试对账
         return LLMResponse(content=content, usage=usage,
                            raw={"choices": [{"message": {"content": content},
                                              "finish_reason": "stop"}],

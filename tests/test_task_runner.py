@@ -134,7 +134,7 @@ def test_run_task_success_writes_tags(session):
     t = _make_task(session, policy_json='{"min_confidence": 0.5}')
     done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert done is t
-    assert t.status == "succeeded" and t.prompt_version == 1 and t.model_version == "mock-1"
+    assert t.status == "succeeded" and t.prompt_version == "1" and t.model_version == "mock-1"
     assert session.query(AssetTag).count() >= 1 and t.finished_at is not None
     # 模式 A：媒体上下文摘要向量回填（runner 独立重算，计划定案）
     assert session.get(MediaContext, t.context_id).embedding is not None
@@ -251,8 +251,8 @@ def test_executor_thread_pool(tmp_path):
             assert closed_row.status == "succeeded", statuses
             assert open_row.status == "succeeded", statuses
             assert closed_row.model_version == "mock-1"
-            # prompt_version 列为 Text（Task 3 模型契约）：新会话经 SQLite
-            # TEXT 亲和读回为 "1"（同 session 进程内对象保持赋值原值 1）
+            # prompt_version 列为 Text（Task 3 模型契约）：写入侧即字符串
+            # （runner 写 str(template.version)），新会话读回仍为 "1"
             assert str(closed_row.prompt_version) == "1"
             # closed 任务有标签产出（min_confidence=0.5 下零选中概率 ≈ 2e-7）
             assert s.query(AssetTag).filter(

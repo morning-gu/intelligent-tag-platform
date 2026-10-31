@@ -97,8 +97,8 @@ def run_generation_task(task_id: str, session: Session, llm,
        （不 re-raise，调用方看状态）；
     7. persist_tags（不 commit，随终态同事务落库）+ 模式 A 回填
        context.embedding（摘要向量 runner 独立重算——计划定案，接口简单）；
-    8. task.model_version = llm.model、prompt_version = 激活模板版本、
-       succeeded、finished_at、一次性 commit、返回 task。
+    8. task.model_version = llm.model、prompt_version = 激活模板版本
+       （写入字符串）、succeeded、finished_at、一次性 commit、返回 task。
     """
     task = session.get(GenerationTask, task_id)
     if task is None:
@@ -154,7 +154,8 @@ def run_generation_task(task_id: str, session: Session, llm,
                 embedder.embed([content.content.summary])[0])
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         task.model_version = llm.model
-        task.prompt_version = template.version
+        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致
+        task.prompt_version = str(template.version)
         task.status = "succeeded"
         task.finished_at = datetime.now(timezone.utc)
         session.commit()
@@ -204,13 +205,17 @@ class TaskExecutor:
         能外抛的只剩基础设施级意外（会话工厂故障等）——记日志留痕，不向
         线程池外传播；滞留 running 的极端情况由重启孤儿重置兜底。
         """
-        session = self._session_factory()
+        session = None
         try:
+            # 会话工厂调用也在 try 内：工厂故障同样记日志（否则异常随被
+            # 丢弃的 future 静默消失，无线索可查）
+            session = self._session_factory()
             run_generation_task(task_id, session, self._llm, self._embedder)
         except Exception:
             logger.exception("生成任务线程执行异常 task_id=%s", task_id)
         finally:
-            session.close()
+            if session is not None:
+                session.close()
 
 
 def reset_orphan_running(session: Session) -> int:
