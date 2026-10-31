@@ -1,6 +1,7 @@
 // 路由门禁与菜单测试：App 以 MemoryRouter 驱动（BrowserRouter 由 main.tsx 提供）。
 // api/client 整体 mock——门禁只关心 getMe 结果：拒绝 → 登录页；成功 → 布局与菜单
-// （八项菜单齐全，其中"用户管理"仅 admin 角色可见）。
+// （八项菜单齐全，其中"用户管理"仅 admin 角色可见）。登录态下工作台会挂载并
+// 请求指标接口，apiFetch 桩为永不落定的 Promise，页面停留在加载态、不打网络。
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,7 +10,11 @@ import { getMe } from './api/client'
 
 vi.mock('./api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/client')>()
-  return { ...actual, getMe: vi.fn() }
+  return {
+    ...actual,
+    getMe: vi.fn(),
+    apiFetch: vi.fn(() => new Promise(() => {})),
+  }
 })
 
 const mockedGetMe = vi.mocked(getMe)
