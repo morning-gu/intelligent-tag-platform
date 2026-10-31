@@ -11,10 +11,18 @@ from tagplatform.governance.excel import (
     TagRow,
     parse_tag_excel,
 )
+from tagplatform.governance.pipeline import (
+    GovernanceResult,
+    Issue,
+    run_governance,
+)
 
 __all__ = [
     "ExcelParseResult",
+    "GovernanceResult",
+    "Issue",
     "RowError",
     "TagRow",
     "parse_tag_excel",
+    "run_governance",
 ]
