@@ -29,6 +29,23 @@ def client():
 
 
 @pytest.fixture
+def content_fixture():
+    """解析 fixtures/content_movie.json 为 ContentJSON（内容导入测试输入）。
+
+    parse_content 延迟 import：与 session fixture 同理，模型层未就位时
+    只影响使用本 fixture 的测试，不拖垮整套件收集。
+    """
+    import json
+    from pathlib import Path
+
+    from tagplatform.schemas import parse_content
+
+    fixture_path = Path(__file__).parent / "fixtures" / "content_movie.json"
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return parse_content(data)
+
+
+@pytest.fixture
 def session():
     """函数级隔离的内存库 ORM 会话（每测试重建库与表）。
 
