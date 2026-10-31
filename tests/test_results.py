@@ -7,9 +7,10 @@
 - pending 覆盖：重跑命中 pending 行 → 覆盖更新（confidence/task_id
   刷新为新任务的值）；
 - generated 候选 upsert：按 (asset_id, candidate_name) 同规则；
-- 已定跳过两 origin 统一 {approved, merged}（controller ruling：merged
-  与 approved 同属人工已定，计划 catalog 侧漏写 merged 系计划文本
-  缺陷——catalog 与 generated 侧各有 approved/merged 跳过锁定测试）。
+- 已定跳过两 origin 统一 {approved, rejected, merged}（阶段 3 B3 拍板：
+  rejected 与 approved/merged 同属人工已定，重跑覆盖会自动复活审核
+  驳回的候选；计划 catalog 侧漏写 merged 系计划文本缺陷——catalog 与
+  generated 侧各有 approved/merged/rejected 跳过锁定测试）。
 
 附加锁定：evidence_json 为 Evidence asdict 序列化、插入行时间戳显式
 非空、未知 origin 与 catalog 缺 tag_id 报 ValueError（零副作用）。
@@ -73,6 +74,18 @@ def test_persist_catalog_merged_skipped(session):
     assert s.skipped_approved == 1 and row.confidence == 0.95 and row.task_id == "t1"  # 原值未动
 
 
+def test_persist_catalog_rejected_skipped(session):
+    """catalog 行 rejected 后重跑亦跳过（阶段 3 B3 拍板：rejected 入人工
+    已定集，与 approved 保留测试同构，一行状态差——重跑覆盖会自动复活
+    审核驳回的候选）。"""
+    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
+    session.query(AssetTag).one().review_status = "rejected"
+    session.commit()
+    s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
+    row = session.query(AssetTag).one()
+    assert s.skipped_approved == 1 and row.confidence == 0.95 and row.task_id == "t1"  # 原值未动
+
+
 def test_persist_pending_overwritten(session):
     persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
     s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
@@ -105,6 +118,19 @@ def test_persist_generated_merged_skipped(session):
     persist_tags(session, "a1", "t1",
                  [_ptag(None, "多线叙事", origin="generated", conf=0.8)], "r1")
     session.query(AssetTag).one().review_status = "merged"
+    session.commit()
+    s = persist_tags(session, "a1", "t2",
+                     [_ptag(None, "多线叙事", origin="generated", conf=0.1)], "r2")
+    row = session.query(AssetTag).one()
+    assert s.skipped_approved == 1 and row.confidence == 0.8 and row.task_id == "t1"
+
+
+def test_persist_generated_rejected_skipped(session):
+    """generated 行 rejected 后重跑跳过（阶段 3 B3 拍板：已定跳过集扩为
+    approved/rejected/merged，两 origin 统一——驳回的候选不得被重跑复活）。"""
+    persist_tags(session, "a1", "t1",
+                 [_ptag(None, "多线叙事", origin="generated", conf=0.8)], "r1")
+    session.query(AssetTag).one().review_status = "rejected"
     session.commit()
     s = persist_tags(session, "a1", "t2",
                      [_ptag(None, "多线叙事", origin="generated", conf=0.1)], "r2")

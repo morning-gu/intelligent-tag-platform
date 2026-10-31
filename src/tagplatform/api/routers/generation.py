@@ -83,8 +83,11 @@ class EvidenceOut(BaseModel):
 
 
 class GenerationResultOut(BaseModel):
-    """生成结果摘要行：tag_name 按 origin 取（catalog 取目录名，generated 取候选名）。"""
+    """生成结果摘要行：id 为 asset_tag 行主键（阶段 3 B3 暴露——Task 4
+    审核操作路由与前端行操作的定位键）；tag_name 按 origin 取（catalog
+    取目录名，generated 取候选名）。"""
 
+    id: int
     tag_name: str
     origin: str
     relevance_score: float | None = None
@@ -107,7 +110,8 @@ class GenerationTaskRetryResponse(BaseModel):
 
 
 class AssetTagOut(GenerationResultOut):
-    """资产标签行：摘要形状 + 标识原样（tag_id/catalog 行、candidate_name/generated 行）。"""
+    """资产标签行：摘要形状（含行主键 id）+ 标识原样（tag_id/catalog 行、
+    candidate_name/generated 行）。"""
 
     tag_id: str | None = None
     candidate_name: str | None = None
@@ -138,12 +142,13 @@ def _catalog_names(session: Session, rows: list[AssetTag]) -> dict[str, str]:
 
 
 def _result_out(row: AssetTag, names: dict[str, str]) -> GenerationResultOut:
-    """asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。"""
+    """asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用，含行主键 id）。"""
     if row.origin == "catalog":
         tag_name = names.get(row.tag_id or "", "")
     else:
         tag_name = row.candidate_name or ""
     return GenerationResultOut(
+        id=row.id,
         tag_name=tag_name,
         origin=row.origin,
         relevance_score=row.relevance_score,
@@ -323,8 +328,8 @@ def retry_generation_task(
 def list_asset_tags(
     asset_id: str, session: Session = Depends(get_session)
 ) -> list[AssetTagOut]:
-    """资产全部生成标签（跨任务，按入库行序）：摘要形状 + tag_id/candidate_name
-    原样；未知资产 → 404。"""
+    """资产全部生成标签（跨任务，按入库行序）：摘要形状 + 行主键 id +
+    tag_id/candidate_name 原样；未知资产 → 404。"""
     if session.get(MediaAsset, asset_id) is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
     rows = (

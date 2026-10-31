@@ -9,14 +9,15 @@
 - GET /api/v1/generation/tasks：status/mode/asset_id 过滤 + created_at
   降序（task_id 决胜）+ limit/offset 分页；
 - GET /api/v1/generation/tasks/{task_id}：详情 + results 摘要（tag_name
-  按 origin 取、evidence 解析、prompt_version 为字符串 "1"——TEXT 列经
-  SQLite 亲和读回，T8 附注）；未知任务 404；
+  按 origin 取、evidence 解析、行 id 主键（B3 暴露，Task 4 审核操作定位
+  键）、prompt_version 为字符串 "1"——TEXT 列经 SQLite 亲和读回，T8 附
+  注）；未知任务 404；
 - POST /api/v1/generation/tasks/{task_id}/retry：仅 failed 可重试（否则
   422 "仅失败任务可重试"）——先造 failed 任务（标签库未导入时 closed
   生成失败），补导标签库后重试至 succeeded；未知任务 404；
 - GET /api/v1/prompts?mode=：v1 种子模板列表（closed/open 各一）；
-- GET /api/v1/assets/{asset_id}/tags：资产全部标签行（摘要形状 +
-  tag_id/candidate_name 原样）；未知资产 404。
+- GET /api/v1/assets/{asset_id}/tags：资产全部标签行（摘要形状 + 行 id
+  主键 + tag_id/candidate_name 原样）；未知资产 404。
 
 Mock 技巧（与 llm/mock.py 咬合，T8 测试同款消 flake 构造）：closed 用
 policy.min_confidence=0.5（MockLLM confidence 值域 [0.5,1) 恒过线）+
@@ -35,7 +36,8 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "content_movie.json"
 CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 # 结果摘要形状（详情 results）与资产标签行（摘要 + 标识原样）的键集契约
-RESULT_KEYS = {"tag_name", "origin", "relevance_score", "confidence",
+# （id 为 asset_tag 行主键，阶段 3 B3 暴露——Task 4 审核操作路由的定位键）
+RESULT_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
                "review_status", "evidence"}
 ASSET_TAG_KEYS = RESULT_KEYS | {"tag_id", "candidate_name"}
 # 任务列表项键集（brief 钉死九字段）
@@ -110,6 +112,8 @@ def test_generation_e2e_closed_succeeded(client):
     assert len(results) >= 1
     first = results[0]
     assert set(first.keys()) == RESULT_KEYS
+    assert isinstance(first["id"], int) and first["id"] > 0  # 行主键（B3 暴露）
+    assert len({r["id"] for r in results}) == len(results)  # 行 id 唯一
     assert first["origin"] == "catalog"
     assert first["tag_name"].startswith(("类型标签", "情绪标签"))
     assert first["review_status"] == "pending"
@@ -126,6 +130,7 @@ def test_generation_e2e_closed_succeeded(client):
         assert set(row.keys()) == ASSET_TAG_KEYS
         assert row["tag_id"] is not None and row["candidate_name"] is None
         assert row["tag_name"] == res["tag_name"]  # 同按入库行序，逐行对应
+        assert row["id"] == res["id"]  # 两端点同一批行的主键一致（B3 暴露）
 
 
 def test_generation_e2e_open_generated_rows(client):
@@ -147,6 +152,7 @@ def test_generation_e2e_open_generated_rows(client):
     assert names == {"多线叙事", "情感张力", "视听风格"}
     for row in results:
         assert row["origin"] == "generated"
+        assert isinstance(row["id"], int) and row["id"] > 0  # 行主键（B3 暴露）
         assert row["relevance_score"] is None  # 未命中目录：无相关度
         assert row["review_status"] == "pending"
 
