@@ -11,3 +11,7 @@ dist/
 
 # 前端（frontend/ 自带 .gitignore 亦含；根级兜底防误提交）
 node_modules/
+
+# Claude Code 会话与本机工作区状态（不入库）
+.claude/
+.env
