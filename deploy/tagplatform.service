@@ -1,0 +1,51 @@
+# 影视智能标签平台 systemd 服务单元（Ubuntu，假定部署路径 /opt/tagplatform）。
+# 安装方式见 deploy/deploy.md：软链到 /etc/systemd/system/tagplatform.service
+# 后执行 sudo systemctl daemon-reload && sudo systemctl enable --now tagplatform。
+#
+# 占位约定（启用前务必逐项替换，三个占位点：部署路径 / 运行用户 / 密钥类环境变量）：
+# - /opt/tagplatform —— 部署路径（仓库 clone 位置，含 .venv 与 frontend/dist）；
+# - User=/Group= 的 CHANGE_ME —— 专用低权限运行账户（勿用 root）；
+# - 标注 CHANGE_ME_* 的 Environment 行 —— 生产必改的密钥与口令（取消注释并填入）。
+
+[Unit]
+Description=影视智能标签平台（FastAPI + uvicorn，127.0.0.1:8000）
+# 迁移失败即启动失败（ExecStartPre 非零退出会中止启动），无需额外条件声明
+After=network.target
+
+[Service]
+Type=simple
+# 运行用户占位：生产务必改为专用低权限账户（需对 <部署路径>/data 可写）
+User=CHANGE_ME
+Group=CHANGE_ME
+
+# 工作目录 = 部署路径：alembic 按相对路径找 alembic.ini，load_dotenv 从
+# 此处读 .env（systemd Environment 行已设置的变量优先，.env 只补缺）
+WorkingDirectory=/opt/tagplatform
+
+# ---------- 环境变量 ----------
+# Python 子进程不缓冲 stdout/stderr（日志实时进 journald）
+Environment=PYTHONUNBUFFERED=1
+# SQLite 数据库路径（迁移与应用共用；父目录由应用自动创建）
+Environment=TAGPLT_DATABASE_PATH=/opt/tagplatform/data/tagplatform.db
+# 会话令牌 HMAC 密钥：生产必改（默认 dev-secret 泄漏即可伪造任意登录态）
+#Environment=TAGPLT_SESSION_SECRET=CHANGE_ME_STRONG_RANDOM_SECRET
+# 首管理员引导密码（user_account 空表时创建 admin 账号；生产务必改强密码）
+#Environment=TAGPLT_ADMIN_PASSWORD=CHANGE_ME_ADMIN_PASSWORD
+# OpenAI 兼容 LLM 端点（标签生成必需；用 mock 时可留空）——按需取消注释并填入：
+#Environment=OPENAI_BASE_URL=https://your-llm-endpoint.example.com/v1
+#Environment=OPENAI_API_KEY=sk-CHANGE_ME
+
+# 密钥类变量也可改为放 <部署路径>/.env（gitignore 已忽略），避免明文进 unit 文件；
+# 若用 EnvironmentFile=/opt/tagplatform/.env，则上述注释行可全部删除。
+
+# 启动前先迁移：先建表再起 uvicorn（应用启动即查询业务表，空库直接崩溃）
+ExecStartPre=/opt/tagplatform/.venv/bin/python -m alembic upgrade head
+
+ExecStart=/opt/tagplatform/.venv/bin/uvicorn tagplatform.api:create_app --factory --host 127.0.0.1 --port 8000
+
+# 异常退出自动拉起（正常 systemctl stop 不重启）
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

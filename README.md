@@ -63,31 +63,11 @@ npm run dev
 
 ### 生产部署（同源反代）
 
-```bash
-# 1) 构建前端静态产物（输出 frontend/dist/）
-cd frontend && npm run build
-
-# 2) 后端按"快速启动"的先迁移、后启动顺序运行 uvicorn
-```
-
-前端构建产物为纯静态文件（`frontend/dist/`），由 Nginx 等反向代理直接
-托管，与后端**同源**——前端代码只写相对路径，反代把 `/api` 原样转发到
-uvicorn 即可，**无 CORS 需求**（开发期由 Vite 代理承担同一职责）：
-
-```nginx
-server {
-    root /var/www/tagplatform/dist;   # frontend/dist 构建产物
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-    }
-    location / {
-        try_files $uri /index.html;   # SPA history 路由回退
-    }
-}
-```
-
-生产务必设置 `TAGPLT_SESSION_SECRET` 与 `TAGPLT_ADMIN_PASSWORD`（见环境
-变量表）；数据库迁移先于 uvicorn 启动的顺序要求同"快速启动"。
+生产部署采用 **venv + systemd + nginx** 直接部署（无 Docker 依赖）：nginx 托管
+`frontend/dist` 静态产物（SPA）并把 `/api` 反代到本机 uvicorn（同源，无 CORS），
+uvicorn 以 systemd 服务常驻、启动前自动跑迁移。完整步骤（依赖锁定、迁移、
+systemd/nginx 启用、验证、数据备份）见 **`deploy/deploy.md`**（配套 systemd
+unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 
 ## 环境变量
 
