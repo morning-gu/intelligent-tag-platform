@@ -2,11 +2,30 @@
 // 与标题搜索（回车/按钮触发），行点击进入详情页 /assets/{asset_id}。
 // 数据来自 GET /assets（asset_type 精确过滤、q 标题子串匹配），一次性
 // 返回全量（无分页契约），表格用 antd 默认前端分页。
-import { Alert, Card, Select, Space, Table, Tag, Input } from 'antd'
+// 上传入口（阶段 4 任务 5，入口 A 占位）：顶部"上传视频"按钮 → Modal 单文件
+// 选择 → POST /media/upload（multipart FormData）登记资产，成功后刷新列表。
+// 占位语义：仅存文件 + 建资产行，不做识别。列表行形状（AssetSummary）无
+// 识别状态字段（context 仅存在于详情接口），故不做"未识别"假 Tag——
+// 以成功提示与 Modal 内说明承载占位语义（比弱信号推导更诚实）。
+import {
+  Alert,
+  Button,
+  Card,
+  Modal,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Input,
+  Typography,
+  Upload,
+  message,
+} from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
+import { uploadMedia } from '../api/media'
 import { formatTimestamp } from '../api/review'
 
 /** 资产类型中文展示（取值域与内容 JSON 契约的 Literal 一致）。 */
@@ -32,6 +51,11 @@ export default function AssetList() {
   const [searchQ, setSearchQ] = useState('')
   const [inputQ, setInputQ] = useState('')
 
+  // —— 上传占位（入口 A）：Modal 开关 + 已选文件 + 提交中 ——
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+
   const loadAssets = useCallback(async () => {
     setLoading(true)
     try {
@@ -56,6 +80,32 @@ export default function AssetList() {
       cancelled = true
     }
   }, [loadAssets])
+
+  /** 打开上传 Modal：清掉上次残留的已选文件。 */
+  function openUpload() {
+    setUploadFile(null)
+    setUploadOpen(true)
+  }
+
+  /** 提交上传：FormData（file 字段）经 api client POST。成功提示占位语义
+   * （仅登记未识别，指引入口 B）并刷新列表使新资产行出现；失败（422 非
+   * 白名单后缀 / 413 超 2GB 上限）透出后端 detail，保留 Modal 与已选
+   * 文件供直接重试。 */
+  async function handleUploadSubmit() {
+    if (uploadFile === null) return
+    setUploading(true)
+    try {
+      const res = await uploadMedia(uploadFile)
+      message.success(`已登记「${res.title}」，未导入识别内容——请经入口 B 导入识别 JSON 后打标`)
+      setUploadOpen(false)
+      setUploadFile(null)
+      await loadAssets() // 刷新列表使新登记的资产行出现
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      setUploading(false)
+    }
+  }
 
   const columns: TableProps<AssetSummary>['columns'] = [
     { title: '标题', dataIndex: 'title' },
@@ -87,7 +137,14 @@ export default function AssetList() {
   ]
 
   return (
-    <Card title="内容资产">
+    <Card
+      title="内容资产"
+      extra={
+        <Button type="primary" onClick={openUpload}>
+          上传视频
+        </Button>
+      }
+    >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Space wrap>
           <Select
@@ -124,6 +181,40 @@ export default function AssetList() {
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
         />
       </div>
+      <Modal
+        title="上传视频"
+        open={uploadOpen}
+        okText="开始上传"
+        cancelText="取消"
+        okButtonProps={{ disabled: uploadFile === null }}
+        confirmLoading={uploading}
+        onOk={handleUploadSubmit}
+        onCancel={() => setUploadOpen(false)}
+        destroyOnHidden
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr（此时文件
+              也不进内建列表），改由确认按钮经 apiFetch 提交；已选文件以
+              "已选择：文件名" 自绘展示，重复选择即替换。 */}
+          <Upload
+            accept=".mp4,.webm,.mkv"
+            maxCount={1}
+            showUploadList={false}
+            disabled={uploading}
+            beforeUpload={(file) => {
+              setUploadFile(file)
+              return false
+            }}
+          >
+            <Button>选择视频文件</Button>
+          </Upload>
+          {uploadFile !== null && <Typography.Text>已选择：{uploadFile.name}</Typography.Text>}
+          <Typography.Text type="secondary">
+            占位上传：仅保存视频文件并登记资产，不做识别。识别内容请经入口 B 导入识别 JSON
+            后再行打标。
+          </Typography.Text>
+        </div>
+      </Modal>
     </Card>
   )
 }
