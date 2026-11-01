@@ -61,6 +61,34 @@ npm run dev
 - **测试与构建**：`npm test`（Vitest + Testing Library）、`npm run build`
   （tsc 类型检查 + 产物输出 `dist/`）。
 
+### 生产部署（同源反代）
+
+```bash
+# 1) 构建前端静态产物（输出 frontend/dist/）
+cd frontend && npm run build
+
+# 2) 后端按"快速启动"的先迁移、后启动顺序运行 uvicorn
+```
+
+前端构建产物为纯静态文件（`frontend/dist/`），由 Nginx 等反向代理直接
+托管，与后端**同源**——前端代码只写相对路径，反代把 `/api` 原样转发到
+uvicorn 即可，**无 CORS 需求**（开发期由 Vite 代理承担同一职责）：
+
+```nginx
+server {
+    root /var/www/tagplatform/dist;   # frontend/dist 构建产物
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+    }
+    location / {
+        try_files $uri /index.html;   # SPA history 路由回退
+    }
+}
+```
+
+生产务必设置 `TAGPLT_SESSION_SECRET` 与 `TAGPLT_ADMIN_PASSWORD`（见环境
+变量表）；数据库迁移先于 uvicorn 启动的顺序要求同"快速启动"。
+
 ## 环境变量
 
 前缀 `TAGPLT_`（读 `.env` 与进程环境）：
@@ -87,7 +115,7 @@ npm run dev
 .venv/Scripts/python -m pytest
 ```
 
-全量约 252 条测试，默认全走 mock，不联网、不下载模型。
+全量约 262 条测试，默认全走 mock，不联网、不下载模型。
 
 前端测试（Vitest + Testing Library，含组件与 API 契约测试）：
 
@@ -103,7 +131,7 @@ cd frontend && npm test
 
 ```
 src/tagplatform/
-├── db/                     SQLAlchemy 模型（9 张表，结构由 alembic 迁移管理）
+├── db/                     SQLAlchemy 模型（10 张表，结构由 alembic 迁移管理）
 ├── schemas/                影视内容 JSON 契约与解析
 ├── adapters/               内容源适配（内容 JSON 导入）
 ├── governance/             阶段 1：Excel 标签库导入、检测与治理流水线
@@ -114,14 +142,18 @@ src/tagplatform/
 ├── prompts.py              prompt 模板渲染（版本化模板存库）
 ├── tasks/                  生成任务执行器：状态机、线程池、孤儿清理
 ├── results.py              标签结果入库（approved 保留 / pending 覆盖）
-└── api/                    FastAPI 薄层（唯一 import fastapi 的入口）
+├── auth/                   阶段 3：账号表/密码哈希/会话认证（全 API 登录门槛）
+├── review/                 阶段 3：人工审核服务（四动作单条与批量 + 审核记录）
+├── metrics.py              阶段 3：审核推导质量指标（覆盖率/一致率等）
+└── api/                    FastAPI 薄层（唯一 import fastapi 的入口；
+                             routers 阶段 3 新增 auth/review/users/video/metrics）
 ```
 
-**数据表（9 张）**：`media_asset`、`media_context`、`tag_catalog`、
+**数据表（10 张）**：`media_asset`、`media_context`、`tag_catalog`、
 `generation_task`、`asset_tag`、`review_record`、`import_batch`、
-`tag_change_log`、`prompt_template`。
+`tag_change_log`、`prompt_template`、`user_account`。
 
-**两阶段功能一览**：
+**三阶段功能一览**：
 
 - **阶段 1（导入与治理）**：Excel 标签库上传 → 解析/检测 → 语义归一 →
   入库；批次与变更全程留痕（`import_batch` / `tag_change_log`）。
@@ -129,3 +161,7 @@ src/tagplatform/
   库内按类型召回候选做封闭式提取 / 模式 B 开放式生成后归一匹配入库）→
   后台线程池执行（0 = 同步）→ 生成结果与任务终态同事务落库，任务可
   查询、失败可重试。
+- **阶段 3（审核后台）**：登录认证（admin/reviewer 两级角色，除 `/health`
+  外全 API 保护）→ 审核中心对结果行做 approve/reject/modify/merge 单条
+  与批量审核（并发冲突保护、逐条独立不中断）→ 审核记录全程留痕、
+  approved/rejected/merged 进入重跑保护集，闭环经质量指标页复盘。

@@ -84,8 +84,8 @@ class EvidenceOut(BaseModel):
 
 class GenerationResultOut(BaseModel):
     """生成结果摘要行：id 为 asset_tag 行主键（阶段 3 B3 暴露——Task 4
-    审核操作路由与前端行操作的定位键）；tag_name 按 origin 取（catalog
-    取目录名，generated 取候选名）。"""
+    审核操作路由与前端行操作的定位键）；tag_name 展示解析 candidate_*
+    优先、目录名回退（catalog 行经审核 modify 后显示修改值）。"""
 
     id: int
     tag_name: str
@@ -147,11 +147,13 @@ def _catalog_names(session: Session, rows: list[AssetTag]) -> dict[str, str]:
 
 
 def _result_out(row: AssetTag, names: dict[str, str]) -> GenerationResultOut:
-    """asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用，含行主键 id）。"""
-    if row.origin == "catalog":
-        tag_name = names.get(row.tag_id or "", "")
-    else:
-        tag_name = row.candidate_name or ""
+    """asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用，含行主键 id）。
+
+    tag_name 展示解析与审核列表同规：candidate_name 非空优先（审核 modify
+    落在行内的展示字段，改了什么显示什么），否则回退目录名（names 按
+    origin=catalog 行的 tag_id 预取；merged 行 candidate 已清空不受影响）。
+    """
+    tag_name = row.candidate_name or names.get(row.tag_id or "", "")
     return GenerationResultOut(
         id=row.id,
         tag_name=tag_name,

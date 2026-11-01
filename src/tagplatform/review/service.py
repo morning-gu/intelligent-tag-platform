@@ -15,8 +15,13 @@
 - 行不存在 → ValueError("标签行不存在")（API 层 404）；
 - review_status != "pending" → ConflictError("该标签已被处理")
   （API 层 409——并发保护：同一行只有一个审核动作能生效）；
-- 非法 action / modify 无可改字段 / merge 缺 merge_to_tag_id 或目标不在
-  tag_catalog → ValueError（API 层 422）。
+- 落库撞部分唯一索引 → ConflictError("该资产已挂此标签")（API 层 409）：
+  merge 目标标签同资产已挂（ux_asset_tag_catalog）或 modify 改名与同资产
+  已有候选重名（ux_asset_tag_candidate），commit 抛 IntegrityError 时回滚
+  ——行变更与审核记录一并丢弃，行保持 pending；
+- 非法 action / modify 无可改字段 / modify 字符串字段为空或超长 / merge
+  缺 merge_to_tag_id 或目标不在 tag_catalog → ValueError（API 层 422）；
+  modify 各字符串字段 strip 后校验非空且 ≤ 200 字符，strip 值落库。
 
 每次动作写一行 review_record（record_id=`rev_`+uuid4().hex[:8]，
 before_json/after_json 为行关键字段快照，comment 取 payload）。
@@ -34,13 +39,15 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tagplatform.db.models import AssetTag, ReviewRecord, TagCatalog
 
 
 class ConflictError(Exception):
-    """审核冲突：目标行已被处理（review_status 非 pending——重复提交或并发抢先）。"""
+    """审核冲突：目标行已被处理（review_status 非 pending——重复提交或并发
+    抢先），或落库撞部分唯一索引（同资产已挂该目录标签/已有同名候选）。"""
 
 
 # review_record 快照键集（before_json/after_json：行关键字段前后对照）
@@ -58,6 +65,9 @@ _MODIFY_FIELDS = (
 )
 
 _LEGAL_ACTIONS = ("approve", "reject", "modify", "merge")
+
+# modify 字符串字段长度上限（strip 后按字符数计，超长 → ValueError → 422）
+_MODIFY_MAX_LEN = 200
 
 
 def _snapshot(row: AssetTag) -> str:
@@ -101,7 +111,18 @@ def apply_review(session: Session, asset_tag_id: int, action: str,
             if value is None:
                 value = (payload or {}).get(alias)
             if value is not None:
-                new_fields[canonical] = value
+                # 字符串字段逐字段校验（Review Focus 5）：strip 后非空且
+                # 不超上限，strip 值直接落库（顺带消灭纯空白名）
+                if not isinstance(value, str):
+                    raise ValueError(f"修改字段必须为字符串：{canonical}")
+                stripped = value.strip()
+                if not stripped:
+                    raise ValueError("修改字段不能为空")
+                if len(stripped) > _MODIFY_MAX_LEN:
+                    raise ValueError(
+                        f"修改字段超长：{canonical}"
+                        f"（上限 {_MODIFY_MAX_LEN} 字符）")
+                new_fields[canonical] = stripped
         if not new_fields:
             raise ValueError(
                 "modify 动作至少提供一个可修改字段（candidate_name/tag_name、"
@@ -138,5 +159,13 @@ def apply_review(session: Session, asset_tag_id: int, action: str,
         comment=comment,
         created_at=now,
     ))
-    session.commit()  # 审核是用户操作，服务内即时落库
+    try:
+        session.commit()  # 审核是用户操作，服务内即时落库
+    except IntegrityError:
+        # 撞部分唯一索引（ux_asset_tag_catalog / ux_asset_tag_candidate）：
+        # merge 到同资产已挂的目录标签，或 modify 改名与同资产已有候选重名。
+        # 回滚丢弃本次行变更与审核记录（行保持 pending），按冲突语义上抛
+        # 而非裸 500（API 层映射 409）
+        session.rollback()
+        raise ConflictError("该资产已挂此标签")
     return row

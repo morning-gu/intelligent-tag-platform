@@ -10,7 +10,11 @@
 - 前置：行不存在 ValueError("标签行不存在")；非 pending → ConflictError
   （冲突真触发：先置非 pending 再提交，而非依赖种子默认值）；
 - 载荷：非法 action / modify 无可改字段 / merge 缺或坏 merge_to_tag_id →
-  ValueError；
+  ValueError；modify 字符串字段空串/纯空白 → ValueError("修改字段不能为
+  空")、超 200 字符 → ValueError 带字段名、strip 值落库（Review Focus 5）；
+- 落库撞部分唯一索引（终审 Important 2：merge 到同资产已挂的目录标签 /
+  modify 改名与同资产已有候选重名）→ ConflictError("该资产已挂此标签")
+  （原为裸 IntegrityError → API 裸 500），回滚后行不变、审核记录零写入；
 - 记录：record_id 前缀 rev_、before/after 快照（关键字段 + 状态前后差）、
   reviewer_id/comment 落库、服务内 commit（rollback 后数据仍在）。
 """
@@ -155,6 +159,45 @@ def test_modify_unknown_keys_only_raises(session):
                      {"irrelevant": "x", "comment": "c"})
 
 
+def test_modify_blank_string_field_raises(session):
+    """Review Focus 5：modify 字符串字段空串/纯空白 → ValueError
+    "修改字段不能为空"（API 层 422），零副作用。"""
+    row = _seed_row(session)
+    for payload in ({"candidate_name": ""},      # 空串（canonical 键）
+                    {"tag_name": "   "},         # 纯空白（别名键）
+                    {"candidate_type": " \t "},  # 类型字段纯空白
+                    {"description": ""}):        # 描述字段空串
+        with pytest.raises(ValueError, match="修改字段不能为空"):
+            apply_review(session, row.id, "modify", "alice", payload)
+    # 零副作用：行未动、审核记录零写入
+    assert session.get(AssetTag, row.id).candidate_name == "多线叙事"
+    assert session.query(ReviewRecord).count() == 0
+
+
+def test_modify_overlong_string_field_raises(session):
+    """Review Focus 5：modify 字符串字段 strip 后超 200 字符 → ValueError
+    带字段名（API 层 422）；恰好 200 字符可过。"""
+    row = _seed_row(session)
+    with pytest.raises(ValueError, match="candidate_name"):
+        apply_review(session, row.id, "modify", "alice",
+                     {"candidate_name": "长" * 201})
+    assert session.query(ReviewRecord).count() == 0  # 零副作用
+    # 上限边界：恰好 200 字符合法
+    returned = apply_review(session, row.id, "modify", "alice",
+                            {"candidate_name": "名" * 200})
+    assert returned.candidate_name == "名" * 200
+
+
+def test_modify_strips_string_values(session):
+    """Review Focus 5：字符串字段 strip 后落库——前后空白消灭，纯空白名
+    不会再进入库（空名已被前置拦截）。"""
+    row = _seed_row(session)
+    returned = apply_review(session, row.id, "modify", "alice",
+                            {"tag_name": "  紧张感  "})
+    assert returned.candidate_name == "紧张感"
+    assert session.get(AssetTag, row.id).candidate_name == "紧张感"
+
+
 # ---------- merge ----------
 
 
@@ -191,6 +234,36 @@ def test_merge_unknown_target_raises(session):
     with pytest.raises(ValueError):
         apply_review(session, row.id, "merge", "alice",
                      {"merge_to_tag_id": "tag_none"})
+    assert session.query(ReviewRecord).count() == 0
+
+
+def test_merge_onto_mounted_catalog_tag_conflict(session):
+    """终审 Important 2：merge 撞部分唯一索引（ux_asset_tag_catalog）——
+    同资产已挂该目录标签 → ConflictError("该资产已挂此标签")（API 层 409，
+    原为裸 IntegrityError → 500），回滚后行状态不变、审核记录零写入。"""
+    _seed_row(session, origin="catalog", tag_id="tag_1")  # a1 已挂 tag_1
+    row = _seed_row(session)  # generated 候选"多线叙事"
+    with pytest.raises(ConflictError, match="该资产已挂此标签"):
+        apply_review(session, row.id, "merge", "alice",
+                     {"merge_to_tag_id": "tag_1"})
+    # 回滚后行保持 pending / 未并入目录 / 候选字段原样
+    fresh = session.get(AssetTag, row.id)
+    assert fresh.review_status == "pending" and fresh.tag_id is None
+    assert fresh.candidate_name == "多线叙事"
+    assert session.query(ReviewRecord).count() == 0
+
+
+def test_modify_onto_existing_candidate_name_conflict(session):
+    """终审 Important 2（同类）：modify 撞部分唯一索引
+    （ux_asset_tag_candidate）——改名为同资产已有候选 → ConflictError
+    （API 层 409），回滚后行字段不变、审核记录零写入。"""
+    _seed_row(session, candidate_name="已有候选")
+    row = _seed_row(session, candidate_name="待改行")
+    with pytest.raises(ConflictError, match="该资产已挂此标签"):
+        apply_review(session, row.id, "modify", "alice",
+                     {"candidate_name": "已有候选"})
+    fresh = session.get(AssetTag, row.id)
+    assert fresh.candidate_name == "待改行" and fresh.review_status == "pending"
     assert session.query(ReviewRecord).count() == 0
 
 

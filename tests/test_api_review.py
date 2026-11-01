@@ -4,10 +4,13 @@ Task 4 覆盖契约（错误映射 + 批量逐条独立）：
 - POST /api/v1/asset-tags/{id}/review：approve 200 回行摘要（与
   AssetTagOut 同形）、重复审核 409（Review Focus 1 并发保护，detail
   "该标签已被处理"）、未知行 404、非法 action 422、modify 空值 422、
-  merge 缺/坏 merge_to 422、modify 成功回 pending；
+  modify 字符串字段空串/纯空白/超长 422（Review Focus 5）+ strip 落库、
+  merge 缺/坏 merge_to 422、modify 成功回 pending、merge/modify 落库撞
+  部分唯一索引 409（终审 Important 2，原裸 500）；
 - POST /api/v1/asset-tags/batch-review：逐条独立不中断（Review Focus
-  4）——混合未知 id / 部分冲突均回 200 且 per-item ok=false 携带 detail，
-  action 级 422 整请求拒绝且零副作用（DB 仍全 pending）、空 ids 422；
+  4）——混合未知 id / 部分冲突 / 撞唯一索引均回 200 且 per-item ok=false
+  携带 detail，action 级 422 整请求拒绝且零副作用（DB 仍全 pending）、
+  空 ids 422；
 - reviewer 取会话用户名（client fixture 已 admin 登录 → reviewer_id
   "admin"）；未登录 401（create_app protected_deps 统一挂载验证）。
 
@@ -189,6 +192,86 @@ def test_review_merge_moves_to_catalog_tag(client):
     with client.app.state.session_factory() as s:
         rec = s.query(ReviewRecord).filter_by(result_id=row_id).one()
         assert rec.action == "merge"
+
+
+# ---------- 落库撞部分唯一索引（终审 Important 2：原裸 500） ----------
+
+
+def test_review_merge_onto_mounted_tag_409(client):
+    """merge 撞 ux_asset_tag_catalog：同资产已有该目录标签挂载 → 409
+    detail "该资产已挂此标签"，行状态不变、该行审核记录零写入。"""
+    ids = _seed_rows(client, count=2)
+    # 第一条 merge 到 tag_1 成功——(a1, tag_1) 目录挂载位被占
+    first = client.post(f"/api/v1/asset-tags/{ids[0]}/review",
+                        json={"action": "merge",
+                              "payload": {"merge_to_tag_id": "tag_1"}})
+    assert first.status_code == 200
+    # 第二条 merge 到同一目录标签 → commit 撞索引
+    second = client.post(f"/api/v1/asset-tags/{ids[1]}/review",
+                         json={"action": "merge",
+                               "payload": {"merge_to_tag_id": "tag_1"}})
+    assert second.status_code == 409
+    assert second.json()["detail"] == "该资产已挂此标签"
+    with client.app.state.session_factory() as s:
+        row = s.get(AssetTag, ids[1])
+        assert row.review_status == "pending" and row.tag_id is None
+        assert row.candidate_name == "候选1"
+        assert s.query(ReviewRecord).filter_by(result_id=ids[1]).count() == 0
+
+
+def test_batch_review_index_conflict_per_item(client):
+    """批量含撞索引条目：整请求 200，先 merge 的条目占住 (asset, tag) 唯一位
+    成功，后撞的条目 ok=false detail "该资产已挂此标签"（per-item 独立
+    不中断）。"""
+    ids = _seed_rows(client, count=2)
+    resp = client.post("/api/v1/asset-tags/batch-review", json={
+        "ids": ids, "action": "merge",
+        "payload": {"merge_to_tag_id": "tag_1"}})
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert results[0] == {"id": ids[0], "ok": True, "detail": None}
+    assert results[1]["ok"] is False
+    assert results[1]["detail"] == "该资产已挂此标签"
+    with client.app.state.session_factory() as s:
+        statuses = {r.id: r.review_status for r in s.query(AssetTag).all()}
+        assert statuses[ids[0]] == "merged"
+        assert statuses[ids[1]] == "pending"  # 冲突条目已回滚，行未动
+        assert s.query(ReviewRecord).count() == 1  # 仅成功条目写记录
+
+
+# ---------- modify 字符串字段校验（Review Focus 5，终审 Important 3） ----------
+
+
+def test_review_modify_string_field_validation_422(client):
+    """modify 字符串字段空串/纯空白/超长 → 422，零副作用（终审复现：
+    原 200 产出空名行/无上限行）。"""
+    (row_id,) = _seed_rows(client)
+    cases = [
+        {"tag_name": ""},             # 空串
+        {"candidate_name": "   "},    # 纯空白
+        {"tag_name": "长" * 201},     # 超长（上限 200）
+    ]
+    for payload in cases:
+        resp = client.post(f"/api/v1/asset-tags/{row_id}/review",
+                           json={"action": "modify", "payload": payload})
+        assert resp.status_code == 422, f"{payload} 应 422"
+    with client.app.state.session_factory() as s:
+        row = s.get(AssetTag, row_id)
+        assert row.review_status == "pending"
+        assert row.candidate_name == "候选0"
+        assert s.query(ReviewRecord).count() == 0
+
+
+def test_review_modify_strips_value(client):
+    """modify 字符串字段 strip 后落库：" 紧张感 " → "紧张感"（纯空白名
+    由空值校验拦截，不会再产出）。"""
+    (row_id,) = _seed_rows(client)
+    resp = client.post(f"/api/v1/asset-tags/{row_id}/review", json={
+        "action": "modify", "payload": {"tag_name": "  紧张感  "}})
+    assert resp.status_code == 200
+    assert resp.json()["candidate_name"] == "紧张感"
+    with client.app.state.session_factory() as s:
+        assert s.get(AssetTag, row_id).candidate_name == "紧张感"
 
 
 # ---------- 批量审核 ----------
@@ -497,6 +580,55 @@ def test_review_items_merged_row_uses_catalog_name(client):
     assert item["id"] == row_id
     assert item["tag_name"] == "悬疑" and item["tag_type"] == "genre"
     assert item["origin"] == "generated"
+
+
+def test_modify_display_name_visible_in_list_and_detail(client):
+    """终审 Important 1：modify 只写 candidate_* 而列表/任务详情/资产标签
+    对带 tag_id 行一律显示目录名——审核员改 catalog 行 tag_name 后表格
+    不变。修复后展示解析 candidate_* 优先：modify 前三处显示目录名
+    "悬疑"，modify 后三处均显示修改后的名字。"""
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(MediaAsset(asset_id="a_mod", asset_type="movie", title="改名影片",
+                         created_at=_NOW))
+        s.add(TagCatalog(tag_id="tag_mod", tag_name="悬疑", tag_type="genre",
+                         description="以悬念和谜题为核心"))
+        s.add(GenerationTask(task_id="gen_mod", mode="closed",
+                             status="succeeded", created_at=_NOW))
+        s.flush()
+        row = AssetTag(asset_id="a_mod", tag_id="tag_mod", origin="catalog",
+                       confidence=0.8, evidence_json="[]",
+                       review_status="pending", task_id="gen_mod",
+                       created_at=_NOW, updated_at=_NOW)
+        s.add(row)
+        s.flush()
+        row_id = row.id
+        s.commit()
+
+    # 改名前：审核列表 / 任务详情 / 资产标签三处均显示目录名"悬疑"
+    items = client.get("/api/v1/review/items").json()["items"]
+    assert items[0]["tag_name"] == "悬疑" and items[0]["tag_type"] == "genre"
+    detail = client.get("/api/v1/generation/tasks/gen_mod").json()
+    assert detail["results"][0]["tag_name"] == "悬疑"
+    tags = client.get("/api/v1/assets/a_mod/tags").json()
+    assert tags[0]["tag_name"] == "悬疑"
+
+    # modify（catalog 行按别名落 candidate_*，共享目录字典不动）
+    modified = client.post(f"/api/v1/asset-tags/{row_id}/review", json={
+        "action": "modify",
+        "payload": {"tag_name": "悬疑改", "tag_type": "thriller"}})
+    assert modified.status_code == 200
+    assert modified.json()["tag_name"] == "悬疑改"
+
+    # 改名后：三处均显示修改后的名字/类型（目录字典仍是"悬疑"）
+    items = client.get("/api/v1/review/items").json()["items"]
+    assert items[0]["tag_name"] == "悬疑改" and items[0]["tag_type"] == "thriller"
+    detail = client.get("/api/v1/generation/tasks/gen_mod").json()
+    assert detail["results"][0]["tag_name"] == "悬疑改"
+    tags = client.get("/api/v1/assets/a_mod/tags").json()
+    assert tags[0]["tag_name"] == "悬疑改"
+    with factory() as s:
+        assert s.get(TagCatalog, "tag_mod").tag_name == "悬疑"  # 目录未被触碰
 
 
 def test_bad_evidence_degrades_to_empty_list(client):

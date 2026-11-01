@@ -3,24 +3,26 @@
 薄路由层：业务规则全部在 tagplatform.review 服务（四动作语义、前置校验、
 记录写入、服务内提交），router 只做协议转换与错误映射：
 - 行不存在 → 404（router 先行查库；服务层 ValueError 为直接调用方兜底）；
-- ConflictError（行已被处理，重复提交/并发抢先）→ 409；
-- ValueError（merge 载荷缺/坏 merge_to、modify 空值）→ 422；
+- ConflictError（行已被处理，重复提交/并发抢先；或 merge/modify 落库撞
+  部分唯一索引——同资产已挂该目录标签/已有同名候选）→ 409；
+- ValueError（merge 载荷缺/坏 merge_to、modify 空值/空串/超长）→ 422；
 - 非法 action 由请求模型 Literal 声明校验直接 422（action 级失败整请求
   拒绝，单条与批量一致）。
-批量端点逐条独立执行（服务层逐条提交），单条失败（未知行/冲突/载荷非法）
-不中断其余条目，失败原因进 per-item detail（Review Focus 4）。reviewer
-取会话用户名；登录门槛由 create_app include 时的 protected_deps 统一挂载。
-响应复用 generation.py 的行输出形状（AssetTagOut 及其组装辅助——同包内
-复用，避免形状漂移）。
+批量端点逐条独立执行（服务层逐条提交），单条失败（未知行/冲突/载荷非法/
+索引冲突）不中断其余条目，失败原因进 per-item detail（Review Focus 4）。
+reviewer 取会话用户名；登录门槛由 create_app include 时的 protected_deps
+统一挂载。响应复用 generation.py 的行输出形状（AssetTagOut 及其组装
+辅助——同包内复用，避免形状漂移）。
 
 审核列表（Task 5，审核中心页面数据源）：
 - GET /review/items：join media_asset（asset_title）/tag_catalog（目录名
   与类型）/generation_task（mode），七筛选参数（status/confidence_min/
   confidence_max/tag_type/mode/asset_id/origin），默认 confidence 升序
   （低分先审），page/page_size 分页，响应 {items, total, page}；行
-  tag_name/tag_type origin 感知并含 merged 回退——行带 tag_id（catalog
-  行或已并入目录的 merged 行）取 tag_catalog 字典，generated 行无 tag_id
-  取 candidate_*（同任务详情 results 的 origin 感知形状）；
+  tag_name/tag_type 展示解析统一为 candidate_* 优先、目录回退——行带
+  非空 candidate_name（审核 modify 落在行内的展示字段）取候选名/类型，
+  否则带 tag_id（catalog 行或已并入目录的 merged 行）取 tag_catalog 字典
+  （merged 行 candidate_* 已清空自然回退目录名）；
 - GET /review/filters：前端筛选下拉（tag_types 库内去重 + statuses/modes
   契约固定枚举）。
 """
@@ -30,6 +32,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import nullslast
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
@@ -91,8 +94,9 @@ def review_asset_tag(
 ) -> AssetTagOut:
     """单条审核：四动作即时落库，返回更新后的行摘要（与 AssetTagOut 同形）。
 
-    404 未知行；409 行已被处理（Review Focus 1 并发保护）；422 载荷非法
-    （merge 缺/坏 merge_to、modify 空值）或非法 action（Literal 声明校验）。
+    404 未知行；409 行已被处理（Review Focus 1 并发保护）或 merge/modify
+    落库撞部分唯一索引（"该资产已挂此标签"）；422 载荷非法（merge 缺/坏
+    merge_to、modify 空值/空串/超长）或非法 action（Literal 声明校验）。
     """
     if session.get(AssetTag, asset_tag_id) is None:
         raise HTTPException(status_code=404,
@@ -120,8 +124,8 @@ def batch_review_asset_tags(
     session: Session = Depends(get_session),
     user: UserAccount = Depends(get_current_user),
 ) -> BatchReviewResponse:
-    """批量审核：逐条独立执行（服务层逐条提交），未知行/冲突/载荷失败
-    不中断其余条目——失败原因进 per-item detail（Review Focus 4）；
+    """批量审核：逐条独立执行（服务层逐条提交），未知行/冲突/载荷失败/
+    索引冲突不中断其余条目——失败原因进 per-item detail（Review Focus 4）；
     action 级非法由请求模型 422 整请求拒绝（零部分执行）。"""
     results: list[BatchReviewItemOut] = []
     for asset_tag_id in body.ids:
@@ -129,10 +133,11 @@ def batch_review_asset_tags(
             apply_review(session, asset_tag_id, body.action,
                          user.username, body.payload)
             results.append(BatchReviewItemOut(id=asset_tag_id, ok=True))
-        except (ConflictError, ValueError) as exc:
-            # 两类异常均在服务层任何行变更之前抛出（载荷校验全部前置），
-            # 正常路径本无未提交变更；rollback 为防御性冗余，保留以兜底
-            # 服务层未来改动引入中途变更的情形
+        except (ConflictError, ValueError, IntegrityError) as exc:
+            # 服务层已把 IntegrityError 转译为 ConflictError（含回滚），
+            # 此处再捕 IntegrityError 为防御性冗余——兜底服务层未来改动
+            # 直接上抛索引异常的情形，保证批量 per-item 失败不升级 500；
+            # rollback 撤销本条可能残留的未提交变更，后续条目继续
             session.rollback()
             results.append(BatchReviewItemOut(id=asset_tag_id, ok=False,
                                               detail=str(exc)))
@@ -149,9 +154,10 @@ _GENERATION_MODES = ["closed", "open"]
 class ReviewItemOut(BaseModel):
     """审核列表单行。
 
-    tag_name/tag_type origin 感知并含 merged 回退：行带 tag_id（catalog
-    行或已并入目录的 merged 行）→ tag_catalog 字典名/类型；generated 行
-    无 tag_id → 候选名/类型（同任务详情 results 的 origin 感知形状）。
+    tag_name/tag_type 展示解析 candidate_* 优先、目录回退：行带非空
+    candidate_name（审核 modify 落在行内的展示字段，改了什么显示什么）
+    → 候选名/类型；否则带 tag_id（catalog 行或已并入目录的 merged 行）
+    → tag_catalog 字典名/类型（merged 行 candidate_* 已清空自然回退）。
     """
 
     id: int
@@ -257,12 +263,13 @@ def list_review_items(
             id=row.id,
             asset_id=row.asset_id,
             asset_title=asset_title,
-            tag_name=(names.get(row.tag_id, "") if row.tag_id is not None
-                      else (row.candidate_name or "")),
+            # 展示解析 candidate_* 优先、目录回退：审核 modify 落在行内的
+            # 展示字段优先显示（改了什么显示什么），merged 行 candidate
+            # 已清空自然回退目录名/类型
+            tag_name=row.candidate_name or names.get(row.tag_id, ""),
             origin=row.origin,
             mode=task_mode,
-            tag_type=(catalog_tag_type if row.tag_id is not None
-                      else row.candidate_type),
+            tag_type=row.candidate_type or catalog_tag_type,
             confidence=row.confidence,
             relevance=row.relevance_score,
             review_status=row.review_status,
