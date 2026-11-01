@@ -157,7 +157,7 @@ def test_governance_batch_embedding_calls(session):
     calls = []
     class CountingEmbedder:
         name, dim = "counting", 8
-        def embed(self, texts):
+        def embed(self, texts, *, role):
             calls.append(len(texts)); return np.ones((len(texts), 8), np.float32)
     run_governance([TagRow(None, f"标签{i}", "genre", f"描述{i}", None, [], None, None)
                     for i in range(5)], session, CountingEmbedder())

@@ -150,8 +150,10 @@ def run_generation_task(task_id: str, session: Session, llm,
         #    组装同源的摘要文本）
         persist_tags(session, asset_id, task.task_id, tags, run_id)
         if task.mode == "closed":
+            # role=passage：内容侧文档向量（与被检索的目录语料相对）
             context.embedding = encode_vector(
-                embedder.embed([content.content.summary])[0])
+                embedder.embed([content.content.summary],
+                               role="passage")[0])
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致

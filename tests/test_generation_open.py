@@ -49,7 +49,7 @@ _SEED_NAMES = {s[0] for s in _OPEN_SEEDS}
 def _seed_open_catalog(session: Session) -> None:
     """播种一枚与 Mock 模式 B 首候选同文本的目录标签（余弦构造恰为 1.0）。"""
     name, tag_type, desc = _OPEN_SEEDS[0]
-    vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"])[0]
+    vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"], role="passage")[0]
     session.add(TagCatalog(
         tag_id="tag_open_1", tag_name=name, tag_type=tag_type,
         description=desc, status="active", embedding=encode_vector(vec),

@@ -176,8 +176,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     # ---------- 批量编码：全部待检行一次 embed（Task 4 终审建议） ----------
     # 判定阶段的语义检查与第二遍插入共用同一批向量（_ValidRow.vec 缓存），
     # embed 调用从逐行 N 次降为 1 次；空批不发起调用。向量与行按下标对齐。
+    # role=passage：入库向量成为被检索语料（与召回/归一的 query 侧相对）。
     texts = [f"{r.tag_name}。{r.description}" for r in rows]
-    batch_vecs = embedder.embed(texts) if texts else []
+    batch_vecs = embedder.embed(texts, role="passage") if texts else []
 
     # ---------- 第一遍：逐行判定，判定即停，累计有效行集 ----------
     issues: list[Issue] = []

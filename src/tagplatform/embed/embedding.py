@@ -1,15 +1,21 @@
 """嵌入层：确定性 mock 与本地 sentence-transformers 两实现。
 
-统一契约（`.name` / `.dim` / `.embed(texts) -> np.ndarray (n, d)`，输出
-L2 归一化 float32）：
+统一契约（`.name` / `.dim` / `.embed(texts, *, role) -> np.ndarray (n, d)`，
+输出 L2 归一化 float32）：
+- role 表达 e5 非对称检索的两侧（2026-11-02 前缀修复）：`"query"`（检索方，
+  内容查询文本 / 开放候选）与 `"passage"`（被检索语料方：目录标签向量与
+  内容侧文档向量）。非法取值立即 ValueError；
 - MockEmbedder：sha256 伪向量（零网络、零重依赖），测试与冒烟路径。规范化
   （casefold + 仅留字母数字与空格 + 折叠空白）后同形文本同向量，不同文本
-  近似正交——下游指标在 mock 路径下可区分不同标签。
+  近似正交——下游指标在 mock 路径下可区分不同标签。**对 role 不敏感**：
+  前缀行为由 LocalEmbedder 承担，语义逻辑测试零波及；
 - LocalEmbedder：sentence-transformers 惰性导入（mock/测试路径不付首次
-  import 开销，也不触发模型下载），encode 后 L2 归一化输出 float32。
+  import 开销，也不触发模型下载），编码前拼 e5 官方前缀 `"{role}: {text}"`，
+  encode 后 L2 归一化输出 float32。
 
-实现照搬 MovieTagGen `align/embedding.py` 的 Mock/Local 两件：阶段 1 不做
-逐文本磁盘缓存，也无 API 通道，故去掉 embed_texts 缓存层与 ApiEmbedder。
+实现源自 MovieTagGen `align/embedding.py` 的 Mock/Local 两件（role 契约为
+本平台新增——MovieTagGen 同样缺失 e5 前缀）；阶段 1 不做逐文本磁盘缓存，
+也无 API 通道，故去掉 embed_texts 缓存层与 ApiEmbedder。
 """
 from __future__ import annotations
 
@@ -20,9 +26,18 @@ import numpy as np
 
 _MOCK_DIM = 64
 
+# e5 非对称检索的两侧 role（查询方 / 语料方）
+_ROLES = ("query", "passage")
+
+
+def _validate_role(role: str) -> None:
+    """role 只允许 query|passage：拼错立即拒绝，防调用点静默落错空间。"""
+    if role not in _ROLES:
+        raise ValueError(f"未知 role: {role!r}（合法取值 {'|'.join(_ROLES)}）")
+
 
 class Embedder(Protocol):
-    """嵌入器契约：批量文本 → (n, d) float32 L2 归一化矩阵。
+    """嵌入器契约：批量文本 + role → (n, d) float32 L2 归一化矩阵。
 
     dim 在真实模型首次编码前未知（None），MockEmbedder 恒为 64。
     """
@@ -30,7 +45,7 @@ class Embedder(Protocol):
     name: str
     dim: int | None
 
-    def embed(self, texts: list[str]) -> np.ndarray: ...
+    def embed(self, texts: list[str], *, role: str) -> np.ndarray: ...
 
 
 def _l2_normalize(mat: np.ndarray) -> np.ndarray:
@@ -63,12 +78,16 @@ def _mock_unit_vec(canonical: str) -> np.ndarray:
 
 
 class MockEmbedder:
-    """确定性伪嵌入：哈希即向量，测试与 mock 配置专用。"""
+    """确定性伪嵌入：哈希即向量，测试与 mock 配置专用。
+
+    对 role 不敏感（测试替身契约：同文本两 role 同向量），仅做合法性校验。
+    """
 
     name = "mock"
     dim = _MOCK_DIM
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+    def embed(self, texts: list[str], *, role: str) -> np.ndarray:
+        _validate_role(role)
         if not texts:
             return np.zeros((0, _MOCK_DIM), dtype=np.float32)
         return np.stack([_mock_unit_vec(_canonical(t)) for t in texts])
@@ -93,12 +112,16 @@ class LocalEmbedder:
             self._model = SentenceTransformer(self.model_name, device=self.device)
         return self._model
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+    def embed(self, texts: list[str], *, role: str) -> np.ndarray:
+        # 校验先于模型加载：非法 role 绝不触发 sentence_transformers 导入
+        _validate_role(role)
         if not texts:
             # dim 未知时返回 (0, 0)：绝不为了空输入加载/下载模型
             return np.zeros((0, self.dim or 0), dtype=np.float32)
         model = self._load()
-        vecs = model.encode(list(texts), convert_to_numpy=True,
+        # e5 官方前缀格式（冒号后带空格）：query 检索方 / passage 语料方
+        prefixed = [f"{role}: {t}" for t in texts]
+        vecs = model.encode(prefixed, convert_to_numpy=True,
                             normalize_embeddings=True, show_progress_bar=False)
         mat = np.asarray(vecs, dtype=np.float32)
         # 双保险：normalize_embeddings 已归一化，再归一一次防后端差异

@@ -110,13 +110,13 @@ def _seed_catalog(session: Session, per_type: int = 15) -> None:
     """
     for i in range(per_type):
         name, desc = f"类型标签{i}", f"类型描述文本{i}"
-        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"])[0]
+        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"], role="passage")[0]
         session.add(TagCatalog(
             tag_id=f"tag_g_{i:02d}", tag_name=name, tag_type="genre",
             description=desc, status="active", embedding=encode_vector(vec),
         ))
         name, desc = f"情绪标签{i}", f"情绪描述文本{i}"
-        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"])[0]
+        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"], role="passage")[0]
         session.add(TagCatalog(
             tag_id=f"tag_m_{i:02d}", tag_name=name, tag_type="mood",
             description=desc, status="active", embedding=encode_vector(vec),

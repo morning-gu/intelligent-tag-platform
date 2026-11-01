@@ -51,7 +51,7 @@ _TAGS = [
 def _seed_catalog(session: Session, n: int = 6) -> None:
     """播种 n 枚目录标签：embedding 由 MockEmbedder 对 "名称。描述" 现算。"""
     for tag_id, name, tag_type, desc in _TAGS[:n]:
-        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"])[0]
+        vec = MOCK_EMBEDDER.embed([f"{name}。{desc}"], role="passage")[0]
         session.add(TagCatalog(
             tag_id=tag_id, tag_name=name, tag_type=tag_type,
             description=desc, status="active", embedding=encode_vector(vec),

@@ -34,7 +34,7 @@ def recall_by_type(session: Session, queries: list[str], embedder,
     - queries 一次批量嵌入（embedder 契约返回 (n, d)，逐行对应 queries）；
     - 无命中返回 []。
     """
-    query_vecs = embedder.embed(queries)
+    query_vecs = embedder.embed(queries, role="query")
 
     # 全量有效行按 tag_type 分组（deprecate 与无向量行不参与召回）
     groups: dict[str, list[TagCatalog]] = {}

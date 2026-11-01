@@ -46,9 +46,11 @@ class OpenTagProducer:
         if not resp.ok:
             raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
         items = parse_open_output(resp.content)
-        # 2. 全部候选一次批量嵌入（embedder 契约：返回逐行对应的 (n, d) 矩阵）
+        # 2. 全部候选一次批量嵌入（embedder 契约：返回逐行对应的 (n, d) 矩阵）；
+        #    role=query：候选是去目录检索的一方，query↔passage 为 e5 训练方向
         vecs = embedder.embed(
-            [f"{it['tag_name']}。{it['description']}" for it in items])
+            [f"{it['tag_name']}。{it['description']}" for it in items],
+            role="query")
         # 3. 有效目录行一次取全（排除 deprecate 与无向量行，与召回口径一致）
         candidates = [
             (row.tag_id, decode_vector(row.embedding))
