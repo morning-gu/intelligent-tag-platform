@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # 生产必改（泄漏即可伪造任意用户登录态，README 环境变量表警告）
     session_secret: str = "dev-secret"
 
+    # ---------- 阶段 4：运营收尾（上传占位） ----------
+
+    # 上传视频落盘根目录（TAGPLT_MEDIA_ROOT 可覆盖）；上传时按需创建目录
+    media_root: str = "data/media/"
+
 
 @lru_cache
 def get_settings() -> Settings:

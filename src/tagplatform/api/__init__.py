@@ -74,6 +74,7 @@ from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
     content,
     generation,
     health,
+    media,
     metrics,
     prompts,
     review,
@@ -141,6 +142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tags.router, dependencies=protected_deps)
     app.include_router(batches.router, dependencies=protected_deps)
     app.include_router(content.router, dependencies=protected_deps)
+    app.include_router(media.router, dependencies=protected_deps)
     app.include_router(generation.router, dependencies=protected_deps)
     app.include_router(prompts.router, dependencies=protected_deps)
     app.include_router(users.router, dependencies=protected_deps)
