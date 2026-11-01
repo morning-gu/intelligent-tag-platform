@@ -3,7 +3,8 @@
 // （提交触发而非输入即触发）、行点击进入详情路由。
 // 上传占位（阶段 4 任务 5，入口 A）：覆盖上传成功（POST FormData file 字段
 // + 成功提示注明占位语义 + 列表刷新出现新行 + Modal 关闭）、未选文件禁用
-// 确认、422/413 失败透出后端 detail 且不刷新列表。
+// 确认、422/413 失败透出后端 detail 且不刷新列表；nginx 环境 413 响应为
+// HTML（回落文案"请求失败（HTTP 413）"）时特判为 2GB 上限提示。
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -281,5 +282,20 @@ describe('上传视频（入口 A 占位）', () => {
 
     expect(await screen.findByText('文件大小超出上传上限')).toBeInTheDocument()
     expect(assetsCallCount()).toBe(1)
+  })
+
+  it('上传失败（413 且响应为 HTML，nginx 环境）：回落文案特判为 2GB 上限提示，列表不刷新', async () => {
+    // 真实 nginx 413 返回 HTML：readErrorDetail 拿不到 detail，回落
+    // "请求失败（HTTP 413）"——组件按 413 字样换成可行动文案
+    mockUploadApis({ uploadError: new ApiError(413, '请求失败（HTTP 413）') })
+    renderAssetList()
+    await screen.findByText('星际穿越')
+
+    await openUploadAndSelectFile()
+    fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+
+    expect(await screen.findByText('文件超过 2GB 上传上限')).toBeInTheDocument()
+    expect(assetsCallCount()).toBe(1)
+    expect(screen.getByText('选择视频文件')).toBeInTheDocument() // Modal 保留可重试
   })
 })

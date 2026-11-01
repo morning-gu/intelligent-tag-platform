@@ -7,6 +7,7 @@ Task 8 执行器）是读取函数的消费方。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
+import string
 from datetime import datetime, timezone
 
 from sqlalchemy import func
@@ -21,18 +22,39 @@ _REQUIRED_PLACEHOLDERS = {
     "open": ("{content}",),
 }
 
+# 占位符白名单：render_prompt 只以 content/candidates 两个关键字实参调用，
+# 之外的任何字段（如管理员贴入含 {"tag_id": ...} 的 JSON 输出示例、空的
+# {}）在渲染步抛裸 KeyError/IndexError——必须在落库前拒绝。字面花括号
+# 用 {{ }} 双写转义（parse 对转义段返回 field_name=None，不受白名单约束）。
+_ALLOWED_FIELDS = frozenset({"content", "candidates"})
+
 
 def _validate_template_text(mode: str, template_text: str) -> str:
     """校验模板正文并返回 strip 后的正文；不合法抛 ValueError（路由层映射 422）。
 
-    规则：strip 后非空，且包含该 mode 必需的占位符；mode 取值
-    closed|open 之外直接拒绝（表无 CHECK 约束，合法性由本服务层保证）。
+    规则：strip 后非空；format 语法合法（花括号配对，parse 失败转人话）；
+    占位符白名单——字段只允许 content|candidates（防"带 JSON 示例的正文
+    落库激活、渲染步才炸"的误操作）；且包含该 mode 必需的占位符。mode
+    取值 closed|open 之外直接拒绝（表无 CHECK 约束，合法性由本服务层保证）。
     """
     if mode not in _REQUIRED_PLACEHOLDERS:
         raise ValueError(f"未知 mode：{mode}")
     text = template_text.strip()
     if not text:
         raise ValueError("template_text 不能为空（strip 后）")
+    try:
+        fields = [field for _, field, _, _ in string.Formatter().parse(text)]
+    except ValueError as exc:
+        # 花括号不配对等语法错误：落库后每个生成任务渲染步必炸，提前拦截
+        raise ValueError(
+            f"模板 format 语法错误：{exc}——花括号必须配对，字面花括号请双写转义"
+        ) from None
+    for field in fields:
+        if field is not None and field not in _ALLOWED_FIELDS:
+            raise ValueError(
+                f"未知占位符 {{{field}}}——只允许 {{content}} 与 {{candidates}}，"
+                "字面花括号（JSON 示例等）请双写 {{ }} 转义"
+            )
     for placeholder in _REQUIRED_PLACEHOLDERS[mode]:
         if placeholder not in text:
             raise ValueError(f"模板缺少必需占位符 {placeholder}（mode={mode}）")

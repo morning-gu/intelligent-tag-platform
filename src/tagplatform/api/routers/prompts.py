@@ -50,7 +50,7 @@ class PromptActivateOut(BaseModel):
 
 class PromptCreateRequest(BaseModel):
     """新建版本请求：mode 取值 closed|open 之外 422；正文合法性
-    （strip 非空 + 必需占位符）由服务层校验（ValueError → 422）。"""
+    （strip 非空 + 占位符白名单 + 必需占位符）由服务层校验（ValueError → 422）。"""
 
     mode: Literal["closed", "open"]
     template_text: str
@@ -89,7 +89,7 @@ def create_prompt_version(
         row = prompt_service.create_prompt_version(
             session, payload.mode, payload.template_text)
     except ValueError as exc:
-        # 服务层正文校验失败（空文本/缺占位符/未知 mode）→ 422
+        # 服务层正文校验失败（空文本/format 语法错/未知占位符/缺占位符/未知 mode）→ 422
         raise HTTPException(status_code=422, detail=str(exc))
     return PromptOut(id=row.id, mode=row.mode, version=row.version,
                      template_text=row.template_text, is_active=row.is_active,

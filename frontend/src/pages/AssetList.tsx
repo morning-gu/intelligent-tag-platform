@@ -88,9 +88,11 @@ export default function AssetList() {
   }
 
   /** 提交上传：FormData（file 字段）经 api client POST。成功提示占位语义
-   * （仅登记未识别，指引入口 B）并刷新列表使新资产行出现；失败（422 非
-   * 白名单后缀 / 413 超 2GB 上限）透出后端 detail，保留 Modal 与已选
-   * 文件供直接重试。 */
+   * （仅登记未识别，指引入口 B）并刷新列表使新资产行出现；失败透出后端
+   * detail（422 非白名单后缀 / 413 超 2GB），保留 Modal 与已选文件供直接
+   * 重试。nginx 真实环境的 413 返回 HTML（apiFetch 拿不到 detail，回落
+   * "请求失败（HTTP 413）"），按 413 字样特判为 2GB 上限提示；后端 JSON
+   * 413 的 detail 不含 413 字样，原样透出。 */
   async function handleUploadSubmit() {
     if (uploadFile === null) return
     setUploading(true)
@@ -101,7 +103,8 @@ export default function AssetList() {
       setUploadFile(null)
       await loadAssets() // 刷新列表使新登记的资产行出现
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '上传失败')
+      const msg = err instanceof Error ? err.message : '上传失败'
+      message.error(msg.includes('413') ? '文件超过 2GB 上传上限' : msg)
     } finally {
       setUploading(false)
     }

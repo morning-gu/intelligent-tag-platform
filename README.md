@@ -46,7 +46,7 @@ curl http://127.0.0.1:8000/health        # {"status":"ok"}
 前端为 React + AntD SPA（`frontend/`），开发时与后端**双进程并行**：
 
 ```bash
-# 1) 安装依赖（Node >= 20）
+# 1) 安装依赖（Node >= 20.19）
 cd frontend && npm install
 
 # 2) 启动 Vite 开发服务器（默认 http://localhost:5173）
@@ -86,6 +86,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_SEMANTIC_SIMILAR_THRESHOLD` | `0.90` | 语义相似阈值，余弦相似度 >= 该值判为疑似同义 |
 | `TAGPLT_RECALL_TOP_K_PER_TYPE` | `50` | 模式 A 每 tag_type 召回候选上限 |
 | `TAGPLT_OPEN_MATCH_THRESHOLD` | `0.85` | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog |
+| `TAGPLT_MEDIA_ROOT` | `data/media/` | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录） |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。
 
@@ -95,7 +96,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 .venv/Scripts/python -m pytest
 ```
 
-全量约 262 条测试，默认全走 mock，不联网、不下载模型。
+全量约 285 条测试，默认全走 mock，不联网、不下载模型。
 
 前端测试（Vitest + Testing Library，含组件与 API 契约测试）：
 

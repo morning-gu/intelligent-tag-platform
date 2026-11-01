@@ -3,7 +3,7 @@
 阶段 4 Task 2：改提示词零代码变更的最后一环——
 - POST /api/v1/prompts：新版本插入 + 同 mode 旧激活行去激活（恰一个 active）；
 - POST /api/v1/prompts/{prompt_id}/activate：激活切换（幂等，404 未知 id）；
-- 校验失败 422（空文本/缺占位符）、非 admin 403；
+- 校验失败 422（空文本/缺占位符/未知占位符/format 语法错）、非 admin 403；
 - 原子性（Review Focus 1）：事务中途失败不留半行、同 mode 恒恰一个 active
   （服务级测试以"flush 已发出语句、commit 前抛错"的最险时序注入失败钉死）。
 """
@@ -133,6 +133,52 @@ def test_create_bad_mode_422(client):
     assert client.post("/api/v1/prompts", json={
         "mode": "hybrid", "template_text": "{content}"
     }).status_code == 422
+
+
+def test_create_422_unknown_placeholder_json_example(client):
+    """含单花括号 JSON 示例的正文 → 422，detail 人话并点名占位符，不落库。
+
+    管理员贴入带输出示例的模板是高频误操作：{"tag_id": ...} 会被 str.format
+    当作字段，一旦落库激活，该 mode 每个生成任务渲染步抛裸 KeyError——
+    白名单校验在落库前拒绝（终审 Important 1）。
+    """
+    text = ('内容：{content}\n候选清单：{candidates}\n'
+            '输出示例：{"tag_id": "t1", "relevance": 0.9}')
+    resp = client.post("/api/v1/prompts", json={
+        "mode": "closed", "template_text": text})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "未知占位符" in detail and "tag_id" in detail
+    # 失败不落库：closed 仍只有种子 v1 激活
+    rows = client.get("/api/v1/prompts?mode=closed").json()
+    assert len(rows) == 1 and rows[0]["is_active"] is True
+
+
+def test_create_422_unclosed_brace(client):
+    """花括号不配对（{content 缺右括号）→ 422，detail 转人话。"""
+    resp = client.post("/api/v1/prompts", json={
+        "mode": "open", "template_text": "内容 {content 自由生成标签"})
+    assert resp.status_code == 422
+    assert "语法错误" in resp.json()["detail"]
+
+
+def test_create_accepts_double_brace_escaped_literals(client):
+    """双花括号转义的字面花括号（JSON 示例写作 {{...}}）合法放行 → 200。
+
+    校验勿误伤：parse 对 {{ }} 转义段返回 field_name=None，不进白名单比对；
+    转义形态逐字落库，渲染输出单花括号字面量。
+    """
+    text = ('内容：{content}\n候选清单：{candidates}\n'
+            '输出示例（字面花括号示例）：{{"tag_id": "t1"}}')
+    resp = client.post("/api/v1/prompts", json={
+        "mode": "closed", "template_text": text})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["version"] == 2 and body["is_active"] is True
+    assert body["template_text"] == text  # 转义形态原样落库
+    # 渲染语义直验：转义段输出单花括号字面量（生成任务的实参形状）
+    rendered = body["template_text"].format(content="内容X", candidates="候选Y")
+    assert rendered.endswith('输出示例（字面花括号示例）：{"tag_id": "t1"}')
 
 
 # ---------- 非 admin 403 ----------
