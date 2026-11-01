@@ -37,7 +37,7 @@ python3 -m venv .venv
 # 两步装依赖（顺序可换，两步都要）：
 # 1) lock 全量 pin 安装（版本与验证过的环境完全一致）；
 # 2) editable 安装本包——tagplatform 自身不在 requirements.lock 里
-#    （pip freeze 不含 editable 安装的项目），必须单独装。
+#    （pip freeze 会列出本包的 -e 行，生成 lock 时已手动剔除），必须单独装。
 .venv/bin/pip install -r deploy/requirements.lock
 .venv/bin/pip install -e .
 ```
@@ -47,13 +47,16 @@ python3 -m venv .venv
 
 ## 2. 配置环境变量
 
-两种方式任选（systemd `Environment` 行已设置的变量优先于 `.env`）：
+两种方式任选（同一变量只在其中一处配置，勿双源并存）：
 
 - **方式 A（推荐，不进 unit 文件）**：`cp .env.example .env` 后填入
   `TAGPLT_DATABASE_PATH`、`TAGPLT_SESSION_SECRET`（强随机）、
   `TAGPLT_ADMIN_PASSWORD`（强密码）、`OPENAI_BASE_URL`、`OPENAI_API_KEY`；
   systemd unit 的密钥类注释行保持注释，另加一行
   `EnvironmentFile=/opt/tagplatform/.env`（去掉注释）。
+  注意：库路径若改用 .env 提供，需同步**修改/删除** unit 里的
+  `TAGPLT_DATABASE_PATH` 生效行——unit 生效 Environment 行与 .env 双源
+  并存时总有一处静默失效（勿留两处不同值的"真相"）。
 - **方式 B**：直接编辑 `deploy/tagplatform.service`，把 `TAGPLT_SESSION_SECRET`、
   `TAGPLT_ADMIN_PASSWORD`、`OPENAI_*` 四行注释取消并填入真实值。
 
@@ -118,7 +121,11 @@ curl http://127.0.0.1:8000/health        # 期望 {"status":"ok"}
 
 # 7.2 nginx 静态托管与反代（服务器本机或远程）
 curl -I http://<服务器IP>/                # 期望 200，返回 index.html
-curl http://<服务器IP>/api/health        # 期望 {"status":"ok"}（经反代）
+curl -i http://<服务器IP>/api/v1/tags     # 期望 401（JSON detail"未登录或会话已过期"）
+#                                         ——反代连通且鉴权生效；浏览器登录后访问即 200
+# 注意：后端健康路由挂在根路径 /health（无 /api 前缀、不经鉴权），反代侧
+# 不可达——/api/health 必 404、/health 会被 SPA 静态托管接住，健康检查
+# JSON 只走 7.1 的直连
 ```
 
 - 浏览器打开 `http://<服务器IP>/`，用 admin 登录（密码 = 部署时设置的

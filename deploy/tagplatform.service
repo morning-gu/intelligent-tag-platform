@@ -18,8 +18,10 @@ Type=simple
 User=CHANGE_ME
 Group=CHANGE_ME
 
-# 工作目录 = 部署路径：alembic 按相对路径找 alembic.ini，load_dotenv 从
-# 此处读 .env（systemd Environment 行已设置的变量优先，.env 只补缺）
+# 工作目录 = 部署路径：alembic 按相对路径找 alembic.ini；.env（若放此处）
+# 仅被 make_llm_client 的 load_dotenv 读取（OPENAI_* 两项有效）——TAGPLT_*
+# 各 Settings 字段不经 .env 取值（Settings 构造早于 load_dotenv，且未配
+# env_file），必须由 systemd Environment/EnvironmentFile 提供
 WorkingDirectory=/opt/tagplatform
 
 # ---------- 环境变量 ----------
@@ -35,7 +37,8 @@ Environment=TAGPLT_DATABASE_PATH=/opt/tagplatform/data/tagplatform.db
 #Environment=OPENAI_BASE_URL=https://your-llm-endpoint.example.com/v1
 #Environment=OPENAI_API_KEY=sk-CHANGE_ME
 
-# 密钥类变量也可改为放 <部署路径>/.env（gitignore 已忽略），避免明文进 unit 文件；
+# 密钥类变量也可改为放 <部署路径>/.env（当前仓库 .gitignore 未忽略 .env，
+# 勿提交，建议部署侧自行加入忽略），避免明文进 unit 文件；
 # 若用 EnvironmentFile=/opt/tagplatform/.env，则上述注释行可全部删除。
 
 # 启动前先迁移：先建表再起 uvicorn（应用启动即查询业务表，空库直接崩溃）
