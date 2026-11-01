@@ -5,6 +5,7 @@ Mock 契约是后续任务（5/6 产出、8 执行器）的咬合面：模式 A/
 raw OpenAI 信封形状、同 run_id 确定性，均在此钉死。
 """
 
+import hashlib
 import json
 import sys
 
@@ -31,7 +32,42 @@ def test_mock_closed_item_shape():
     for it in items:
         assert {"tag_id", "tag_name", "relevance", "confidence", "evidence"} <= set(it)
         assert 0.5 <= it["relevance"] < 1.0 and 0.5 <= it["confidence"] < 1.0
+        # prompt 无场景行（仅候选节）→ evidence 兜底空列表（Task 6 兜底语义）
         assert it["evidence"] == []
+
+
+# ---------- MockLLMClient：场景证据（Task 6，runner 渲染文本路径） ----------
+
+# 场景行文本（runner._render_content_text 的组装格式，逐字对齐）
+_SCENE_LINES = [
+    "- scene_001 [120000-180000] 两名人物在仓库中发生激烈争执",
+    "- scene_002 [300000-360000] 追车戏在隧道中展开",
+]
+_SCENE_DATA = [
+    ("scene_001", 120000, 180000, "两名人物在仓库中发生激烈争执"),
+    ("scene_002", 300000, 360000, "追车戏在隧道中展开"),
+]
+
+
+def _expected_evidence(run_id: str, key: str) -> list[dict]:
+    """复算 Mock 场景证据选取：sha256(evidence|run_id|key) 前 8 hex → 均匀
+    [0,1) 按场景数分桶（与 llm/mock.py _pick_evidence 同式，钉死哈希键与映射）。"""
+    h = hashlib.sha256(f"evidence|{run_id}|{key}".encode("utf-8")).hexdigest()
+    sid, start, end, desc = _SCENE_DATA[int(int(h[:8], 16) / 0x1_0000_0000
+                                            * len(_SCENE_DATA))]
+    return [{"scene_id": sid, "start_ms": start, "end_ms": end,
+             "description": desc}]
+
+
+def test_mock_closed_scene_evidence():
+    """模式 A 场景证据（Task 6）：选中标签 evidence 为一元素证据卡，取自按
+    sha256(evidence|run_id|tag_id) 选中的场景行（scene_id/时间戳来自该行）。"""
+    prompt = ("《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
+              + "\n## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心")
+    items = json.loads(MockLLMClient().complete(
+        [{"role": "user", "content": prompt}], "run_1").content)
+    assert len(items) == 1  # run_1: sha256(run_1tag_001) < 0.4 必选中
+    assert items[0]["evidence"] == _expected_evidence("run_1", "tag_001")
 
 
 # ---------- MockLLMClient：模式 B（无候选节 → 固定 3 候选） ----------
@@ -49,7 +85,19 @@ def test_mock_open_item_shape():
     assert all("tag_id" not in it for it in items)
     assert [it["tag_type"] for it in items] == ["narrative", "mood", "style"]
     assert all(0.5 <= it["confidence"] < 1.0 for it in items)
+    # prompt 无场景行（title-only 兜底）→ evidence 仍空列表（Task 6 兜底语义）
     assert all(it["evidence"] == [] for it in items)
+
+
+def test_mock_open_scene_evidence():
+    """模式 B 场景证据（Task 6）：三候选各按 sha256(evidence|run_id|tag_name)
+    选一条场景行作一元素证据卡（演示模式证据链完整）。"""
+    prompt = "《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
+    items = json.loads(MockLLMClient().complete(
+        [{"role": "user", "content": prompt}], "r1").content)
+    assert [it["tag_name"] for it in items] == ["多线叙事", "情感张力", "视听风格"]
+    for it in items:
+        assert it["evidence"] == _expected_evidence("r1", it["tag_name"])
 
 
 # ---------- MockLLMClient：raw 信封与确定性 ----------
@@ -64,8 +112,12 @@ def test_mock_raw_envelope():
 
 
 def test_mock_deterministic_same_run_id():
-    """同 run_id 同输入 → 输出逐字节一致（零随机源，哈希采样可复现）。"""
-    msgs = [{"role": "user", "content": "## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心"}]
+    """同 run_id 同输入 → 输出逐字节一致（零随机源，哈希采样可复现）。
+
+    prompt 带场景行：确定性同时覆盖场景证据字段（Task 6）。"""
+    msgs = [{"role": "user", "content": "《示例电影》\n摘要：摘要\n"
+             + "\n".join(_SCENE_LINES)
+             + "\n## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心"}]
     a = MockLLMClient().complete(msgs, "run_9")
     b = MockLLMClient().complete(msgs, "run_9")
     assert a.content == b.content and a.raw == b.raw

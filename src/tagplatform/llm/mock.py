@@ -9,9 +9,16 @@ sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner �
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
   不含 tag_id（模式 B 的 tag_id 由匹配层赋，LLM 不产出）。
 
-哈希风格与 MockEmbedder 一致（前 8 hex / 0x100000000）；选中与打分用不同
-哈希键——若复用选中哈希，被选中的标签分数恒 < 0.7，会与任务 5 的
-min_confidence=0.7 过滤耦合退化为空结果。
+场景证据（Task 6）：两模式均解析 prompt 中的场景行（runner
+_render_content_text 组装的 `- {scene_id} [{start_ms}-{end_ms}] {description}`），
+每个输出标签按 sha256(evidence|{run_id}|{tag_id 或 tag_name}) 确定性选一条
+场景行附为一元素证据卡（scene_id/start_ms/end_ms/description 取该行值）——
+演示/冒烟模式下证据链完整、evidence_coverage 非零；prompt 无场景行
+（如 title-only 空内容测试）时兜底为空列表。
+
+哈希风格与 MockEmbedder 一致（前 8 hex / 0x100000000）；选中、打分与证据
+选取用不同哈希键——若复用选中哈希，被选中的标签分数恒 < 0.7，会与任务 5
+的 min_confidence=0.7 过滤耦合退化为空结果。
 """
 from __future__ import annotations
 
@@ -23,6 +30,10 @@ from tagplatform.llm.client import LLMResponse
 
 # 候选行格式：`- {tag_id} | {tag_name} | {tag_type} | {description}`
 _CANDIDATE_LINE_RE = re.compile(r"^- (.+?) \| (.+?) \| (.+?) \| (.+)$", re.MULTILINE)
+# 场景行格式（runner._render_content_text 组装，逐字对齐）：
+# `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选行
+# 首词后跟 " |" 而非 " ["，两类行格式天然互斥，互不误配）
+_SCENE_LINE_RE = re.compile(r"^- (\S+) \[(\d+)-(\d+)\] (.+)$", re.MULTILINE)
 # 模式 A 标志节（任务 8 runner 组装 candidates 时的标题）
 _CLOSED_MARKER = "## 候选标签"
 # 选中概率阈值（~40%）
@@ -59,9 +70,34 @@ def _score(key: str) -> float:
     return 0.5 + _hash_unit(key) * 0.5
 
 
+def _parse_scenes(text: str) -> list[dict]:
+    """解析 prompt 中的全部场景行（无场景行 → []，title-only 兜底的前置）。
+
+    行格式由 runner._render_content_text 组装（逐字对齐），时间戳还原为 int。"""
+    return [{"scene_id": sid, "start_ms": int(start), "end_ms": int(end),
+             "description": desc}
+            for sid, start, end, desc in _SCENE_LINE_RE.findall(text)]
+
+
+def _pick_evidence(scenes: list[dict], hash_key: str) -> list[dict]:
+    """按 sha256(哈希键) 确定性选一条场景行作一元素证据卡（无场景行 → []）。
+
+    哈希键 `evidence|{run_id}|{tag_id 或 tag_name}`（与选中/打分哈希键区分，
+    互不耦合）；前 8 hex → [0,1) 均匀值按场景数分桶定位（[0,1) 严格小于 1，
+    桶下标恒落在合法区间）。description 定为场景描述（Task 6 拍板）。
+    """
+    if not scenes:
+        return []
+    scene = scenes[int(_hash_unit(hash_key) * len(scenes))]
+    return [{"scene_id": scene["scene_id"], "start_ms": scene["start_ms"],
+             "end_ms": scene["end_ms"], "description": scene["description"]}]
+
+
 def _closed_output(text: str, run_id: str) -> list[dict]:
-    """模式 A：解析候选行，哈希采样选中项（确定性伪判定）。"""
+    """模式 A：解析候选行，哈希采样选中项（确定性伪判定），逐标签附场景证据。"""
     tail = text.split(_CLOSED_MARKER, 1)[1]
+    # 场景行在 content 节（候选标志节之前），对全文解析即可
+    scenes = _parse_scenes(text)
     items = []
     for tag_id, tag_name, _tag_type, _desc in _CANDIDATE_LINE_RE.findall(tail):
         if _hash_unit(run_id + tag_id) >= _SELECT_PROB:
@@ -71,19 +107,21 @@ def _closed_output(text: str, run_id: str) -> list[dict]:
             "tag_name": tag_name,
             "relevance": _score(f"relevance|{run_id}|{tag_id}"),
             "confidence": _score(f"confidence|{run_id}|{tag_id}"),
-            "evidence": [],
+            "evidence": _pick_evidence(scenes, f"evidence|{run_id}|{tag_id}"),
         })
     return items
 
 
-def _open_output(run_id: str) -> list[dict]:
-    """模式 B：固定三候选，confidence 由哈希映射 [0.5,1.0)（轮次噪声）。"""
+def _open_output(text: str, run_id: str) -> list[dict]:
+    """模式 B：固定三候选，confidence 由哈希映射 [0.5,1.0)（轮次噪声），
+    证据按 evidence|{run_id}|{tag_name} 选一条场景行。"""
+    scenes = _parse_scenes(text)
     return [{
         "tag_name": name,
         "tag_type": tag_type,
         "description": desc,
         "confidence": _score(f"confidence|{run_id}|{name}"),
-        "evidence": [],
+        "evidence": _pick_evidence(scenes, f"evidence|{run_id}|{name}"),
     } for name, tag_type, desc in _OPEN_SEEDS]
 
 
@@ -98,7 +136,7 @@ class MockLLMClient:
         if _CLOSED_MARKER in text:
             out = _closed_output(text, run_id)
         else:
-            out = _open_output(run_id)
+            out = _open_output(text, run_id)
         content = json.dumps(out, ensure_ascii=False)
         usage = {"prompt_tokens": 100, "completion_tokens": 50}
         # raw 保留 OpenAI 信封形状（choices[0].message.content），与真实

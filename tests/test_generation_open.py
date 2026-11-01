@@ -82,6 +82,8 @@ def test_open_produce_end_to_end(session, content_fixture):
     # r1 三候选 confidence 均 >= 0.7，无过滤截断
     assert len(out) == 3
     assert all(t.confidence >= 0.7 for t in out)
+    # evidence 兜底空列表（Task 6）：本测试 prompt 以 JSON 文本作 content——
+    # 无场景行；runner 渲染文本路径的场景证据由 runner/API 层测试覆盖
     assert all(t.evidence == [] for t in out)
     # confidence 降序
     confs = [t.confidence for t in out]

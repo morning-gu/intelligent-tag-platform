@@ -119,7 +119,11 @@ def test_generation_e2e_closed_succeeded(client):
     assert first["review_status"] == "pending"
     assert 0.5 <= first["confidence"] <= 1.0
     assert 0.0 <= first["relevance_score"] <= 1.0
-    assert first["evidence"] == []  # MockLLM 证据为空数组
+    # MockLLM 场景证据（Task 6）：runner 渲染文本 prompt 含场景行 → 证据卡
+    # 一元素非空，数据来自该场景行（fixture 单场景：scene_001 [120000-180000]）
+    assert first["evidence"] == [{
+        "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
+        "description": "两名人物在仓库中发生激烈争执"}]
 
     # 资产标签视图：摘要形状 + tag_id/candidate_name 原样（catalog 行）
     tags_resp = client.get("/api/v1/assets/movie_001/tags")
@@ -155,6 +159,10 @@ def test_generation_e2e_open_generated_rows(client):
         assert isinstance(row["id"], int) and row["id"] > 0  # 行主键（B3 暴露）
         assert row["relevance_score"] is None  # 未命中目录：无相关度
         assert row["review_status"] == "pending"
+        # MockLLM 场景证据（Task 6）：open 行证据卡同样来自场景行（单场景恒定）
+        assert row["evidence"] == [{
+            "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
+            "description": "两名人物在仓库中发生激烈争执"}]
 
     # 资产标签视图：generated 行 tag_id 为空、candidate_name 原样
     tags = client.get("/api/v1/assets/movie_001/tags").json()

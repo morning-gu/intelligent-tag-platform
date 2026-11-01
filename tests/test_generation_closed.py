@@ -129,7 +129,9 @@ def test_closed_produce_end_to_end(session, content_fixture):
     assert out and all(t.origin == "catalog" and t.tag_id for t in out)
     assert all(t.confidence >= 0.7 for t in out) and len(out) <= 30
     assert any(t.tag_id == "tag_001" for t in out)  # 必选中 run_id（r2）
-    # catalog 来源：candidate_* 恒为 None；evidence 列表（mock 为空列表）
+    # catalog 来源：candidate_* 恒为 None；evidence 列表（本测试 prompt 以
+    # JSON 文本作 content——无场景行 → Mock 场景证据兜底空列表，Task 6；
+    # runner 真实渲染文本路径的场景证据由 runner/API 层测试覆盖）
     assert all(t.candidate_type is None and t.candidate_description is None
                for t in out)
     assert all(t.evidence == [] for t in out)

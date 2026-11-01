@@ -138,6 +138,13 @@ def test_run_task_success_writes_tags(session):
     assert session.query(AssetTag).count() >= 1 and t.finished_at is not None
     # 模式 A：媒体上下文摘要向量回填（runner 独立重算，计划定案）
     assert session.get(MediaContext, t.context_id).embedding is not None
+    # MockLLM 场景证据（Task 6）：runner 渲染文本 prompt 含场景行 → 落库
+    # evidence_json 非空，证据卡数据来自场景行（fixture 单场景 scene_001）
+    row = session.query(AssetTag).filter(AssetTag.task_id == t.task_id).first()
+    card = json.loads(row.evidence_json)[0]
+    assert card == {"scene_id": "scene_001", "start_ms": 120000,
+                    "end_ms": 180000,
+                    "description": "两名人物在仓库中发生激烈争执"}
 
 
 def test_run_task_llm_failure_atomic(session):
