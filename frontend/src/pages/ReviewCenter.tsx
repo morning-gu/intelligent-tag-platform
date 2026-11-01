@@ -2,6 +2,9 @@
 // - 顶部筛选栏：状态/标签类型/置信度区间/模式/来源（statuses/modes 与
 //   origin 为契约固定枚举，tag_types 动态取自 /review/filters）；默认拉
 //   status=pending，后端 confidence 升序返回（低分先审）；分页走列表 API。
+// - 表格"模式"列（closed 闭环/open 开放）与"来源"列并排——来源是行
+//   数据形态（目录/生成），模式才区分分类任务与生成任务产出；行经
+//   outerjoin generation_task，任务缺失时 mode 为 null 兜底"—"。
 // - 行展开 EvidenceCard 展示证据明细，点击跳内容详情并定位场景。
 // - 单条 通过/拒绝（Popconfirm 确认）；修改/合并（Modal 表单）；勾选行
 //   批量通过/拒绝（逐条独立端点）。
@@ -59,6 +62,9 @@ const STATUS_FALLBACK = ['pending', 'approved', 'rejected', 'merged']
 
 /** 生成模式中文展示（契约固定枚举 closed/open）。 */
 const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
+
+/** 生成模式 Tag 颜色（与生产任务页一致：闭环蓝/开放紫）。 */
+const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
 /** 来源下拉固定选项（origin 为数据模型固定取值，/review/filters 不返回）。 */
 const ORIGIN_OPTIONS = [
@@ -302,6 +308,16 @@ export default function ReviewCenter() {
           {ORIGIN_OPTIONS.find((o) => o.value === v)?.label ?? v}
         </Tag>
       ),
+    },
+    {
+      title: '模式',
+      dataIndex: 'mode',
+      render: (v: string | null) =>
+        v === null ? (
+          '—'
+        ) : (
+          <Tag color={MODE_COLORS[v] ?? 'default'}>{MODE_LABELS[v] ?? v}</Tag>
+        ),
     },
     {
       title: '置信度',

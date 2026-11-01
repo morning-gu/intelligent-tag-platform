@@ -67,6 +67,22 @@ const ROW_B: ReviewItem = {
   task_id: null,
 }
 
+/** mode=null 行：模式列兜底"—"（任务缺失/被删的行经 outerjoin 得 null）。 */
+const ROW_NULL_MODE: ReviewItem = {
+  id: 3,
+  asset_id: 'a3',
+  asset_title: '无模式资产',
+  tag_name: '慢镜头',
+  origin: 'catalog',
+  mode: null,
+  tag_type: 'style',
+  confidence: 0.8,
+  relevance: 0.8,
+  review_status: 'pending',
+  evidence: [],
+  task_id: null,
+}
+
 /** total=60 > page_size=50：分页器出现第二页按钮。 */
 const PAGE_ONE: ReviewItemsResponse = { items: [ROW_A, ROW_B], total: 60, page: 1 }
 
@@ -140,12 +156,14 @@ describe('ReviewCenter 审核中心', () => {
     expect(await screen.findByText('星际穿越')).toBeInTheDocument()
     const rowA = screen.getByText('星际穿越').closest('tr')!
     const rowB = screen.getByText('盗梦空间').closest('tr')!
-    // 行内容：标签名 / 来源 Tag / 状态 Tag / 置信度进度条 / null 兜底
+    // 行内容：标签名 / 来源 Tag / 模式 Tag / 状态 Tag / 置信度进度条 / null 兜底
     expect(rowA).toHaveTextContent('主角争执')
     expect(rowA).toHaveTextContent('生成')
+    expect(rowA).toHaveTextContent('开放')
     expect(rowA).toHaveTextContent('待审核')
     expect(rowA).toHaveTextContent('42%')
     expect(screen.getByText('目录')).toBeInTheDocument()
+    expect(rowB).toHaveTextContent('闭环')
     expect(within(rowB).getAllByText('暂无')).toHaveLength(2)
 
     // 默认拉待审核，分页参数走列表 API
@@ -154,6 +172,15 @@ describe('ReviewCenter 审核中心', () => {
     expect(paths[0]).toContain('status=pending')
     expect(paths[0]).toContain('page=1')
     expect(paths[0]).toContain('page_size=50')
+  })
+
+  it('模式列：mode 为 null 时兜底显示"—"', async () => {
+    mockApis({ items: { items: [ROW_NULL_MODE], total: 1, page: 1 } })
+    renderReviewCenter()
+
+    await screen.findByText('慢镜头')
+    // 该行其余列均有值（标题/类型/置信度/相关度/状态），"—"只可能来自模式列
+    expect(screen.getByText('—')).toBeInTheDocument()
   })
 
   it('修改置信度下限筛选：携带 confidence_min 重新拉取', async () => {
