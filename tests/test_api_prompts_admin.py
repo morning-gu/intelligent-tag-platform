@@ -34,12 +34,14 @@ def test_create_new_version_deactivates_old_exactly_one_active(client, tmp_path)
     assert body["is_active"] is True
     assert body["created_at"] is not None
 
-    # API 视角：v1 去激活、v2 激活
+    # API 视角：v1 去激活、v2 激活；列表直接带正文（新建预填依赖）
     rows = client.get("/api/v1/prompts?mode=closed").json()
     assert len(rows) == 2
     by_version = {r["version"]: r for r in rows}
     assert by_version[1]["is_active"] is False
     assert by_version[2]["is_active"] is True
+    assert by_version[2]["template_text"] == CLOSED_V2_TEXT  # 新版逐字落库
+    assert "{content}" in by_version[1]["template_text"]  # 种子 v1 正文原样带出
 
     # 直查库计数（绕过 API 的最硬断言）：同 mode 恰一个 active
     conn = sqlite3.connect(tmp_path / "tagplatform.db")

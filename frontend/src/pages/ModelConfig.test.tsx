@@ -19,13 +19,14 @@ vi.mock('../api/client', async (importOriginal) => {
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
-// ---------- 夹具（与后端 PromptOut / ConfigOut 契约同形；列表不含模板正文） ----------
+// ---------- 夹具（与后端 PromptOut / ConfigOut 契约同形，列表直接带正文） ----------
 
 const CLOSED_PROMPTS: PromptTemplateSummary[] = [
   {
     id: 1,
     mode: 'closed',
     version: 1,
+    template_text: '闭卷 v1：{content}\n候选：{candidates}',
     is_active: false,
     created_at: '2026-10-30T08:00:00',
   },
@@ -33,6 +34,7 @@ const CLOSED_PROMPTS: PromptTemplateSummary[] = [
     id: 2,
     mode: 'closed',
     version: 2,
+    template_text: '闭卷 v2：{content}\n候选清单：{candidates}\n只输出 JSON。',
     is_active: true,
     created_at: '2026-10-31T09:30:00',
   },
@@ -40,7 +42,14 @@ const CLOSED_PROMPTS: PromptTemplateSummary[] = [
 
 // open 夹具用版本 5，避免与 closed 的 v1 在"切换后旧行消失"断言中混淆
 const OPEN_PROMPTS: PromptTemplateSummary[] = [
-  { id: 3, mode: 'open', version: 5, is_active: true, created_at: null },
+  {
+    id: 3,
+    mode: 'open',
+    version: 5,
+    template_text: '开卷 v5：{content}\n自由生成标签。',
+    is_active: true,
+    created_at: null,
+  },
 ]
 
 const CONFIG: RuntimeConfig = {
@@ -78,6 +87,7 @@ function mockApis(options: MockOptions = {}) {
           id: 3,
           mode: 'closed',
           version: 3,
+          template_text: '闭卷 v3（新建成功返回）',
           is_active: true,
           created_at: '2026-11-01T00:00:00',
         }
@@ -193,6 +203,7 @@ describe('ModelConfig 模型配置中心页', () => {
         id: 3,
         mode: 'closed',
         version: 3,
+        template_text: '生成标签：{content}\n候选清单：{candidates}',
         is_active: true,
         created_at: '2026-11-01T00:00:00',
       },
@@ -215,12 +226,24 @@ describe('ModelConfig 模型配置中心页', () => {
     await waitFor(() => expect(listCallCount('closed')).toBe(2))
   })
 
+  it('新建弹窗预填当前 Tab 激活版本文本（基于现版微调，非从零转写）', async () => {
+    mockApis()
+    render(<ModelConfig />)
+    await screen.findByText('v2')
+
+    fireEvent.click(screen.getByRole('button', { name: '新建版本' }))
+
+    const textarea = screen.getByLabelText('模板正文') as HTMLTextAreaElement
+    expect(textarea.value).toBe(CLOSED_PROMPTS[1].template_text)
+  })
+
   it('新建版本：在 open Tab 提交时载荷 mode=open', async () => {
     mockApis({
       createResult: {
         id: 4,
         mode: 'open',
         version: 6,
+        template_text: '开放生成标签：{content}',
         is_active: true,
         created_at: '2026-11-01T00:00:00',
       },
@@ -231,6 +254,10 @@ describe('ModelConfig 模型配置中心页', () => {
     await screen.findByText('v5')
 
     fireEvent.click(screen.getByRole('button', { name: '新建版本' }))
+    // 预填的是切换后 Tab（open）的激活版本文本
+    expect((screen.getByLabelText('模板正文') as HTMLTextAreaElement).value).toBe(
+      OPEN_PROMPTS[0].template_text,
+    )
     fireEvent.change(screen.getByLabelText('模板正文'), {
       target: { value: '开放生成标签：{content}' },
     })

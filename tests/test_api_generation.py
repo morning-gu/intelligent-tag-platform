@@ -284,15 +284,21 @@ def test_task_list_filters_and_pagination(client):
 
 
 def test_prompts_list(client):
-    """v1 种子模板：closed/open 各一条激活版本；mode 过滤生效。"""
+    """v1 种子模板：closed/open 各一条激活版本；mode 过滤生效；列表带正文。"""
     rows = client.get("/api/v1/prompts").json()
     assert {(r["mode"], r["version"], r["is_active"]) for r in rows} == {
         ("closed", 1, True), ("open", 1, True)}
     assert all(r["created_at"] is not None for r in rows)
+    # template_text 直接随列表返回（运营侧新建版本预填依赖，阶段 4 审查轮 1）
+    by_mode = {r["mode"]: r for r in rows}
+    assert "{content}" in by_mode["closed"]["template_text"]
+    assert "{candidates}" in by_mode["closed"]["template_text"]
+    assert "{content}" in by_mode["open"]["template_text"]
 
     closed = client.get("/api/v1/prompts?mode=closed").json()
     assert [(r["mode"], r["version"], r["is_active"]) for r in closed] == \
         [("closed", 1, True)]
+    assert "{candidates}" in closed[0]["template_text"]
 
 
 # ---- 404：未知任务/资产 ----

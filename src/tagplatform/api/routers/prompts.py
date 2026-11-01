@@ -1,9 +1,10 @@
 """`/api/v1/prompts` 路由：Prompt 模板列表与版本管理（写路径仅 admin）。
 
-薄路由层：读取走 GET /prompts（模板清单，正文大字段不出列表——正文仅供
-生成流水线 Task 8 执行器消费）；写入经 tagplatform.prompts 服务层
-（create_prompt_version / activate_prompt_version）——版本计算、占位符
-校验与激活切换的业务逻辑都在服务层，本层只做协议转换：正文非法
+薄路由层：读取走 GET /prompts（模板清单，列表直接带 template_text——
+运营侧新建版本需基于现版微调而非从零转写，正文非机密、登录可见即可；
+正文同时供生成流水线 Task 8 执行器消费）；写入经 tagplatform.prompts
+服务层（create_prompt_version / activate_prompt_version）——版本计算、
+占位符校验与激活切换的业务逻辑都在服务层，本层只做协议转换：正文非法
 （服务层 ValueError）→ 422，未知 id → 404，权限门槛 require_admin
 （非 admin 403）。历史版本不可变：不提供编辑/删除端点，换提示词 =
 追加新版本 + 切换激活（改提示词零代码变更的运营闭环，阶段 4 Task 2）。
@@ -25,14 +26,16 @@ router = APIRouter(prefix="/api/v1")
 
 
 class PromptOut(BaseModel):
-    """Prompt 模板列表项：id + 模式 + 版本 + 是否激活 + 创建时间。
+    """Prompt 模板列表项：id + 模式 + 版本 + 正文 + 是否激活 + 创建时间。
 
-    id 供 activate 路由定位（prompt_template 表自增主键，阶段 2 迁移 0002）。
+    id 供 activate 路由定位（prompt_template 表自增主键，阶段 2 迁移 0002）；
+    template_text 供运营侧新建版本预填现版正文（阶段 4 审查轮 1）。
     """
 
     id: int
     mode: str
     version: int
+    template_text: str
     is_active: bool
     created_at: datetime | None = None
 
@@ -64,7 +67,8 @@ def list_prompts(
         query = query.filter(PromptTemplate.mode == mode)
     rows = query.order_by(PromptTemplate.mode, PromptTemplate.version).all()
     return [
-        PromptOut(id=r.id, mode=r.mode, version=r.version, is_active=r.is_active,
+        PromptOut(id=r.id, mode=r.mode, version=r.version,
+                  template_text=r.template_text, is_active=r.is_active,
                   created_at=r.created_at)
         for r in rows
     ]
@@ -88,7 +92,8 @@ def create_prompt_version(
         # 服务层正文校验失败（空文本/缺占位符/未知 mode）→ 422
         raise HTTPException(status_code=422, detail=str(exc))
     return PromptOut(id=row.id, mode=row.mode, version=row.version,
-                     is_active=row.is_active, created_at=row.created_at)
+                     template_text=row.template_text, is_active=row.is_active,
+                     created_at=row.created_at)
 
 
 @router.post("/prompts/{prompt_id}/activate", response_model=PromptActivateOut)

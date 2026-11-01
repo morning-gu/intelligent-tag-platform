@@ -1,17 +1,18 @@
-// Prompt 模板版本管理 API（阶段 4 Task 2 契约）：版本列表（mode 过滤）、
-// 新建版本（admin）、激活切换（admin）。类型形状与后端
-// tagplatform/api/routers/prompts.py 的 PromptOut / PromptCreateRequest /
-// PromptActivateOut 一致。注意：列表响应不含 template_text（正文大字段仅供
-// 生成流水线执行器消费）；历史版本不可变——后端不提供编辑/删除端点，
-// 换提示词 = 追加新版本 + 切换激活。422（空文本/缺占位符）/ 404（未知 id）
-// / 403（非 admin）经 client 的 ApiError 透出后端 detail。
+// Prompt 模板版本管理 API（阶段 4 Task 2 契约，审查轮 1 增补 template_text）：
+// 版本列表（mode 过滤，列表直接带正文——运营侧新建版本需基于现版微调而非
+// 从零转写，正文非机密、登录可见即可）、新建版本（admin）、激活切换（admin）。
+// 类型形状与后端 tagplatform/api/routers/prompts.py 的 PromptOut /
+// PromptCreateRequest / PromptActivateOut 一致。历史版本不可变——后端不提供
+// 编辑/删除端点，换提示词 = 追加新版本 + 切换激活。422（空文本/缺占位符）/
+// 404（未知 id）/ 403（非 admin）经 client 的 ApiError 透出后端 detail。
 import { apiFetch } from './client'
 
-/** Prompt 模板列表项（与后端 PromptOut 一致，绝不含模板正文）。 */
+/** Prompt 模板列表项（与后端 PromptOut 一致，含模板正文 template_text）。 */
 export interface PromptTemplateSummary {
   id: number
   mode: string
   version: number
+  template_text: string
   is_active: boolean
   created_at: string | null
 }

@@ -4,11 +4,11 @@
 //   列表由 activeMode 驱动单一 Table 渲染，避免隐藏面板残留旧数据），
 //   版本 Table（版本号/激活 Tag/创建时间/操作列——仅非激活行提供"激活"，
 //   已激活行操作列为空）。
-//   "新建版本"Modal：textarea 编辑 template_text，mode 取当前 Tab →
-//   POST /prompts → 成功提示 + 关闭弹窗 + 刷新当前 Tab（新版本落库即激活，
-//   同 mode 旧版本自动停用，后端保证恰一个 is_active）。
-//   后端列表契约不含 template_text（正文大字段仅供生成流水线执行器消费），
-//   故弹窗正文从空开始编辑，以 extra 文案提示各 mode 必需占位符；
+//   "新建版本"Modal：textarea 编辑 template_text，mode 取当前 Tab，打开时
+//   预填当前 Tab 激活版本的正文（后端列表已带 template_text——基于现版微调，
+//   非从零转写；无激活版本则从空开始）→ POST /prompts → 成功提示 + 关闭
+//   弹窗 + 刷新当前 Tab（新版本落库即激活，同 mode 旧版本自动停用，后端
+//   保证恰一个 is_active）。
 //   422（空文本/缺占位符）/ 403（非 admin）经 ApiError 透出后端 detail，
 //   弹窗保持打开便于修正重试。历史版本不可变：无编辑/删除操作
 //   （换提示词 = 追加新版本 + 切换激活）。
@@ -145,6 +145,12 @@ export default function ModelConfig() {
 
   function openCreate() {
     createForm.resetFields()
+    // 预填当前 Tab 激活版本的正文（列表已带 template_text）：运营侧基于
+    // 现版微调而非从零转写；无激活版本（理论不可达，后端保证恰一个）则留空
+    const active = prompts.find((row) => row.is_active)
+    if (active !== undefined) {
+      createForm.setFieldsValue({ template_text: active.template_text })
+    }
     setCreateOpen(true)
   }
 
@@ -278,7 +284,7 @@ export default function ModelConfig() {
             name="template_text"
             label="模板正文"
             rules={[{ required: true, message: '请输入模板正文' }]}
-            extra={MODE_PLACEHOLDER_HINTS[activeMode]}
+            extra={`${MODE_PLACEHOLDER_HINTS[activeMode]}；打开时已预填当前激活版本，可在此基础上微调`}
           >
             <Input.TextArea
               rows={8}
