@@ -90,7 +90,11 @@ export default function Layout() {
           </Space>
         </Header>
         <Content style={{ padding: 24 }}>
-          <Outlet />
+          {/* 必须显式转发登录态：react-router v7 的 Outlet 无条件以传入
+              context（缺省 undefined）包 Provider，裸 <Outlet /> 会把
+              RequireAuth 下发的 context 重置——下游 AdminRoute 的
+              useOutletContext 将解构失败（v6 可穿透继承，v7 不行） */}
+          <Outlet context={{ user }} />
         </Content>
       </AntLayout>
     </AntLayout>
