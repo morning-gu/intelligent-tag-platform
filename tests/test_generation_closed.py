@@ -30,7 +30,6 @@ from tagplatform.generation.recall import embed_content_texts, recall_by_type
 from tagplatform.llm.parsing import (
     LLMParseError,
     parse_closed_output,
-    parse_open_output,
 )
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.vectors import encode_vector
@@ -187,25 +186,3 @@ def test_parse_closed_error_message_has_position():
     assert "第 1 个" in str(exc_info.value)
 
 
-# ---- parse_open_output：模式 B 契约校验（任务 6 消费） ----
-
-
-def test_parse_open_drops_extra_keys():
-    items = parse_open_output(json.dumps([
-        {"tag_name": "多线叙事", "tag_type": "narrative", "description": "d",
-         "confidence": 0.8, "evidence": [],
-         "tag_id": "should_drop", "extra": 1},
-    ], ensure_ascii=False))
-    # 多余键（含 tag_id）静默丢弃，仅保留契约五键
-    assert set(items[0]) == {"tag_name", "tag_type", "description",
-                             "confidence", "evidence"}
-
-
-def test_parse_open_bad_structure():
-    with pytest.raises(LLMParseError):
-        parse_open_output('[{"tag_name": "n"}]')  # 缺 tag_type/description/...
-    with pytest.raises(LLMParseError):
-        parse_open_output(json.dumps([
-            {"tag_name": "n", "tag_type": "t", "description": "d",
-             "confidence": 1.5, "evidence": []},  # confidence 越界
-        ], ensure_ascii=False))

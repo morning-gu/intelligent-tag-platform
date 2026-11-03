@@ -70,34 +70,44 @@ def test_mock_closed_scene_evidence():
     assert items[0]["evidence"] == _expected_evidence("run_1", "tag_001")
 
 
-# ---------- MockLLMClient：模式 B（无候选节 → 固定 3 候选） ----------
+# ---------- MockLLMClient：开放式生成（mtg）与 judge 两条分支 ----------
 
 def test_mock_open_returns_fixed_three():
     resp = MockLLMClient().complete([{"role": "user", "content": "为以下内容生成标签"}], "r1")
     out = json.loads(resp.content)
-    assert [t["tag_name"] for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert [t["tag"] for t in out] == ["多线叙事", "情感张力", "视听风格"]
 
 
 def test_mock_open_item_shape():
-    """模式 B 元素键形：不含 tag_id（Review Focus 4 的 mock 侧保障）。"""
-    items = json.loads(MockLLMClient().complete([{"role": "user", "content": "生成标签"}], "r").content)
-    assert all({"tag_name", "tag_type", "description", "confidence", "evidence"} <= set(it) for it in items)
-    assert all("tag_id" not in it for it in items)
-    assert [it["tag_type"] for it in items] == ["narrative", "mood", "style"]
-    assert all(0.5 <= it["confidence"] < 1.0 for it in items)
-    # prompt 无场景行（title-only 兜底）→ evidence 仍空列表（Task 6 兜底语义）
-    assert all(it["evidence"] == [] for it in items)
+    """生成分支键形：tag/dimension/scenes/reason（与 mtg 解析契约一致）。"""
+    items = json.loads(MockLLMClient().complete(
+        [{"role": "user", "content": "生成标签"}], "r").content)
+    assert all({"tag", "dimension", "scenes", "reason"} <= set(it) for it in items)
+    assert [it["dimension"] for it in items] == ["叙事", "情绪", "风格"]
+    # prompt 无场景行（title-only 兜底）→ scenes 仍空列表
+    assert all(it["scenes"] == [] for it in items)
 
 
 def test_mock_open_scene_evidence():
-    """模式 B 场景证据（Task 6）：三候选各按 sha256(evidence|run_id|tag_name)
-    选一条场景行作一元素证据卡（演示模式证据链完整）。"""
-    prompt = "《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
+    """生成分支：有场景行时按顺序轮转给场景 id（证据可追溯）。"""
+    prompt = "## 标签生成任务\n《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
     items = json.loads(MockLLMClient().complete(
         [{"role": "user", "content": prompt}], "r1").content)
-    assert [it["tag_name"] for it in items] == ["多线叙事", "情感张力", "视听风格"]
-    for it in items:
-        assert it["evidence"] == _expected_evidence("r1", it["tag_name"])
+    assert [it["tag"] for it in items] == ["多线叙事", "情感张力", "视听风格"]
+    scene_ids = {row[0] for row in _SCENE_DATA}
+    assert all(set(it["scenes"]) <= scene_ids for it in items)
+
+
+def test_mock_judge_branch():
+    """审核分支：候选行全部判 supported、confidence 0.9、引用首场景。"""
+    prompt = ("## 审核任务\n## 候选标签\n- 多线叙事｜叙事｜多线索交替\n"
+              "- 情感张力｜情绪｜持续的紧张感\n\n## 影片内容\n" + "\n".join(_SCENE_LINES))
+    items = json.loads(MockLLMClient().complete(
+        [{"role": "user", "content": prompt}], "r1").content)
+    assert [it["tag"] for it in items] == ["多线叙事", "情感张力"]
+    assert all(it["verdict"] == "supported" for it in items)
+    assert all(it["confidence"] == 0.9 for it in items)
+    assert all(it["scenes"] == ["scene_001"] for it in items)
 
 
 # ---------- MockLLMClient：raw 信封与确定性 ----------

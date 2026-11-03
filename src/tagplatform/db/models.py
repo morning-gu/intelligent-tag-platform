@@ -297,15 +297,40 @@ PROMPT_V1_SEED = (
     },
 )
 
+# open 模板自 2026-11 起不再被任何生成任务消费（open 改由
+# generation/mtg 的内置流水线 mtg-v1 接管）。按"不删但标注过时"的口径：
+# v1 行原样保留（历史可查、API 仍可读），另插一条 inactive 的 v2 作为
+# 过时标记——提示词管理页能直接看到；同 mode 恰一个 active 的不变量不变。
+_PROMPT_DEPRECATED_OPEN_TEXT = "\n".join([
+    "【已过时】open 模式自 2026-11 起由内置流水线 mtg-v1 接管",
+    "（多轮生成 + 语义合并 + judge 审核），本模板不再被任何生成任务消费。",
+    "closed 模式仍使用自己的模板；本行仅作历史标注，不要激活。",
+    "",
+    "{content}",
+])
+
+PROMPT_DEPRECATED_OPEN_SEED = (
+    {
+        "mode": "open",
+        "version": 2,
+        "template_text": _PROMPT_DEPRECATED_OPEN_TEXT,
+        "is_active": False,
+        "created_at": datetime(2026, 11, 3),
+    },
+)
+
+
 @event.listens_for(PromptTemplate.__table__, "after_create")
 def _seed_prompt_v1(target, connection, **kw):
-    """prompt_template 建表后自动播种 v1 激活模板（仅 Base.metadata.create_all
-    路径触发，覆盖 conftest 的 session/client fixture）。
+    """prompt_template 建表后自动播种 v1 激活模板与 open 过时标注行。
 
-    alembic 迁移 0002 经 op.create_table 建表，不触发本事件，由迁移自带的
-    bulk_insert 播种——两条路径互斥，不会重复插入。
+    仅 Base.metadata.create_all 路径触发（覆盖 conftest 的 session/client
+    fixture）。alembic 迁移 0002/0005 经 op.create_table + bulk_insert 播种，
+    不触发本事件——两条路径互斥，不会重复插入。
     """
-    connection.execute(target.insert(), [dict(row) for row in PROMPT_V1_SEED])
+    rows = [dict(row) for row in PROMPT_V1_SEED]
+    rows += [dict(row) for row in PROMPT_DEPRECATED_OPEN_SEED]
+    connection.execute(target.insert(), rows)
 
 
 class UserAccount(Base):
@@ -325,7 +350,6 @@ class UserAccount(Base):
     # 取值 admin|reviewer
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
 
 class AssetBuildTask(Base):
     """上传视频后自动生成资产的后台任务（前端轮询进度）。

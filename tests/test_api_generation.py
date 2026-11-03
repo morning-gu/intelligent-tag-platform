@@ -263,7 +263,7 @@ def test_task_list_filters_and_pagination(client):
     assert all(set(row.keys()) == TASK_KEYS for row in listing)
     # created_at 降序：后创建的 open 任务在前
     assert [row["task_id"] for row in listing] == [second["task_id"], first["task_id"]]
-    assert listing[0]["prompt_version"] == "1"  # TEXT 列字符串（T8 附注）
+    assert listing[0]["prompt_version"] == "mtg-v1"  # open 自拼 prompt 的口径版本
     assert listing[0]["asset_id"] == "movie_001"
 
     # status / mode / asset_id 过滤
@@ -292,16 +292,18 @@ def test_task_list_filters_and_pagination(client):
 
 
 def test_prompts_list(client):
-    """v1 种子模板：closed/open 各一条激活版本；mode 过滤生效；列表带正文。"""
+    """种子模板：closed/open v1 激活；open 另有 v2 过时标注（inactive）。"""
     rows = client.get("/api/v1/prompts").json()
     assert {(r["mode"], r["version"], r["is_active"]) for r in rows} == {
-        ("closed", 1, True), ("open", 1, True)}
+        ("closed", 1, True), ("open", 1, True), ("open", 2, False)}
     assert all(r["created_at"] is not None for r in rows)
     # template_text 直接随列表返回（运营侧新建版本预填依赖，阶段 4 审查轮 1）
-    by_mode = {r["mode"]: r for r in rows}
-    assert "{content}" in by_mode["closed"]["template_text"]
-    assert "{candidates}" in by_mode["closed"]["template_text"]
-    assert "{content}" in by_mode["open"]["template_text"]
+    by_key = {(r["mode"], r["version"]): r for r in rows}
+    assert "{content}" in by_key[("closed", 1)]["template_text"]
+    assert "{candidates}" in by_key[("closed", 1)]["template_text"]
+    assert "{content}" in by_key[("open", 1)]["template_text"]
+    # open v2 是"已过时"标注行：inactive，且正文写明不再被消费
+    assert "已过时" in by_key[("open", 2)]["template_text"]
 
     closed = client.get("/api/v1/prompts?mode=closed").json()
     assert [(r["mode"], r["version"], r["is_active"]) for r in closed] == \

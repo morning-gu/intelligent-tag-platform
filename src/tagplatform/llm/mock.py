@@ -36,14 +36,19 @@ _CANDIDATE_LINE_RE = re.compile(r"^- (.+?) \| (.+?) \| (.+?) \| (.+)$", re.MULTI
 _SCENE_LINE_RE = re.compile(r"^- (\S+) \[(\d+)-(\d+)\] (.+)$", re.MULTILINE)
 # 模式 A 标志节（任务 8 runner 组装 candidates 时的标题）
 _CLOSED_MARKER = "## 候选标签"
+# 开放式生成（mtg 流水线）的标志串：生成 / 审核两种请求靠它分流
+_MTG_GEN_MARKER = "## 标签生成任务"
+_MTG_JUDGE_MARKER = "## 审核任务"
+# 审核候选行格式：`- {tag}｜{dimension}｜{reason}`（全角竖线，与场景行互斥）
+_JUDGE_LINE_RE = re.compile(r"^- (.+?)｜(.+?)｜(.*)$", re.MULTILINE)
 # 选中概率阈值（~40%）
 _SELECT_PROB = 0.4
 
-# 模式 B 固定三候选：名称 / 分类 / 一句话中文定义
+# 开放生成固定三候选：名称 / 维度（中文五维名）
 _OPEN_SEEDS = [
-    ("多线叙事", "narrative", "叙事在多条线索或时间线之间交替推进。"),
-    ("情感张力", "mood", "情绪在铺垫与释放之间保持持续的紧张感。"),
-    ("视听风格", "style", "画面构图与声音设计共同呈现鲜明的风格化表达。"),
+    ("多线叙事", "叙事"),
+    ("情感张力", "情绪"),
+    ("视听风格", "风格"),
 ]
 
 
@@ -113,16 +118,45 @@ def _closed_output(text: str, run_id: str) -> list[dict]:
 
 
 def _open_output(text: str, run_id: str) -> list[dict]:
-    """模式 B：固定三候选，confidence 由哈希映射 [0.5,1.0)（轮次噪声），
-    证据按 evidence|{run_id}|{tag_name} 选一条场景行。"""
+    """开放式生成（mtg）：固定三候选，按场景数轮转给一条场景证据。
+
+    三轮返回同样的三个候选（真实模型也会重复），用于覆盖跨轮合并路径：
+    归一化去重后 runs=3。
+    """
     scenes = _parse_scenes(text)
-    return [{
-        "tag_name": name,
-        "tag_type": tag_type,
-        "description": desc,
-        "confidence": _score(f"confidence|{run_id}|{name}"),
-        "evidence": _pick_evidence(scenes, f"evidence|{run_id}|{name}"),
-    } for name, tag_type, desc in _OPEN_SEEDS]
+    items = []
+    for index, (name, dimension) in enumerate(_OPEN_SEEDS):
+        scene = scenes[index % len(scenes)] if scenes else None
+        items.append({
+            "tag": name,
+            "dimension": dimension,
+            "scenes": [scene["scene_id"]] if scene else [],
+            "reason": f"模拟依据 #{index + 1}",
+        })
+    return items
+
+
+def _judge_output(text: str, run_id: str) -> list[dict]:
+    """judge：解析候选行，全部判 supported（confidence 0.9，引用首场景并摘原文）。
+
+    必须给 quote：流水线要求"判决引用内容原文"，模拟客户端从首场景描述里
+    截一段，口径与真实 judge 一致。
+    """
+    scenes = _parse_scenes(text)
+    scene_id = scenes[0]["scene_id"] if scenes else None
+    quote = scenes[0]["description"][:12] if scenes else ""
+    items = []
+    for tag, _dimension, _reason in _JUDGE_LINE_RE.findall(text):
+        items.append({
+            "tag": tag.strip(),
+            "verdict": "supported",
+            "importance": "core",
+            "confidence": 0.9,
+            "scenes": [scene_id] if scene_id else [],
+            "quote": quote,
+            "reason": "模拟判定：所引原文支撑标签",
+        })
+    return items
 
 
 class MockLLMClient:
@@ -133,7 +167,9 @@ class MockLLMClient:
 
     def complete(self, messages: list[dict], run_id: str) -> LLMResponse:
         text = _extract_text(messages)
-        if _CLOSED_MARKER in text:
+        if _MTG_JUDGE_MARKER in text:
+            out = _judge_output(text, run_id)
+        elif _CLOSED_MARKER in text:
             out = _closed_output(text, run_id)
         else:
             out = _open_output(text, run_id)

@@ -53,9 +53,11 @@ def test_create_new_version_deactivates_old_exactly_one_active(client, tmp_path)
         conn.close()
     assert counts == [("closed", 1), ("open", 1)]
 
-    # open 模式不受影响：v1 仍激活
+    # open 模式不受影响：v1 仍激活（v2 是过时标注，一直 inactive）
     open_rows = client.get("/api/v1/prompts?mode=open").json()
-    assert len(open_rows) == 1 and open_rows[0]["is_active"] is True
+    assert len(open_rows) == 2
+    active = [r for r in open_rows if r["is_active"]]
+    assert len(active) == 1 and active[0]["version"] == 1
 
 
 def test_activate_switch_and_idempotent(client):
@@ -121,11 +123,12 @@ def test_create_422_missing_placeholders(client):
     assert client.post("/api/v1/prompts", json={
         "mode": "closed", "template_text": "只有正文没有占位符"
     }).status_code == 422
-    # 三次失败都不落库：closed/open 仍各恰一行 v1 激活
+    # 三次失败都不落库：closed 仍 v1 单行激活；open 仍 v1 激活 + v2 过时标注
     closed = client.get("/api/v1/prompts?mode=closed").json()
     open_rows = client.get("/api/v1/prompts?mode=open").json()
     assert len(closed) == 1 and closed[0]["is_active"] is True
-    assert len(open_rows) == 1 and open_rows[0]["is_active"] is True
+    assert [r["version"] for r in open_rows if r["is_active"]] == [1]
+    assert len(open_rows) == 2
 
 
 def test_create_bad_mode_422(client):

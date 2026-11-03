@@ -12,6 +12,7 @@ TestClient——同为 httpx 之上的同步封装，契约（同步、进程内
 """
 
 import os
+import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,11 @@ from tagplatform.api import create_app
 from tagplatform.embed import make_embedder
 from tagplatform.llm import MockLLMClient
 from tagplatform.settings import Settings
+
+# 测试隔离：mtg 流水线的审计报告与数据集根都指向临时目录，
+# 避免单测往仓库里写文件、或误扫 /cache/MovieNet（零网络、零外部依赖红线）。
+os.environ.setdefault("TAGPLT_MTG_REPORT_DIR", tempfile.mkdtemp(prefix="mtg-audit-"))
+os.environ.setdefault("TAGPLT_DATASET_ROOT", tempfile.mkdtemp(prefix="mtg-dataset-"))
 
 # 治理流水线（Task 7）等测试共用的确定性 mock 嵌入器（零网络、零模型下载）
 MOCK_EMBEDDER = make_embedder("mock", mock=True)

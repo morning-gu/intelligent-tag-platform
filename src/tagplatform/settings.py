@@ -74,6 +74,25 @@ class Settings(BaseSettings):
     # False = 只填数据集事实，一次模型调用都不发。
     asset_infer: bool = True
 
+    # ---------- 阶段 6：MovieTagGen 移植的开放式生成（2026-11） ----------
+    # 生成轮数（跨轮并集，1 = 单轮）；轮数越高覆盖越好、成本线性上涨
+    mtg_runs: int = 3
+    # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
+    mtg_frames_per_scene: int = 2
+    mtg_max_frames: int = 24
+    # 跨轮语义合并阈值（e5 余弦，complete-link）
+    mtg_merge_threshold: float = 0.90
+    # 单轮输出上限（模型被要求 15-20 个，这里兜底截断）
+    mtg_max_candidates_per_run: int = 20
+    # judge 通过后的最终产出上限（用户口径 10-15 条）
+    mtg_max_final_tags: int = 15
+    # judge：模型与开关（关掉则只做合并，不过滤）
+    mtg_judge_model: str = "deepseek-v4.1-flash"
+    mtg_judge_enabled: bool = True
+    mtg_judge_temperature: float = 0.0
+    # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
+    mtg_report_dir: str = "data/audit/mtg"
+
 
 @lru_cache
 def get_settings() -> Settings:
