@@ -18,6 +18,8 @@ xlsx 字节流由 build_xlsx 用 openpyxl 现场构造，不依赖外部文件�
 
 import io
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 
 import openpyxl
 
@@ -73,6 +75,26 @@ def test_import_excel_via_api(client):
     detail = client.get(f"/api/v1/tags/{first['tag_id']}")
     assert detail.status_code == 200
     assert detail.json()["aliases"] == ["悬念", "推理"]
+    assert detail.json()["path"] == ["悬疑"]
+
+
+def test_export_tags_as_xlsx_and_xml(client):
+    resp = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
+    assert resp.status_code == 200
+
+    exported = client.get("/api/v1/tags/export?q=悬疑")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        assert set(archive.namelist()) == {"tags-export.xlsx", "tags-export.xml"}
+        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
+        xml_root = ET.fromstring(archive.read("tags-export.xml"))
+
+    rows = list(workbook.active.iter_rows(values_only=True))
+    assert rows[0][:4] == ("一级标签名称", "二级标签名称", "三级标签名称", "标签")
+    assert rows[1][3] == "悬疑"
+    assert xml_root.find("tag") is not None
+    assert xml_root.find("tag").text == "悬疑"
 
 
 def test_import_xml_via_api(client):

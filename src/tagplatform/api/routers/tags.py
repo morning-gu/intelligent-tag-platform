@@ -5,14 +5,19 @@
 错误映射（解析失败/坏表头 → 422；未知 tag_id → 404）。
 """
 
+import io
 import json
 import logging
+import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import asdict
 
+import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session, aliased
 
 from tagplatform.api import get_embedder, get_session
 from tagplatform.db.models import ImportBatch, TagCatalog
@@ -90,6 +95,8 @@ class TagDetail(TagOut):
     """标签详情：在列表字段之上展开 aliases 列表。"""
 
     aliases: list[str]
+    path: list[str] = []
+    path_ids: list[str] = []
 
 
 def _parse_aliases(raw: str | None) -> list[str]:
@@ -167,6 +174,7 @@ def list_tags(
     q: str | None = Query(None),
     parent_id: str | None = Query(None),
     root: bool = Query(False),
+    scope_id: str | None = Query(None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
@@ -177,6 +185,19 @@ def list_tags(
         query = query.filter(TagCatalog.parent_id.is_(None))
     elif parent_id is not None:
         query = query.filter(TagCatalog.parent_id == parent_id)
+    elif scope_id is not None:
+        descendants = select(TagCatalog.tag_id).where(TagCatalog.tag_id == scope_id).cte(
+            name="tag_descendants", recursive=True
+        )
+        child = aliased(TagCatalog)
+        descendants = descendants.union_all(
+            select(child.tag_id).where(child.parent_id == descendants.c.tag_id)
+        )
+        query = query.filter(
+            TagCatalog.tag_id.in_(select(descendants.c.tag_id).where(
+                descendants.c.tag_id != scope_id
+            ))
+        )
     if type_ is not None:
         query = query.filter(TagCatalog.tag_type == type_)
     if q:
@@ -203,12 +224,133 @@ def list_tags(
     ])
 
 
+@router.get("/export")
+def export_tags(
+    q: str | None = Query(None),
+    scope_id: str | None = Query(None),
+    session: Session = Depends(get_session),
+) -> Response:
+    """导出当前目录作用域或名称筛选命中的目录及其全部标签。"""
+    all_tags = session.query(TagCatalog).order_by(TagCatalog.tag_id).all()
+    by_id = {tag.tag_id: tag for tag in all_tags}
+    children: dict[str | None, list[TagCatalog]] = {}
+    for tag in all_tags:
+        children.setdefault(tag.parent_id, []).append(tag)
+
+    def descendants(tag_id: str) -> set[str]:
+        result: set[str] = set()
+        pending = [tag_id]
+        while pending:
+            current = pending.pop()
+            for child in children.get(current, []):
+                if child.tag_id not in result:
+                    result.add(child.tag_id)
+                    pending.append(child.tag_id)
+        return result
+
+    selected_ids = descendants(scope_id) if scope_id is not None else {
+        tag.tag_id for tag in all_tags
+    }
+    if scope_id is not None and scope_id not in by_id:
+        raise HTTPException(status_code=404, detail=f"目录不存在：{scope_id}")
+
+    if q:
+        keyword = q.casefold()
+        matches = [
+            tag for tag in all_tags
+            if keyword in tag.tag_name.casefold()
+            or (tag.aliases is not None and keyword in tag.aliases.casefold())
+        ]
+        selected_ids = {
+            descendant_id
+            for tag in matches
+            if tag.tag_id in selected_ids
+            for descendant_id in ({tag.tag_id} | descendants(tag.tag_id))
+        }
+
+    export_tags = [
+        tag for tag in all_tags
+        if tag.tag_id in selected_ids and not children.get(tag.tag_id)
+    ]
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "标签"
+    worksheet.append(["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"])
+    for tag in export_tags:
+        path: list[str] = []
+        current: TagCatalog | None = tag
+        while current is not None:
+            path.append(current.tag_name)
+            current = by_id.get(current.parent_id) if current.parent_id else None
+        path.reverse()
+        levels = (path + ["", "", ""])[:3]
+        worksheet.append([*levels, tag.tag_name, tag.description, "系统生成"])
+
+    workbook_output = io.BytesIO()
+    workbook.save(workbook_output)
+
+    xml_root = ET.Element("tags")
+    xml_nodes: dict[tuple[str, ...], ET.Element] = {}
+    for tag in export_tags:
+        path: list[str] = []
+        current = tag
+        while current is not None:
+            path.append(current.tag_name)
+            current = by_id.get(current.parent_id) if current.parent_id else None
+        path.reverse()
+        if len(path) == 1:
+            ET.SubElement(
+                xml_root,
+                "tag",
+                {"type": "system", "description": tag.description or ""},
+            ).text = path[0]
+            continue
+
+        parent = xml_root
+        for depth, name in enumerate(path[:-1], start=1):
+            key = tuple(path[:depth])
+            node = xml_nodes.get(key)
+            if node is None:
+                node = ET.SubElement(parent, f"level{depth}", {"name": name})
+                xml_nodes[key] = node
+            parent = node
+        ET.SubElement(
+            parent,
+            "tag",
+            {"type": "system", "description": tag.description or ""},
+        ).text = path[-1]
+
+    xml_output = ET.tostring(xml_root, encoding="utf-8", xml_declaration=True)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("tags-export.xlsx", workbook_output.getvalue())
+        archive.writestr("tags-export.xml", xml_output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="tags-export.zip"'},
+    )
+
+
 @router.get("/{tag_id}", response_model=TagDetail)
 def get_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDetail:
     """单条标签详情：含解析后的 aliases 列表；未知 tag_id → 404。"""
     tag = session.get(TagCatalog, tag_id)
     if tag is None:
         raise HTTPException(status_code=404, detail=f"标签不存在：{tag_id}")
+    path: list[str] = []
+    current = tag
+    while current is not None:
+        path.append(current.tag_name)
+        current = session.get(TagCatalog, current.parent_id) if current.parent_id else None
+    path.reverse()
+    path_ids = []
+    current = tag
+    while current is not None:
+        path_ids.append(current.tag_id)
+        current = session.get(TagCatalog, current.parent_id) if current.parent_id else None
+    path_ids.reverse()
     return TagDetail(
         tag_id=tag.tag_id,
         tag_name=tag.tag_name,
@@ -217,4 +359,6 @@ def get_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDetail:
         parent_id=tag.parent_id,
         status=tag.status,
         aliases=_parse_aliases(tag.aliases),
+        path=path,
+        path_ids=path_ids,
     )

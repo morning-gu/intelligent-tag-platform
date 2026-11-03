@@ -86,7 +86,7 @@ def _parse_hierarchy_excel(
 ) -> ExcelParseResult:
     """解析六列层级标签模板，并转换为通用 TagRow。"""
     result = ExcelParseResult()
-    required = ("一级标签名称", "二级标签名称", "标签", "标签描述")
+    required = ("一级标签名称", "二级标签名称", "标签")
     hierarchy_names: set[str] = set()
     for row_number, cells in enumerate(
             worksheet.iter_rows(min_row=2, values_only=True), start=2):
@@ -149,7 +149,7 @@ def _parse_hierarchy_excel(
             tag_id=None,
             tag_name=tag_name,
             tag_type="genre",
-            description=texts["标签描述"],
+            description=texts["标签描述"] or "",
             parent_tag=texts["三级标签名称"] or texts["二级标签名称"],
             aliases=[],
             applicable_scope=None,
@@ -204,7 +204,7 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
 
             tag_name = texts.get("tag_name")
             missing_required = [
-                name for name in REQUIRED_COLUMNS if texts.get(name) is None
+                name for name in ("tag_name", "tag_type") if texts.get(name) is None
             ]
             if missing_required:
                 # 缺必需字段优先于类型异常（与治理流水线"只报首个"一致）

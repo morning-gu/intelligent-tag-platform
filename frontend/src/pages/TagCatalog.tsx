@@ -1,26 +1,31 @@
 // 标签库页（Task 13）：标准标签目录的查询与详情查看（阶段 3 无标签编辑/
 // 删除契约，仅读）。
-// - 目录 Table：type 精确筛选（动态类型取自 /review/filters，与审核中心
-//   同源）+ q 名称/别名子串搜索（提交触发）；后端 limit/offset 分页且列表
+// - 目录 Table：q 名称/别名子串搜索（提交触发）；后端 limit/offset 分页且列表
 //   响应无 total 字段——每页多取一条探测后续页（探测行不展示），分页 total
 //   以"当前页末 + 是否还有后续"拼装，翻到末页时自然收敛为精确值。
 // - 行点击 → 详情 Drawer：GET /tags/{id}，含 aliases 列表与父标签/状态。
 import {
   Alert,
+  Button,
   Card,
   Descriptions,
   Drawer,
   Input,
-  Select,
   Space,
   Table,
   Tag,
+  TreeSelect,
   Typography,
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { fetchTagCatalog, fetchTagDetail, type TagCatalogDetail, type TagCatalogItem } from '../api/catalog'
-import { fetchReviewFilters } from '../api/review'
+import {
+  downloadTagCatalog,
+  fetchTagCatalog,
+  fetchTagDetail,
+  type TagCatalogDetail,
+  type TagCatalogItem,
+} from '../api/catalog'
 
 /** 标签状态中文展示与 Tag 颜色（active/deprecate 与治理流水线入库语义一致）。 */
 const TAG_STATUS_LABELS: Record<string, string> = {
@@ -32,17 +37,26 @@ const TAG_STATUS_COLORS: Record<string, string> = {
   deprecate: 'red',
 }
 
+function sortDirectoriesFirst(items: TagCatalogItem[]): TagCatalogItem[] {
+  return [...items].sort(
+    (left, right) => Number(right.has_children === true) - Number(left.has_children === true),
+  )
+}
+
 export default function TagCatalog() {
   // —— 树状目录：首屏只加载根节点，展开时按父节点加载子节点 ——
   const [items, setItems] = useState<TagCatalogItem[]>([])
+  const [directoryItems, setDirectoryItems] = useState<TagCatalogItem[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
 
-  // —— 筛选状态：类型变更即拉取；名称搜索在提交（回车/按钮）时生效 ——
-  const [type, setType] = useState<string | undefined>()
+  // —— 筛选状态：名称搜索在提交（回车/按钮）时生效 ——
   const [searchQ, setSearchQ] = useState('')
   const [inputQ, setInputQ] = useState('')
-  const [tagTypes, setTagTypes] = useState<string[]>([])
+  const [scopeId, setScopeId] = useState<string | undefined>()
+  const [scopeLabel, setScopeLabel] = useState<string | undefined>()
+  const [expandedRowKeys, setExpandedRowKeys] = useState<string[]>([])
 
   // —— 详情 Drawer ——
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null)
@@ -50,24 +64,43 @@ export default function TagCatalog() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
 
+  async function exportCatalog() {
+    setExporting(true)
+    try {
+      const blob = await downloadTagCatalog({ q: searchQ, scope_id: scopeId })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'tags-export.zip'
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : '标签导出失败')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const loadCatalog = useCallback(async () => {
     setLoading(true)
     try {
       const res = await fetchTagCatalog({
-        type,
         q: searchQ,
+        parent_id: scopeId,
         // 默认只展示一级目录；搜索时返回所有匹配节点，避免子级标签
         // 因 root=true 被过滤掉，同时保留目录节点的下级展开能力。
-        root: searchQ === '' ? true : undefined,
+        root: scopeId === undefined && searchQ === '' ? true : undefined,
       })
-      setItems(res.items)
+      const sortedItems = sortDirectoriesFirst(res.items)
+      setItems(sortedItems)
+      if (scopeId === undefined && searchQ === '') setDirectoryItems(sortedItems)
       setLoadError(null)
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : '标签库加载失败')
     } finally {
       setLoading(false)
     }
-  }, [type, searchQ])
+  }, [scopeId, searchQ])
 
   useEffect(() => {
     // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
@@ -80,20 +113,6 @@ export default function TagCatalog() {
       cancelled = true
     }
   }, [loadCatalog])
-
-  useEffect(() => {
-    // 类型下拉候选（库内动态去重）；筛选接口失败不阻塞列表，静默忽略
-    let cancelled = false
-    fetchReviewFilters().then(
-      (f) => {
-        if (!cancelled) setTagTypes(f.tag_types)
-      },
-      () => {},
-    )
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   /** 打开标签详情 Drawer：在事件内重置详情态（含上次残留）并记录标签 ID，
    * 拉取交给下方 effect（effect 内不做同步 setState）。 */
@@ -127,26 +146,91 @@ export default function TagCatalog() {
     }
   }, [selectedTagId])
 
-  async function expandNode(expanded: boolean, record: TagCatalogItem) {
-    if (!expanded || record.children !== undefined) return
-    try {
-      const res = await fetchTagCatalog({ parent_id: record.tag_id })
-      setItems((current) => updateChildren(current, record.tag_id, res.items))
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : '下级标签加载失败')
-    }
+  async function loadDirectoryChildren(node: { value?: string | number }) {
+    if (typeof node.value !== 'string') return
+    const parentId = node.value
+    const res = await fetchTagCatalog({ parent_id: parentId })
+    setDirectoryItems((current) => updateDirectoryChildren(current, parentId, res.items))
   }
 
-  function updateChildren(
+  function updateDirectoryChildren(
     nodes: TagCatalogItem[],
     parentId: string,
     children: TagCatalogItem[],
   ): TagCatalogItem[] {
     return nodes.map((node) => {
-      if (node.tag_id === parentId) return { ...node, children }
-      if (node.children) return { ...node, children: updateChildren(node.children, parentId, children) }
+      if (node.tag_id === parentId) {
+        return { ...node, children: sortDirectoriesFirst(children) }
+      }
+      if (node.children) {
+        return { ...node, children: updateDirectoryChildren(node.children, parentId, children) }
+      }
       return node
     })
+  }
+
+  function selectDirectory(directoryId: string | undefined, directoryName?: string) {
+    setSelectedTagId(null)
+    setSearchQ('')
+    setInputQ('')
+    setScopeId(directoryId)
+    setScopeLabel(directoryName)
+    setExpandedRowKeys([])
+  }
+
+  function findDirectory(nodes: TagCatalogItem[], id: string): TagCatalogItem | undefined {
+    for (const node of nodes) {
+      if (node.tag_id === id) return node
+      if (node.children) {
+        const found = findDirectory(node.children, id)
+        if (found) return found
+      }
+    }
+    return undefined
+  }
+
+  function goToParentDirectory() {
+    if (scopeId === undefined) return
+    const current = findDirectory(directoryItems, scopeId)
+    const parent = current?.parent_id ? findDirectory(directoryItems, current.parent_id) : undefined
+    selectDirectory(parent?.tag_id, parent?.tag_name)
+  }
+
+  async function expandSelectedDirectory(record: TagCatalogItem) {
+    if (record.has_children !== true) return
+    setExpandedRowKeys((current) =>
+      current.includes(record.tag_id)
+        ? current.filter((key) => key !== record.tag_id)
+        : [...current, record.tag_id],
+    )
+    if (record.children !== undefined) return
+    try {
+      const res = await fetchTagCatalog({ parent_id: record.tag_id })
+      setItems((current) => updateDirectoryChildren(current, record.tag_id, res.items))
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : '下级标签加载失败')
+    }
+  }
+
+  function toTreeData(nodes: TagCatalogItem[]): Array<{
+    title: string
+    value: string
+    children?: Array<{
+      title: string
+      value: string
+      children?: ReturnType<typeof toTreeData>
+      isLeaf?: boolean
+    }>
+    isLeaf?: boolean
+  }> {
+    return nodes
+      .filter((node) => node.has_children === true)
+      .map((node) => ({
+      title: node.tag_name,
+      value: node.tag_id,
+      children: node.children ? toTreeData(node.children) : undefined,
+      isLeaf: false,
+      }))
   }
 
   const columns: TableProps<TagCatalogItem>['columns'] = [
@@ -154,6 +238,11 @@ export default function TagCatalog() {
       title: '名称',
       dataIndex: 'tag_name',
       render: (name: string, record: TagCatalogItem) => (
+        record.tag_id === '__back__' ? (
+          <Button type="link" onClick={goToParentDirectory} style={{ padding: 0 }}>
+            ← {name}
+          </Button>
+        ) : (
         <Space size={8}>
           <span
             style={{
@@ -174,12 +263,8 @@ export default function TagCatalog() {
           </span>
           <span>{name}</span>
         </Space>
+        )
       ),
-    },
-    {
-      title: '类型',
-      dataIndex: 'tag_type',
-      render: (v: string) => <Tag color="blue">{v}</Tag>,
     },
     { title: '描述', dataIndex: 'description' },
     {
@@ -194,20 +279,44 @@ export default function TagCatalog() {
     },
   ]
 
+  const displayItems: TagCatalogItem[] = scopeId
+    ? [
+        {
+          tag_id: '__back__',
+          tag_name: '返回上级目录',
+          tag_type: '',
+          description: '',
+          parent_id: null,
+          status: null,
+          has_children: false,
+        },
+        ...items,
+      ]
+    : items
+
   return (
     <Card title="标签库">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Space wrap>
-          <Select
-            aria-label="类型筛选"
-            value={type}
-            onChange={(v) => {
-              setType(v)
+          <TreeSelect
+            aria-label="目录层级"
+            treeData={[
+              { title: '所有', value: '__all__', isLeaf: true },
+              ...(scopeId && scopeLabel && !directoryItems.some((item) => item.tag_id === scopeId)
+                ? [{ title: scopeLabel, value: scopeId, isLeaf: true }]
+                : []),
+              ...toTreeData(directoryItems),
+            ]}
+            value={scopeId ?? '__all__'}
+            onChange={(value, label) => {
+              const nextId = value === '__all__' ? undefined : value
+              setScopeId(nextId)
+              setScopeLabel(typeof label === 'string' ? label : undefined)
             }}
-            options={tagTypes.map((t) => ({ value: t, label: t }))}
-            allowClear
-            placeholder="标签类型"
-            style={{ width: 160 }}
+            loadData={loadDirectoryChildren}
+            treeDefaultExpandAll={false}
+            placeholder="目录层级"
+            style={{ width: 220 }}
           />
           <Input.Search
             aria-label="名称搜索"
@@ -220,6 +329,9 @@ export default function TagCatalog() {
             }}
             style={{ width: 280 }}
           />
+          <Button type="primary" onClick={() => void exportCatalog()} loading={exporting}>
+            标签导出
+          </Button>
         </Space>
         {loadError !== null && (
           <Alert type="error" showIcon message="标签库加载失败" description={loadError} />
@@ -227,13 +339,12 @@ export default function TagCatalog() {
         <Table<TagCatalogItem>
           rowKey="tag_id"
           columns={columns}
-          dataSource={items}
+          dataSource={displayItems}
           loading={loading}
           expandable={{
-            // 兼容旧服务未返回 has_children 的情况；展开后若无子项不会
-            // 再显示子节点。默认允许整行点击展开，目录页更符合树状导航习惯。
             rowExpandable: (record) => record.has_children === true,
-            expandRowByClick: true,
+            expandedRowKeys,
+            expandRowByClick: false,
             expandIcon: ({ expanded, onExpand, record }) =>
               record.has_children === true ? (
                 <button
@@ -241,6 +352,7 @@ export default function TagCatalog() {
                   aria-label={expanded ? '收起下级目录' : '展开下级目录'}
                   onClick={(event) => {
                     event.stopPropagation()
+                    void expandSelectedDirectory(record)
                     onExpand(record, event)
                   }}
                   style={{
@@ -259,21 +371,24 @@ export default function TagCatalog() {
                 >
                   <span
                     style={{
-                      width: 7,
-                      height: 7,
-                      borderRight: '2px solid currentColor',
-                      borderBottom: '2px solid currentColor',
-                      transform: expanded ? 'rotate(225deg)' : 'rotate(-45deg)',
-                      transition: 'transform 0.2s ease',
+                      width: expanded ? 11 : 2,
+                      height: expanded ? 2 : 11,
+                      background: 'currentColor',
+                      transition: 'all 0.2s ease',
                     }}
                   />
                 </button>
               ) : null,
-            onExpand: expandNode,
           }}
           onRow={(record) => ({
             onClick: () => {
-              if (record.has_children !== true) openTag(record.tag_id)
+              if (record.tag_id === '__back__') {
+                goToParentDirectory()
+              } else if (record.has_children === true) {
+                void expandSelectedDirectory(record)
+              } else {
+                openTag(record.tag_id)
+              }
             },
             style: { cursor: 'pointer' },
           })}
@@ -296,14 +411,37 @@ export default function TagCatalog() {
             column={1}
             items={[
               { key: 'id', label: '标签 ID', children: detail.tag_id },
-              { key: 'name', label: '标签名', children: detail.tag_name },
-              { key: 'type', label: '类型', children: detail.tag_type },
-              { key: 'desc', label: '描述', children: detail.description },
               {
-                key: 'parent',
-                label: '父标签',
-                children: detail.parent_id ?? '—',
+                key: 'name',
+                label: '标签名',
+                children: (
+                  <Space size={4} wrap>
+                    {(detail.path ?? [detail.tag_name]).map((name, index) => {
+                      const isTag = index === (detail.path?.length ?? 1) - 1
+                      const directoryId = detail.path_ids?.[index]
+                      return isTag || directoryId === undefined ? (
+                        <span key={`${name}-${index}`}>
+                          {index > 0 ? ' / ' : ''}
+                          {name}
+                        </span>
+                      ) : (
+                        <span key={`${name}-${index}`}>
+                          {index > 0 ? ' / ' : ''}
+                          <Button
+                            type="link"
+                            size="small"
+                            onClick={() => selectDirectory(directoryId, name)}
+                            style={{ padding: 0 }}
+                          >
+                            {name}
+                          </Button>
+                        </span>
+                      )
+                    })}
+                  </Space>
+                ),
               },
+              { key: 'desc', label: '描述', children: detail.description },
               {
                 key: 'status',
                 label: '状态',
