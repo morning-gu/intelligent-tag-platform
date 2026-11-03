@@ -19,6 +19,8 @@ export interface TagCatalogItem {
 /** 标签详情：列表字段之上展开 aliases 列表（与后端 TagDetail 一致）。 */
 export interface TagCatalogDetail extends TagCatalogItem {
   aliases: string[]
+  path?: string[]
+  path_ids?: string[]
 }
 
 /** 目录列表查询参数：undefined/空串字段不拼入查询串；limit/offset 为
@@ -30,6 +32,7 @@ export interface TagCatalogQuery {
   offset?: number
   parent_id?: string
   root?: boolean
+  scope_id?: string
 }
 
 /** GET /tags 响应：仅 items（无 total，分页探测由调用方处理）。 */
@@ -53,4 +56,20 @@ export function fetchTagCatalog(query: TagCatalogQuery = {}): Promise<TagCatalog
 /** 单条标签详情（含 aliases）；未知 tag_id → 404。 */
 export function fetchTagDetail(tagId: string): Promise<TagCatalogDetail> {
   return apiFetch<TagCatalogDetail>(`/api/v1/tags/${tagId}`)
+}
+
+/** 下载当前目录作用域或名称筛选结果的 Excel/XML 压缩包。 */
+export async function downloadTagCatalog(query: Pick<TagCatalogQuery, 'q' | 'scope_id'> = {}): Promise<Blob> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') params.set(key, value)
+  }
+  const search = params.toString()
+  const response = await fetch(`/api/v1/tags/export${search ? `?${search}` : ''}`, {
+    credentials: 'include',
+  })
+  if (!response.ok) {
+    throw new Error(`标签导出失败（HTTP ${response.status}）`)
+  }
+  return response.blob()
 }

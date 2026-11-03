@@ -46,19 +46,15 @@ def test_excel_malformed_rows_reported():
     r = parse_tag_excel(build_xlsx(HEADERS + [
         ["悬疑", "genre", "以悬念为核心"],              # 合法
         [None, "genre", "缺名称"],                      # 行级 missing_field(tag_name)
-        ["数量", "genre"],                              # 行级 missing_field(description)
+        ["数量", "genre"],                              # 描述为空时仍合法
         ["风格", "genre", "d", "aliases列乱填数字", 123],  # bad_type→aliases 数字转字符串"123"
         [None, None, None],                             # 空行跳过
     ]))
-    # 计划原文此处断言 len(r.rows) == 3，经核为笔误：5 条数据行中 2 行报
-    # missing_field（第 3、4 行），末条为空行跳过不产出行，合法行实为 2
-    # （悬疑、风格——风格行 aliases 的数字 123 转字符串）。rows 与 errors
-    # 必须不相交：导入 API 把 rows 原样交给治理流水线，带错误行混入会被
-    # 直接入库（详见 task-6-report）。
-    assert len(r.rows) == 2 and len(r.errors) == 2
+    assert len(r.rows) == 3 and len(r.errors) == 1
     assert {e.code for e in r.errors} == {"missing_field"}
     assert r.errors[0].row_number == 3 and r.errors[0].tag_name is None
-    assert r.rows[1].aliases == ["123"]  # 数字单元格转字符串
+    assert r.rows[1].description == ""
+    assert r.rows[2].aliases == ["123"]  # 数字单元格转字符串
 
 
 def test_header_missing_required():
@@ -107,3 +103,14 @@ def test_hierarchy_template_required_columns():
     assert len(r.errors) == 1
     assert r.errors[0].code == "missing_field"
     assert "二级标签名称" in r.errors[0].detail
+
+
+def test_hierarchy_template_allows_empty_description():
+    r = parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", None, "喜剧", None, None],
+    ]))
+
+    assert not r.errors
+    assert r.rows[-1].tag_name == "喜剧"
+    assert r.rows[-1].description == ""

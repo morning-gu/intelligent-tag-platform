@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 
 REQUIRED_COLUMNS = ("tag_name", "tag_type", "description")
+REQUIRED_VALUE_COLUMNS = ("tag_name", "tag_type")
 OPTIONAL_COLUMNS = ("tag_id", "parent_tag", "aliases", "applicable_scope", "status")
 _ALIAS_SEPARATOR = re.compile(r"[,，;；]")
 
@@ -78,7 +79,7 @@ def build_tag_row(texts: dict[str, str | None]) -> TagRow:
         tag_id=texts.get("tag_id"),
         tag_name=texts["tag_name"],
         tag_type=texts["tag_type"],
-        description=texts["description"],
+        description=texts.get("description") or "",
         parent_tag=texts.get("parent_tag"),
         aliases=split_aliases(texts.get("aliases")),
         applicable_scope=texts.get("applicable_scope"),
