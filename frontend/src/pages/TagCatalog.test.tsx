@@ -1,7 +1,5 @@
-// 标签库页测试（Task 13）：mock apiFetch 按路径分发，覆盖：目录渲染（类型/
-// 状态 Tag、null 兜底）、服务端分页 limit/offset 映射（pageSize+1 探测、
-// 翻页 offset 递进）、type 筛选与 q 搜索传参（提交触发而非输入即触发）、
-// 行点击详情 Drawer（aliases/parent_id/status 展示与加载失败提示）。
+// 标签库页测试：覆盖根节点树状目录、类型/q 筛选、展开子节点、详情 Drawer
+// 与加载失败提示。
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import TagCatalog from './TagCatalog'
@@ -17,7 +15,7 @@ const mockedApiFetch = vi.mocked(apiFetch)
 
 // ---------- 夹具（与后端 TagOut/TagDetail 契约同形） ----------
 
-/** 21 条目录项：第 1 页（pageSize 20）取满后仍有 1 条，可探测到下一页。 */
+/** 平面夹具；树状展开用例另行提供层级数据。 */
 const CATALOG_ITEMS: TagCatalogItem[] = Array.from({ length: 21 }, (_, i) => ({
   tag_id: `t-${String(i + 1).padStart(3, '0')}`,
   tag_name: `标签${i + 1}`,
@@ -25,6 +23,7 @@ const CATALOG_ITEMS: TagCatalogItem[] = Array.from({ length: 21 }, (_, i) => ({
   description: `第 ${i + 1} 个标签的描述`,
   parent_id: null,
   status: i === 1 ? 'deprecate' : 'active',
+  has_children: false,
 }))
 
 const TAG_DETAIL: TagCatalogDetail = {
@@ -56,8 +55,13 @@ function mockApis(options: MockOptions = {}) {
   mockedApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/v1/review/filters') return FILTERS
     if (path === '/api/v1/tags' || path.startsWith('/api/v1/tags?')) {
-      const items = options.items ?? CATALOG_ITEMS
+      const allItems = options.items ?? CATALOG_ITEMS
       const params = new URLSearchParams(path.split('?')[1] ?? '')
+      const items = params.get('parent_id') !== null
+        ? allItems.filter((item) => item.parent_id === params.get('parent_id'))
+        : params.get('root') === 'true'
+          ? allItems.filter((item) => item.parent_id === null)
+          : allItems
       const limit = Number(params.get('limit') ?? items.length)
       const offset = Number(params.get('offset') ?? 0)
       return { items: items.slice(offset, offset + limit) }
@@ -103,12 +107,10 @@ describe('TagCatalog 标签库页', () => {
     const row2 = screen.getByText('标签2').closest('tr')!
     expect(row2).toHaveTextContent('theme')
     expect(row2).toHaveTextContent('废弃')
-    // 第 1 页共 20 行；探测到的第 21 条不进表格
-    expect(screen.getByText('标签20')).toBeInTheDocument()
-    expect(screen.queryByText('标签21')).not.toBeInTheDocument()
+    expect(screen.getByText('标签21')).toBeInTheDocument()
 
     // 首屏参数：pageSize 20 + 1 探测、offset 0 显式发送
-    expect(catalogCallPaths()).toEqual(['/api/v1/tags?limit=21&offset=0'])
+    expect(catalogCallPaths()).toEqual(['/api/v1/tags?root=true'])
   })
 
   it('类型筛选选 scene：携带 type=scene 并重置回第 1 页', async () => {
@@ -122,7 +124,7 @@ describe('TagCatalog 标签库页', () => {
     fireEvent.click(await screen.findByTitle('scene'))
 
     await waitFor(() => expect(catalogCallPaths()).toHaveLength(2))
-    expect(catalogCallPaths()[1]).toBe('/api/v1/tags?type=scene&limit=21&offset=0')
+    expect(catalogCallPaths()[1]).toBe('/api/v1/tags?type=scene&root=true')
   })
 
   it('名称搜索：提交（按钮）触发带 q 重新拉取，输入本身不触发', async () => {
@@ -133,26 +135,89 @@ describe('TagCatalog 标签库页', () => {
     fireEvent.change(screen.getByPlaceholderText('名称/别名搜索'), {
       target: { value: '打斗' },
     })
+
     expect(catalogCallPaths()).toHaveLength(1) // 输入即触发则此处已两次
 
     fireEvent.click(screen.getByRole('button', { name: /搜\s*索/ }))
 
     await waitFor(() => expect(catalogCallPaths()).toHaveLength(2))
-    expect(catalogCallPaths()[1]).toBe(`/api/v1/tags?q=${encodeURIComponent('打斗')}&limit=21&offset=0`)
+    expect(catalogCallPaths()[1]).toBe(`/api/v1/tags?q=${encodeURIComponent('打斗')}`)
   })
 
-  it('翻到第 2 页：offset 递进为 20，剩余探测行进表格', async () => {
-    mockApis()
+  it('点击一级目录行后加载并展示下一级目录', async () => {
+    const root: TagCatalogItem = {
+      tag_id: 'root',
+      tag_name: '内容',
+      tag_type: 'genre',
+      description: '',
+      parent_id: null,
+      status: 'active',
+      has_children: true,
+    }
+    const child: TagCatalogItem = {
+      tag_id: 'child',
+      tag_name: '剧情',
+      tag_type: 'genre',
+      description: '',
+      parent_id: 'root',
+      status: 'active',
+      has_children: false,
+    }
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/review/filters') return FILTERS
+      if (path === '/api/v1/tags?root=true') return { items: [root] }
+      if (path === '/api/v1/tags?parent_id=root') return { items: [child] }
+      throw new Error(`未预期的请求：${path}`)
+    })
     renderTagCatalog()
-    await screen.findByText('标签1')
+    await screen.findByText('内容')
 
-    // 首页 21 条探测到后续页：分页器应给出第 2 页
-    fireEvent.click(await screen.findByTitle('2'))
+    fireEvent.click(screen.getByRole('button', { name: '展开下级目录' }))
 
-    await waitFor(() => expect(catalogCallPaths()[1]).toBe('/api/v1/tags?limit=21&offset=20'))
-    // 第 2 页展示第 21 条（探测行从数据源自然流入）
-    expect(await screen.findByText('标签21')).toBeInTheDocument()
-    expect(screen.queryByText('标签1')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockedApiFetch.mock.calls.some(([path]) => path === '/api/v1/tags?parent_id=root'))
+        .toBe(true)
+    })
+    expect(await screen.findByText('剧情')).toBeInTheDocument()
+  })
+
+  it('搜索子级目录后仍可展开其下级标签', async () => {
+    const directory: TagCatalogItem = {
+      tag_id: 'directory',
+      tag_name: '悬疑',
+      tag_type: 'genre',
+      description: '',
+      parent_id: 'parent',
+      status: 'active',
+      has_children: true,
+    }
+    const child: TagCatalogItem = {
+      tag_id: 'child',
+      tag_name: '反转',
+      tag_type: 'genre',
+      description: '结局反转',
+      parent_id: 'directory',
+      status: 'active',
+      has_children: false,
+    }
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/review/filters') return FILTERS
+      if (path === '/api/v1/tags?root=true') return { items: [] }
+      if (path === '/api/v1/tags?q=%E6%82%AC%E7%96%91') return { items: [directory] }
+      if (path === '/api/v1/tags?parent_id=directory') return { items: [child] }
+      throw new Error(`未预期的请求：${path}`)
+    })
+    renderTagCatalog()
+    await waitFor(() => expect(catalogCallPaths()).toEqual(['/api/v1/tags?root=true']))
+
+    fireEvent.change(screen.getByPlaceholderText('名称/别名搜索'), {
+      target: { value: '悬疑' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /搜\s*索/ }))
+
+    expect(await screen.findByText('悬疑')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开下级目录' }))
+    expect(await screen.findByText('反转')).toBeInTheDocument()
   })
 
   it('行点击打开详情 Drawer：tag_id/类型/描述/父标签/别名渲染', async () => {

@@ -49,7 +49,7 @@ export interface ImportBatchDetail extends ImportBatchSummary {
   summary: ImportSummary | null
 }
 
-/** 上传标签 Excel（multipart，字段 file）：解析 → 治理入库 → 摘要。
+/** 上传标签 Excel/XML（multipart，字段 file）：按扩展名解析 → 治理入库 → 摘要。
  * 注意走 FormData（client 对 FormData 不强设 Content-Type）。 */
 export function importTags(file: File): Promise<ImportResponse> {
   const form = new FormData()

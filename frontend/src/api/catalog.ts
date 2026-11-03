@@ -12,6 +12,8 @@ export interface TagCatalogItem {
   description: string
   parent_id: string | null
   status: string | null
+  has_children?: boolean
+  children?: TagCatalogItem[]
 }
 
 /** 标签详情：列表字段之上展开 aliases 列表（与后端 TagDetail 一致）。 */
@@ -26,6 +28,8 @@ export interface TagCatalogQuery {
   q?: string
   limit?: number
   offset?: number
+  parent_id?: string
+  root?: boolean
 }
 
 /** GET /tags 响应：仅 items（无 total，分页探测由调用方处理）。 */

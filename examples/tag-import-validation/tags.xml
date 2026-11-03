@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+    <level1 name="内容">
+        <level2 name="剧情">
+            <level3 name="悬疑">
+                <tag description="通过线索和冲突制造悬念" type="ai">反转</tag>
+            </level3>
+            <tag description="故事中包含幽默、轻松的表达方式" type="manual">喜剧</tag>
+        </level2>
+    </level1>
+</root>

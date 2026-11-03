@@ -1,6 +1,6 @@
-"""`/api/v1/tags` 路由：标签导入（multipart 上传）与标签查询。
+"""`/api/v1/tags` 路由：标签导入（Excel/XML 上传）与标签查询。
 
-薄路由层：解析（parse_tag_excel）→ 治理（run_governance）→ 响应模型，
+薄路由层：解析（按扩展名选择 Excel/XML）→ 治理（run_governance）→ 响应模型，
 业务规则全部在 tagplatform.governance 与 DB 层，router 只做协议转换与
 错误映射（解析失败/坏表头 → 422；未知 tag_id → 404）。
 """
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_embedder, get_session
 from tagplatform.db.models import ImportBatch, TagCatalog
-from tagplatform.governance import parse_tag_excel, run_governance
+from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
 
 router = APIRouter(prefix="/api/v1/tags")
 
@@ -77,6 +77,7 @@ class TagOut(BaseModel):
     description: str
     parent_id: str | None = None
     status: str | None = None
+    has_children: bool = False
 
 
 class TagListResponse(BaseModel):
@@ -110,19 +111,26 @@ def import_tags(
     session: Session = Depends(get_session),
     embedder=Depends(get_embedder),
 ) -> ImportResponse:
-    """上传标签 Excel：解析 → 治理入库 → 返回批次号与结果摘要。
+    """上传标签 Excel/XML：解析 → 治理入库 → 返回批次号与结果摘要。
 
     同步 def：治理流水线（embed + DB）为阻塞操作，走线程池不占事件循环。
     """
     data = file.file.read()
+    filename = (file.filename or "").lower()
+    looks_like_xml = data.lstrip().startswith(b"<")
     try:
-        parsed = parse_tag_excel(data)
+        if filename.endswith(".xml") or looks_like_xml:
+            parsed = parse_tag_xml(data)
+        elif filename.endswith(".xlsx"):
+            parsed = parse_tag_excel(data)
+        else:
+            raise HTTPException(status_code=422, detail="仅支持 .xlsx 或 .xml 文件")
+    except HTTPException:
+        raise
     except Exception:
-        # openpyxl 对损坏/非 xlsx 字节抛多种异常（BadZipFile、
-        # InvalidFileException 等，Task 6 约定由本层捕获映射）：统一 422。
-        # 保留宽捕获（openpyxl 异常族宽，收窄反而漏），记录堆栈便于排查
-        logger.exception("Excel 解析失败: %s", file.filename or "upload")
-        raise HTTPException(status_code=422, detail="文件无法解析为 xlsx 表格")
+        # 解析器异常类型分别来自 openpyxl 与 ElementTree，统一映射为 422。
+        logger.exception("标签文件解析失败: %s", file.filename or "upload")
+        raise HTTPException(status_code=422, detail="文件无法解析为有效的 XML 或 xlsx 文件")
     if parsed.header_error:
         # 缺必需表头列：422，detail 为解析层给出的错误说明
         raise HTTPException(status_code=422, detail=parsed.header_error)
@@ -135,7 +143,7 @@ def import_tags(
     parse_errors = [ParseErrorOut(**asdict(e)) for e in parsed.errors]
     batch = session.get(ImportBatch, result.batch_id)
     if batch is not None:
-        batch.file_name = file.filename or "upload.xlsx"
+        batch.file_name = file.filename or "upload"
         summary_data = json.loads(batch.result_summary)
         summary_data["parse_errors"] = [asdict(e) for e in parsed.errors]
         batch.result_summary = json.dumps(summary_data, ensure_ascii=False)
@@ -157,12 +165,18 @@ def import_tags(
 def list_tags(
     type_: str | None = Query(None, alias="type"),
     q: str | None = Query(None),
+    parent_id: str | None = Query(None),
+    root: bool = Query(False),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
 ) -> TagListResponse:
     """标签目录列表：type 精确过滤；q 对 tag_name 与 aliases 子串匹配。"""
     query = session.query(TagCatalog)
+    if root:
+        query = query.filter(TagCatalog.parent_id.is_(None))
+    elif parent_id is not None:
+        query = query.filter(TagCatalog.parent_id == parent_id)
     if type_ is not None:
         query = query.filter(TagCatalog.tag_type == type_)
     if q:
@@ -181,6 +195,9 @@ def list_tags(
             description=t.description,
             parent_id=t.parent_id,
             status=t.status,
+            has_children=session.query(TagCatalog.tag_id)
+            .filter(TagCatalog.parent_id == t.tag_id)
+            .first() is not None,
         )
         for t in rows
     ])

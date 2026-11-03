@@ -75,6 +75,32 @@ def test_import_excel_via_api(client):
     assert detail.json()["aliases"] == ["悬念", "推理"]
 
 
+def test_import_xml_via_api(client):
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <root>
+      <level1 name="内容">
+        <level2 name="剧情">
+          <tag description="带有喜剧元素" type="manual">喜剧</tag>
+        </level2>
+      </level1>
+    </root>""".encode()
+    resp = client.post("/api/v1/tags/import", files={"file": ("tags.xml", xml)})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["total"] == 3
+    assert body["summary"]["inserted"] == 3
+    assert client.get("/api/v1/tags?q=喜剧").json()["items"][0]["tag_type"] == "genre"
+
+
+def test_import_xml_detected_by_content(client):
+    xml = "<root><level1 name='内容'><level2 name='剧情'/></level1></root>".encode()
+    resp = client.post("/api/v1/tags/import", files={"file": ("tags", xml)})
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["inserted"] == 2
+
+
 def test_import_twice_reports_duplicates(client):
     resp1 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
     resp2 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})

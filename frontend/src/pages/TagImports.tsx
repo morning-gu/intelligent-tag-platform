@@ -1,4 +1,4 @@
-// 标签导入页（Task 13）：Excel 标签库上传导入 + 批次历史。
+// 标签导入页（Task 13）：Excel/XML 标签库上传导入 + 批次历史。
 // - 上传（AntD Upload 手动模式）：beforeUpload 拦截改由 apiFetch 走
 //   POST /tags/import（multipart FormData，client 对 FormData 不强设
 //   Content-Type）；成功展示结果摘要（total/inserted/skipped 统计 +
@@ -237,10 +237,10 @@ export default function TagImports() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Card title="上传标签 Excel">
+      <Card title="上传标签文件">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Upload
-            accept=".xlsx"
+            accept=".xlsx,.xml"
             maxCount={1}
             showUploadList={false}
             disabled={uploading}
@@ -250,7 +250,7 @@ export default function TagImports() {
             }}
           >
             <Button type="primary" loading={uploading}>
-              选择 Excel 文件上传
+              选择 Excel/XML 文件上传
             </Button>
           </Upload>
           {uploadResult !== null && (
