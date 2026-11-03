@@ -39,11 +39,70 @@ from tagplatform.generation import GenerationPolicy, GenerationSpec, get_produce
 from tagplatform.generation.recall import embed_content_texts, recall_by_type
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
-from tagplatform.schemas import ContentJSON, parse_content
+from tagplatform.content_io import load_content
+from tagplatform.schemas import ContentJSON
 from tagplatform.settings import get_settings
 from tagplatform.vectors import encode_vector
 
 logger = logging.getLogger(__name__)
+
+
+# prompt 明细注入上限：长片场景多，防止 content 文本无界增长（token 成本）
+_MAX_CAST_LINES = 8
+_MAX_DIALOGUE_LINES = 3
+_MAX_AUDIO_EVENTS = 2
+_MAX_CHARACTER_EMOTIONS = 6
+
+
+def _render_cast_line(content: ContentJSON) -> str | None:
+    """角色表 → 单行 "人物：..."（无角色返回 None，保证老数据渲染逐字不变）。"""
+    cast = content.content.characters
+    if not cast:
+        return None
+    names = [
+        f"{ch.name}（{ch.description}）" if ch.description else ch.name
+        for ch in cast[:_MAX_CAST_LINES]
+    ]
+    return "人物：" + "、".join(names)
+
+
+def _render_scene_details(scene) -> list[str]:
+    """单场景的上游扩展明细（氛围 / 地点 / 声音 / 台词）。
+
+    缩进行、不以 "- " 开头：与场景行 `- {scene_id} [start-end] desc` 的
+    解析契约（llm/mock.py _SCENE_LINE_RE）天然互斥，不会污染证据解析。
+    """
+    lines: list[str] = []
+    if scene.emotions:
+        lines.append("  氛围：" + "、".join(scene.emotions))
+    emotions = [f"{ce.character}（{ce.emotion}）"
+                for ce in scene.character_emotions[:_MAX_CHARACTER_EMOTIONS]]
+    if not emotions:
+        # 严格贴模板的内容里没有场景级人物情绪：从台词情绪回推，别让标签丢掉
+        # 这条证据（沉默角色仍拿不到，这是模板的建模边界）
+        seen: set[str] = set()
+        for dialogue in scene.dialogues:
+            tone = dialogue.emotion.text_emotion if dialogue.emotion else None
+            speaker = dialogue.speaker_name or dialogue.speaker
+            if tone and speaker and speaker not in seen:
+                seen.add(speaker)
+                emotions.append(f"{speaker}（{tone}）")
+            if len(emotions) >= _MAX_CHARACTER_EMOTIONS:
+                break
+    if emotions:
+        lines.append("  人物情绪：" + "、".join(emotions))
+    if scene.location:
+        lines.append(f"  地点：{scene.location}")
+    if scene.background_music:
+        lines.append(f"  音乐：{scene.background_music}")
+    for event in scene.audio_events[:_MAX_AUDIO_EVENTS]:
+        lines.append(f"  声音：{event.description}")
+    for dialogue in scene.dialogues[:_MAX_DIALOGUE_LINES]:
+        tone = ""
+        if dialogue.emotion and dialogue.emotion.text_emotion:
+            tone = f"（{dialogue.emotion.text_emotion}）"
+        lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
+    return lines
 
 
 def _render_content_text(content: ContentJSON) -> str:
@@ -54,15 +113,24 @@ def _render_content_text(content: ContentJSON) -> str:
     《示例电影》
     摘要：影片整体剧情摘要
     - scene_001 [120000-180000] 两名人物在仓库中发生激烈争执
+
+    2026-11 上游对接增量：摘要后可有 "人物：" 一行；每个场景行之后可跟
+    缩进的明细行（氛围/地点/声音/台词）。老数据（无角色/情绪/音频/台词）
+    渲染结果与扩展前逐字一致——场景行格式是 MockLLM 证据解析的契约，
+    不能改。
     """
-    header = f"《{content.asset.title}》\n摘要：{content.content.summary}\n"
-    scene_lines = [
-        f"- {scene.scene_id}"
-        f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
-        f" {scene.description}"
-        for scene in content.content.scenes
-    ]
-    return header + "\n".join(scene_lines)
+    parts: list[str] = [f"《{content.asset.title}》",
+                        f"摘要：{content.content.summary}"]
+    cast = _render_cast_line(content)
+    if cast:
+        parts.append(cast)
+    for scene in content.content.scenes:
+        parts.append(
+            f"- {scene.scene_id}"
+            f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
+            f" {scene.description}")
+        parts.extend(_render_scene_details(scene))
+    return "\n".join(parts)
 
 
 def _render_candidates_text(candidates: list[TagCatalog]) -> str:
@@ -87,7 +155,7 @@ def run_generation_task(task_id: str, session: Session, llm,
     八步流程（计划钉死）：
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
     2. context 缺失 → failed + error、commit、返回 task；
-    3. parse_content(json.loads(context.content_json))；资产 id 取
+    3. load_content(context.content_json)；资产 id 取
        content.asset.asset_id（缺省回落 context.asset_id）；
     4. get_producer(task.mode)；closed 额外召回候选组装 candidates 文本，
        render_prompt 渲染激活模板（open 模板无 candidates 占位符，只传 content）；
@@ -120,7 +188,7 @@ def run_generation_task(task_id: str, session: Session, llm,
 
     try:
         # 3. 内容解析与资产归属
-        content = parse_content(json.loads(context.content_json))
+        content = load_content(context.content_json)
         asset_id = content.asset.asset_id or context.asset_id
         # 4. producer 分发与 prompt 组装渲染
         producer = get_producer(task.mode)

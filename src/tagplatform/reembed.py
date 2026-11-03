@@ -1,4 +1,4 @@
-"""一次性向量迁移：存量无前缀向量 → e5 role 前缀空间重嵌（2026-11-02）。
+﻿"""一次性向量迁移：存量无前缀向量 → e5 role 前缀空间重嵌（2026-11-02）。
 
 背景：LocalEmbedder 落地 query:/passage: 前缀后，历史入库向量（无前缀
 空间）与新向量不在同一空间——本模块把 tag_catalog / media_context 的
@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from tagplatform.db.models import MediaContext, TagCatalog
+from tagplatform.content_io import load_content
 from tagplatform.schemas import parse_content
 from tagplatform.vectors import encode_vector
 
@@ -65,7 +66,7 @@ def reembed_all(session: Session, embedder) -> ReembedSummary:
             row.updated_at = now
     if context_rows:
         texts = [
-            parse_content(json.loads(row.content_json)).content.summary
+            load_content(row.content_json).content.summary
             for row in context_rows
         ]
         vecs = embedder.embed(texts, role="passage")

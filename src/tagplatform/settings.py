@@ -60,6 +60,20 @@ class Settings(BaseSettings):
     # 上传视频落盘根目录（TAGPLT_MEDIA_ROOT 可覆盖）；上传时按需创建目录
     media_root: str = "data/media/"
 
+    # ---------- 阶段 5：上传即生成资产（2026-11） ----------
+
+    # 数据集根目录（MovieNet）；上传文件名命中后从这里取标注与关键帧
+    dataset_root: str = "/cache/MovieNet"
+    # 每场景抽几张关键帧喂多模态模型
+    asset_frames: int = 3
+    # 场景级并发（生成资产的模型调用）
+    asset_workers: int = 4
+    # 每场景最多带几行字幕（台词进资产，但全量会让 JSON 涨 8 倍）
+    asset_dialogue_limit: int = 5
+    # 是否让模型推断数据集没有的字段（中文描述/氛围/事件/说话人/剧情时间地点）。
+    # False = 只填数据集事实，一次模型调用都不发。
+    asset_infer: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

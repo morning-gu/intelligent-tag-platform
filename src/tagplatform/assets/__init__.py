@@ -1,0 +1,73 @@
+﻿"""资产构建包出口：数据集影片 → 上游契约格式的资产 JSON。"""
+
+from tagplatform.assets.builder import (
+    ASSET_BUILDER_VERSION,
+    AssetBuilder,
+    CastIndex,
+    MovieStats,
+    ScenePlan,
+    assemble_asset,
+    encode_image,
+    parse_scene_result,
+    parse_summary_result,
+    pick_keyframes,
+    plan_scenes,
+    renumber_ids,
+    scene_messages,
+    source_tag,
+    summary_messages,
+)
+from tagplatform.assets.emotions import (
+    FEELINGS,
+    MOODS,
+    prompt_catalog,
+    to_emotion,
+    to_emotions,
+)
+from tagplatform.assets.dataset import (
+    MatchResult,
+    MovieEntry,
+    build_index,
+    match,
+    normalize,
+    parse_filename,
+)
+from tagplatform.assets.subtitles import (
+    SubtitleLine,
+    lines_for_scene,
+    load_subtitles,
+    parse_srt,
+)
+
+__all__ = [
+    "ASSET_BUILDER_VERSION",
+    "AssetBuilder",
+    "CastIndex",
+    "MatchResult",
+    "MovieEntry",
+    "MovieStats",
+    "ScenePlan",
+    "FEELINGS",
+    "MOODS",
+    "SubtitleLine",
+    "assemble_asset",
+    "build_index",
+    "encode_image",
+    "lines_for_scene",
+    "load_subtitles",
+    "match",
+    "normalize",
+    "parse_filename",
+    "parse_scene_result",
+    "parse_srt",
+    "parse_summary_result",
+    "pick_keyframes",
+    "plan_scenes",
+    "renumber_ids",
+    "prompt_catalog",
+    "to_emotion",
+    "to_emotions",
+    "scene_messages",
+    "source_tag",
+    "summary_messages",
+]

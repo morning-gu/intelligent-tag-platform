@@ -1,40 +1,59 @@
-"""`/api/v1/media/upload` 上传占位路由（阶段 4 任务 4）。
+"""`/api/v1/media/*` 上传与「上传即生成资产」路由。
 
-占位语义：上传即登记（存文件 + media_asset 行），**不做识别**——
-无 media_context、无转码，内容详情由前端提示"未导入识别内容"。
+上传语义（2026-11 起）：登记资产（存文件 + media_asset 行），并用**文件名**
+去数据集里匹配影片——命中就建一条后台生成任务，逐场景跑多模态模型，把
+生成结果以同一条资产的 asset_id 导入平台；没命中就是普通占位资产。
 
-权限说明（设计如此，报告注明）：登录即可上传，未设 admin 门槛——
-与其他业务 router 一致经 create_app include 时统一挂 protected_deps
-（api/__init__.py），不额外加 require_admin。
+这样前端只需"选一个 mp4"，不需要填片名：文件名带片名即可
+（`The.Godfather.1972.1080p.mkv`），带 IMDb id（`tt0068646.mp4`）最准。
 
-薄路由层：后缀白名单 / 大小上限 / uuid 存盘 / 资产行登记全部在核心层
-tagplatform.media，本 router 只做 multipart 提取与错误映射：
+权限说明（设计如此，报告注明）：登录即可上传，未设 admin 门槛——与其他业务
+router 一致经 create_app include 时统一挂 protected_deps。
+
+薄路由层：后缀白名单 / 大小上限 / uuid 存盘 / 资产行登记在核心层
+tagplatform.media；匹配与生成编排在 tagplatform.asset_build；本 router 只做
+multipart 提取与错误映射：
 - 后缀非白名单（UnsupportedVideoFormat）→ 422 {"detail": "不支持的视频格式"}；
-- 超上限（UploadTooLarge）→ 413，两条拦截路径：
-  - Content-Length 头早拒（端点体首步）：诚实客户端的 2GB+ 上传无需
-    再复制落盘到 media_root 即拒。注意 FastAPI 在依赖求解前已收完并
-    解析 multipart（starlette 磁盘 spool，内存不上爆），处理器内检查
-    无法早于收包——真正的预读拦截需全局中间件，超出本任务范围；
-  - 流式累计超限（核心层兜底）：防分块传输 / 头缺失 / 伪造小头。
+- 超上限（UploadTooLarge）→ 413，两条拦截路径（Content-Length 头早拒 +
+  核心层流式累计兜底）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from tagplatform import media
+from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
+from tagplatform.db.models import AssetBuildTask, MediaAsset
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
 
 
 class MediaUploadResponse(BaseModel):
-    """上传响应：新资产标识 + 标题（原名去后缀）+ 落盘绝对路径。"""
+    """上传响应：资产标识 + 标题 + 落盘路径 + 数据集匹配与任务信息。"""
 
     asset_id: str
     title: str
     video_uri: str
+    # 文件名命中数据集时非空，前端据此轮询 build_status
+    movie_id: str | None = None
+    matched_title: str | None = None
+    match_how: str | None = None
+    build_task_id: str | None = None
+
+
+class BuildTaskOut(BaseModel):
+    """生成任务进度：前端轮询「正在分析第 done/total 个场景」。"""
+
+    task_id: str
+    asset_id: str
+    movie_id: str
+    status: str
+    total_scenes: int
+    done_scenes: int
+    error: str | None = None
 
 
 def enforce_upload_size_limit(request: Request) -> None:
@@ -54,25 +73,142 @@ def enforce_upload_size_limit(request: Request) -> None:
 def upload_media(
     request: Request,
     file: UploadFile,
+    asset_id: str | None = Form(None),
+    auto_build: bool = Form(True),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaUploadResponse:
-    """上传视频占位登记：存文件 + 建 media_asset（不做识别）。
+    """上传视频：登记资产；文件名命中数据集则异步生成资产内容。
 
     同步 def：磁盘落盘与登记为阻塞操作，走线程池不占事件循环。进入本
     函数时 multipart 已由 FastAPI 收完解析（磁盘 spool，内存不上爆），
     先按 Content-Length 头早拒，再交核心层流式落盘与登记。
     """
     enforce_upload_size_limit(request)
+    filename = file.filename or ""
+    asset_id = (asset_id or "").strip() or None
+
+    # 客户端显式指定 asset_id 时只允许"预留主键"：已绑定视频的资产不能被
+    # 覆盖，否则任何登录用户都能把别人的视频换掉。自动匹配出的
+    # movie_<id> 不受此限——那代表同一部片的重复上传，覆盖是预期行为。
+    if asset_id is not None:
+        existing = session.get(MediaAsset, asset_id)
+        if existing is not None and existing.video_uri:
+            raise HTTPException(
+                status_code=409,
+                detail="资产已绑定视频，不能通过上传覆盖") from None
+
+    # 先匹配再存盘：命中数据集时资产直接用 movie_<id> 作为主键，
+    # 重复上传同一部片不会产生一堆 asset_xxxx 孤儿行
+    matched = asset_build.match_filename(filename, settings.dataset_root)
+    if matched is not None and asset_id is None:
+        asset_id = f"movie_{matched.movie.movie_id}"
+
     try:
         stored = media.save_upload(
-            file.file, file.filename or "", session, settings.media_root)
+            file.file, filename, session, settings.media_root,
+            asset_id=asset_id)
     except media.UnsupportedVideoFormat:
         raise HTTPException(
             status_code=422, detail="不支持的视频格式") from None
     except media.UploadTooLarge:
         raise HTTPException(
             status_code=413, detail="文件大小超出上传上限") from None
+
+    task = None
+    if matched is not None and auto_build:
+        task = asset_build.create_task(session, stored.asset_id,
+                                       matched.movie.movie_id)
+        asset_build.submit(task.task_id, settings)
+
     return MediaUploadResponse(
-        asset_id=stored.asset_id, title=stored.title, video_uri=stored.video_uri
+        asset_id=stored.asset_id,
+        title=stored.title,
+        video_uri=stored.video_uri,
+        movie_id=matched.movie.movie_id if matched else None,
+        matched_title=matched.movie.title if matched else None,
+        match_how=matched.how if matched else None,
+        build_task_id=task.task_id if task else None,
+    )
+
+
+@router.get("/media/build-tasks/{task_id}", response_model=BuildTaskOut)
+def get_build_task(task_id: str, session: Session = Depends(get_session)) -> BuildTaskOut:
+    """查询生成任务进度；未知 task_id → 404。"""
+    task = session.get(AssetBuildTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return _task_out(task)
+
+
+@router.get("/media/build-tasks", response_model=list[BuildTaskOut])
+def list_build_tasks(asset_id: str | None = None,
+                     session: Session = Depends(get_session)) -> list[BuildTaskOut]:
+    """任务列表：按 asset_id 过滤，创建时间降序。"""
+    query = session.query(AssetBuildTask)
+    if asset_id:
+        query = query.filter(AssetBuildTask.asset_id == asset_id)
+    rows = query.order_by(AssetBuildTask.created_at.desc()).all()
+    return [_task_out(row) for row in rows]
+
+
+_PROGRESS_PAGE = """<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>生成进度</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;margin:40px auto;
+max-width:640px;padding:0 20px;color:#1f2328}
+h1{font-size:18px;margin:0 0 4px}
+.bar{height:10px;background:#eaeef2;border-radius:6px;overflow:hidden;margin:18px 0 8px}
+.fill{height:100%;width:0;background:#2f81f7;transition:width .4s}
+.meta{color:#59636e;font-size:13px}
+.ok{color:#1a7f37}.bad{color:#cf222e}
+code{background:#f6f8fa;padding:1px 5px;border-radius:4px;font-size:13px}
+</style></head><body>
+<h1>资产生成进度</h1>
+<div class="meta">任务 <code>__TASK__</code></div>
+<div class="bar"><div class="fill" id="fill"></div></div>
+<div id="line" class="meta">读取中…</div>
+<div id="extra" class="meta" style="margin-top:14px"></div>
+<script>
+const TASK = "__TASK__";
+async function tick(){
+  try{
+    const r = await fetch("/api/v1/media/build-tasks/" + TASK, {credentials:"include"});
+    if(!r.ok){ document.getElementById("line").textContent = "查询失败 HTTP " + r.status; return; }
+    const t = await r.json();
+    const pct = t.total_scenes ? Math.round(100*t.done_scenes/t.total_scenes) : 0;
+    document.getElementById("fill").style.width = pct + "%";
+    const label = {queued:"排队中",running:"生成中",succeeded:"已完成",failed:"失败"}[t.status] || t.status;
+    const line = document.getElementById("line");
+    line.textContent = label + "  " + t.done_scenes + "/" + (t.total_scenes || "?") + " 场景  (" + pct + "%)";
+    line.className = "meta " + (t.status==="succeeded"?"ok":t.status==="failed"?"bad":"");
+    const extra = document.getElementById("extra");
+    if(t.status === "succeeded"){
+      extra.innerHTML = "资产 <code>" + t.asset_id + "</code> 已可查看（素材页刷新即可）。";
+    } else if(t.status === "failed"){
+      extra.textContent = "错误：" + (t.error || "未知");
+    }
+    if(t.status === "succeeded" || t.status === "failed") return;
+  }catch(e){ document.getElementById("line").textContent = "网络错误：" + e; }
+  setTimeout(tick, 2000);
+}
+tick();
+</script></body></html>"""
+
+
+@router.get("/media/build-tasks/{task_id}/view", response_class=HTMLResponse,
+            include_in_schema=False)
+def build_task_view(task_id: str, session: Session = Depends(get_session)) -> HTMLResponse:
+    """进度页（不依赖前端构建）：浏览器打开即自动轮询，替代 dist 里缺失的进度条。"""
+    if session.get(AssetBuildTask, task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return HTMLResponse(_PROGRESS_PAGE.replace("__TASK__", task_id))
+
+
+def _task_out(task: AssetBuildTask) -> BuildTaskOut:
+    return BuildTaskOut(
+        task_id=task.task_id, asset_id=task.asset_id, movie_id=task.movie_id,
+        status=task.status, total_scenes=task.total_scenes,
+        done_scenes=task.done_scenes, error=task.error,
     )

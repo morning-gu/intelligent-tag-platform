@@ -35,6 +35,42 @@ def test_content_import_via_api(client):
     assert full.json()["content"]["summary"]
 
 
+VISION_PAYLOAD = {
+    "schema_version": "1.0",
+    "asset": {"asset_id": "movie_vision_api", "asset_type": "movie",
+              "title": "上游格式样例", "duration_ms": 3_600_000, "language": "zh-CN"},
+    "content": {
+        "description": "一名记者追查旧案，发现自己父亲当年被冤枉。",
+        "characters": [{"character_id": "c1", "name": "周野", "description": "记者"}],
+        "scenes": [{
+            "scene_id": "s1", "start_ms": 0, "end_ms": 60_000,
+            "description": "档案室翻找卷宗，灰尘在光柱里浮动。",
+            "character_ids": ["c1"],
+            "emotion": [{"name": "压抑"}],
+            "dialogues": [{"speaker_id": "c1", "speaker_name": "周野",
+                           "text": "这份笔录的签名是伪造的。",
+                           "start_ms": 10_000, "end_ms": 13_000}],
+            "audio_events": [{"event_type": "background_music",
+                              "description": "单音钢琴", "start_ms": 0, "end_ms": 60_000}],
+        }],
+    },
+}
+
+
+def test_content_import_vision_kind(client):
+    """kind="vision"：上游格式经适配器落库，字段进入统一内容 JSON。"""
+    resp = client.post("/api/v1/content/import", json={
+        "kind": "vision", "video_root": None, "data": VISION_PAYLOAD})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ctx = client.get(
+        f"/api/v1/assets/{body['asset_id']}/contexts/{body['context_id']}").json()
+    assert ctx["metadata"]["source"] == "video_understanding"
+    assert ctx["content"]["characters"][0]["name"] == "周野"
+    assert ctx["content"]["scenes"][0]["emotions"] == ["压抑"]
+    assert ctx["content"]["scenes"][0]["audio_events"][0]["event_type"] == "background_music"
+
+
 def test_content_import_bad_video_root_422(client):   # Review Focus 4
     resp = client.post("/api/v1/content/import", json={
         "kind": "platform", "video_root": "Z:/不存在", "data": CONTENT_FIXTURE_DICT})
@@ -68,7 +104,8 @@ def test_content_import_bad_data_422(client):
 
 
 def test_adapters_endpoint(client):
-    assert client.get("/api/v1/adapters").json() == ["platform"]
+    # 排序返回：platform（平台标准格式）+ vision（上游视频理解格式）
+    assert client.get("/api/v1/adapters").json() == ["platform", "vision"]
 
 
 def test_assets_list_and_filters(client):

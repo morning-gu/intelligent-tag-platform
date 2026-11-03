@@ -297,7 +297,6 @@ PROMPT_V1_SEED = (
     },
 )
 
-
 @event.listens_for(PromptTemplate.__table__, "after_create")
 def _seed_prompt_v1(target, connection, **kw):
     """prompt_template 建表后自动播种 v1 激活模板（仅 Base.metadata.create_all
@@ -326,3 +325,26 @@ class UserAccount(Base):
     # 取值 admin|reviewer
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AssetBuildTask(Base):
+    """上传视频后自动生成资产的后台任务（前端轮询进度）。
+
+    status 取值 queued|running|succeeded|failed；done_scenes/total_scenes 供
+    前端显示「正在分析第 N/M 个场景」。asset_id 指向上传时登记的媒体资产，
+    生成完成后由内容导入服务写入同一 asset_id 的 media_context。
+    """
+
+    __tablename__ = "asset_build_task"
+
+    task_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    asset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("media_asset.asset_id"), nullable=False, index=True
+    )
+    movie_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    total_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    done_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
