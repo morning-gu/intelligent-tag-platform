@@ -114,10 +114,8 @@ def test_valve_cascade_no_silent_strand(session):
     inserted_names = {t.tag_name for t in session.query(TagCatalog).all() if t.tag_id in res.inserted}
     assert inserted_names | set(by_name) == {"甲", "乙", "丙"}
 
-def test_deprecated_same_name_blocks_import(session):
-    """修复 2：库内存在 status='deprecate' 同名标签时再导入——报 duplicate_name
-    （detail 注明已废弃），不逃逸 IntegrityError，批次摘要照常落库，库内计数不变。
-    """
+def test_deprecated_same_name_is_reactivated_on_import(session):
+    """停用标签按相同目录再次导入时恢复为启用。"""
     now = datetime.now(timezone.utc)
     session.add(TagCatalog(
         tag_id="tag_dep0001", tag_name="悬疑", tag_type="genre",
@@ -128,12 +126,11 @@ def test_deprecated_same_name_blocks_import(session):
     res = run_governance(
         [TagRow(None, "悬疑", "genre", "以悬念为核心", None, [], None, None)],
         session, MOCK_EMBEDDER)
-    assert res.inserted == []
-    assert res.issues[0].code == "duplicate_name"
-    assert "已废弃" in res.issues[0].detail and "tag_dep0001" in res.issues[0].detail
-    # run_governance 正常返回（原先 IntegrityError 逃逸导致批次整批作废不落库）
+    assert res.inserted == ["tag_dep0001"]
+    assert res.issues == []
     assert session.get(ImportBatch, res.batch_id) is not None
     assert session.query(TagCatalog).count() == 1
+    assert session.get(TagCatalog, "tag_dep0001").status == "active"
 
 def test_tag_type_invalid_precedes_semantic(session, monkeypatch):
     # 顺序对齐（控制器裁决）：类型非法先于语义检查判定——非法类型不付

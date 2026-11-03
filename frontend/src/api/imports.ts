@@ -66,3 +66,19 @@ export function fetchImportBatches(): Promise<ImportBatchSummary[]> {
 export function fetchImportBatch(batchId: string): Promise<ImportBatchDetail> {
   return apiFetch<ImportBatchDetail>(`/api/v1/import/batches/${batchId}`)
 }
+
+/** 下载指定导入批次的 Excel/XML 压缩包。 */
+export async function downloadImportBatch(batchId: string): Promise<Blob> {
+  const response = await fetch(`/api/v1/import/batches/${batchId}/export`, {
+    credentials: 'include',
+  })
+  if (!response.ok) throw new Error(`批次导出失败（HTTP ${response.status}）`)
+  return response.blob()
+}
+
+/** 撤销已完成的导入批次。 */
+export function revokeImportBatch(batchId: string): Promise<ImportBatchSummary> {
+  return apiFetch<ImportBatchSummary>(`/api/v1/import/batches/${batchId}/revoke`, {
+    method: 'POST',
+  })
+}

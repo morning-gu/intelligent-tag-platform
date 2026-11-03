@@ -97,6 +97,21 @@ def test_export_tags_as_xlsx_and_xml(client):
     assert xml_root.find("tag").text == "悬疑"
 
 
+def test_import_allows_same_tag_name_under_different_parents(client):
+    payload = build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", None, "其他", "", None],
+        ["风格", "视觉", None, "其他", "", None],
+    ])
+    resp = client.post("/api/v1/tags/import", files={"file": ("scoped.xlsx", payload)})
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["inserted"] == 6
+    matches = client.get("/api/v1/tags?q=其他").json()["items"]
+    assert len(matches) == 2
+    assert {item["tag_name"] for item in matches} == {"其他"}
+
+
 def test_import_xml_via_api(client):
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <root>
@@ -202,6 +217,95 @@ def test_batch_list_and_detail(client):
 
     # 未知批次 → 404
     assert client.get("/api/v1/import/batches/batch_none").status_code == 404
+
+
+def test_revoke_batch_exports_and_removes_imported_tags(client):
+    imported = client.post("/api/v1/tags/import", files={"file": ("revoke.xlsx", XLSX_BYTES)})
+    batch_id = imported.json()["batch_id"]
+
+    exported = client.get(f"/api/v1/import/batches/{batch_id}/export")
+    assert exported.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        assert set(archive.namelist()) == {"tags-export.xlsx", "tags-export.xml"}
+
+    revoked = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
+    assert client.get(f"/api/v1/import/batches/{batch_id}").json()["status"] == "revoked"
+    assert client.get("/api/v1/tags?q=悬疑").json()["items"] == []
+
+    again = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
+    assert again.status_code == 409
+
+    reimported = client.post(
+        "/api/v1/tags/import",
+        files={"file": ("reimport.xlsx", XLSX_BYTES)},
+    )
+    assert reimported.status_code == 200
+    assert reimported.json()["summary"]["inserted"] == 1
+
+
+def test_revoke_nested_batch_does_not_violate_parent_foreign_key(client):
+    imported = client.post(
+        "/api/v1/tags/import",
+        files={"file": ("nested.xlsx", build_xlsx([
+            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+            ["内容", "剧情", "悬疑", "反转", "", None],
+        ]))},
+    )
+    batch_id = imported.json()["batch_id"]
+
+    revoked = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
+    assert revoked.status_code == 200
+    assert client.get("/api/v1/tags?root=true").json()["items"] == []
+
+
+def test_deactivate_reactivate_and_reimport_tag(client):
+    imported = client.post("/api/v1/tags/import", files={"file": ("status.xlsx", XLSX_BYTES)})
+    tag_id = client.get("/api/v1/tags?q=悬疑").json()["items"][0]["tag_id"]
+
+    stopped = client.post(f"/api/v1/tags/{tag_id}/deactivate")
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "deprecate"
+
+    reimported = client.post("/api/v1/tags/import", files={"file": ("status-again.xlsx", XLSX_BYTES)})
+    assert reimported.status_code == 200
+    assert reimported.json()["summary"]["inserted"] == 1
+    assert client.get(f"/api/v1/tags/{tag_id}").json()["status"] == "active"
+
+
+def test_delete_tag_cleans_empty_parent_directories(client):
+    imported = client.post(
+        "/api/v1/tags/import",
+        files={"file": ("delete.xlsx", build_xlsx([
+            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+            ["内容", "剧情", None, "反转", "", None],
+        ]))},
+    )
+    assert imported.status_code == 200
+    tag_id = client.get("/api/v1/tags?q=反转").json()["items"][0]["tag_id"]
+
+    deleted = client.delete(f"/api/v1/tags/{tag_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["parent_id"] is None
+    assert client.get("/api/v1/tags?root=true").json()["items"] == []
+
+
+def test_delete_tag_keeps_non_empty_parent(client):
+    client.post(
+        "/api/v1/tags/import",
+        files={"file": ("delete-two.xlsx", build_xlsx([
+            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+            ["内容", "剧情", None, "反转", "", None],
+            ["内容", "剧情", None, "悬疑", "", None],
+        ]))},
+    )
+    tag_id = client.get("/api/v1/tags?q=反转").json()["items"][0]["tag_id"]
+
+    deleted = client.delete(f"/api/v1/tags/{tag_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["parent_name"] == "剧情"
+    assert client.get("/api/v1/tags?q=悬疑").json()["items"]
 
 
 def test_tag_404(client):

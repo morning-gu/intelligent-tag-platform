@@ -87,7 +87,7 @@ def _parse_hierarchy_excel(
     """解析六列层级标签模板，并转换为通用 TagRow。"""
     result = ExcelParseResult()
     required = ("一级标签名称", "二级标签名称", "标签")
-    hierarchy_names: set[str] = set()
+    hierarchy_names: set[tuple[str | None, str]] = set()
     for row_number, cells in enumerate(
             worksheet.iter_rows(min_row=2, values_only=True), start=2):
         if all(
@@ -130,9 +130,10 @@ def _parse_hierarchy_excel(
             (texts["三级标签名称"], texts["二级标签名称"]),
         )
         for hierarchy_name, parent_name in hierarchy:
-            if hierarchy_name is None or hierarchy_name in hierarchy_names:
+            hierarchy_key = (parent_name, hierarchy_name)
+            if hierarchy_name is None or hierarchy_key in hierarchy_names:
                 continue
-            hierarchy_names.add(hierarchy_name)
+            hierarchy_names.add(hierarchy_key)
             result.rows.append(TagRow(
                 tag_id=None,
                 tag_name=hierarchy_name,

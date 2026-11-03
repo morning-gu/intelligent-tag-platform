@@ -114,3 +114,15 @@ def test_hierarchy_template_allows_empty_description():
     assert not r.errors
     assert r.rows[-1].tag_name == "喜剧"
     assert r.rows[-1].description == ""
+
+
+def test_hierarchy_template_allows_same_tag_name_under_different_directories():
+    r = parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", None, "其他", "", None],
+        ["风格", "视觉", None, "其他", "", None],
+    ]))
+
+    assert not r.errors
+    assert [row.tag_name for row in r.rows if row.tag_name == "其他"] == ["其他", "其他"]
+    assert [row.parent_tag for row in r.rows if row.tag_name == "其他"] == ["剧情", "视觉"]

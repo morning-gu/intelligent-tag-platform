@@ -238,4 +238,14 @@ describe('TagImports 标签导入页', () => {
     expect(await screen.findByText('批次历史加载失败')).toBeInTheDocument()
     expect(screen.getByText('后端不可用')).toBeInTheDocument()
   })
+
+  it('已撤销批次显示已撤销状态', async () => {
+    mockApis({
+      batches: [{ ...BATCHES[0], status: 'revoked' }],
+      batchDetail: { ...BATCH_DETAIL, status: 'revoked' },
+    })
+    renderTagImports()
+    await screen.findByText('b-1')
+    expect(screen.getByText('b-1').closest('tr')).toHaveTextContent('已撤销')
+  })
 })

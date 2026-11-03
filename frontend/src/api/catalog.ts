@@ -58,6 +58,24 @@ export function fetchTagDetail(tagId: string): Promise<TagCatalogDetail> {
   return apiFetch<TagCatalogDetail>(`/api/v1/tags/${tagId}`)
 }
 
+export function deactivateTag(tagId: string): Promise<TagCatalogDetail> {
+  return apiFetch<TagCatalogDetail>(`/api/v1/tags/${tagId}/deactivate`, { method: 'POST' })
+}
+
+export function activateTag(tagId: string): Promise<TagCatalogDetail> {
+  return apiFetch<TagCatalogDetail>(`/api/v1/tags/${tagId}/activate`, { method: 'POST' })
+}
+
+export interface TagDeleteResponse {
+  tag_id: string
+  parent_id: string | null
+  parent_name: string | null
+}
+
+export function deleteTag(tagId: string): Promise<TagDeleteResponse> {
+  return apiFetch<TagDeleteResponse>(`/api/v1/tags/${tagId}`, { method: 'DELETE' })
+}
+
 /** 下载当前目录作用域或名称筛选结果的 Excel/XML 压缩包。 */
 export async function downloadTagCatalog(query: Pick<TagCatalogQuery, 'q' | 'scope_id'> = {}): Promise<Blob> {
   const params = new URLSearchParams()

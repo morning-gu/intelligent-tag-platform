@@ -11,6 +11,7 @@ import {
   Descriptions,
   Drawer,
   Input,
+  Modal,
   Space,
   Table,
   Tag,
@@ -23,6 +24,9 @@ import {
   downloadTagCatalog,
   fetchTagCatalog,
   fetchTagDetail,
+  activateTag,
+  deactivateTag,
+  deleteTag,
   type TagCatalogDetail,
   type TagCatalogItem,
 } from '../api/catalog'
@@ -30,11 +34,11 @@ import {
 /** 标签状态中文展示与 Tag 颜色（active/deprecate 与治理流水线入库语义一致）。 */
 const TAG_STATUS_LABELS: Record<string, string> = {
   active: '启用',
-  deprecate: '废弃',
+  deprecate: '停用',
 }
 const TAG_STATUS_COLORS: Record<string, string> = {
   active: 'green',
-  deprecate: 'red',
+  deprecate: 'orange',
 }
 
 function sortDirectoriesFirst(items: TagCatalogItem[]): TagCatalogItem[] {
@@ -63,6 +67,8 @@ export default function TagCatalog() {
   const [detail, setDetail] = useState<TagCatalogDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [statusUpdating, setStatusUpdating] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   async function exportCatalog() {
     setExporting(true)
@@ -176,6 +182,29 @@ export default function TagCatalog() {
     setScopeId(directoryId)
     setScopeLabel(directoryName)
     setExpandedRowKeys([])
+  }
+
+  function confirmDeleteTag(tag: TagCatalogDetail) {
+    Modal.confirm({
+      title: '删除标签',
+      content: `确定删除标签“${tag.tag_name}”吗？如果目录为空，空目录也会被删除。`,
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setDeleting(true)
+        try {
+          const result = await deleteTag(tag.tag_id)
+          setSelectedTagId(null)
+          selectDirectory(result.parent_id ?? undefined, result.parent_name ?? undefined)
+          await loadCatalog()
+        } catch (err) {
+          setDetailError(err instanceof Error ? err.message : '删除标签失败')
+        } finally {
+          setDeleting(false)
+        }
+      },
+    })
   }
 
   function findDirectory(nodes: TagCatalogItem[], id: string): TagCatalogItem | undefined {
@@ -407,6 +436,7 @@ export default function TagCatalog() {
         )}
         {detailLoading && <Typography.Text type="secondary">详情加载中…</Typography.Text>}
         {detail !== null && (
+          <>
           <Descriptions
             column={1}
             items={[
@@ -470,6 +500,33 @@ export default function TagCatalog() {
               },
             ]}
           />
+          <Button
+            danger={detail.status === 'active'}
+            loading={statusUpdating}
+            onClick={async () => {
+              setStatusUpdating(true)
+              try {
+                const next = detail.status === 'deprecate'
+                  ? await activateTag(detail.tag_id)
+                  : await deactivateTag(detail.tag_id)
+                setDetail(next)
+              } catch (err) {
+                setDetailError(err instanceof Error ? err.message : '状态更新失败')
+              } finally {
+                setStatusUpdating(false)
+              }
+            }}
+          >
+            {detail.status === 'deprecate' ? '启用' : '停用'}
+          </Button>
+          <Button
+            danger
+            loading={deleting}
+            onClick={() => confirmDeleteTag(detail)}
+          >
+            删除
+          </Button>
+          </>
         )}
       </Drawer>
     </Card>
