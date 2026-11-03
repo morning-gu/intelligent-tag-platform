@@ -32,18 +32,94 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import GenerationTask, MediaContext, TagCatalog
+from tagplatform.db.models import AssetTag, GenerationTask, MediaContext, TagCatalog
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.recall import embed_content_texts, recall_by_type
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
+from tagplatform.content_io import load_content
 from tagplatform.schemas import ContentJSON, parse_content
 from tagplatform.settings import get_settings
 from tagplatform.vectors import encode_vector
 
 logger = logging.getLogger(__name__)
+
+
+def _clear_pending(session: Session, asset_id: str, mode: str) -> int:
+    """删除该资产"同模式生成任务产生的、尚未审核"的候选行（重跑替换）。
+
+    只删 pending：人工已定稿的行（approved/rejected/merged）不受影响；只删
+    同 mode 的任务行：closed 的待审候选不会被 open 重跑误清。返回删除行数。
+    """
+    task_ids = select(GenerationTask.task_id).where(GenerationTask.mode == mode)
+    result = session.execute(
+        delete(AssetTag).where(
+            AssetTag.asset_id == asset_id,
+            AssetTag.review_status == "pending",
+            AssetTag.task_id.in_(task_ids),
+        ).execution_options(synchronize_session=False))
+    return result.rowcount or 0
+
+
+# prompt 明细注入上限：长片场景多，防止 content 文本无界增长（token 成本）
+_MAX_CAST_LINES = 8
+_MAX_DIALOGUE_LINES = 3
+_MAX_AUDIO_EVENTS = 2
+_MAX_CHARACTER_EMOTIONS = 6
+
+
+def _render_cast_line(content: ContentJSON) -> str | None:
+    """角色表 → 单行 "人物：..."（无角色返回 None，保证老数据渲染逐字不变）。"""
+    cast = content.content.characters
+    if not cast:
+        return None
+    names = [
+        f"{ch.name}（{ch.description}）" if ch.description else ch.name
+        for ch in cast[:_MAX_CAST_LINES]
+    ]
+    return "人物：" + "、".join(names)
+
+
+def _render_scene_details(scene) -> list[str]:
+    """单场景的上游扩展明细（氛围 / 地点 / 声音 / 台词）。
+
+    缩进行、不以 "- " 开头：与场景行 `- {scene_id} [start-end] desc` 的
+    解析契约（llm/mock.py _SCENE_LINE_RE）天然互斥，不会污染证据解析。
+    """
+    lines: list[str] = []
+    if scene.emotions:
+        lines.append("  氛围：" + "、".join(scene.emotions))
+    emotions = [f"{ce.character}（{ce.emotion}）"
+                for ce in scene.character_emotions[:_MAX_CHARACTER_EMOTIONS]]
+    if not emotions:
+        # 严格贴模板的内容里没有场景级人物情绪：从台词情绪回推，别让标签丢掉
+        # 这条证据（沉默角色仍拿不到，这是模板的建模边界）
+        seen: set[str] = set()
+        for dialogue in scene.dialogues:
+            tone = dialogue.emotion.text_emotion if dialogue.emotion else None
+            speaker = dialogue.speaker_name or dialogue.speaker
+            if tone and speaker and speaker not in seen:
+                seen.add(speaker)
+                emotions.append(f"{speaker}（{tone}）")
+            if len(emotions) >= _MAX_CHARACTER_EMOTIONS:
+                break
+    if emotions:
+        lines.append("  人物情绪：" + "、".join(emotions))
+    if scene.location:
+        lines.append(f"  地点：{scene.location}")
+    if scene.background_music:
+        lines.append(f"  音乐：{scene.background_music}")
+    for event in scene.audio_events[:_MAX_AUDIO_EVENTS]:
+        lines.append(f"  声音：{event.description}")
+    for dialogue in scene.dialogues[:_MAX_DIALOGUE_LINES]:
+        tone = ""
+        if dialogue.emotion and dialogue.emotion.text_emotion:
+            tone = f"（{dialogue.emotion.text_emotion}）"
+        lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
+    return lines
 
 
 def _render_content_text(content: ContentJSON) -> str:
@@ -54,15 +130,24 @@ def _render_content_text(content: ContentJSON) -> str:
     《示例电影》
     摘要：影片整体剧情摘要
     - scene_001 [120000-180000] 两名人物在仓库中发生激烈争执
+
+    2026-11 上游对接增量：摘要后可有 "人物：" 一行；每个场景行之后可跟
+    缩进的明细行（氛围/地点/声音/台词）。老数据（无角色/情绪/音频/台词）
+    渲染结果与扩展前逐字一致——场景行格式是 MockLLM 证据解析的契约，
+    不能改。
     """
-    header = f"《{content.asset.title}》\n摘要：{content.content.summary}\n"
-    scene_lines = [
-        f"- {scene.scene_id}"
-        f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
-        f" {scene.description}"
-        for scene in content.content.scenes
-    ]
-    return header + "\n".join(scene_lines)
+    parts: list[str] = [f"《{content.asset.title}》",
+                        f"摘要：{content.content.summary}"]
+    cast = _render_cast_line(content)
+    if cast:
+        parts.append(cast)
+    for scene in content.content.scenes:
+        parts.append(
+            f"- {scene.scene_id}"
+            f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
+            f" {scene.description}")
+        parts.extend(_render_scene_details(scene))
+    return "\n".join(parts)
 
 
 def _render_candidates_text(candidates: list[TagCatalog]) -> str:
@@ -120,21 +205,26 @@ def run_generation_task(task_id: str, session: Session, llm,
 
     try:
         # 3. 内容解析与资产归属
-        content = parse_content(json.loads(context.content_json))
+        content = load_content(context.content_json)
         asset_id = content.asset.asset_id or context.asset_id
         # 4. producer 分发与 prompt 组装渲染
+        #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
+        #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板。
         producer = get_producer(task.mode)
-        template = get_active_prompt(session, task.mode)
-        fields: dict[str, str] = {"content": _render_content_text(content)}
-        if task.mode == "closed":
-            candidates = recall_by_type(
-                session,
-                embed_content_texts(content),
-                embedder,
-                get_settings().recall_top_k_per_type,
-            )
-            fields["candidates"] = _render_candidates_text(candidates)
-        prompt_text = render_prompt(template, **fields)
+        template = None
+        prompt_text = ""
+        if not getattr(producer, "builds_prompt", False):
+            template = get_active_prompt(session, task.mode)
+            fields: dict[str, str] = {"content": _render_content_text(content)}
+            if task.mode == "closed":
+                candidates = recall_by_type(
+                    session,
+                    embed_content_texts(content),
+                    embedder,
+                    get_settings().recall_top_k_per_type,
+                )
+                fields["candidates"] = _render_candidates_text(candidates)
+            prompt_text = render_prompt(template, **fields)
         # 5. 策略解析（空 policy_json → 默认）
         raw_policy = (task.policy_json or "").strip()
         policy = (GenerationPolicy(**json.loads(raw_policy))
@@ -146,6 +236,16 @@ def run_generation_task(task_id: str, session: Session, llm,
             policy=policy, prompt_text=prompt_text, run_id=run_id,
         )
         tags = producer.produce(spec, session, llm, embedder)
+        # 6.5 重跑替换：自拼 prompt 的生产器（如 open/mtg）声明 replaces_pending
+        #     时，先清掉该资产"同模式、尚未审核"的旧候选，再落本次结果。
+        #     否则每重跑一次就在审核队列里叠一份近义标签（实测 3 次后
+        #     Memento 积到 29 条待审）。已定稿行（approved/rejected/merged）
+        #     不在此列，persist_tags 的"已定跳过"语义不变。
+        if getattr(producer, "replaces_pending", False):
+            cleared = _clear_pending(session, asset_id, task.mode)
+            if cleared:
+                logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
+                            asset_id, cleared)
         # 7. 结果入库（不 commit）+ 模式 A 回填上下文摘要向量（与 prompt
         #    组装同源的摘要文本）
         persist_tags(session, asset_id, task.task_id, tags, run_id)
@@ -156,8 +256,10 @@ def run_generation_task(task_id: str, session: Session, llm,
                                role="passage")[0])
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         task.model_version = llm.model
-        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致
-        task.prompt_version = str(template.version)
+        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
+        # 自拼 prompt 的生产器写自己的口径版本（如 mtg-v1）
+        task.prompt_version = (str(template.version) if template is not None
+                               else getattr(producer, "prompt_version", ""))
         task.status = "succeeded"
         task.finished_at = datetime.now(timezone.utc)
         session.commit()

@@ -1,12 +1,13 @@
-"""LLM 输出解析：模式 A/B 的 JSON 数组契约校验（Task 5）。
+"""LLM 输出解析：模式 A（封闭提取）的 JSON 数组契约校验（Task 5）。
 
 client 层只管传输不做解析（client.py 的分工承诺），本模块把 LLM 文本
 解析为受校验的元素列表：
 - parse_closed_output（模式 A）：元素须含 tag_id/tag_name/relevance/
-  confidence/evidence，relevance/confidence ∈ [0,1]（含边界）；
-- parse_open_output（模式 B）：元素须含 tag_name/tag_type/description/
-  confidence/evidence，confidence ∈ [0,1]；多余键（含 tag_id——模式 B 的
-  tag_id 由匹配层赋值，LLM 不产出）静默丢弃。
+  confidence/evidence，relevance/confidence ∈ [0,1]（含边界）。
+
+模式 B（开放生成）自 2026-11 起改由 `generation/mtg/parse.py` 解析
+（多轮 + 合并 + judge 的契约与本文件不同），旧 `parse_open_output` 已随
+旧实现一并删除。
 
 任何结构偏离抛 LLMParseError，消息含首个坏元素位置（0 起下标）；解析
 重试的编排归任务 8 执行器，本模块不做重试。
@@ -22,9 +23,8 @@ class LLMParseError(Exception):
     """LLM 输出结构不符合契约（非 JSON / 非数组 / 缺键 / 分值越界）。"""
 
 
-# 两模式的元素必含键（evidence 恒为列表；元素内结构由映射层 Evidence(**e) 兜底）
+# 模式 A 的元素必含键（evidence 恒为列表；元素内结构由映射层 Evidence(**e) 兜底）
 _CLOSED_REQUIRED = ("tag_id", "tag_name", "relevance", "confidence", "evidence")
-_OPEN_REQUIRED = ("tag_name", "tag_type", "description", "confidence", "evidence")
 
 
 def _bad_element(index: int, reason: str) -> LLMParseError:
@@ -72,9 +72,3 @@ def parse_closed_output(content: str) -> list[dict]:
     """模式 A 解析：目录标签判定结果，返回已校验的元素列表（原样保留键）。"""
     return _validate(_parse_array(content), _CLOSED_REQUIRED,
                      ("relevance", "confidence"))
-
-
-def parse_open_output(content: str) -> list[dict]:
-    """模式 B 解析：开放候选，仅保留契约五键（多余键含 tag_id 静默丢弃）。"""
-    data = _validate(_parse_array(content), _OPEN_REQUIRED, ("confidence",))
-    return [{key: item[key] for key in _OPEN_REQUIRED} for item in data]

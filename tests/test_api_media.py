@@ -69,7 +69,10 @@ def test_upload_success(media_client, tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     # 断言组一：响应形状（恰三键；asset_id 形如 asset_+8位hex；title 去后缀）
-    assert set(body) == {"asset_id", "title", "video_uri"}
+    # 2026-11 起响应多带数据集匹配与生成任务字段（未命中时全为 None）
+    assert set(body) == {"asset_id", "title", "video_uri", "movie_id",
+                         "matched_title", "match_how", "build_task_id"}
+    assert body["movie_id"] is None and body["build_task_id"] is None
     assert re.fullmatch(r"asset_[0-9a-f]{8}", body["asset_id"])
     assert body["title"] == "clip"
     # 断言组二：文件真实落盘（绝对路径、uuid 存盘名、字节一致）
@@ -192,3 +195,59 @@ def test_upload_unauthenticated_401(client):
         resp = fresh.post("/api/v1/media/upload",
                           files={"file": ("clip.mp4", b"x")})
     assert resp.status_code == 401
+
+
+# ---------- asset_id 绑定（2026-11 上游对接） ----------
+
+
+def _seed_asset(media_client, asset_id: str, title: str = "数据集影片",
+                video_uri: str | None = None) -> None:
+    """播种一枚已登记资产（模拟数据集/识别服务先给出标识）。"""
+    from datetime import datetime, timezone
+
+    with media_client.app.state.session_factory() as s:
+        s.add(MediaAsset(asset_id=asset_id, asset_type="movie", title=title,
+                         video_uri=video_uri,
+                         created_at=datetime.now(timezone.utc)))
+        s.commit()
+
+
+def test_upload_binds_existing_asset(media_client):
+    """asset_id 指向已存在资产：只补 video_uri，不新建行、不改标题。"""
+    _seed_asset(media_client, "movie_tt0032138", title="绿野仙踪")
+    before = _count_rows(media_client)
+
+    resp = _upload(media_client, name="oz.mp4",
+                   data={"asset_id": "movie_tt0032138"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["asset_id"] == "movie_tt0032138"
+    assert body["title"] == "绿野仙踪"          # 数据集标题保留
+    assert _count_rows(media_client) == before  # 零新增行
+
+    with media_client.app.state.session_factory() as s:
+        row = s.get(MediaAsset, "movie_tt0032138")
+        assert row.video_uri == body["video_uri"]
+        assert Path(body["video_uri"]).exists()
+
+
+def test_upload_creates_asset_with_given_id(media_client):
+    """asset_id 指向不存在的资产：以该标识新建（上传先于识别的预留主键）。"""
+    resp = _upload(media_client, name="new.mp4", data={"asset_id": "movie_new_001"})
+    assert resp.status_code == 200
+    assert resp.json()["asset_id"] == "movie_new_001"
+    with media_client.app.state.session_factory() as s:
+        assert s.get(MediaAsset, "movie_new_001") is not None
+
+
+def test_upload_refuses_to_overwrite_bound_asset(media_client):
+    """已绑定视频的资产不能被上传覆盖：否则任何人可换掉别人的视频。"""
+    _seed_asset(media_client, "movie_tt0111161", title="肖申克",
+                video_uri="data/media/old.mp4")
+
+    resp = _upload(media_client, name="new.mp4",
+                   data={"asset_id": "movie_tt0111161"})
+    assert resp.status_code == 409
+
+    with media_client.app.state.session_factory() as s:
+        assert s.get(MediaAsset, "movie_tt0111161").video_uri == "data/media/old.mp4"

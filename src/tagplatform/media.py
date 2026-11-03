@@ -72,12 +72,19 @@ def save_upload(
     original_name: str,
     session: Session,
     media_root: str,
+    asset_id: str | None = None,
 ) -> StoredUpload:
     """占位上传：校验后缀 → 流式落盘（超限中止清理）→ 登记资产并提交。
 
     任何失败路径零残留：422（后缀）发生在任何写盘之前；413（超限）
     中止读取并删除半成品；两者均不产生数据库行。上限经 MAX_UPLOAD_BYTES
     模块全局调用期读取（测试可 monkeypatch 收紧以触发流式兜底路径）。
+
+    asset_id（2026-11 上游对接）：可选的资产绑定键。
+    - 指向已存在资产 → 只更新 video_uri（不新建行、不改标题/父级）——
+      数据集/识别服务先给了资产标识、后补视频的典型顺序；
+    - 指向不存在的资产 → 以该标识新建（上传先于识别时预留主键）；
+    - 缺省 → 沿用旧的 `asset_` + uuid 生成逻辑，行为与阶段 4 一致。
     """
     # 先校验后缀（失败零副作用：目录未建、文件未写、行未入）
     name = stored_filename(original_name)
@@ -104,16 +111,25 @@ def save_upload(
         dest.unlink(missing_ok=True)
         raise
 
-    asset_id = f"asset_{uuid.uuid4().hex[:8]}"
+    video_uri = str(dest.resolve())
+
+    # 绑定已有资产：只补视频地址，不新建行（识别服务/数据集已登记资产的情形）
+    if asset_id is not None:
+        existing = session.get(MediaAsset, asset_id)
+        if existing is not None:
+            existing.video_uri = video_uri
+            session.commit()
+            return StoredUpload(asset_id=existing.asset_id, title=existing.title,
+                                video_uri=video_uri)
+
+    new_id = asset_id or f"asset_{uuid.uuid4().hex[:8]}"
     session.add(MediaAsset(
-        asset_id=asset_id,
+        asset_id=new_id,
         asset_type="movie",
         title=title,
         duration_ms=None,  # 占位：时长未知，识别流水线后续补齐
-        video_uri=str(dest.resolve()),  # 存盘绝对路径
+        video_uri=video_uri,  # 存盘绝对路径
         created_at=datetime.now(timezone.utc),  # 时间戳列无默认值，显式赋 UTC now
     ))
     session.commit()
-    return StoredUpload(
-        asset_id=asset_id, title=title, video_uri=str(dest.resolve())
-    )
+    return StoredUpload(asset_id=new_id, title=title, video_uri=video_uri)

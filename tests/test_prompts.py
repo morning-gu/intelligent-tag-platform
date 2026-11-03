@@ -66,6 +66,6 @@ def test_migration_upgrades_with_seed(tmp_path):
         rows = conn.execute(
             "SELECT mode, version, is_active FROM prompt_template ORDER BY mode"
         ).fetchall()
-        assert rows == [("closed", 1, 1), ("open", 1, 1)]
+        assert rows == [("closed", 1, 1), ("open", 1, 1), ("open", 2, 0)]
     finally:
         conn.close()

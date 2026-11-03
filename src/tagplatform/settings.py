@@ -60,6 +60,39 @@ class Settings(BaseSettings):
     # 上传视频落盘根目录（TAGPLT_MEDIA_ROOT 可覆盖）；上传时按需创建目录
     media_root: str = "data/media/"
 
+    # ---------- 阶段 5：上传即生成资产（2026-11） ----------
+
+    # 数据集根目录（MovieNet）；上传文件名命中后从这里取标注与关键帧
+    dataset_root: str = "/cache/MovieNet"
+    # 每场景抽几张关键帧喂多模态模型
+    asset_frames: int = 3
+    # 场景级并发（生成资产的模型调用）
+    asset_workers: int = 4
+    # 每场景最多带几行字幕（台词进资产，但全量会让 JSON 涨 8 倍）
+    asset_dialogue_limit: int = 5
+    # 是否让模型推断数据集没有的字段（中文描述/氛围/事件/说话人/剧情时间地点）。
+    # False = 只填数据集事实，一次模型调用都不发。
+    asset_infer: bool = True
+
+    # ---------- 阶段 6：MovieTagGen 移植的开放式生成（2026-11） ----------
+    # 生成轮数（跨轮并集，1 = 单轮）；轮数越高覆盖越好、成本线性上涨
+    mtg_runs: int = 3
+    # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
+    mtg_frames_per_scene: int = 2
+    mtg_max_frames: int = 24
+    # 跨轮语义合并阈值（e5 余弦，complete-link）
+    mtg_merge_threshold: float = 0.90
+    # 单轮输出上限（模型被要求 15-20 个，这里兜底截断）
+    mtg_max_candidates_per_run: int = 20
+    # judge 通过后的最终产出上限（用户口径 10-15 条）
+    mtg_max_final_tags: int = 15
+    # judge：模型与开关（关掉则只做合并，不过滤）
+    mtg_judge_model: str = "deepseek-v4.1-flash"
+    mtg_judge_enabled: bool = True
+    mtg_judge_temperature: float = 0.0
+    # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
+    mtg_report_dir: str = "data/audit/mtg"
+
 
 @lru_cache
 def get_settings() -> Settings:

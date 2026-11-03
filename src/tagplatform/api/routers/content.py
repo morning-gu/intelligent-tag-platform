@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
 from tagplatform.content_import import import_content as import_content_svc
+from tagplatform.content_io import load_content
 from tagplatform.db.models import MediaAsset, MediaContext
 from tagplatform.schemas import ContentJSON
 
@@ -107,7 +108,9 @@ def import_content(
         raise HTTPException(
             status_code=422, detail=f"内容 JSON 校验失败: {exc}") from None
     try:
-        result = import_content_svc(content, session, body.video_root)
+        # 原样入库：库里存的 JSON 与调用方提交的一致（不做字段改名/裁剪）
+        result = import_content_svc(content, session, body.video_root,
+                                    raw=body.data)
     except ValueError as exc:
         # 服务层在任何数据库写入前校验 video_root，失败零副作用
         raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -176,7 +179,7 @@ def get_asset_context(
     ctx = session.get(MediaContext, context_id)
     if ctx is None or ctx.asset_id != asset_id:
         raise HTTPException(status_code=404, detail=f"上下文不存在：{context_id}")
-    return ContentJSON.model_validate_json(ctx.content_json)
+    return load_content(ctx.content_json)
 
 
 @router.get("/adapters", response_model=list[str])

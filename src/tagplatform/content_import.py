@@ -38,6 +38,7 @@ from urllib.parse import unquote, urlparse
 
 from sqlalchemy.orm import Session
 
+from tagplatform.content_io import dump_for_storage
 from tagplatform.db.models import MediaAsset, MediaContext
 from tagplatform.schemas import ContentJSON
 
@@ -72,12 +73,17 @@ def resolve_video_path(video_uri: str, video_root: str | None) -> str:
 
 
 def import_content(
-    content: ContentJSON, session: Session, video_root: str | None
+    content: ContentJSON, session: Session, video_root: str | None,
+    raw: dict | None = None,
 ) -> ImportResult:
     """导入统一内容 JSON：影片/场景资产 upsert + 上下文新建并提交。
 
     video_root 非 None 时必须为已存在目录，否则抛 ValueError（任何
     数据库写入之前先校验，失败零副作用）。
+
+    raw 是**调用方收到的原始 JSON**（上游模板形态）。给了就原样入库，不给
+    才退回内部形态的序列化——"资产以什么格式交付，库里就是什么格式"，
+    读的时候再由 `content_io.load_content` 归一化。
     """
     if video_root is not None and not Path(video_root).is_dir():
         raise ValueError(f"video_root 不存在: {video_root}")
@@ -96,7 +102,9 @@ def import_content(
         # upsert 只更新非键字段：asset_type/parent_id 冻结（主键不可变更）
         existing.title = content.asset.title
         existing.duration_ms = content.asset.duration_ms
-        existing.video_uri = video_uri
+        # video_uri 为 None 时保留原值：上传绑定的文件不能被内容 JSON 抹掉
+        if video_uri is not None:
+            existing.video_uri = video_uri
     else:
         if not asset_id:
             asset_id = f"asset_{uuid.uuid4().hex[:8]}"
@@ -148,7 +156,8 @@ def import_content(
     session.add(MediaContext(
         context_id=context_id,
         asset_id=asset_id,
-        content_json=content.model_dump_json(),
+        content_json=(dump_for_storage(raw) if raw is not None
+                      else content.model_dump_json()),
         embedding=None,  # 留空，由嵌入生产任务写入
         source=content.metadata.source,
         model_version=content.metadata.model_version,
