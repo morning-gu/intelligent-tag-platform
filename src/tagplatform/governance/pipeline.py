@@ -148,14 +148,22 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     """
     threshold, allowed_types = _load_config(config)
 
-    # 库内基线：tag_name 唯一约束覆盖全部行（含废弃行——废弃同名行仍占用
-    # 名称，判重必须含之，放行必然 IntegrityError 逃逸）；非废弃行用于父
-    # 解析/别名冲突/语义比对（废弃标签不参与这些解析，行为不变）
+    # 库内基线：同一父目录下名称唯一；非废弃行用于父解析/别名冲突/
+    # 语义比对（废弃标签不参与这些解析）。
     db_rows = session.query(TagCatalog).all()
-    db_all_by_name = {t.tag_name: t for t in db_rows}
+    db_parent_names = {
+        t.tag_id: next(
+            (parent.tag_name for parent in db_rows if parent.tag_id == t.parent_id),
+            None,
+        )
+        for t in db_rows
+    }
+    db_all_by_key = {
+        (db_parent_names[t.tag_id], t.tag_name): t for t in db_rows
+    }
     db_by_name = {t.tag_name: t for t in db_rows if t.status != "deprecate"}
     db_candidates = [
-        (t.tag_name, decode_vector(t.embedding))
+        (t.tag_name, decode_vector(t.embedding), db_parent_names[t.tag_id])
         for t in db_rows
         if t.status != "deprecate" and t.embedding is not None
     ]
@@ -166,12 +174,14 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         batch_by_name.setdefault(r.tag_name, r)
     alias_owners: dict[str, list[int]] = {}
     name_owners: dict[str, list[int]] = {}
+    name_scope_owners: dict[tuple[str | None, str], list[int]] = {}
     for i, r in enumerate(rows):
         # TagRow.aliases 标注 list[str]，但直接构造可传 None（brief 用例
         # 即如此）：治理层按"None = 无别名"兼容
         for alias in (r.aliases or []):
             alias_owners.setdefault(alias, []).append(i)
         name_owners.setdefault(r.tag_name, []).append(i)
+        name_scope_owners.setdefault((r.parent_tag, r.tag_name), []).append(i)
 
     # ---------- 批量编码：全部待检行一次 embed（Task 4 终审建议） ----------
     # 判定阶段的语义检查与第二遍插入共用同一批向量（_ValidRow.vec 缓存），
@@ -191,11 +201,11 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         #    （见模块 docstring），先记为待定，语义未命中时回填
         dup_now: str | None = None
         dup_deferred: str | None = None
-        db_hit = db_all_by_name.get(r.tag_name)
+        db_hit = db_all_by_key.get((r.parent_tag, r.tag_name))
         if db_hit is not None:
             if db_hit.status == "deprecate":
-                # 废弃行仍占用唯一名称：无条件拦截（放行必然 IntegrityError）
-                dup_now = f"同名标签已废弃 tag_id={db_hit.tag_id}"
+                # 停用标签再次导入时恢复启用，保留原 tag_id。
+                pass
             elif db_hit.tag_type == r.tag_type:
                 dup_now = f"已存在 tag_id={db_hit.tag_id}"
             else:
@@ -204,6 +214,8 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         if dup_now is None:
             for earlier_name, earlier_type in earlier:
                 if earlier_name != r.tag_name:
+                    continue
+                if len(name_scope_owners.get((r.parent_tag, r.tag_name), [])) < 2:
                     continue
                 if earlier_type == r.tag_type:
                     dup_now = "批内重复"
@@ -249,7 +261,17 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         #    （向量取自批量预取结果——与插入阶段同一批，不再逐行 embed）
         vec = batch_vecs[i]
         hits = search_similar(
-            vec, db_candidates + [(v.row.tag_name, v.vec) for v in valid], top_k=1)
+            vec,
+            [
+                (name, candidate_vec)
+                for name, candidate_vec, candidate_scope in (
+                    db_candidates
+                    + [(v.row.tag_name, v.vec, v.row.parent_tag) for v in valid]
+                )
+                if name != r.tag_name or candidate_scope == r.parent_tag
+            ],
+            top_k=1,
+        )
         if hits and hits[0][1] >= threshold:
             similar_name, score = hits[0]
             issues.append(Issue(
@@ -259,8 +281,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             earlier.append((r.tag_name, r.tag_type))
             continue
 
-        # 5) 同名不同 type 且语义未命中 → 回填 duplicate_name
-        #      （tag_name 唯一约束，放行必然 IntegrityError，必须拦截）
+        # 5) 同级同名不同 type 且语义未命中 → 回填 duplicate_name
         if dup_deferred is not None:
             issues.append(Issue(r.tag_name, "duplicate_name", dup_deferred))
             earlier.append((r.tag_name, r.tag_type))
@@ -285,7 +306,11 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         # 通过全部检查 → 有效行集（tag_id 此时定死，供子行 parent 引用）
         valid_row = _ValidRow(
             row=r,
-            tag_id=r.tag_id if r.tag_id else f"tag_{uuid.uuid4().hex[:8]}",
+            tag_id=(
+                db_hit.tag_id
+                if db_hit is not None and db_hit.status == "deprecate"
+                else (r.tag_id if r.tag_id else f"tag_{uuid.uuid4().hex[:8]}")
+            ),
             vec=vec,
         )
         valid.append(valid_row)
@@ -330,19 +355,36 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
                     valid_by_name.pop(v.row.tag_name, None)
                     continue
             status = v.row.status or "active"  # status 缺省语义由入库层决定
-            session.add(TagCatalog(
-                tag_id=v.tag_id,
-                tag_name=v.row.tag_name,
-                tag_type=v.row.tag_type,
-                description=v.row.description,
-                parent_id=parent_id,
-                aliases=json.dumps(v.row.aliases, ensure_ascii=False) if v.row.aliases else None,
-                applicable_scope=v.row.applicable_scope,
-                status=status,
-                embedding=encode_vector(v.vec),
-                created_at=now,
-                updated_at=now,
-            ))
+            existing = session.get(TagCatalog, v.tag_id)
+            before_json = None
+            if existing is None:
+                session.add(TagCatalog(
+                    tag_id=v.tag_id,
+                    tag_name=v.row.tag_name,
+                    tag_type=v.row.tag_type,
+                    description=v.row.description,
+                    parent_id=parent_id,
+                    aliases=json.dumps(v.row.aliases, ensure_ascii=False) if v.row.aliases else None,
+                    applicable_scope=v.row.applicable_scope,
+                    status=status,
+                    embedding=encode_vector(v.vec),
+                    created_at=now,
+                    updated_at=now,
+                ))
+            else:
+                before_json = json.dumps(
+                    {"status": existing.status}, ensure_ascii=False)
+                existing.tag_type = v.row.tag_type
+                existing.description = v.row.description
+                existing.parent_id = parent_id
+                existing.aliases = (
+                    json.dumps(v.row.aliases, ensure_ascii=False)
+                    if v.row.aliases else None
+                )
+                existing.applicable_scope = v.row.applicable_scope
+                existing.status = status
+                existing.embedding = encode_vector(v.vec)
+                existing.updated_at = now
             # 自引用外键无 relationship()：逐行 flush 保证父行先落库
             session.flush()
             after = {
@@ -359,7 +401,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             session.add(TagChangeLog(
                 tag_id=v.tag_id,
                 action="import",
-                before_json=None,
+                before_json=before_json,
                 after_json=json.dumps(after, ensure_ascii=False),
                 operator=_OPERATOR,
                 created_at=now,

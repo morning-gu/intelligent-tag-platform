@@ -69,7 +69,7 @@ class TagCatalog(Base):
     __tablename__ = "tag_catalog"
 
     tag_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tag_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    tag_name: Mapped[str] = mapped_column(Text, nullable=False)
     tag_type: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     parent_id: Mapped[str | None] = mapped_column(
@@ -84,6 +84,10 @@ class TagCatalog(Base):
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("parent_id", "tag_name", name="ux_tag_catalog_parent_name"),
+    )
 
 
 class GenerationTask(Base):
@@ -186,7 +190,7 @@ class ImportBatch(Base):
 
     batch_id: Mapped[str] = mapped_column(Text, primary_key=True)
     file_name: Mapped[str] = mapped_column(Text, nullable=False)
-    # 取值 processing|completed|failed
+    # 取值 processing|completed|failed|revoked
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # JSON 字符串（处理结果摘要）
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -21,13 +21,16 @@ import {
   Typography,
   Upload,
   message,
+  Modal,
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import {
   fetchImportBatch,
   fetchImportBatches,
+  downloadImportBatch,
   importTags,
+  revokeImportBatch,
   type ImportBatchDetail,
   type ImportBatchSummary,
   type ImportResponse,
@@ -38,6 +41,7 @@ import {
 const BATCH_STATUS_LABELS: Record<string, string> = {
   processing: '处理中',
   completed: '已完成',
+  revoked: '已撤销',
   failed: '已失败',
 }
 const BATCH_STATUS_COLORS: Record<string, string> = {
@@ -139,6 +143,7 @@ export default function TagImports() {
   const [detail, setDetail] = useState<ImportBatchDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [revoking, setRevoking] = useState(false)
 
   const loadBatches = useCallback(async () => {
     setLoading(true)
@@ -211,6 +216,71 @@ export default function TagImports() {
     } finally {
       setUploading(false)
     }
+  }
+
+  function saveBlob(blob: Blob, fileName: string) {
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = fileName
+      link.click()
+      URL.revokeObjectURL(url)
+    }
+
+  function confirmRevoke(batch: ImportBatchDetail) {
+      Modal.confirm({
+        title: '撤销导入批次',
+        content: '撤销后将删除本批次导入的标签，是否先导出 Excel 和 XML 文件？',
+        okText: '导出并撤销',
+        cancelText: '取消',
+        onOk: async () => {
+          setRevoking(true)
+          try {
+            const blob = await downloadImportBatch(batch.batch_id)
+            saveBlob(blob, `${batch.batch_id}-export.zip`)
+            await revokeImportBatch(batch.batch_id)
+            message.success('批次已撤销')
+            setDetail((current) => current ? { ...current, status: 'revoked' } : current)
+            await loadBatches()
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : '撤销批次失败')
+          } finally {
+            setRevoking(false)
+          }
+        },
+        footer: (_, { OkBtn, CancelBtn }) => (
+          <Space>
+            <CancelBtn />
+            <Button
+              onClick={() => {
+                Modal.destroyAll()
+                Modal.confirm({
+                  title: '确认直接撤销',
+                  content: '确定不导出文件并撤销该批次吗？',
+                  okText: '直接撤销',
+                  cancelText: '取消',
+                  onOk: async () => {
+                    setRevoking(true)
+                    try {
+                      await revokeImportBatch(batch.batch_id)
+                      message.success('批次已撤销')
+                      setDetail((current) => current ? { ...current, status: 'revoked' } : current)
+                      await loadBatches()
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : '撤销批次失败')
+                    } finally {
+                      setRevoking(false)
+                    }
+                  },
+                })
+              }}
+            >
+              直接撤销
+            </Button>
+            <OkBtn />
+          </Space>
+        ),
+      })
   }
 
   const columns: TableProps<ImportBatchSummary>['columns'] = [
@@ -313,6 +383,14 @@ export default function TagImports() {
             ) : (
               <SummaryView summary={detail.summary} />
             )}
+            <Button
+              danger
+              loading={revoking}
+              disabled={detail.status !== 'completed'}
+              onClick={() => confirmRevoke(detail)}
+            >
+              撤销
+            </Button>
           </div>
         )}
       </Drawer>

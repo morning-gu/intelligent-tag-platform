@@ -20,7 +20,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from tagplatform.api import get_embedder, get_session
-from tagplatform.db.models import ImportBatch, TagCatalog
+from tagplatform.db.models import AssetTag, ImportBatch, TagCatalog, TagChangeLog
 from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
 
 router = APIRouter(prefix="/api/v1/tags")
@@ -97,6 +97,14 @@ class TagDetail(TagOut):
     aliases: list[str]
     path: list[str] = []
     path_ids: list[str] = []
+
+
+class TagDeleteResponse(BaseModel):
+    """标签删除结果及目录页应跳转的上级目录。"""
+
+    tag_id: str
+    parent_id: str | None = None
+    parent_name: str | None = None
 
 
 def _parse_aliases(raw: str | None) -> list[str]:
@@ -273,6 +281,14 @@ def export_tags(
         if tag.tag_id in selected_ids and not children.get(tag.tag_id)
     ]
 
+    return Response(
+        content=_build_export_archive(export_tags, by_id),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="tags-export.zip"'},
+    )
+
+
+def _build_export_archive(export_tags: list[TagCatalog], by_id: dict[str, TagCatalog]) -> bytes:
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
     worksheet.title = "标签"
@@ -326,11 +342,7 @@ def export_tags(
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("tags-export.xlsx", workbook_output.getvalue())
         archive.writestr("tags-export.xml", xml_output)
-    return Response(
-        content=output.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="tags-export.zip"'},
-    )
+    return output.getvalue()
 
 
 @router.get("/{tag_id}", response_model=TagDetail)
@@ -361,4 +373,81 @@ def get_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDetail:
         aliases=_parse_aliases(tag.aliases),
         path=path,
         path_ids=path_ids,
+    )
+
+
+def _set_tag_status(tag_id: str, status: str, session: Session) -> TagDetail:
+    tag = session.get(TagCatalog, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail=f"标签不存在：{tag_id}")
+    if tag.status == status:
+        return get_tag(tag_id, session)
+    before = {"status": tag.status}
+    tag.status = status
+    session.add(TagChangeLog(
+        tag_id=tag_id,
+        action="deprecate" if status == "deprecate" else "update",
+        before_json=json.dumps(before, ensure_ascii=False),
+        after_json=json.dumps({"status": status}, ensure_ascii=False),
+        operator="governance",
+    ))
+    session.commit()
+    return get_tag(tag_id, session)
+
+
+@router.post("/{tag_id}/deactivate", response_model=TagDetail)
+def deactivate_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDetail:
+    return _set_tag_status(tag_id, "deprecate", session)
+
+
+@router.post("/{tag_id}/activate", response_model=TagDetail)
+def activate_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDetail:
+    return _set_tag_status(tag_id, "active", session)
+
+
+@router.delete("/{tag_id}", response_model=TagDeleteResponse)
+def delete_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDeleteResponse:
+    tag = session.get(TagCatalog, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail=f"标签不存在：{tag_id}")
+    if session.query(AssetTag.id).filter(AssetTag.tag_id == tag_id).first():
+        raise HTTPException(status_code=409, detail="标签已被资产引用，无法删除")
+
+    parent = session.get(TagCatalog, tag.parent_id) if tag.parent_id else None
+    deleted_parent_ids: set[str] = set()
+    session.delete(tag)
+    session.flush()
+
+    # 删除标签后，向上清理没有任何子节点的空目录。
+    while parent is not None:
+        has_children = session.query(TagCatalog.tag_id).filter(
+            TagCatalog.parent_id == parent.tag_id
+        ).first()
+        if has_children:
+            break
+        next_parent = session.get(TagCatalog, parent.parent_id) if parent.parent_id else None
+        deleted_parent_ids.add(parent.tag_id)
+        session.delete(parent)
+        session.flush()
+        parent = next_parent
+
+    session.add(TagChangeLog(
+        tag_id=tag_id,
+        action="delete",
+        before_json=json.dumps({"tag_name": tag.tag_name}, ensure_ascii=False),
+        after_json=None,
+        operator="governance",
+    ))
+    redirect_target = parent
+    if parent is not None and parent.tag_id in deleted_parent_ids:
+        redirect_target = (
+            session.get(TagCatalog, parent.parent_id)
+            if parent.parent_id
+            else None
+        )
+    session.commit()
+    return TagDeleteResponse(
+        tag_id=tag_id,
+        parent_id=redirect_target.tag_id if redirect_target is not None else None,
+        parent_name=redirect_target.tag_name if redirect_target is not None else None,
     )

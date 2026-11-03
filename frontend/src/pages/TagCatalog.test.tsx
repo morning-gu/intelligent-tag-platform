@@ -106,7 +106,7 @@ describe('TagCatalog 标签库页', () => {
     // 第二行：deprecate 状态中文展示
     const row2 = screen.getByText('标签2').closest('tr')!
     expect(row2).not.toHaveTextContent('theme')
-    expect(row2).toHaveTextContent('废弃')
+    expect(row2).toHaveTextContent('停用')
     expect(screen.getByText('标签21')).toBeInTheDocument()
 
     // 首屏参数：pageSize 20 + 1 探测、offset 0 显式发送
