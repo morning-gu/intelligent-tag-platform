@@ -114,7 +114,12 @@ Schema v1.0，字段结构沿用原始提案 §3.3.1：`asset`（asset_id / asse
 
 ## 6. 标签治理（模块四）
 
-Excel 模板 8 字段（tag_id 可系统生成；tag_name / tag_type / description 必填；parent_tag / aliases / applicable_scope / status 选填）。分组 = tag_type，不加列。
+Excel 导入支持层级模板：一级标签名称、二级标签名称、三级标签名称、标签、
+标签描述、标签生成方式六列。一级标签名称、二级标签名称、标签、标签描述必填；
+三级标签名称可空，空时标签挂在二级标签名称下；导入后的 tag_type 固定为
+genre；标签生成方式为空时 TagRow.is_manual 为 true，否则为 false。
+同时兼容旧版 8 字段模板（tag_id 可系统生成；tag_name / tag_type /
+description 必填；parent_tag / aliases / applicable_scope / status 选填）。
 
 导入流水线：解析 → 字段校验 → 精确重复检测（名称/别名冲突）→ 语义相似检测（tag_name + description 向量，相似度 ≥0.9 判疑似同义，进待处理列表）→ 层级校验（parent 存在、无循环依赖）→ 分类合法性校验 → 无冲突自动入库、有冲突人工处理。全程记录批次号，写入 `import_batch`；标签库变更写 `tag_change_log`。
 

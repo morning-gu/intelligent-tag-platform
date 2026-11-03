@@ -32,14 +32,9 @@ const TAG_STATUS_COLORS: Record<string, string> = {
   deprecate: 'red',
 }
 
-const PAGE_SIZE_DEFAULT = 20
-
 export default function TagCatalog() {
-  // —— 目录数据与服务端分页（limit = pageSize + 1 探测后续页）——
+  // —— 树状目录：首屏只加载根节点，展开时按父节点加载子节点 ——
   const [items, setItems] = useState<TagCatalogItem[]>([])
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT)
-  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -61,20 +56,18 @@ export default function TagCatalog() {
       const res = await fetchTagCatalog({
         type,
         q: searchQ,
-        limit: pageSize + 1,
-        offset: (page - 1) * pageSize,
+        // 默认只展示一级目录；搜索时返回所有匹配节点，避免子级标签
+        // 因 root=true 被过滤掉，同时保留目录节点的下级展开能力。
+        root: searchQ === '' ? true : undefined,
       })
-      // 探测行：多取的一条仅用于判断有无下一页，不进表格
-      const rows = res.items.length > pageSize ? res.items.slice(0, pageSize) : res.items
-      setItems(rows)
-      setHasMore(res.items.length > pageSize)
+      setItems(res.items)
       setLoadError(null)
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : '标签库加载失败')
     } finally {
       setLoading(false)
     }
-  }, [type, searchQ, page, pageSize])
+  }, [type, searchQ])
 
   useEffect(() => {
     // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
@@ -134,8 +127,55 @@ export default function TagCatalog() {
     }
   }, [selectedTagId])
 
+  async function expandNode(expanded: boolean, record: TagCatalogItem) {
+    if (!expanded || record.children !== undefined) return
+    try {
+      const res = await fetchTagCatalog({ parent_id: record.tag_id })
+      setItems((current) => updateChildren(current, record.tag_id, res.items))
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : '下级标签加载失败')
+    }
+  }
+
+  function updateChildren(
+    nodes: TagCatalogItem[],
+    parentId: string,
+    children: TagCatalogItem[],
+  ): TagCatalogItem[] {
+    return nodes.map((node) => {
+      if (node.tag_id === parentId) return { ...node, children }
+      if (node.children) return { ...node, children: updateChildren(node.children, parentId, children) }
+      return node
+    })
+  }
+
   const columns: TableProps<TagCatalogItem>['columns'] = [
-    { title: '标签名', dataIndex: 'tag_name' },
+    {
+      title: '名称',
+      dataIndex: 'tag_name',
+      render: (name: string, record: TagCatalogItem) => (
+        <Space size={8}>
+          <span
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minWidth: 42,
+              height: 22,
+              padding: '0 6px',
+              borderRadius: 11,
+              background: record.has_children ? '#e6f4ff' : '#f6ffed',
+              color: record.has_children ? '#1677ff' : '#389e0d',
+              fontSize: 12,
+              lineHeight: '22px',
+            }}
+          >
+            {record.has_children ? '目录' : '标签'}
+          </span>
+          <span>{name}</span>
+        </Space>
+      ),
+    },
     {
       title: '类型',
       dataIndex: 'tag_type',
@@ -162,7 +202,6 @@ export default function TagCatalog() {
             aria-label="类型筛选"
             value={type}
             onChange={(v) => {
-              setPage(1)
               setType(v)
             }}
             options={tagTypes.map((t) => ({ value: t, label: t }))}
@@ -177,7 +216,6 @@ export default function TagCatalog() {
             value={inputQ}
             onChange={(e) => setInputQ(e.target.value)}
             onSearch={(v) => {
-              setPage(1)
               setSearchQ(v)
             }}
             style={{ width: 280 }}
@@ -191,24 +229,55 @@ export default function TagCatalog() {
           columns={columns}
           dataSource={items}
           loading={loading}
+          expandable={{
+            // 兼容旧服务未返回 has_children 的情况；展开后若无子项不会
+            // 再显示子节点。默认允许整行点击展开，目录页更符合树状导航习惯。
+            rowExpandable: (record) => record.has_children === true,
+            expandRowByClick: true,
+            expandIcon: ({ expanded, onExpand, record }) =>
+              record.has_children === true ? (
+                <button
+                  type="button"
+                  aria-label={expanded ? '收起下级目录' : '展开下级目录'}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onExpand(record, event)
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 24,
+                    height: 24,
+                    border: '1px solid #91caff',
+                    borderRadius: 6,
+                    background: expanded ? '#e6f4ff' : '#fff',
+                    color: '#1677ff',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 7,
+                      height: 7,
+                      borderRight: '2px solid currentColor',
+                      borderBottom: '2px solid currentColor',
+                      transform: expanded ? 'rotate(225deg)' : 'rotate(-45deg)',
+                      transition: 'transform 0.2s ease',
+                    }}
+                  />
+                </button>
+              ) : null,
+            onExpand: expandNode,
+          }}
           onRow={(record) => ({
-            onClick: () => openTag(record.tag_id),
+            onClick: () => {
+              if (record.has_children !== true) openTag(record.tag_id)
+            },
             style: { cursor: 'pointer' },
           })}
-          pagination={{
-            current: page,
-            pageSize,
-            // 后端无 total 契约：hasMore 时多给一页占位（探测行保证下一页可达），
-            // 末页收敛为 offset + 实际行数；总数仅在末页展示（中间页的
-            // hasMore 占位 total 是下界，展示会误导）
-            total: hasMore ? page * pageSize + 1 : (page - 1) * pageSize + items.length,
-            showSizeChanger: true,
-            showTotal: hasMore ? undefined : (t) => `共 ${t} 条`,
-            onChange: (p, ps) => {
-              setPage(p)
-              setPageSize(ps)
-            },
-          }}
+          pagination={false}
         />
       </div>
       <Drawer

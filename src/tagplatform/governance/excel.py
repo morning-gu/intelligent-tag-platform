@@ -1,4 +1,4 @@
-"""Excel 标签模板解析：xlsx 字节流 → TagRow 行对象 + 行级错误报告。
+"""Excel 标签模板解析：xlsx 字节流 → 通用导入结果。
 
 纯解析层：只做"单元格 → 行对象"的结构化与行级问题收集，不做判重/
 语义等内容校验（那是 Task 7 治理流水线的职责）。`rows` 与 `errors`
@@ -6,9 +6,13 @@
 原样交给治理流水线，若错误行混入会被直接入库。
 
 解析规则：
-- 首行为表头，按列名映射；必需列 tag_name/tag_type/description，缺失
-  即 header_error（此时 rows/errors 均为空）；其余 5 列可选，缺可选
-  列头不报错，多余列头忽略；
+- 新版模板首行为六列表头：一级标签名称、二级标签名称、三级标签名称、标签、标签描述、
+  标签生成方式。
+  一级标签名称、二级标签名称、标签、标签描述必填；三级标签名称可空，
+  父标签优先取三级标签名称，否则取二级标签名称；tag_type 为空时固定为
+  manual，否则标记为非手动添加；TagRow.tag_type 固定为 genre；
+- 旧版英文表头模板仍兼容：必需列 tag_name/tag_type/description，缺失即
+  header_error；其余列可选，缺可选列头不报错，多余列头忽略；
 - 整行单元格均为空白/None 的空行跳过；
 - 数字单元格转字符串（int/float）；bool/日期等无法可靠文本化的值报
   bad_type；
@@ -21,80 +25,47 @@
 """
 
 import io
-import re
-from dataclasses import dataclass, field
+from pprint import pprint
 
 import openpyxl
 
-# 模板 8 列：3 必需 + 5 可选（缺可选列头不报错）
-REQUIRED_COLUMNS = ("tag_name", "tag_type", "description")
-OPTIONAL_COLUMNS = ("tag_id", "parent_tag", "aliases", "applicable_scope", "status")
+from tagplatform.governance.models import (
+    BadCell as _BadCell,
+    ExcelParseResult,
+    ImportParseResult,
+    OPTIONAL_COLUMNS,
+    REQUIRED_COLUMNS,
+    RowError,
+    TagRow,
+    build_tag_row,
+    cell_text,
+)
 
-# aliases 单元格分隔符：中英文逗号/分号
-_ALIAS_SEPARATOR = re.compile(r"[,，;；]")
+NEW_EXCEL_COLUMNS = (
+    "一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式")
+MANUAL_TAG_TYPE = "manual"
 
-
-class _BadCell(Exception):
-    """单元格值无法可靠转换为文本（bool/日期等非文本非数字类型）。"""
-
-
-@dataclass
-class TagRow:
-    """Excel 模板中的一行标签（字段均已规范化为文本，缺失为 None）。"""
-
-    tag_id: str | None
-    tag_name: str
-    tag_type: str
-    description: str
-    parent_tag: str | None
-    aliases: list[str]
-    applicable_scope: str | None
-    status: str | None
-
-
-@dataclass
-class RowError:
-    """单行解析失败记录；该行缺 tag_name 时 tag_name 为 None。"""
-
-    row_number: int
-    tag_name: str | None
-    code: str  # missing_field / bad_type / bad_alias
-    detail: str
+__all__ = [
+    "ExcelParseResult",
+    "ImportParseResult",
+    "OPTIONAL_COLUMNS",
+    "REQUIRED_COLUMNS",
+    "RowError",
+    "TagRow",
+    "NEW_EXCEL_COLUMNS",
+    "MANUAL_TAG_TYPE",
+    "parse_tag_excel",
+    "print_parse_result",
+]
 
 
-@dataclass
-class ExcelParseResult:
-    """解析结果：rows 与 errors 不相交；header_error 非空时两者均为空。"""
-
-    rows: list[TagRow] = field(default_factory=list)
-    errors: list[RowError] = field(default_factory=list)
-    header_error: str | None = None
-
-
-def _cell_text(value: object) -> str | None:
-    """单元格值规范化为文本：None/空白 → None，数字 → 字符串。
-
-    返回 None 表示该单元格缺失/为空；无法可靠文本化的类型（bool、日期
-    等）抛 _BadCell，由调用方归入 bad_type。注意 bool 是 int 子类，须
-    先于数字判断。
-    """
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if isinstance(value, bool):
-        raise _BadCell(value)
-    if isinstance(value, (int, float)):
-        return str(value)
-    raise _BadCell(value)
-
-
-def _split_aliases(text: str | None) -> list[str]:
-    """按中英文逗号/分号分隔 aliases 单元格，去首尾空白与空段。"""
-    if not text:
-        return []
-    return [part for part in (p.strip() for p in _ALIAS_SEPARATOR.split(text)) if part]
+def print_parse_result(result: ExcelParseResult) -> None:
+    """以易读的结构打印 Excel 解析结果。"""
+    pprint({
+        "rows": [row.__dict__ for row in result.rows],
+        "errors": [error.__dict__ for error in result.errors],
+        "header_error": result.header_error,
+    }, sort_dicts=False)
 
 
 def _build_header_map(first_row: tuple) -> dict[str, int]:
@@ -109,6 +80,85 @@ def _build_header_map(first_row: tuple) -> dict[str, int]:
     return header_map
 
 
+def _parse_hierarchy_excel(
+        worksheet: openpyxl.worksheet.worksheet.Worksheet,
+        header_map: dict[str, int],
+) -> ExcelParseResult:
+    """解析六列层级标签模板，并转换为通用 TagRow。"""
+    result = ExcelParseResult()
+    required = ("一级标签名称", "二级标签名称", "标签", "标签描述")
+    hierarchy_names: set[str] = set()
+    for row_number, cells in enumerate(
+            worksheet.iter_rows(min_row=2, values_only=True), start=2):
+        if all(
+            value is None or (isinstance(value, str) and not value.strip())
+            for value in cells
+        ):
+            continue
+
+        texts: dict[str, str | None] = {}
+        bad_columns: list[str] = []
+        for name in NEW_EXCEL_COLUMNS:
+            try:
+                texts[name] = cell_text(cells[header_map[name]])
+            except _BadCell:
+                texts[name] = None
+                bad_columns.append(name)
+
+        missing = [name for name in required if texts[name] is None]
+        tag_name = texts["标签"]
+        if missing:
+            result.errors.append(RowError(
+                row_number=row_number,
+                tag_name=tag_name,
+                code="missing_field",
+                detail=f"缺少必需字段：{'、'.join(missing)}",
+            ))
+            continue
+        if bad_columns:
+            result.errors.append(RowError(
+                row_number=row_number,
+                tag_name=tag_name,
+                code="bad_type",
+                detail=f"列 {'、'.join(bad_columns)} 的值无法转换为文本",
+            ))
+            continue
+
+        hierarchy = (
+            (texts["一级标签名称"], None),
+            (texts["二级标签名称"], texts["一级标签名称"]),
+            (texts["三级标签名称"], texts["二级标签名称"]),
+        )
+        for hierarchy_name, parent_name in hierarchy:
+            if hierarchy_name is None or hierarchy_name in hierarchy_names:
+                continue
+            hierarchy_names.add(hierarchy_name)
+            result.rows.append(TagRow(
+                tag_id=None,
+                tag_name=hierarchy_name,
+                tag_type="genre",
+                description="",
+                parent_tag=parent_name,
+                aliases=[],
+                applicable_scope=None,
+                status=None,
+                is_manual=True,
+            ))
+
+        result.rows.append(TagRow(
+            tag_id=None,
+            tag_name=tag_name,
+            tag_type="genre",
+            description=texts["标签描述"],
+            parent_tag=texts["三级标签名称"] or texts["二级标签名称"],
+            aliases=[],
+            applicable_scope=None,
+            status=None,
+            is_manual=texts["标签生成方式"] is None,
+        ))
+    return result
+
+
 def parse_tag_excel(data: bytes) -> ExcelParseResult:
     """解析 xlsx 字节流为标签行列表 + 行级错误（规则见模块 docstring）。"""
     workbook = openpyxl.load_workbook(io.BytesIO(data))
@@ -116,6 +166,16 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
         worksheet = workbook.active
         header_row = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
         header_map = _build_header_map(header_row or ())
+
+        new_columns = [name for name in NEW_EXCEL_COLUMNS if name in header_map]
+        if new_columns:
+            missing = [name for name in NEW_EXCEL_COLUMNS if name not in header_map]
+            if missing:
+                return ExcelParseResult(
+                    header_error=f"表头缺少必需列：{'、'.join(missing)}")
+            result = _parse_hierarchy_excel(worksheet, header_map)
+            print_parse_result(result)
+            return result
 
         missing = [name for name in REQUIRED_COLUMNS if name not in header_map]
         if missing:
@@ -130,7 +190,7 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
             bad_columns: list[str] = []
             for name, idx in header_map.items():
                 try:
-                    texts[name] = _cell_text(cells[idx])
+                    texts[name] = cell_text(cells[idx])
                 except _BadCell:
                     texts[name] = None
                     bad_columns.append(name)
@@ -164,16 +224,8 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
                 ))
                 continue
 
-            result.rows.append(TagRow(
-                tag_id=texts.get("tag_id"),
-                tag_name=tag_name,
-                tag_type=texts["tag_type"],
-                description=texts["description"],
-                parent_tag=texts.get("parent_tag"),
-                aliases=_split_aliases(texts.get("aliases")),
-                applicable_scope=texts.get("applicable_scope"),
-                status=texts.get("status"),
-            ))
+            result.rows.append(build_tag_row(texts))
+        print_parse_result(result)
         return result
     finally:
         workbook.close()

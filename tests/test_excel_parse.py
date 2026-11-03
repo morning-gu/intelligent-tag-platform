@@ -79,3 +79,31 @@ def test_full_eight_column_template():
     assert first.parent_tag is None and first.applicable_scope == "电影"
     assert first.status == "active"
     assert r.rows[1].aliases == [] and r.rows[1].parent_tag is None
+
+
+def test_hierarchy_template():
+    r = parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", "悬疑", "反转", "结局出人意料", "genre"],
+        ["内容", "剧情", None, "喜剧", "带有喜剧元素", None],
+    ]))
+
+    assert not r.errors and len(r.rows) == 5
+    assert [row.tag_name for row in r.rows] == ["内容", "剧情", "悬疑", "反转", "喜剧"]
+    assert r.rows[3].tag_type == "genre"
+    assert not r.rows[3].is_manual
+    assert r.rows[3].parent_tag == "悬疑"
+    assert r.rows[4].tag_type == "genre"
+    assert r.rows[4].is_manual
+    assert r.rows[4].parent_tag == "剧情"
+
+
+def test_hierarchy_template_required_columns():
+    r = parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", None, None, "标签", "描述"],
+    ]))
+
+    assert len(r.errors) == 1
+    assert r.errors[0].code == "missing_field"
+    assert "二级标签名称" in r.errors[0].detail
