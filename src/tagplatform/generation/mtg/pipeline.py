@@ -290,6 +290,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     alignment: dict[str, Alignment] = {}
     replacements: list[dict] = []
     verify_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    verify_trace: dict = {}
     if library and accepted:
         alignment = align_candidates(
             library, embedder, [candidate.tag for candidate, _, _ in accepted],
@@ -305,7 +306,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             if pairs:
                 client = _make_verify_client(settings, llm)
                 verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
-                                           usage=verify_usage)
+                                           usage=verify_usage, trace=verify_trace)
                 for name, same in verdict_map.items():
                     if name in alignment:
                         alignment[name] = replace(alignment[name],
@@ -432,6 +433,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 for name, item in alignment.items()
             ],
             "replacements": replacements,
+            "verify_raw": verify_trace.get("raw"),
             "truncated": [
                 {"tag": candidate.tag,
                  "band": (alignment[candidate.tag].band
