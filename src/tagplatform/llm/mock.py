@@ -39,6 +39,8 @@ _CLOSED_MARKER = "## 候选标签"
 # 开放式生成（mtg 流水线）的标志串：生成 / 审核两种请求靠它分流
 _MTG_GEN_MARKER = "## 标签生成任务"
 _MTG_JUDGE_MARKER = "## 审核任务"
+# 相似度复核请求（generation/mtg/verify.py）：行格式同为全角竖线三段
+_MTG_VERIFY_MARKER = "## 相似度复核"
 # 审核候选行格式：`- {tag}｜{dimension}｜{reason}`（全角竖线，与场景行互斥）
 _JUDGE_LINE_RE = re.compile(r"^- (.+?)｜(.+?)｜(.*)$", re.MULTILINE)
 # 选中概率阈值（~40%）
@@ -136,6 +138,20 @@ def _open_output(text: str, run_id: str) -> list[dict]:
     return items
 
 
+def _verify_output(text: str) -> dict:
+    """相似度复核：候选与库标签字面相同才算同一概念（确定性伪判定）。
+
+    真实模型的判据是语义；mock 只按字面相等给 true，保证测试里
+    "只有同名才替换"这条路径可预期。
+    """
+    results = [
+        {"candidate": candidate.strip(),
+         "same": candidate.strip() == library.strip()}
+        for candidate, library, _cos in _JUDGE_LINE_RE.findall(text)
+    ]
+    return {"results": results}
+
+
 def _judge_output(text: str, run_id: str) -> list[dict]:
     """judge：解析候选行，全部判 supported（confidence 0.9，引用首场景并摘原文）。
 
@@ -169,6 +185,8 @@ class MockLLMClient:
         text = _extract_text(messages)
         if _MTG_JUDGE_MARKER in text:
             out = _judge_output(text, run_id)
+        elif _MTG_VERIFY_MARKER in text:
+            out = _verify_output(text)
         elif _CLOSED_MARKER in text:
             out = _closed_output(text, run_id)
         else:

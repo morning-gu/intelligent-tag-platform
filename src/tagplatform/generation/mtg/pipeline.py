@@ -11,7 +11,9 @@
 保留的平台语义：
 - 空目录不报错（与 closed 相反）；
 - 标签库装满后按"库内对齐"分三档标记（`catalog_align`）：同名 → origin=catalog
-  并挂 tag_id；疑似/新词 → origin=generated，分档只进审计与排序，不删任何行；
+  并挂 tag_id；疑似经 LLM 复核（`verify`）确认同一概念 → 替换成库内标准名并
+  挂 tag_id（原词记进审计，供将来写别名）；其余走 generated，分档只进审计与
+  排序，不删任何行；
 - `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
 
 每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：三轮原始候选、合并簇、
@@ -24,6 +26,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -33,6 +36,7 @@ from tagplatform.generation.mtg import keyframes as keyframes_mod
 from tagplatform.generation.mtg.catalog_align import (
     BAND_DUPLICATE,
     BAND_RANK,
+    BAND_SUSPECT,
     Alignment,
     align_candidates,
     load_library_index,
@@ -46,6 +50,7 @@ from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
     render_content,
 )
+from tagplatform.generation.mtg.verify import verify_pairs
 from tagplatform.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -129,6 +134,14 @@ def _make_judge_client(settings: Settings, llm):
         temperature=settings.mtg_judge_temperature,
         request_interval=settings.llm_request_interval,
     )
+
+
+def _make_verify_client(settings: Settings, llm):
+    """相似度复核客户端：复用 judge 的模型与参数（同一类判定，同一套限速）。
+
+    单独包一层是为了可替换：测试与将来换更小的模型时只动这一处。
+    """
+    return _make_judge_client(settings, llm)
 
 
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
@@ -271,16 +284,32 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             continue
         accepted.append((candidate, verdict, evidence))
 
-    # ---- 5. 库内对齐、排序、截断、落库归属 ----
+    # ---- 5. 库内对齐、复核、排序、截断、落库归属 ----
     # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
     # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
     alignment: dict[str, Alignment] = {}
+    replacements: list[dict] = []
+    verify_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if library and accepted:
         alignment = align_candidates(
             library, embedder, [candidate.tag for candidate, _, _ in accepted],
             suspect_cosine=settings.open_library_suspect_cosine,
             name_overlap=settings.open_library_name_overlap,
         )
+        # 疑似对子交给模型复核：分档只能看"像不像"，替换要看"是不是"。
+        # 复核失败/开关关掉都按"未复核"处理（不替换），并把结论写进审计。
+        if settings.open_library_verify_enabled:
+            pairs = [(name, item.matched_name, item.cosine or 0.0)
+                     for name, item in alignment.items()
+                     if item.band == BAND_SUSPECT and item.matched_name]
+            if pairs:
+                client = _make_verify_client(settings, llm)
+                verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
+                                           usage=verify_usage)
+                for name, same in verdict_map.items():
+                    if name in alignment:
+                        alignment[name] = replace(alignment[name],
+                                                  same_concept=same)
 
     limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
@@ -314,11 +343,28 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
         level = candidate.scope if candidate.scope in ("film", "scene") else "film"
         item = alignment.get(candidate.tag)
-        # 只有"同名"才认作库内标签：疑似重复仍走 generated，由人决定要不要并
-        if item is not None and item.band == BAND_DUPLICATE and item.matched_tag_id:
+        # 同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
+        # 疑似 → 复核通过 + 替换开关打开才换成库内标准名，否则保留原样。
+        same_name = (item is not None and item.band == BAND_DUPLICATE
+                     and item.matched_tag_id)
+        replace_suspect = (item is not None
+                           and settings.open_library_replace_enabled
+                           and item.band == BAND_SUSPECT
+                           and item.same_concept is True
+                           and item.matched_tag_id)
+        if same_name or replace_suspect:
+            if replace_suspect:
+                replacements.append({
+                    "generated": candidate.tag,
+                    "library": item.matched_name,
+                    "tag_id": item.matched_tag_id,
+                    "cosine": (None if item.cosine is None
+                               else round(item.cosine, 3)),
+                    "reason": item.reason,
+                })
             tags.append(ProducedTag(
                 origin="catalog", tag_id=item.matched_tag_id,
-                tag_name=candidate.tag,
+                tag_name=item.matched_name or candidate.tag,
                 candidate_type=None, candidate_description=None,
                 relevance_score=item.cosine, confidence=confidence,
                 evidence=evidence, level=level,
@@ -353,6 +399,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             "library_hint_count": len(hints),
             "suspect_cosine": settings.open_library_suspect_cosine,
             "name_overlap": settings.open_library_name_overlap,
+            "verify_enabled": bool(settings.open_library_verify_enabled),
+            "replace_enabled": bool(settings.open_library_replace_enabled),
         },
         "scenes": len(contents.content.scenes),
         "frames": frame_count,
@@ -379,9 +427,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             "align": [
                 {"tag": name, "band": item.band, "reason": item.reason,
                  "matched": item.matched_name,
-                 "cosine": None if item.cosine is None else round(item.cosine, 3)}
+                 "cosine": None if item.cosine is None else round(item.cosine, 3),
+                 "same_concept": item.same_concept}
                 for name, item in alignment.items()
             ],
+            "replacements": replacements,
             "truncated": [
                 {"tag": candidate.tag,
                  "band": (alignment[candidate.tag].band
@@ -389,6 +439,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 for candidate, _, _ in truncated
             ],
         },
+        "verify_usage": verify_usage,
         "dropped": dropped,
         "elapsed_s": round(elapsed, 1),
     }

@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     open_library_suspect_cosine: float = 0.87
     # 名字字符重合度（Jaccard）≥ 该值判"疑似重复"
     open_library_name_overlap: float = 0.40
+    # 疑似对子交给 LLM 复核"是不是同一个概念"（一批一次调用）；
+    # 复核通过才把候选替换成库内标准名，失败/关掉则不替换
+    open_library_verify_enabled: bool = True
+    # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
+    open_library_replace_enabled: bool = True
 
 
 @lru_cache

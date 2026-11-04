@@ -1,4 +1,9 @@
-"""库内标签对齐：生成前给"已有标签"提示，生成后给候选分档（只标记，不删除）。
+"""库内标签对齐：生成前给"已有标签"提示，生成后给候选分档。
+
+分档本身只标记、不删行；真正改动产出的只有一条规则——"可以替换"：
+同名直接换成库内标签（名字本来就一样）；疑似必须经 LLM 复核（`verify.py`）
+确认是同一概念才替换成库内标准名，原词留给将来写别名。替换开关关掉时
+退回"只标记"。
 
 与旧 `pipeline._catalog_hits` 的区别：
 - 旧：截断**之后**拿候选名去库取 top-1，≥ `open_match_threshold`(0.85) 就把
@@ -56,13 +61,32 @@ class LibraryTag:
 
 @dataclass(frozen=True)
 class Alignment:
-    """一条候选的对齐结论（只标记，调用方决定怎么用）。"""
+    """一条候选的对齐结论（只标记，调用方决定怎么用）。
+
+    ``same_concept`` 是 LLM 复核结论：True=可以合并（替换成库内标准名），
+    False=不是同一概念，None=未复核（库为空 / 复核开关关掉 / 复核失败）。
+    """
 
     band: str
     reason: str
     matched_name: str | None = None
     matched_tag_id: str | None = None
     cosine: float | None = None
+    same_concept: bool | None = None
+
+    @property
+    def replaceable(self) -> bool:
+        """是否该把候选替换成库内标准名。
+
+        同名（duplicate）无需复核即可替换；疑似必须复核通过才替换——
+        "像"不等于"是"，规则层的误判率实测约 38%，替换错了会把
+        "非线性叙事"并进"线性叙事"。
+        """
+        if self.matched_tag_id is None:
+            return False
+        if self.band == BAND_DUPLICATE:
+            return True
+        return self.band == BAND_SUSPECT and self.same_concept is True
 
 
 def load_library_index(session: Session) -> list[LibraryTag]:
