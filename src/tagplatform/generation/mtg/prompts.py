@@ -126,10 +126,26 @@ def _generation_instructions() -> str:
     )
 
 
+def _library_hint_block(names: list[str]) -> str:
+    """库内已有标签的提示块（只给名字，不给定义）。
+
+    措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
+    "悬疑解谜"这类更细的候选，只是不该原样复述。
+    """
+    listing = "\n".join(f"- {name}" for name in names)
+    return (
+        "## 库里已有的标签\n"
+        "下面这些标签我们的标签库里已经有了，**不要原样重复输出**；"
+        "如果你认为其中某条对这部片不够准确、不够具体，可以给出更精确的说法：\n"
+        f"{listing}"
+    )
+
+
 def build_generation_messages(content: ContentJSON,
                               frames_by_scene: dict[str, tuple[Path, ...]],
-                              run_index: int = 0) -> list[dict]:
-    """构造一轮生成请求：内容 + 场景内联关键帧 + 维度/格式要求。"""
+                              run_index: int = 0,
+                              library_hint: list[str] | None = None) -> list[dict]:
+    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内已有标签 + 要求。"""
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
@@ -143,6 +159,8 @@ def build_generation_messages(content: ContentJSON,
                           "text": f"〔关键帧〕{scene.scene_id} 第 {order}/{len(frames)} 张"})
             parts.append({"type": "image_url",
                           "image_url": {"url": _encode_image(frame)}})
+    if library_hint:
+        parts.append({"type": "text", "text": _library_hint_block(library_hint)})
     parts.append({"type": "text", "text": _generation_instructions()})
     return [{"role": "user", "content": parts}]
 
