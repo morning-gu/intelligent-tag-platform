@@ -35,6 +35,7 @@ from tagplatform.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.generation.mtg import keyframes as keyframes_mod
 from tagplatform.generation.mtg.catalog_align import (
     BAND_DUPLICATE,
+    BAND_NEW,
     BAND_RANK,
     BAND_SUSPECT,
     Alignment,
@@ -308,9 +309,17 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
                                            usage=verify_usage, trace=verify_trace)
                 for name, same in verdict_map.items():
-                    if name in alignment:
-                        alignment[name] = replace(alignment[name],
-                                                  same_concept=same)
+                    if name not in alignment:
+                        continue
+                    item = alignment[name]
+                    if same is False and item.band == BAND_SUSPECT:
+                        # 复核否定的就是"新标签"：分档要跟着改，否则它会被
+                        # 一直当疑似压在排序后面，把名额让给别的疑似。
+                        alignment[name] = replace(
+                            item, same_concept=False, band=BAND_NEW,
+                            reason=f"{item.reason}；复核判非同一概念")
+                    else:
+                        alignment[name] = replace(item, same_concept=same)
 
     limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
