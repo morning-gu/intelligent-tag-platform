@@ -358,3 +358,21 @@ def test_pipeline_switch_off_disables_library(
         mtg_settings.mtg_report_dir, "t-align3.json").read_text(encoding="utf-8"))
     assert report["library"]["enabled"] is False
     assert report["library"]["hints"] == []
+
+def test_duplicate_library_names_pick_deterministically():
+    """库里同名多条（"其他" 出现 30 次）→ 稳定取 tag_id 最小的一条。"""
+    from tagplatform.generation.mtg.catalog_align import LibraryTag, align_candidates
+
+    vec = MOCK_EMBEDDER.embed(["其他"], role="passage")[0]
+    index = [LibraryTag(tag_id="tag_b", name="其他", vector=vec),
+             LibraryTag(tag_id="tag_a", name="其他", vector=vec)]
+    out = align_candidates(index, MOCK_EMBEDDER, ["其他"],
+                           suspect_cosine=0.87, name_overlap=0.4)
+    assert out["其他"].band == "duplicate"
+    assert out["其他"].matched_tag_id == "tag_a"
+    assert "同名 2 条" in out["其他"].reason
+
+    # 顺序反过来结果不变
+    out2 = align_candidates(list(reversed(index)), MOCK_EMBEDDER, ["其他"],
+                            suspect_cosine=0.87, name_overlap=0.4)
+    assert out2["其他"].matched_tag_id == "tag_a"
