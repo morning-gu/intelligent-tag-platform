@@ -155,10 +155,22 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
     if not index or not names:
         return {}
 
-    by_key = {normalize_tag(tag.name): tag for tag in index}
+    by_key: dict[str, list[LibraryTag]] = {}
+    for tag in index:
+        by_key.setdefault(normalize_tag(tag.name), []).append(tag)
     library_names = [tag.name for tag in index]
     matrix = np.stack([tag.vector for tag in index])
     queries = embedder.embed(names, role="query")
+
+    def _pick(candidates: list[LibraryTag]) -> tuple[LibraryTag, str]:
+        """同名多条时按 tag_id 取稳定的一条，并把歧义写进 reason。
+
+        库里有 48 个名字被多条标签共用（"其他" 出现 30 次，挂在不同的父节点
+        下）。不排序直接取会随查询顺序变化，同一部片子重跑可能挂到不同 tag_id。
+        """
+        chosen = min(candidates, key=lambda tag: tag.tag_id)
+        note = "" if len(candidates) == 1 else f"（库内同名 {len(candidates)} 条，取 {chosen.tag_id}）"
+        return chosen, note
 
     result: dict[str, Alignment] = {}
     for name, vector in zip(names, queries):
@@ -167,19 +179,20 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
         cosine = float(sims[top])
         nearest = index[top]
 
-        exact = by_key.get(normalize_tag(name))
-        if exact is not None:
+        exact_hits = by_key.get(normalize_tag(name))
+        if exact_hits:
+            exact, note = _pick(exact_hits)
             result[name] = Alignment(
-                band=BAND_DUPLICATE, reason="与库内标签同名",
+                band=BAND_DUPLICATE, reason="与库内标签同名" + note,
                 matched_name=exact.name, matched_tag_id=exact.tag_id,
                 cosine=cosine)
             continue
 
         contained = _contained_library_name(name, library_names)
         if contained is not None:
-            matched = next(tag for tag in index if tag.name == contained)
+            matched, note = _pick([tag for tag in index if tag.name == contained])
             result[name] = Alignment(
-                band=BAND_SUSPECT, reason=f"名字包含库内标签「{contained}」",
+                band=BAND_SUSPECT, reason=f"名字包含库内标签「{contained}」" + note,
                 matched_name=contained, matched_tag_id=matched.tag_id,
                 cosine=cosine)
             continue
