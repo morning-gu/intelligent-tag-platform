@@ -37,12 +37,19 @@ def build_verify_messages(pairs: list[tuple[str, str, float]]) -> list[dict]:
                       for cand, lib, cos in pairs[:_MAX_PAIRS])
     text = (
         f"{VERIFY_MARKER}\n"
-        "下面每行是一组「候选标签｜已有标签｜相似度」。判断两者是不是同一个概念。\n"
-        "判断标准只有一条：能不能直接拿已有标签替换候选，而不丢这部片子的信息。\n"
-        "以下都不算同一个概念：\n"
-        "1. 意思相反或方向相反（例如“非线性叙事”与“线性叙事”）；\n"
-        "2. 只是字面相近、侧重点不同（例如“家族惨剧”与“家族恩怨”）；\n"
-        "3. 候选比已有标签多出实质信息、替换会丢掉这层信息。\n"
+        "下面每行是一组「候选标签｜已有标签｜相似度」。\n"
+        "判断标准只有一条：如果这两个词都进了标签库，审核的人会不会认为它们是"
+        "重复条目、只该留一条？会 → same=true，否则 false。\n"
+        "答 true 的典型情况（同一含义的详略/近义说法，合并后信息不丢，"
+        "原措辞会作为别名保留）：\n"
+        "- 压抑沉重 / 压抑\n"
+        "- 古典史诗 / 宏大史诗\n"
+        "- 悬疑神秘 / 悬疑\n"
+        "答 false 的三种情况：\n"
+        "1. 意思相反（非线性叙事 / 线性叙事）；\n"
+        "2. 字面像但指不同事物（友情与背叛 / 权力与背叛；超能力觉醒 / 绝境觉醒）；\n"
+        "3. 候选是另一个独立概念，只是共享了词（暴君多疑 / 多疑 视情况，"
+        "共享词但主体不同的判 false）。\n"
         f"{lines}\n"
         '只输出一个 JSON 对象：{"results":[{"candidate":"候选原文","same":true}]}，'
         "每行都要给一条，不要解释、不要 Markdown 代码块。"
@@ -76,8 +83,11 @@ def parse_verify_results(text: str) -> dict[str, bool]:
 
 def verify_pairs(client, pairs: list[tuple[str, str, float]], *,
                  run_id: str, usage: dict | None = None,
-                 retries: int = 1) -> dict[str, bool]:
-    """批量复核；失败返回已解析的部分（可能为空），不抛异常。"""
+                 retries: int = 1, trace: dict | None = None) -> dict[str, bool]:
+    """批量复核；失败返回已解析的部分（可能为空），不抛异常。
+
+    trace 传入 dict 时写入最后一次原始输出（截断），供审计核对判定理由。
+    """
     if not pairs:
         return {}
     messages = build_verify_messages(pairs)
@@ -99,6 +109,8 @@ def verify_pairs(client, pairs: list[tuple[str, str, float]], *,
             logger.warning("相似度复核响应异常：%s",
                            (response.raw or {}).get("error"))
             return {}
+        if trace is not None:
+            trace["raw"] = (response.content or "")[:2000]
         try:
             return parse_verify_results(response.content)
         except (ValueError, json.JSONDecodeError) as exc:
