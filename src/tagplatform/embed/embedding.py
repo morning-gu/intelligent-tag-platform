@@ -10,8 +10,9 @@
   近似正交——下游指标在 mock 路径下可区分不同标签。**对 role 不敏感**：
   前缀行为由 LocalEmbedder 承担，语义逻辑测试零波及；
 - LocalEmbedder：sentence-transformers 惰性导入（mock/测试路径不付首次
-  import 开销，也不触发模型下载），编码前拼 e5 官方前缀 `"{role}: {text}"`，
-  encode 后 L2 归一化输出 float32。
+  import 开销，也不触发模型下载）。**前缀按模型决定**（2026-11-05 换模型）：
+  e5 系需要 e5 官方前缀 `"{role}: {text}"`，BGE-M3 及其它模型吃纯文本，
+  加前缀反而伤效果；encode 后 L2 归一化输出 float32。
 
 实现源自 MovieTagGen `align/embedding.py` 的 Mock/Local 两件（role 契约为
 本平台新增——MovieTagGen 同样缺失 e5 前缀）；阶段 1 不做逐文本磁盘缓存，
@@ -28,6 +29,15 @@ _MOCK_DIM = 64
 
 # e5 非对称检索的两侧 role（查询方 / 语料方）
 _ROLES = ("query", "passage")
+
+
+def _prefix_style(model_name: str) -> str:
+    """模型 → 前缀风格：e5 加 "role: " 前缀，其它模型用纯文本。
+
+    BGE-M3 官方口径是无指令、直接编码；给它拼 "query: " 会把指令当正文，
+    实测会拉低分辨力。未知模型一律按纯文本——多前缀无害但少前缀更安全。
+    """
+    return "e5" if "e5" in (model_name or "").casefold() else "plain"
 
 
 def _validate_role(role: str) -> None:
@@ -103,6 +113,7 @@ class LocalEmbedder:
         self.device = device
         self.name = model_name
         self.dim = None          # 首次真实编码后回填（模型维度随模型而定）
+        self.prefix_style = _prefix_style(model_name)
         self._model = None
 
     def _load(self):
@@ -119,8 +130,12 @@ class LocalEmbedder:
             # dim 未知时返回 (0, 0)：绝不为了空输入加载/下载模型
             return np.zeros((0, self.dim or 0), dtype=np.float32)
         model = self._load()
-        # e5 官方前缀格式（冒号后带空格）：query 检索方 / passage 语料方
-        prefixed = [f"{role}: {t}" for t in texts]
+        # e5：官方前缀格式（冒号后带空格），query 检索方 / passage 语料方；
+        # 其它模型（BGE-M3 等）：纯文本，前缀会被当成正文干扰语义
+        if self.prefix_style == "e5":
+            prefixed = [f"{role}: {t}" for t in texts]
+        else:
+            prefixed = list(texts)
         vecs = model.encode(prefixed, convert_to_numpy=True,
                             normalize_embeddings=True, show_progress_bar=False)
         mat = np.asarray(vecs, dtype=np.float32)
