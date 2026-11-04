@@ -1,4 +1,9 @@
-"""scope tag names by parent directory"""
+"""scope tag names by parent directory
+
+原 PR #4 以 revision="0004"/down_revision="0003" 合入——与已上线的
+0004_asset_build_task 撞号且从 0003 分叉（alembic 双头报错）。部署侧
+重编号为 0006 接在 0005 之后，链恢复线性；迁移内容未改动。
+"""
 
 from typing import Sequence, Union
 
@@ -6,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "0004"
-down_revision: Union[str, Sequence[str], None] = "0003"
+revision: str = "0006"
+down_revision: Union[str, Sequence[str], None] = "0005"
 branch_labels = None
 depends_on = None
 
