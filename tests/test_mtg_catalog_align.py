@@ -353,6 +353,10 @@ def test_pipeline_keeps_candidate_when_verify_says_different(
     report = json.loads(pathlib.Path(
         mtg_settings.mtg_report_dir, "t-align5.json").read_text(encoding="utf-8"))
     assert report["library"]["replacements"] == []
+    # 复核否定 → 分档改回 new：它确实是一条新标签，不该继续当疑似压排名
+    row = next(r for r in report["library"]["align"] if r["tag"] == "多线叙事")
+    assert row["band"] == "new" and row["same_concept"] is False
+    assert "复核判非同一概念" in row["reason"]
 
 
 def test_pipeline_replace_switch_off_keeps_generated(
