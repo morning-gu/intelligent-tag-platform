@@ -9,8 +9,9 @@
   与 MovieTagGen 的"证据可追溯"要求对齐。
 
 保留的平台语义：
-- 空目录不报错（与 closed 相反），命中 `tag_catalog` 的候选仍标
-  origin=catalog（阈值 `open_match_threshold`），今天目录为空时全部 generated；
+- 空目录不报错（与 closed 相反）；
+- 标签库装满后按"库内对齐"分三档标记（`catalog_align`）：同名 → origin=catalog
+  并挂 tag_id；疑似/新词 → origin=generated，分档只进审计与排序，不删任何行；
 - `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
 
 每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：三轮原始候选、合并簇、
@@ -27,9 +28,17 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagCatalog
 from tagplatform.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.generation.mtg import keyframes as keyframes_mod
+from tagplatform.generation.mtg.catalog_align import (
+    BAND_DUPLICATE,
+    BAND_RANK,
+    Alignment,
+    align_candidates,
+    load_library_index,
+    recall_library_hints,
+    summarize_bands,
+)
 from tagplatform.generation.mtg.judge import judge_candidates
 from tagplatform.generation.mtg.merge import MergedCandidate, merge_candidates
 from tagplatform.generation.mtg.parse import parse_generation_items
@@ -38,12 +47,12 @@ from tagplatform.generation.mtg.prompts import (
     render_content,
 )
 from tagplatform.settings import Settings, get_settings
-from tagplatform.vectors import decode_vector, search_similar
 
 logger = logging.getLogger(__name__)
 
-# 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分
-MTG_VERSION = "mtg-v1"
+# 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分。
+# v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
+MTG_VERSION = "mtg-v2"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -122,23 +131,6 @@ def _make_judge_client(settings: Settings, llm):
     )
 
 
-def _catalog_hits(session: Session, embedder, names: list[str],
-                  threshold: float) -> dict[str, tuple[str, float]]:
-    """候选名 → (tag_id, 相似度)：命中目录（>= 阈值）才算，空目录返回空。"""
-    rows = [row for row in session.query(TagCatalog).all()
-            if row.status != "deprecate" and row.embedding]
-    if not rows or not names:
-        return {}
-    vectors = embedder.embed(names, role="query")
-    candidates = [(row.tag_id, decode_vector(row.embedding)) for row in rows]
-    hits: dict[str, tuple[str, float]] = {}
-    for name, vector in zip(names, vectors):
-        matched = search_similar(vector, candidates, top_k=1)
-        if matched and matched[0][1] >= threshold:
-            hits[name] = (matched[0][0], float(matched[0][1]))
-    return hits
-
-
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
                   scene_index: dict) -> list[Evidence]:
     """候选 → 证据列表：judge 引用优先，回退生成侧场景，只保留真实场景。
@@ -182,11 +174,20 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
+    # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
+    # 库内向量用导入时算好落库的那份，不在这里重新嵌入（1400 条要几分钟）。
+    library = load_library_index(session) if settings.open_library_enabled else []
+    hints: list[str] = []
+    if library and settings.open_library_hint_enabled:
+        hints = recall_library_hints(library, embedder, contents,
+                                     settings.open_library_hint_count)
+
     # ---- 1. 多轮生成 ----
     entries: list[dict] = []
     runs: list[dict] = []
     for run_index in range(max(1, settings.mtg_runs)):
-        messages = build_generation_messages(contents, frames, run_index)
+        messages = build_generation_messages(contents, frames, run_index,
+                                             library_hint=hints)
         response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
         _add_usage(usage, response.usage)
         if not response.ok:
@@ -270,27 +271,40 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             continue
         accepted.append((candidate, verdict, evidence))
 
-    # ---- 5. 排序、截断、目录匹配 ----
+    # ---- 5. 库内对齐、排序、截断、落库归属 ----
+    # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
+    # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
+    alignment: dict[str, Alignment] = {}
+    if library and accepted:
+        alignment = align_candidates(
+            library, embedder, [candidate.tag for candidate, _, _ in accepted],
+            suspect_cosine=settings.open_library_suspect_cosine,
+            name_overlap=settings.open_library_name_overlap,
+        )
+
     limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
-    def _rank(item) -> tuple[int, float, int]:
-        """队列排序：重要度（core 优先）→ judge 把握 → 出现轮数。
+    def _band_rank(tag: str) -> int:
+        item = alignment.get(tag)
+        return BAND_RANK[item.band] if item is not None else BAND_RANK["new"]
+
+    def _rank(item) -> tuple[int, int, float, int]:
+        """队列排序：重要度 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
 
         先看重要度而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
         对影片重要；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
-        而 core 的"视角反转"被挤掉。
+        而 core 的"视角反转"被挤掉。分档插在重要度之后、把握之前：
+        同样重要的两条，优先留库外新词。
         """
         candidate, verdict, _ = item
         importance = _IMPORTANCE_RANK.get((verdict or {}).get("importance"), 0)
         confidence = verdict["confidence"] if verdict else 0.8
-        return (-importance, -confidence, -candidate.runs)
+        return (-importance, -_band_rank(candidate.tag), -confidence,
+                -candidate.runs)
 
     accepted.sort(key=_rank)
+    truncated = accepted[limit:]
     accepted = accepted[:limit]
-
-    names = [candidate.tag for candidate, _, _ in accepted]
-    hits = _catalog_hits(session, embedder, names,
-                         settings.open_match_threshold) if names else {}
 
     tags: list[ProducedTag] = []
     for candidate, verdict, evidence in accepted:
@@ -299,12 +313,14 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
         level = candidate.scope if candidate.scope in ("film", "scene") else "film"
-        if candidate.tag in hits:
-            tag_id, similarity = hits[candidate.tag]
+        item = alignment.get(candidate.tag)
+        # 只有"同名"才认作库内标签：疑似重复仍走 generated，由人决定要不要并
+        if item is not None and item.band == BAND_DUPLICATE and item.matched_tag_id:
             tags.append(ProducedTag(
-                origin="catalog", tag_id=tag_id, tag_name=candidate.tag,
+                origin="catalog", tag_id=item.matched_tag_id,
+                tag_name=candidate.tag,
                 candidate_type=None, candidate_description=None,
-                relevance_score=similarity, confidence=confidence,
+                relevance_score=item.cosine, confidence=confidence,
                 evidence=evidence, level=level,
             ))
         else:
@@ -333,6 +349,10 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             "merge_threshold": settings.mtg_merge_threshold,
             "judge_confidence_floor": _JUDGE_CONFIDENCE_FLOOR,
             "max_final_tags": limit,
+            "library_enabled": bool(settings.open_library_enabled),
+            "library_hint_count": len(hints),
+            "suspect_cosine": settings.open_library_suspect_cosine,
+            "name_overlap": settings.open_library_name_overlap,
         },
         "scenes": len(contents.content.scenes),
         "frames": frame_count,
@@ -347,8 +367,28 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         "accepted": [{"tag": t.tag_name, "origin": t.origin,
                       "dimension": t.candidate_type,
                       "confidence": t.confidence,
+                      "band": (alignment.get(t.tag_name).band
+                               if t.tag_name in alignment else None),
                       "evidence": [e.scene_id for e in t.evidence]}
                      for t in tags],
+        "library": {
+            "enabled": bool(library),
+            "size": len(library),
+            "hints": hints,
+            "bands": summarize_bands(alignment),
+            "align": [
+                {"tag": name, "band": item.band, "reason": item.reason,
+                 "matched": item.matched_name,
+                 "cosine": None if item.cosine is None else round(item.cosine, 3)}
+                for name, item in alignment.items()
+            ],
+            "truncated": [
+                {"tag": candidate.tag,
+                 "band": (alignment[candidate.tag].band
+                          if candidate.tag in alignment else None)}
+                for candidate, _, _ in truncated
+            ],
+        },
         "dropped": dropped,
         "elapsed_s": round(elapsed, 1),
     }

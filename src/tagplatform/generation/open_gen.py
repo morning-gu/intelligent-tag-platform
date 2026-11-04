@@ -11,8 +11,9 @@
 - `prompt_version = MTG_VERSION`：任务表记录口径版本（如 `mtg-v1`），
   换算法时能区分历史结果。
 
-空目录语义保留：开放式生成不依赖既有标签库，全部落 generated 待审核；
-命中目录（相似度 ≥ `open_match_threshold`）的仍标 origin=catalog。
+空目录语义保留：开放式生成不依赖既有标签库；库非空时按 `generation/mtg/
+catalog_align.py` 的口径给候选分档（同名 → origin=catalog，疑似/新词 →
+generated 并只进审计与排序），实现"用库提升新标签质量"而不写库。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
