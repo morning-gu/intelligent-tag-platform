@@ -257,6 +257,89 @@ def test_pipeline_ranking_prefers_new_over_duplicate(
     assert out[0].tag_name != "多线叙事"
 
 
+def _seed_library(session, tag_id: str, name: str) -> None:
+    vec = MOCK_EMBEDDER.embed([name], role="passage")[0]
+    session.add(TagCatalog(tag_id=tag_id, tag_name=name, tag_type="narrative",
+                           description=name, status="active",
+                           embedding=encode_vector(vec)))
+    session.commit()
+
+
+class _VerifyClient:
+    """复核桩：按构造参数决定"是否同一概念"。"""
+
+    def __init__(self, same: bool):
+        self.same = same
+        self.calls = 0
+
+    def complete(self, messages, run_id):
+        from tagplatform.llm.client import LLMResponse
+        self.calls += 1
+        text = messages[0]["content"]
+        rows = [line[2:] for line in text.splitlines()
+                if line.startswith("- ") and "｜" in line]
+        results = [{"candidate": row.split("｜")[0], "same": self.same}
+                   for row in rows]
+        return LLMResponse(
+            content=json.dumps({"results": results}, ensure_ascii=False),
+            usage={'prompt_tokens': 10, 'completion_tokens': 5}, raw={}, ok=True)
+
+
+def test_pipeline_replaces_suspect_when_verified(
+        session, content_fixture, mtg_settings, monkeypatch):
+    """疑似对子复核通过 → 候选名换成库内标准名，原词进审计的替换记录。"""
+    # 库里只有"多线"，mock 生成"多线叙事" → 名字包含 → 疑似
+    _seed_library(session, "tag_cat_1", "多线")
+    monkeypatch.setattr(mtg_pipeline, "_make_verify_client",
+                        lambda settings, llm: _VerifyClient(same=True))
+
+    spec = _build_spec(content_fixture, run_id="align4")
+    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+
+    replaced = [t for t in out if t.origin == "catalog"]
+    assert replaced and replaced[0].tag_name == "多线"
+    assert replaced[0].tag_id == "tag_cat_1"
+    report = json.loads(pathlib.Path(
+        mtg_settings.mtg_report_dir, "t-align4.json").read_text(encoding="utf-8"))
+    assert report["library"]["replacements"] == [{
+        "generated": "多线叙事", "library": "多线", "tag_id": "tag_cat_1",
+        "cosine": report["library"]["replacements"][0]["cosine"],
+        "reason": report["library"]["replacements"][0]["reason"],
+    }]
+
+
+def test_pipeline_keeps_candidate_when_verify_says_different(
+        session, content_fixture, mtg_settings, monkeypatch):
+    """复核判定"不是同一概念" → 保留生成的原词，不替换。"""
+    _seed_library(session, "tag_cat_1", "多线")
+    monkeypatch.setattr(mtg_pipeline, "_make_verify_client",
+                        lambda settings, llm: _VerifyClient(same=False))
+
+    spec = _build_spec(content_fixture, run_id="align5")
+    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+
+    names = {t.tag_name for t in out}
+    assert "多线叙事" in names
+    assert all(t.origin == "generated" for t in out if t.tag_name == "多线叙事")
+    report = json.loads(pathlib.Path(
+        mtg_settings.mtg_report_dir, "t-align5.json").read_text(encoding="utf-8"))
+    assert report["library"]["replacements"] == []
+
+
+def test_pipeline_replace_switch_off_keeps_generated(
+        session, content_fixture, mtg_settings, monkeypatch):
+    """替换开关关掉 → 疑似即使复核通过也不替换（同名仍算库内标签）。"""
+    _seed_library(session, "tag_cat_1", "多线")
+    monkeypatch.setattr(mtg_pipeline, "_make_verify_client",
+                        lambda settings, llm: _VerifyClient(same=True))
+    monkeypatch.setattr(mtg_settings, "open_library_replace_enabled", False)
+
+    spec = _build_spec(content_fixture, run_id="align6")
+    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+
+    assert all(t.tag_name != "多线" for t in out)
+
+
 def test_pipeline_switch_off_disables_library(
         session, content_fixture, mtg_settings, monkeypatch):
     """总开关关掉 → 不注入提示、不分档，全部按旧行为走 generated。"""
