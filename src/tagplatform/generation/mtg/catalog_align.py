@@ -49,6 +49,15 @@ BAND_NEW = "new"
 # 排序用：数值越大越优先（新词优先占名额）
 BAND_RANK = {BAND_NEW: 2, BAND_SUSPECT: 1, BAND_DUPLICATE: 0}
 
+# 导入模板里的占位行（实测库里有"按 YYYY-MM-DD 填写"这种）。它们既不该
+# 出现在提示词里，也不该被当成对齐目标——否则生成的新词可能被替换成一句模板。
+_PLACEHOLDER_MARKS = ("YYYY-MM-DD", "yyyy-mm-dd", "填写", "示例", "TODO")
+
+
+def _is_placeholder(name: str) -> bool:
+    """模板占位行识别：命中明显是"填表说明"而非标签的写法。"""
+    return any(mark in name for mark in _PLACEHOLDER_MARKS)
+
 
 @dataclass(frozen=True)
 class LibraryTag:
@@ -90,13 +99,14 @@ class Alignment:
 
 
 def load_library_index(session: Session) -> list[LibraryTag]:
-    """读取库内叶子标签（排除废弃行与无向量行），供提示与分档复用。
+    """读取库内叶子标签（排除废弃行、无向量行与模板占位行），供提示与分档复用。
 
     叶子 = 没有任何行把它当父节点——目录节点（"内容元数据标签"这类）不参与
     对齐，否则候选可能"撞上一个分类名"。
     """
     rows = [row for row in session.query(TagCatalog).all()
-            if row.status != "deprecate" and row.embedding]
+            if row.status != "deprecate" and row.embedding
+            and not _is_placeholder(row.tag_name)]
     # 父节点集合按全表算（含废弃行）：否则"父节点已废弃"的子节点会被误当叶子
     all_parent_ids = {row.parent_id for row in session.query(TagCatalog).all()
                       if row.parent_id}

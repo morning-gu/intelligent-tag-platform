@@ -294,6 +294,17 @@ def _seed_library(session, tag_id: str, name: str) -> None:
     session.commit()
 
 
+def test_library_index_skips_template_placeholder(session):
+    """模板占位行（实测库里有一条"按 YYYY-MM-DD 填写"）不进索引。"""
+    _seed_library(session, "tag_ok", "复仇")
+    _seed_library(session, "tag_bad", "按 YYYY-MM-DD 填写")
+
+    index = load_library_index(session)
+
+    names = {tag.name for tag in index}
+    assert names == {"复仇"}
+
+
 class _VerifyClient:
     """复核桩：按构造参数决定"是否同一概念"。"""
 
