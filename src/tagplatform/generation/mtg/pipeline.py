@@ -204,7 +204,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
 
     # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
     # 库内向量用导入时算好落库的那份，不在这里重新嵌入（1400 条要几分钟）。
-    library = load_library_index(session) if settings.open_library_enabled else []
+    library = (load_library_index(session, dim=embedder.dim)
+               if settings.open_library_enabled else [])
     hints: list[str] = []
     if library and settings.open_library_hint_enabled:
         hints = recall_library_hints(library, embedder, contents,

@@ -305,6 +305,20 @@ def test_library_index_skips_template_placeholder(session):
     assert names == {"复仇"}
 
 
+def test_library_index_skips_vectors_of_wrong_dimension(session):
+    """换模型忘了重灌 → 维度不符的行跳过，任务照常出标签（不是崩）。"""
+    _seed_library(session, "tag_ok", "复仇")
+    _seed_library(session, "tag_old", "背叛")
+    row = session.get(TagCatalog, "tag_old")
+    row.embedding = encode_vector(np.zeros(3, dtype="float32") + 0.5)
+    session.commit()
+
+    index = load_library_index(session, dim=len(
+        MOCK_EMBEDDER.embed(["x"], role="passage")[0]))
+
+    assert {tag.name for tag in index} == {"复仇"}
+
+
 class _VerifyClient:
     """复核桩：按构造参数决定"是否同一概念"。"""
 

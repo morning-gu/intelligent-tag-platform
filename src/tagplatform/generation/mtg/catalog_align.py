@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -38,6 +39,8 @@ from tagplatform.db.models import TagCatalog
 from tagplatform.generation.mtg.merge import normalize_tag
 from tagplatform.schemas import ContentJSON
 from tagplatform.vectors import decode_vector
+
+logger = logging.getLogger(__name__)
 
 # 标签名参与"包含关系"判断的最短长度：单字标签（如"爱"）会把半张表都算成疑似
 _MIN_CONTAIN_LEN = 2
@@ -98,11 +101,16 @@ class Alignment:
         return self.band == BAND_SUSPECT and self.same_concept is True
 
 
-def load_library_index(session: Session) -> list[LibraryTag]:
+def load_library_index(session: Session, *, dim: int | None = None) -> list[LibraryTag]:
     """读取库内叶子标签（排除废弃行、无向量行与模板占位行），供提示与分档复用。
 
     叶子 = 没有任何行把它当父节点——目录节点（"内容元数据标签"这类）不参与
     对齐，否则候选可能"撞上一个分类名"。
+
+    `dim`：查询向量的维度。库内向量来自导入时算好的那份，换句向量模型后
+    必须重灌（scripts/reembed_catalog.py）；万一忘了重灌，维度对不上会让
+    search_similar 抛 ValueError、整条生成任务失败。这里直接跳过维度不符的
+    行：宁可这一轮没有库可比（全部按新词出），也不要让任务挂掉。
     """
     rows = [row for row in session.query(TagCatalog).all()
             if row.status != "deprecate" and row.embedding
@@ -110,12 +118,20 @@ def load_library_index(session: Session) -> list[LibraryTag]:
     # 父节点集合按全表算（含废弃行）：否则"父节点已废弃"的子节点会被误当叶子
     all_parent_ids = {row.parent_id for row in session.query(TagCatalog).all()
                       if row.parent_id}
-    return [
-        LibraryTag(tag_id=row.tag_id, name=row.tag_name,
-                   vector=decode_vector(row.embedding))
-        for row in rows
-        if row.tag_id not in all_parent_ids
-    ]
+    index: list[LibraryTag] = []
+    for row in rows:
+        if row.tag_id in all_parent_ids:
+            continue
+        vector = decode_vector(row.embedding)
+        if dim is not None and vector.shape[0] != dim:
+            continue
+        index.append(LibraryTag(tag_id=row.tag_id, name=row.tag_name,
+                                vector=vector))
+    if dim is not None and len(index) < len([r for r in rows
+                                             if r.tag_id not in all_parent_ids]):
+        logger.warning("标签库有维度不符的向量（期望 %d），已跳过——"
+                       "换过句向量模型就要跑 scripts/reembed_catalog.py", dim)
+    return index
 
 
 def _content_texts(content: ContentJSON) -> list[str]:
