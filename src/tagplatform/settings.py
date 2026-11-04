@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     open_library_verify_enabled: bool = True
     # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
     open_library_replace_enabled: bool = True
+    # 复核调用的输出上限：推理模型在模棱两可的对子上会把思考写爆
+    # （实测一次 27k tokens，任务从 4 分钟拖到 7 分钟），这里硬性兜底
+    open_library_verify_max_tokens: int = 4096
 
 
 @lru_cache

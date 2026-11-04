@@ -138,11 +138,25 @@ def _make_judge_client(settings: Settings, llm):
 
 
 def _make_verify_client(settings: Settings, llm):
-    """相似度复核客户端：复用 judge 的模型与参数（同一类判定，同一套限速）。
+    """相似度复核客户端：与 judge 同模型，但温度 0 且**卡输出上限**。
 
-    单独包一层是为了可替换：测试与将来换更小的模型时只动这一处。
+    judge 一次要出 20 条判决，输出量本来就大；复核只有几条二分类，实测却
+    有一次烧掉 27k completion tokens（推理模型在模棱两可的对子上反复权衡），
+    把 4 分钟的任务拖到 7 分钟。这里给 max_tokens 兜底，超了就解析失败 →
+    不替换，代价可控。
     """
-    return _make_judge_client(settings, llm)
+    from tagplatform.llm.mock import MockLLMClient
+    if settings.use_mock_llm or isinstance(llm, MockLLMClient):
+        return llm
+    from tagplatform.llm import OpenAIClient
+    return OpenAIClient(
+        model=settings.mtg_judge_model,
+        base_url_env=settings.llm_base_url_env,
+        api_key_env=settings.llm_api_key_env,
+        temperature=0.0,
+        max_tokens=settings.open_library_verify_max_tokens,
+        request_interval=settings.llm_request_interval,
+    )
 
 
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,

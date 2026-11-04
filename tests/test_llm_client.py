@@ -137,7 +137,8 @@ def test_mock_deterministic_same_run_id():
 
 def test_openai_client_json_fallback_and_retry():
     calls = []
-    def flaky_transport(model, messages, temperature, response_format, extra_body):
+    def flaky_transport(model, messages, temperature, response_format, extra_body,
+                   max_tokens=None):
         calls.append(response_format)
         if len(calls) == 1: raise RuntimeError("json_object not supported")
         return {"choices": [{"message": {"content": "[]"}}], "usage": {}}
@@ -147,7 +148,8 @@ def test_openai_client_json_fallback_and_retry():
 
 
 def test_openai_client_all_fail_returns_not_ok():
-    def broken(model, messages, temperature, response_format, extra_body):
+    def broken(model, messages, temperature, response_format, extra_body,
+             max_tokens=None):
         raise RuntimeError("network down")
     client = OpenAIClient("m", transport=broken, request_interval=0, max_retries=2)
     resp = client.complete([{"role": "user", "content": "x"}], "r")

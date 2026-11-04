@@ -13,7 +13,7 @@ from typing import Callable
 
 from tagplatform.settings import Settings
 
-Transport = Callable[[str, list[dict], float, dict | None, dict | None], dict]
+Transport = Callable[[str, list[dict], float, dict | None, dict | None, int | None], dict]
 
 
 @dataclass
@@ -28,7 +28,8 @@ class OpenAIClient:
     def __init__(self, model: str, base_url_env: str = "OPENAI_BASE_URL",
                  api_key_env: str = "OPENAI_API_KEY", temperature: float = 0.7,
                  request_interval: float = 0.5, transport: Transport | None = None,
-                 max_retries: int = 3, extra_body: dict | None = None):
+                 max_retries: int = 3, extra_body: dict | None = None,
+                 max_tokens: int | None = None):
         self.model = model
         self.base_url_env = base_url_env
         self.api_key_env = api_key_env
@@ -36,6 +37,9 @@ class OpenAIClient:
         self.request_interval = request_interval
         self.max_retries = max_retries
         self.extra_body = dict(extra_body) if extra_body else {}
+        # 输出上限：推理模型偶尔会把思考写爆（实测一次复核烧了 27k tokens），
+        # 只在需要卡住延迟的调用点设置，生成主链不设
+        self.max_tokens = max_tokens
         self._transport = transport
 
     def _build_transport(self) -> Transport:
@@ -51,9 +55,12 @@ class OpenAIClient:
         sdk = OpenAI(base_url=base_url, api_key=api_key)
 
         def transport(model: str, messages: list[dict], temperature: float,
-                      response_format: dict | None, extra_body: dict | None) -> dict:
+                      response_format: dict | None, extra_body: dict | None,
+                      max_tokens: int | None = None) -> dict:
             kwargs: dict = {"model": model, "messages": messages,
                             "temperature": temperature}
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             if response_format is not None:
                 kwargs["response_format"] = response_format
             if extra_body:
@@ -90,7 +97,7 @@ class OpenAIClient:
               allow_json: bool) -> LLMResponse:
         rf = {"type": "json_object"} if allow_json else None
         raw = transport(self.model, messages, self.temperature, rf,
-                        self.extra_body or None)
+                        self.extra_body or None, self.max_tokens)
         content = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
         return LLMResponse(content=content or "", usage=raw.get("usage", {}),
                            raw=raw, ok=True)
