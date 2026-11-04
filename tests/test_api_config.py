@@ -26,7 +26,7 @@ def test_config_returns_all_fields(client):
     assert body["llm_temperature"] == 0.7
     assert body["recall_top_k_per_type"] == 50
     assert body["open_match_threshold"] == 0.85
-    assert body["semantic_similar_threshold"] == 0.90
+    assert body["semantic_similar_threshold"] == 0.85
     assert body["generation_workers"] == 0  # fixture 钉死同步执行
     assert body["use_mock_llm"] is True
     assert body["use_mock_embedder"] is True

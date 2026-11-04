@@ -333,28 +333,43 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 -candidate.runs)
 
     accepted.sort(key=_rank)
-    truncated = accepted[limit:]
-    accepted = accepted[:limit]
+
+    def _plan(candidate) -> tuple[Alignment | None, bool]:
+        """(对齐结论, 是否替换成库内标签)。
+
+        同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
+        疑似 → 复核通过 + 替换开关打开才换成库内标准名。
+        """
+        item = alignment.get(candidate.tag)
+        same_name = bool(item is not None and item.band == BAND_DUPLICATE
+                         and item.matched_tag_id)
+        replace_suspect = bool(item is not None
+                               and settings.open_library_replace_enabled
+                               and item.band == BAND_SUSPECT
+                               and item.same_concept is True
+                               and item.matched_tag_id)
+        return item, same_name or replace_suspect
+
+    plans = {candidate.tag: _plan(candidate) for candidate, _, _ in accepted}
+    # 命中的库内标签不占新标签名额：它们本来就是"库里已有的东西"，
+    # 让它挤掉一条真正的新词没有道理。两桶各自排序、各自受 limit 约束。
+    replaced = [item for item in accepted if plans[item[0].tag][1]]
+    fresh = [item for item in accepted if not plans[item[0].tag][1]]
+    kept_replaced = replaced[:limit]
+    truncated = fresh[limit:] + replaced[limit:]
+    accepted = fresh[:limit] + kept_replaced
 
     tags: list[ProducedTag] = []
+    tag_rows: list[dict] = []
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
         reason = (verdict or {}).get("reason") or candidate.reason
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
         level = candidate.scope if candidate.scope in ("film", "scene") else "film"
-        item = alignment.get(candidate.tag)
-        # 同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
-        # 疑似 → 复核通过 + 替换开关打开才换成库内标准名，否则保留原样。
-        same_name = (item is not None and item.band == BAND_DUPLICATE
-                     and item.matched_tag_id)
-        replace_suspect = (item is not None
-                           and settings.open_library_replace_enabled
-                           and item.band == BAND_SUSPECT
-                           and item.same_concept is True
-                           and item.matched_tag_id)
-        if same_name or replace_suspect:
-            if replace_suspect:
+        item, is_replace = plans.get(candidate.tag, (None, False))
+        if is_replace and item is not None:
+            if item.band == BAND_SUSPECT:
                 replacements.append({
                     "generated": candidate.tag,
                     "library": item.matched_name,
@@ -370,6 +385,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 relevance_score=item.cosine, confidence=confidence,
                 evidence=evidence, level=level,
             ))
+            tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
+                             "origin": "catalog", "band": item.band,
+                             "dimension": None,
+                             "confidence": confidence,
+                             "evidence": [e.scene_id for e in evidence]})
         else:
             tags.append(ProducedTag(
                 origin="generated", tag_id=None, tag_name=candidate.tag,
@@ -378,6 +398,12 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 relevance_score=None, confidence=confidence,
                 evidence=evidence, level=level,
             ))
+            tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
+                             "origin": "generated",
+                             "band": (item.band if item is not None else None),
+                             "dimension": candidate.dimension,
+                             "confidence": confidence,
+                             "evidence": [e.scene_id for e in evidence]})
 
     # ---- 6. 审计落盘 ----
     elapsed = time.monotonic() - started
@@ -413,13 +439,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                     "scope": m.scope}
                    for m in merged],
         "verdicts": list(verdicts.values()),
-        "accepted": [{"tag": t.tag_name, "origin": t.origin,
-                      "dimension": t.candidate_type,
-                      "confidence": t.confidence,
-                      "band": (alignment.get(t.tag_name).band
-                               if t.tag_name in alignment else None),
-                      "evidence": [e.scene_id for e in t.evidence]}
-                     for t in tags],
+        "accepted": [{"tag": row["name"], "candidate": row["tag"],
+                      "origin": row["origin"],
+                      "confidence": row["confidence"], "band": row["band"],
+                      "evidence": row["evidence"]}
+                     for row in tag_rows],
         "library": {
             "enabled": bool(library),
             "size": len(library),

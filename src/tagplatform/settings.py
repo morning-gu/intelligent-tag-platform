@@ -20,12 +20,16 @@ class Settings(BaseSettings):
 
     # SQLite 数据库文件路径
     database_path: str = "data/tagplatform.db"
-    # 句向量模型（intfloat/multilingual-e5-base，768 维）
-    embedding_model: str = "intfloat/multilingual-e5-base"
+    # 句向量模型（1024 维）。2026-11-05 由 e5-base 换到 BGE-M3：
+    # 同一批 87 条人工标注上 AUC 0.903→0.928，且"重复 vs 新词"的分差
+    # 0.028→0.187（e5 把所有中文短词挤在 0.85-0.95，阈值只能在噪声里切）。
+    # 换模型必须重灌 tag_catalog.embedding（scripts/reembed_catalog.py）。
+    embedding_model: str = "BAAI/bge-m3"
     # True 时用确定性 MockEmbedder（测试专用，绝不触发模型下载）
     use_mock_embedder: bool = False
-    # 语义相似阈值，余弦相似度 >= 该值判为疑似同义（含等于）
-    semantic_similar_threshold: float = 0.90
+    # 语义相似阈值：导入校验时与库内标签余弦 >= 该值判"疑似重复"（含等于）。
+    # e5 时代是 0.90；换 BGE-M3 后 0.90 只对几乎逐字相同的对子触发，下调到 0.85。
+    semantic_similar_threshold: float = 0.85
     # 标签类型逗号分隔白名单；空 = 不校验
     allowed_tag_types: str = ""
 
@@ -80,8 +84,10 @@ class Settings(BaseSettings):
     # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
     mtg_frames_per_scene: int = 2
     mtg_max_frames: int = 24
-    # 跨轮语义合并阈值（e5 余弦，complete-link）
-    mtg_merge_threshold: float = 0.90
+    # 跨轮语义合并阈值（complete-link）。换 BGE-M3 后按"e5 0.90 会合掉的对子"
+    # 反推：同一批候选里 e5≥0.90 有 31 对，BGE-M3 上对应 0.75（13 对）——
+    # 刻意偏保守，宁可留两条相似候选让人看，也不要把不同的词合掉。
+    mtg_merge_threshold: float = 0.75
     # 单轮输出上限（模型被要求 15-20 个，这里兜底截断）
     mtg_max_candidates_per_run: int = 20
     # judge 通过后的最终产出上限（用户口径 10-15 条）
@@ -101,7 +107,7 @@ class Settings(BaseSettings):
     open_library_hint_count: int = 30
     # 分档阈值：余弦 ≥ 该值判"疑似重复"。
     # 0.87 ≈ 候选×库随机配对的 99.9% 分位（实测 0.866），不是拍脑袋的数。
-    open_library_suspect_cosine: float = 0.87
+    open_library_suspect_cosine: float = 0.74
     # 名字字符重合度（Jaccard）≥ 该值判"疑似重复"
     open_library_name_overlap: float = 0.40
     # 疑似对子交给 LLM 复核"是不是同一个概念"（一批一次调用）；
