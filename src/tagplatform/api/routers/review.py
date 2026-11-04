@@ -170,6 +170,7 @@ class ReviewItemOut(BaseModel):
     confidence: float | None = None
     relevance: float | None = None
     review_status: str
+    level: str = "film"
     evidence: list[EvidenceOut] = []
     task_id: str | None = None
 
@@ -273,6 +274,7 @@ def list_review_items(
             confidence=row.confidence,
             relevance=row.relevance_score,
             review_status=row.review_status,
+            level=row.level,
             evidence=_parse_evidence(row.evidence_json),
             task_id=row.task_id,
         )

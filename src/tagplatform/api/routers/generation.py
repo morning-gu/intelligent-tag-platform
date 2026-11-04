@@ -93,6 +93,7 @@ class GenerationResultOut(BaseModel):
     relevance_score: float | None = None
     confidence: float | None = None
     review_status: str
+    level: str = "film"
     evidence: list[EvidenceOut] = []
 
 
@@ -161,6 +162,7 @@ def _result_out(row: AssetTag, names: dict[str, str]) -> GenerationResultOut:
         relevance_score=row.relevance_score,
         confidence=row.confidence,
         review_status=row.review_status,
+        level=row.level,
         evidence=_parse_evidence(row.evidence_json),
     )
 

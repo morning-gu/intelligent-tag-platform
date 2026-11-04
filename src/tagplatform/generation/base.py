@@ -59,6 +59,9 @@ class ProducedTag:
     relevance_score: float | None
     confidence: float
     evidence: list[Evidence]
+    # 标签层级：film（影片级）/ scene（场景级）。默认 film 让闭环与目录
+    # 产出无需显式传参；开放生成按 MTG 合并结果的 scope 落值。
+    level: str = "film"
 
 
 @dataclass

@@ -38,22 +38,24 @@ const DETAIL: AssetDetailData = {
 }
 
 const SCENES = [
-  { scene_id: 's1', time_range: { start_ms: 0, end_ms: 60_000 }, description: '日常训练',
-    visual_features: [], dialogues: [], entities: [], events: [] },
-  { scene_id: 's2', time_range: { start_ms: 60_000, end_ms: 120_000 }, description: '主角争执推搡',
-    visual_features: [], dialogues: [], entities: [], events: [] },
-  { scene_id: 's3', time_range: { start_ms: 120_000, end_ms: 180_000 }, description: '离别远行',
-    visual_features: [], dialogues: [], entities: [], events: [] },
+  { scene_id: 's1', start_ms: 0, end_ms: 60_000, description: '日常训练',
+    virtual_time: null, location: null, character_ids: [], events: [],
+    emotion: [], dialogues: [], audio_events: [] },
+  { scene_id: 's2', start_ms: 60_000, end_ms: 120_000, description: '主角争执推搡',
+    virtual_time: null, location: null, character_ids: [], events: [],
+    emotion: [], dialogues: [], audio_events: [] },
+  { scene_id: 's3', start_ms: 120_000, end_ms: 180_000, description: '离别远行',
+    virtual_time: null, location: null, character_ids: [], events: [],
+    emotion: [], dialogues: [], audio_events: [] },
 ]
 
 const CONTEXT: ContentContext = {
   schema_version: '1.0',
   asset: {
     asset_id: 'a1', asset_type: 'movie', title: '星际穿越', duration_ms: 180_000,
-    video_uri: 'movies/interstellar.mp4', parent_id: null,
+    video_uri: 'movies/interstellar.mp4', language: 'zh-CN',
   },
-  content: { summary: '主角在太空遇难', scenes: SCENES },
-  metadata: { source: 'test', model_version: 'vision-v3', recognition_status: 'completed' },
+  content: { description: '主角在太空遇难', characters: [], scenes: SCENES },
 }
 
 const TAGS: AssetTagRow[] = [
@@ -64,6 +66,7 @@ const TAGS: AssetTagRow[] = [
     relevance_score: 0.8,
     confidence: 0.42,
     review_status: 'pending',
+    level: 'scene',
     evidence: [{ scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' }],
     tag_id: null,
     candidate_name: '主角争执',
@@ -75,6 +78,7 @@ const TAGS: AssetTagRow[] = [
     relevance_score: null,
     confidence: null,
     review_status: 'approved',
+    level: 'film',
     evidence: [],
     tag_id: 'tag-war',
     candidate_name: null,
@@ -142,9 +146,25 @@ describe('AssetDetail 内容资产详情', () => {
     expect(tagRow).toHaveTextContent('生成')
     expect(tagRow).toHaveTextContent('待审核')
     expect(tagRow).toHaveTextContent('42%')
+    // 层级列：生成行 scene、目录行 film
+    expect(within(tagRow).getByText('场景')).toBeInTheDocument()
     const rowB = screen.getByText('枪战').closest('tr')!
     expect(rowB).toHaveTextContent('目录')
+    expect(within(rowB).getByText('影片')).toBeInTheDocument()
     expect(within(rowB).getAllByText('暂无')).toHaveLength(2)
+  })
+
+  it('场景资产：卡片标题截断预览，正文展示完整描述', async () => {
+    const longTitle =
+      'The Dude 抵达 The Big Lebowski 的豪宅，Brandt 先带他参观了展示 Lebowski 慈善成就的奖项。' +
+      '随后在书房，坐轮椅的 The Big Lebowski 态度强硬，拒绝为被毁的地毯负责。'
+    mockApis({ detail: { ...DETAIL, asset_type: 'scene', title: longTitle } })
+    renderDetail()
+
+    const description = await screen.findByTestId('asset-description')
+    expect(description).toHaveTextContent(longTitle)
+    // 全文只出现一次（卡片标题是截断预览，不重复渲染全文）
+    expect(screen.getAllByText(longTitle)).toHaveLength(1)
   })
 
   it('URL query ?scene=&t=：挂载即 seek 到 t 毫秒并选中场景', async () => {

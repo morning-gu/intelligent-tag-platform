@@ -44,7 +44,7 @@ _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 # 行摘要键集契约（与 generation.py 的 AssetTagOut 同形——Task 4 响应形状）
 ASSET_TAG_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
-                  "review_status", "evidence", "tag_id", "candidate_name"}
+                  "review_status", "level", "evidence", "tag_id", "candidate_name"}
 
 
 def _seed_rows(client, count=1, origin="generated") -> list[int]:
@@ -347,10 +347,10 @@ def test_review_requires_login(client):
 # ---------- 审核列表与筛选（Task 5） ----------
 
 # 审核列表行键集契约（计划：id/asset_id/asset_title/tag_name/origin/mode/
-# tag_type/confidence/relevance/review_status/evidence/task_id）
+# tag_type/confidence/relevance/review_status/level/evidence/task_id）
 REVIEW_ITEM_KEYS = {"id", "asset_id", "asset_title", "tag_name", "origin",
                     "mode", "tag_type", "confidence", "relevance",
-                    "review_status", "evidence", "task_id"}
+                    "review_status", "level", "evidence", "task_id"}
 
 
 def _seed_list_scene(client) -> dict[str, int]:

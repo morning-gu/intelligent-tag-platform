@@ -40,6 +40,8 @@ export interface ReviewItem {
   confidence: number | null
   relevance: number | null
   review_status: string
+  /** 标签层级：film（影片级）/ scene（场景级）。 */
+  level: string
   evidence: ReviewEvidence[]
   task_id: string | null
 }

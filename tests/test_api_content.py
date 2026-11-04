@@ -32,7 +32,7 @@ def test_content_import_via_api(client):
     detail = client.get(f"/api/v1/assets/{body['asset_id']}").json()
     assert detail["contexts"][0]["recognition_status"] == "completed"
     full = client.get(f"/api/v1/assets/{body['asset_id']}/contexts/{body['context_id']}")
-    assert full.json()["content"]["summary"]
+    assert full.json()["content"]["description"]
 
 
 VISION_PAYLOAD = {
@@ -58,17 +58,22 @@ VISION_PAYLOAD = {
 
 
 def test_content_import_vision_kind(client):
-    """kind="vision"：上游格式经适配器落库，字段进入统一内容 JSON。"""
+    """kind="vision"：上游格式经适配器落库，读端点按上游模板形态返回。"""
     resp = client.post("/api/v1/content/import", json={
         "kind": "vision", "video_root": None, "data": VISION_PAYLOAD})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     ctx = client.get(
         f"/api/v1/assets/{body['asset_id']}/contexts/{body['context_id']}").json()
-    assert ctx["metadata"]["source"] == "video_understanding"
+    assert ctx["content"]["description"] == "一名记者追查旧案，发现自己父亲当年被冤枉。"
     assert ctx["content"]["characters"][0]["name"] == "周野"
-    assert ctx["content"]["scenes"][0]["emotions"] == ["压抑"]
-    assert ctx["content"]["scenes"][0]["audio_events"][0]["event_type"] == "background_music"
+    scene = ctx["content"]["scenes"][0]
+    assert scene["start_ms"] == 0 and scene["end_ms"] == 60_000
+    assert scene["emotion"][0]["name"] == "压抑"
+    assert scene["audio_events"][0]["event_type"] == "background_music"
+    # 模板字段全量：列表字段缺失写 []，标量缺失写 null
+    assert scene["events"] == [] and scene["virtual_time"] is None
+    assert "summary" not in ctx["content"] and "metadata" not in ctx
 
 
 def test_content_import_bad_video_root_422(client):   # Review Focus 4

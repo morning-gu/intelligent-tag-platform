@@ -47,6 +47,7 @@ const ROW_A: ReviewItem = {
   confidence: 0.42,
   relevance: 0.77,
   review_status: 'pending',
+  level: 'scene',
   evidence: [{ scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' }],
   task_id: 'task-1',
 }
@@ -63,6 +64,7 @@ const ROW_B: ReviewItem = {
   confidence: null,
   relevance: null,
   review_status: 'pending',
+  level: 'film',
   evidence: [],
   task_id: null,
 }
@@ -79,6 +81,7 @@ const ROW_NULL_MODE: ReviewItem = {
   confidence: 0.8,
   relevance: 0.8,
   review_status: 'pending',
+  level: 'film',
   evidence: [],
   task_id: null,
 }
@@ -128,6 +131,17 @@ function postedBody(path: string): string | undefined {
   return call === undefined ? undefined : String((call[1] as RequestInit).body)
 }
 
+/** 审核中心默认全部折叠：逐一点击分组头展开，露出标签行与行内操作。 */
+async function expandAllGroups() {
+  const headers = [...document.querySelectorAll('.ant-collapse-header')]
+  for (const header of headers) fireEvent.click(header)
+  await waitFor(() =>
+    expect(document.querySelectorAll('.ant-collapse-item-active')).toHaveLength(
+      headers.length,
+    ),
+  )
+}
+
 function renderReviewCenter() {
   return render(
     <MemoryRouter initialEntries={['/review']}>
@@ -149,35 +163,47 @@ afterEach(() => {
 // ---------- 用例 ----------
 
 describe('ReviewCenter 审核中心', () => {
-  it('渲染列表行与默认筛选参数（status=pending、page_size=50）', async () => {
+  it('按影片分组渲染（默认全部折叠）+ 默认筛选参数（status=pending、page_size=500）', async () => {
     mockApis()
     renderReviewCenter()
 
+    // 分组头：影片标题 + 条数；默认折叠，标签行不渲染
     expect(await screen.findByText('星际穿越')).toBeInTheDocument()
-    const rowA = screen.getByText('星际穿越').closest('tr')!
-    const rowB = screen.getByText('盗梦空间').closest('tr')!
-    // 行内容：标签名 / 来源 Tag / 模式 Tag / 状态 Tag / 置信度进度条 / null 兜底
+    expect(screen.getByText('盗梦空间')).toBeInTheDocument()
+    expect(screen.queryByText('主角争执')).not.toBeInTheDocument()
+    expect(screen.queryByText('枪战')).not.toBeInTheDocument()
+    expect(document.querySelectorAll('.ant-collapse-item-active')).toHaveLength(0)
+
+    fireEvent.click(screen.getByText('星际穿越'))
+    const rowA = (await screen.findByText('主角争执')).closest('tr')!
+    fireEvent.click(screen.getByText('盗梦空间'))
+    const rowB = (await screen.findByText('枪战')).closest('tr')!
+    // 行内容：标签名 / 来源 Tag / 模式 Tag / 状态 Tag / 层级 Tag / 置信度进度条
     expect(rowA).toHaveTextContent('主角争执')
     expect(rowA).toHaveTextContent('生成')
     expect(rowA).toHaveTextContent('开放')
     expect(rowA).toHaveTextContent('待审核')
+    expect(rowA).toHaveTextContent('场景')
     expect(rowA).toHaveTextContent('42%')
     expect(screen.getByText('目录')).toBeInTheDocument()
     expect(rowB).toHaveTextContent('闭环')
+    expect(rowB).toHaveTextContent('影片')
     expect(within(rowB).getAllByText('暂无')).toHaveLength(2)
 
-    // 默认拉待审核，分页参数走列表 API
+    // 默认拉待审核，分组视图一次取回全部匹配行
     const paths = itemsCallPaths()
     expect(paths).toHaveLength(1)
     expect(paths[0]).toContain('status=pending')
     expect(paths[0]).toContain('page=1')
-    expect(paths[0]).toContain('page_size=50')
+    expect(paths[0]).toContain('page_size=500')
   })
 
   it('模式列：mode 为 null 时兜底显示"—"', async () => {
     mockApis({ items: { items: [ROW_NULL_MODE], total: 1, page: 1 } })
     renderReviewCenter()
 
+    await screen.findByText('无模式资产')
+    await expandAllGroups()
     await screen.findByText('慢镜头')
     // 该行其余列均有值（标题/类型/置信度/相关度/状态），"—"只可能来自模式列
     expect(screen.getByText('—')).toBeInTheDocument()
@@ -209,21 +235,27 @@ describe('ReviewCenter 审核中心', () => {
     expect(itemsCallPaths()[1]).toContain('status=approved')
   })
 
-  it('点击第二页：携带 page=2 重新拉取', async () => {
+  it('影片分组默认折叠：点击分组头展开，再点收起', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
 
-    fireEvent.click(screen.getByText('2'))
+    const panel = screen.getByText('星际穿越').closest('.ant-collapse-item')!
+    expect(panel).not.toHaveClass('ant-collapse-item-active')
 
-    await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
-    expect(itemsCallPaths()[1]).toContain('page=2')
+    fireEvent.click(screen.getByText('星际穿越'))
+    await waitFor(() => expect(panel).toHaveClass('ant-collapse-item-active'))
+    expect(await screen.findByText('主角争执')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('星际穿越'))
+    await waitFor(() => expect(panel).not.toHaveClass('ant-collapse-item-active'))
   })
 
   it('单条通过：Popconfirm 确认后 POST approve 载荷并自动刷新', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -240,6 +272,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ reviewError: new ApiError(409, '该标签已被处理') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -253,6 +286,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ reviewError: new ApiError(422, 'merge 动作必须提供 merge_to_tag_id') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^拒\s*绝$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -265,6 +299,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^修\s*改$/ })[0])
     const nameInput = await screen.findByLabelText('标签名')
@@ -285,6 +320,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^合\s*并$/ })[0])
     // 打开弹窗即预载候选标签（空关键词）
@@ -310,10 +346,11 @@ describe('ReviewCenter 审核中心', () => {
     })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     const checkboxes = screen.getAllByRole('checkbox')
-    fireEvent.click(checkboxes[1]) // 第一行（0 为表头全选）
-    fireEvent.click(checkboxes[2]) // 第二行
+    fireEvent.click(checkboxes[1]) // 影片一的行
+    fireEvent.click(checkboxes[3]) // 影片二的行
     fireEvent.click(screen.getByRole('button', { name: /^批量通过$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -331,8 +368,10 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ batchResults: [{ id: 1, ok: true }, { id: 2, ok: true }] })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
-    fireEvent.click(screen.getAllByRole('checkbox')[0]) // 表头全选
+    fireEvent.click(screen.getAllByRole('checkbox')[0]) // 影片一表头全选
+    fireEvent.click(screen.getAllByRole('checkbox')[2]) // 影片二表头全选
     fireEvent.click(screen.getByRole('button', { name: /^批量拒绝$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -348,6 +387,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     // 仅 ROW_A 有证据可展开（ROW_B rowExpandable=false）
     const expandIcon = document.querySelector('.ant-table-row-expand-icon')

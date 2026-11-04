@@ -285,11 +285,12 @@ def test_open_respects_max_final_tags(session, content_fixture, mtg_settings):
     assert len(out) == 1
 
 
-# ---- 层级约束（内部把关，不落库） ----
+# ---- 层级约束（内部把关 + 层级落库） ----
 
 
 def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings):
-    """全片级但只有单场支撑 → 淘汰；场景级单场支撑 → 保留。"""
+    """全片级但只有单场支撑 → 淘汰；场景级单场支撑 → 保留，且层级随
+    产出带出（film/scene 落库到 asset_tag.level）。"""
     content = _scene_content(content_fixture, "tt0000009", 2)
     spec = _build_spec(session, content, run_id="rf")
     llm = _FixedGenLLM([
@@ -305,6 +306,8 @@ def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings
                                     judge_client=_JudgeClient())
     names = {tag.tag_name for tag in out}
     assert names == {"开场旁白", "家族权力更迭"}
+    levels = {tag.tag_name: tag.level for tag in out}
+    assert levels == {"开场旁白": "scene", "家族权力更迭": "film"}
 
 
 # ---- 队列治理：judge 引用原文 + 重要度排序 ----

@@ -46,6 +46,18 @@ const STATUS_COLORS: Record<string, string> = {
 /** 来源中文展示（origin 为数据模型固定取值 generated/catalog）。 */
 const ORIGIN_LABELS: Record<string, string> = { generated: '生成', catalog: '目录' }
 
+/** 标签层级中文展示与颜色（level 为生成契约固定枚举 film/scene）。 */
+const LEVEL_LABELS: Record<string, string> = { film: '影片', scene: '场景' }
+const LEVEL_COLORS: Record<string, string> = { film: 'blue', scene: 'cyan' }
+
+/** 场景描述在卡片标题里的预览长度（全文在下方描述块展示）。 */
+const TITLE_PREVIEW = 40
+
+/** 超长文本截断（场景描述预览用）。 */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 export default function AssetDetail() {
   const { assetId = '' } = useParams()
   const [searchParams] = useSearchParams()
@@ -139,7 +151,7 @@ export default function AssetDetail() {
   /** 场景分段点击：seek 到场景起始毫秒 + 选中高亮。 */
   function handleSceneClick(scene: AssetScene) {
     setSelected({ assetId, sceneId: scene.scene_id, params: searchParams })
-    playerRef.current?.seek(scene.time_range.start_ms)
+    playerRef.current?.seek(scene.start_ms)
   }
 
   /** 证据点击（标签卡原位定位）：seek 到证据 start_ms + 选中对应场景。 */
@@ -158,11 +170,18 @@ export default function AssetDetail() {
   const maxSceneEnd =
     context === null
       ? 0
-      : context.content.scenes.reduce((m, s) => Math.max(m, s.time_range.end_ms), 0)
+      : context.content.scenes.reduce((m, s) => Math.max(m, s.end_ms), 0)
   const durationMs = detail?.duration_ms ?? maxSceneEnd
 
   const tagColumns: TableProps<AssetTagRow>['columns'] = [
     { title: '标签名', dataIndex: 'tag_name' },
+    {
+      title: '标签层级',
+      dataIndex: 'level',
+      render: (v: string) => (
+        <Tag color={LEVEL_COLORS[v] ?? 'default'}>{LEVEL_LABELS[v] ?? v}</Tag>
+      ),
+    },
     {
       title: '来源',
       dataIndex: 'origin',
@@ -196,7 +215,15 @@ export default function AssetDetail() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Card title={detail === null ? '视频与场景' : detail.title}>
+      <Card
+        title={
+          detail === null
+            ? '视频与场景'
+            : detail.asset_type === 'scene'
+              ? truncate(detail.title, TITLE_PREVIEW)
+              : detail.title
+        }
+      >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <VideoPlayer ref={playerRef} assetId={assetId} />
           {detail !== null && (
@@ -212,9 +239,19 @@ export default function AssetDetail() {
                   </Typography.Text>
                 )}
               </div>
+              {/* 场景资产：标题即完整场景描述，列表页只给截断预览，这里
+                  展示全文（pre-wrap 保留换行）。 */}
+              {detail.asset_type === 'scene' && (
+                <Typography.Paragraph
+                  data-testid="asset-description"
+                  style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
+                >
+                  {detail.title}
+                </Typography.Paragraph>
+              )}
               {context !== null && (
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  {context.content.summary}
+                  {context.content.description ?? '（无剧情描述）'}
                 </Typography.Paragraph>
               )}
             </>

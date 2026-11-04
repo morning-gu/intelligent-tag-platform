@@ -17,9 +17,9 @@
   asset_type="scene"、duration_ms = end - start、video_uri 同影片；
   重复导入 upsert（同 scene_id 不重复插行）；
 - **media_context**：每次导入新建一行（不做 upsert）——context_id =
-  ctx_ + uuid4().hex[:8]、content_json 为 ContentJSON 全量序列化、
-  source/model_version/recognition_status 取 metadata、embedding 留空
-  （由嵌入生产任务回填）。
+  ctx_ + uuid4().hex[:8]、content_json 为**完整上游模板形态**（缺值 null /
+  空列表 []，字段全量）、source/model_version/recognition_status 取
+  metadata、embedding 留空（由嵌入生产任务回填）。
 
 实现注意：
 - MediaAsset.parent_id 外键无 relationship()：影片行先 flush 落库，
@@ -38,9 +38,11 @@ from urllib.parse import unquote, urlparse
 
 from sqlalchemy.orm import Session
 
-from tagplatform.content_io import dump_for_storage
+from tagplatform.content_io import dump_for_storage, is_upstream_shape
+from tagplatform.content_template import to_template, to_template_from_content
 from tagplatform.db.models import MediaAsset, MediaContext
 from tagplatform.schemas import ContentJSON
+from tagplatform.schemas.upstream import parse_upstream
 
 
 @dataclass
@@ -81,9 +83,10 @@ def import_content(
     video_root 非 None 时必须为已存在目录，否则抛 ValueError（任何
     数据库写入之前先校验，失败零副作用）。
 
-    raw 是**调用方收到的原始 JSON**（上游模板形态）。给了就原样入库，不给
-    才退回内部形态的序列化——"资产以什么格式交付，库里就是什么格式"，
-    读的时候再由 `content_io.load_content` 归一化。
+    raw 是**调用方收到的原始 JSON**（上游模板形态）。给了就按上游模型取
+    全量字段（保留 `emotion.code` / 事件参与人情绪）后落库；不给则由内部
+    `ContentJSON` 反推模板。两种路径都写成**完整模板形态**（每个字段都在，
+    缺值 null / 空列表 []）——`media_context.content_json` 与 API 返回同一口径。
     """
     if video_root is not None and not Path(video_root).is_dir():
         raise ValueError(f"video_root 不存在: {video_root}")
@@ -153,11 +156,15 @@ def import_content(
 
     # ---------- media_context：每次导入新建一行（不做 upsert） ----------
     context_id = f"ctx_{uuid.uuid4().hex[:8]}"
+    stored = (
+        to_template(parse_upstream(raw))
+        if raw is not None and is_upstream_shape(raw)
+        else to_template_from_content(content)
+    )
     session.add(MediaContext(
         context_id=context_id,
         asset_id=asset_id,
-        content_json=(dump_for_storage(raw) if raw is not None
-                      else content.model_dump_json()),
+        content_json=dump_for_storage(stored),
         embedding=None,  # 留空，由嵌入生产任务写入
         source=content.metadata.source,
         model_version=content.metadata.model_version,

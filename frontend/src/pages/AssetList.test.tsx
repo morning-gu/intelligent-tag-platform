@@ -1,16 +1,16 @@
-// 内容资产列表测试（Task 11）：mock apiFetch 按路径分发，覆盖：列表渲染
-// （类型/时长/视频/创建时间展示与 null 兜底）、类型筛选传参、标题搜索传参
-// （提交触发而非输入即触发）、行点击进入详情路由。
-// 上传占位（阶段 4 任务 5，入口 A）：覆盖上传成功（POST FormData file 字段
-// + 成功提示注明占位语义 + 列表刷新出现新行 + Modal 关闭）、未选文件禁用
-// 确认、422/413 失败透出后端 detail 且不刷新列表；nginx 环境 413 响应为
-// HTML（回落文案"请求失败（HTTP 413）"）时特判为 2GB 上限提示。
+// 内容资产列表测试：mock apiFetch 按路径分发，覆盖：
+// - 按类型分组、默认折叠、展开后渲染行（时长/视频/创建时间与 null 兜底）；
+// - 场景描述在列表里截断预览，点行进入详情路由；
+// - 标题搜索传参（提交触发而非输入即触发）；
+// - 上传：未命中 → 占位登记提示；命中 → Modal 内轮询生成进度并刷新列表；
+// - 422/413 失败透出后端 detail 且不刷新列表（nginx HTML 413 特判）。
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetList from './AssetList'
 import { ApiError, apiFetch } from '../api/client'
 import type { AssetSummary } from '../api/assets'
+import type { BuildTask, MediaUploadResult } from '../api/media'
 
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -20,6 +20,10 @@ vi.mock('../api/client', async (importOriginal) => {
 const mockedApiFetch = vi.mocked(apiFetch)
 
 // ---------- 夹具（与后端 AssetOut 契约同形） ----------
+
+const LONG_SCENE_TITLE =
+  'The Dude 抵达 The Big Lebowski 的豪宅，Brandt 先带他参观了展示 Lebowski 慈善成就的奖项。' +
+  '随后在书房，坐轮椅的 The Big Lebowski 态度强硬，拒绝为被毁的地毯负责。'
 
 const ASSETS: AssetSummary[] = [
   {
@@ -35,8 +39,17 @@ const ASSETS: AssetSummary[] = [
     asset_id: 'a-scene',
     asset_type: 'scene',
     parent_id: 'a-movie',
-    title: '星际穿越-场景2',
+    title: LONG_SCENE_TITLE,
     duration_ms: 65_000,
+    video_uri: null,
+    created_at: null,
+  },
+  {
+    asset_id: 'a-series',
+    asset_type: 'series',
+    parent_id: null,
+    title: '继承之战',
+    duration_ms: null,
     video_uri: null,
     created_at: null,
   },
@@ -49,9 +62,42 @@ function assetsCallPaths(): string[] {
     .filter((p): p is string => typeof p === 'string' && p.startsWith('/api/v1/assets'))
 }
 
-// ---------- 上传占位夹具（与后端 MediaUploadResponse / AssetOut 契约同形） ----------
+/** 展开某个类型分组（分组头文字 = 类型中文名）。 */
+async function expandGroup(label: string) {
+  fireEvent.click(await screen.findByText(label))
+}
 
-const UPLOAD_RESULT = { asset_id: 'a-new', title: '新片', video_uri: 'C:\\data\\media\\u.mkv' }
+// ---------- 上传场景夹具（与后端 MediaUploadResponse / BuildTaskOut 同形） ----------
+
+const UNMATCHED_UPLOAD: MediaUploadResult = {
+  asset_id: 'a-new',
+  title: '新片',
+  video_uri: 'C:\\data\\media\\u.mkv',
+  movie_id: null,
+  matched_title: null,
+  match_how: null,
+  build_task_id: null,
+}
+
+const MATCHED_UPLOAD: MediaUploadResult = {
+  ...UNMATCHED_UPLOAD,
+  movie_id: 'tt0172495',
+  matched_title: '角斗士',
+  match_how: 'imdb_id',
+  build_task_id: 'build_1',
+}
+
+const RUNNING_TASK: BuildTask = {
+  task_id: 'build_1',
+  asset_id: 'a-new',
+  movie_id: 'tt0172495',
+  status: 'running',
+  total_scenes: 4,
+  done_scenes: 2,
+  error: null,
+}
+
+const DONE_TASK: BuildTask = { ...RUNNING_TASK, status: 'succeeded', done_scenes: 4 }
 
 const NEW_ASSET: AssetSummary = {
   asset_id: 'a-new',
@@ -77,15 +123,26 @@ function renderAssetList() {
 
 // ---------- 上传场景 mock 装配与查询辅助 ----------
 
-/** 上传场景的 apiFetch 桩：资产列表（上传成功后含新行）+ /media/upload。 */
-function mockUploadApis(options: { uploadError?: Error } = {}) {
+/** 上传场景的 apiFetch 桩：资产列表 + /media/upload + 进度查询。 */
+function mockUploadApis(
+  options: {
+    uploadError?: Error
+    uploadResult?: MediaUploadResult
+    tasks?: BuildTask[]
+  } = {},
+) {
   let assets: AssetSummary[] = ASSETS
+  const tasks = [...(options.tasks ?? [RUNNING_TASK, DONE_TASK])]
   mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     if (method === 'POST' && path === '/api/v1/media/upload') {
       if (options.uploadError) throw options.uploadError
       assets = [NEW_ASSET, ...ASSETS] // 上传成功：后端新增资产行
-      return UPLOAD_RESULT
+      return options.uploadResult ?? UNMATCHED_UPLOAD
+    }
+    if (path.startsWith('/api/v1/media/build-tasks/')) {
+      const next = tasks.length > 1 ? tasks.shift()! : tasks[0]
+      return next
     }
     if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) return assets
     throw new Error(`未预期的请求：${method} ${path}`)
@@ -146,40 +203,59 @@ afterEach(() => {
 })
 
 describe('AssetList 内容资产列表', () => {
-  it('渲染资产行：类型 Tag/时长 mm:ss/视频有无/创建时间与 null 兜底', async () => {
+  it('按类型分组、默认折叠：只显示分组头与条数', async () => {
     renderAssetList()
 
+    expect(await screen.findByText('电影')).toBeInTheDocument()
+    expect(screen.getByText('剧集')).toBeInTheDocument()
+    expect(screen.getByText('场景')).toBeInTheDocument()
+    // 默认折叠：分组内的资产行不渲染
+    expect(screen.queryByText('星际穿越')).not.toBeInTheDocument()
+    // 上传按钮旁的文件名要求提示直接可见
+    expect(
+      screen.getByText('文件名需含 IMDb ID（如 tt0068646）或英文片名（如 The.Godfather.1972）'),
+    ).toBeInTheDocument()
+    expect(assetsCallPaths()).toEqual(['/api/v1/assets'])
+  })
+
+  it('展开电影分组：渲染时长/视频/创建时间与 null 兜底', async () => {
+    renderAssetList()
+    await expandGroup('电影')
+
     const row = (await screen.findByText('星际穿越')).closest('tr')!
-    expect(row).toHaveTextContent('电影')
     // 10_800_000ms → 180:00（formatTimestamp 复用，分钟位不封顶）
     expect(row).toHaveTextContent('180:00')
     expect(row).toHaveTextContent('可播放')
     expect(row).toHaveTextContent('2026-10-30 08:30:00')
-    const rowB = screen.getByText('星际穿越-场景2').closest('tr')!
-    expect(rowB).toHaveTextContent('场景')
-    expect(rowB).toHaveTextContent('01:05')
-    expect(rowB).toHaveTextContent('无')
+
+    await expandGroup('剧集')
+    const rowB = (await screen.findByText('继承之战')).closest('tr')!
     expect(rowB).toHaveTextContent('—')
-    // 默认无筛选：不带查询串
-    expect(assetsCallPaths()).toEqual(['/api/v1/assets'])
+    expect(rowB).toHaveTextContent('无')
   })
 
-  it('类型筛选选电影：携带 asset_type=movie 重新拉取', async () => {
+  it('场景描述在列表里截断预览（不显示全文）', async () => {
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await expandGroup('场景')
 
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: '类型筛选' }))
-    // antd v6 下拉存在隐藏的无障碍克隆（role=option、无点击处理器），
-    // 真实可点选项带 title 属性——以 title 定位点击
-    fireEvent.click(await screen.findByTitle('电影'))
+    const cell = await screen.findByText((content) => content.startsWith('The Dude 抵达'))
+    expect(cell.textContent).toHaveLength(61) // 60 字 + 省略号
+    expect(cell.textContent?.endsWith('…')).toBe(true)
+    expect(cell.textContent).not.toBe(LONG_SCENE_TITLE)
+  })
 
-    await waitFor(() => expect(assetsCallPaths()).toHaveLength(2))
-    expect(assetsCallPaths()[1]).toBe('/api/v1/assets?asset_type=movie')
+  it('行点击进入详情路由 /assets/{asset_id}', async () => {
+    renderAssetList()
+    await expandGroup('场景')
+
+    fireEvent.click(await screen.findByText((content) => content.startsWith('The Dude 抵达')))
+
+    expect(await screen.findByText('详情页占位')).toBeInTheDocument()
   })
 
   it('标题搜索：提交（按钮）触发带 q 重新拉取，输入本身不触发', async () => {
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     fireEvent.change(screen.getByPlaceholderText('标题搜索'), {
       target: { value: '星际' },
@@ -190,15 +266,6 @@ describe('AssetList 内容资产列表', () => {
 
     await waitFor(() => expect(assetsCallPaths()).toHaveLength(2))
     expect(assetsCallPaths()[1]).toBe(`/api/v1/assets?q=${encodeURIComponent('星际')}`)
-  })
-
-  it('行点击进入详情路由 /assets/{asset_id}', async () => {
-    renderAssetList()
-    await screen.findByText('星际穿越')
-
-    fireEvent.click(screen.getByText('星际穿越-场景2'))
-
-    expect(await screen.findByText('详情页占位')).toBeInTheDocument()
   })
 
   it('列表加载失败：渲染错误提示（透出错误文案）', async () => {
@@ -212,40 +279,60 @@ describe('AssetList 内容资产列表', () => {
   })
 })
 
-describe('上传视频（入口 A 占位）', () => {
-  it('上传成功：POST FormData（file 字段为所选文件）→ 成功提示注明占位语义 + 列表刷新出现新行 + Modal 关闭', async () => {
+describe('上传视频与生成进度', () => {
+  it('未匹配影片：占位登记提示（提示文件名规则）+ 列表刷新 + Modal 关闭', async () => {
     mockUploadApis()
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     const file = await openUploadAndSelectFile()
-    // 已选文件自绘展示（beforeUpload 返回 false 时 antd 内建列表不收文件）
     expect(screen.getByText('已选择：新片.mkv')).toBeInTheDocument()
+    // 上传按钮旁只给文件名要求（IMDb ID / 英文片名），不放其他说明
+    expect(
+      screen.getByText('文件名需含 IMDb ID（如 tt0068646）或英文片名（如 The.Godfather.1972）'),
+    ).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
 
-    // POST 载荷：multipart FormData（client 不强设 Content-Type），file 字段即所选文件
     await waitFor(() => expect(uploadCall()).toBeDefined())
     const body = uploadCall()![1].body as FormData
     expect(body).toBeInstanceOf(FormData)
     expect(body.get('file')).toBe(file)
 
-    // 成功提示注明占位语义（已登记但不做识别，指引入口 B）
     expect(
-      await screen.findByText('已登记「新片」，未导入识别内容——请经入口 B 导入识别 JSON 后打标'),
+      await screen.findByText('已登记「新片」，未匹配到影片——文件名需含 IMDb ID 或英文片名'),
     ).toBeInTheDocument()
 
-    // Modal 关闭（补发离场动画事件后摘除内容）+ 列表刷新（第二次资产拉取）且新行出现
     await finishModalLeaveMotion()
     await waitFor(() => expect(screen.queryByText('选择视频文件')).not.toBeInTheDocument())
     await waitFor(() => expect(assetsCallCount()).toBe(2))
+    // 新资产出现在电影分组里（分组默认折叠：展开后才可见）
+    await expandGroup('电影')
     expect(await screen.findByText('新片')).toBeInTheDocument()
+  })
+
+  it('命中影片：Modal 切换为生成进度视图并轮询到完成', async () => {
+    mockUploadApis({ uploadResult: MATCHED_UPLOAD })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.mp4')
+    fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+
+    // 进度视图：匹配片名 + 进度条 + 场景计数
+    expect(await screen.findByText('已匹配影片《角斗士》')).toBeInTheDocument()
+    expect(await screen.findByTestId('build-progress')).toBeInTheDocument()
+    expect(await screen.findByText('生成中 · 2/4 场景')).toBeInTheDocument()
+
+    // 下一轮轮询（2s 后）返回 succeeded → 提示完成并刷新列表
+    expect(await screen.findByText('已完成 · 4/4 场景', undefined, { timeout: 5000 })).toBeInTheDocument()
+    await waitFor(() => expect(assetsCallCount()).toBe(2))
   })
 
   it('未选文件时确认按钮禁用，取消按钮关闭 Modal', async () => {
     mockUploadApis()
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     fireEvent.click(screen.getByRole('button', { name: '上传视频' }))
     const ok = await screen.findByRole('button', { name: '开始上传' })
@@ -261,7 +348,7 @@ describe('上传视频（入口 A 占位）', () => {
   it('上传失败（422 非白名单后缀）：透出后端 detail，Modal 保留可重试，列表不刷新', async () => {
     mockUploadApis({ uploadError: new ApiError(422, '不支持的视频格式') })
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
@@ -275,7 +362,7 @@ describe('上传视频（入口 A 占位）', () => {
   it('上传失败（413 超 2GB 上限）：透出后端 detail，列表不刷新', async () => {
     mockUploadApis({ uploadError: new ApiError(413, '文件大小超出上传上限') })
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
@@ -289,7 +376,7 @@ describe('上传视频（入口 A 占位）', () => {
     // "请求失败（HTTP 413）"——组件按 413 字样换成可行动文案
     mockUploadApis({ uploadError: new ApiError(413, '请求失败（HTTP 413）') })
     renderAssetList()
-    await screen.findByText('星际穿越')
+    await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))

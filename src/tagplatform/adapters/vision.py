@@ -160,7 +160,7 @@ def to_content_json(up: UpstreamPayload) -> ContentJSON:
         scenes.append(Scene(
             scene_id=sid,
             time_range=TimeRange(start_ms=scene.start_ms, end_ms=scene.end_ms),
-            description=scene.description,
+            description=scene.description or "",
             entities=entities,
             events=[Event(event_type="event", description=e.description,
                           event_id=e.event_id,
@@ -184,10 +184,11 @@ def to_content_json(up: UpstreamPayload) -> ContentJSON:
             background_music=scene.background_music,
         ))
 
-    summary = up.content.description.strip()
+    summary = (up.content.description or "").strip()
     if not summary:
         # 上游只给场景、不给整片描述：用首个非空场景描述兜底（召回/生成都要它）
-        summary = next((s.description.strip() for s in scenes if s.description.strip()), "")
+        summary = next((s.description.strip() for s in scenes
+                        if (s.description or "").strip()), "")
 
     return ContentJSON(
         schema_version="1.0",

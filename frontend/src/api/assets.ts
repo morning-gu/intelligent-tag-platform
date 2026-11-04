@@ -29,45 +29,67 @@ export interface AssetDetailData extends AssetSummary {
   contexts: AssetContextSummary[]
 }
 
-/** 毫秒时间区间（与后端 TimeRange 一致）。 */
-export interface SceneTimeRange {
-  start_ms: number
-  end_ms: number
+/** 情绪项（上游模板 `emotion[{name, code}]`：词表 code，未知时为 null）。 */
+export interface EmotionItem {
+  name: string | null
+  code: string | null
 }
 
-/** 场景内单条台词（与后端 Dialogue 一致）。 */
+/** 场景内单条台词（与上游模板 new_json.txt 一致）。 */
 export interface SceneDialogue {
-  speaker: string
+  dialogue_id: string | null
+  speaker_id: string | null
+  speaker_name: string | null
   text: string
-  start_ms: number
-  end_ms: number
+  start_ms: number | null
+  end_ms: number | null
 }
 
-/** 场景内识别出的实体（与后端 Entity 一致）。 */
-export interface SceneEntity {
-  entity_id: string
-  name: string
-  type: string
+/** 事件参与人及其情绪（上游模板 participant_ids[{character_id, emotion}]）。 */
+export interface SceneParticipant {
+  character_id: string | null
+  emotion: EmotionItem[]
 }
 
-/** 场景内识别出的事件（与后端 Event 一致）。 */
+/** 场景内识别出的事件（上游模板 events[]）。 */
 export interface SceneEvent {
+  event_id: string | null
+  description: string
+  participant_ids: SceneParticipant[]
+}
+
+/** 场景内音频事件（上游模板 audio_events[]）。 */
+export interface AudioEvent {
   event_type: string
   description: string
+  start_ms: number | null
+  end_ms: number | null
 }
 
-/** 单个场景（与后端 Scene 一致：时间区间 + 描述 + 多模态识别结果）。 */
+/** 单个场景（上游模板形态：时间戳拍平 + 情绪 [{name,code}]）。 */
 export interface AssetScene {
   scene_id: string
-  time_range: SceneTimeRange
-  description: string
-  visual_features: string[]
-  dialogues: SceneDialogue[]
-  entities: SceneEntity[]
+  start_ms: number
+  end_ms: number
+  description: string | null
+  virtual_time: string | null
+  location: string | null
+  character_ids: string[]
   events: SceneEvent[]
+  emotion: EmotionItem[]
+  dialogues: SceneDialogue[]
+  audio_events: AudioEvent[]
 }
 
-/** 完整内容 JSON（与后端 ContentJSON 一致，schema v1.0）。 */
+/** 角色项（上游模板 characters[]）。 */
+export interface AssetCharacter {
+  character_id: string
+  name: string
+  aliases: string[]
+  description: string | null
+}
+
+/** 完整内容 JSON（上游模板 new_json.txt 形态，字段全量：缺值 null / []）。 */
 export interface ContentContext {
   schema_version: string
   asset: {
@@ -76,16 +98,12 @@ export interface ContentContext {
     title: string
     duration_ms: number | null
     video_uri: string | null
-    parent_id: string | null
+    language: string | null
   }
   content: {
-    summary: string
+    description: string | null
+    characters: AssetCharacter[]
     scenes: AssetScene[]
-  }
-  metadata: {
-    source: string
-    model_version: string | null
-    recognition_status: string
   }
 }
 
@@ -98,6 +116,8 @@ export interface AssetTagRow {
   relevance_score: number | null
   confidence: number | null
   review_status: string
+  /** 标签层级：film（影片级）/ scene（场景级）。 */
+  level: string
   evidence: ReviewEvidence[]
   tag_id: string | null
   candidate_name: string | null

@@ -159,3 +159,20 @@ def test_persist_unknown_origin_raises(session):
     # 非法 origin 拒绝入库且零副作用（查询前即校验）
     with pytest.raises(ValueError):
         persist_tags(session, "a1", "t1", [_ptag("tag_1", origin="alien")], "r1")
+
+
+def _tag_with_level(level: str) -> ProducedTag:
+    return ProducedTag(origin="generated", tag_id=None, tag_name="主观镜头",
+                       candidate_type="shot", candidate_description="第一人称视角",
+                       relevance_score=None, confidence=0.8,
+                       evidence=[Evidence("scene_001", 1000, 2000, "证据")],
+                       level=level)
+
+
+def test_persist_level_insert_and_overwrite(session):
+    """层级随产出落库：插入写 scene；同候选重跑可刷新为 film。"""
+    persist_tags(session, "a1", "t1", [_tag_with_level("scene")], "r1")
+    assert session.query(AssetTag).one().level == "scene"
+
+    persist_tags(session, "a1", "t1", [_tag_with_level("film")], "r2")
+    assert session.query(AssetTag).one().level == "film"

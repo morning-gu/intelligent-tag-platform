@@ -175,7 +175,7 @@ class UpstreamScene(BaseModel):
     scene_id: str
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
-    description: str = ""
+    description: str | None = None
     virtual_time: str | None = None
     location: str | None = None
     character_ids: list[str] = Field(default_factory=list)
@@ -200,7 +200,7 @@ class UpstreamContent(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    description: str = ""
+    description: str | None = None
     characters: list[UpstreamCharacter] = Field(default_factory=list)
     scenes: list[UpstreamScene] = Field(default_factory=list)
 

@@ -296,13 +296,16 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
         reason = (verdict or {}).get("reason") or candidate.reason
+        # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
+        # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
+        level = candidate.scope if candidate.scope in ("film", "scene") else "film"
         if candidate.tag in hits:
             tag_id, similarity = hits[candidate.tag]
             tags.append(ProducedTag(
                 origin="catalog", tag_id=tag_id, tag_name=candidate.tag,
                 candidate_type=None, candidate_description=None,
                 relevance_score=similarity, confidence=confidence,
-                evidence=evidence,
+                evidence=evidence, level=level,
             ))
         else:
             tags.append(ProducedTag(
@@ -310,7 +313,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 candidate_type=candidate.dimension,
                 candidate_description=reason or None,
                 relevance_score=None, confidence=confidence,
-                evidence=evidence,
+                evidence=evidence, level=level,
             ))
 
     # ---- 6. 审计落盘 ----

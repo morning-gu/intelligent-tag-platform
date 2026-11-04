@@ -1,8 +1,8 @@
 """内容 JSON 的存储形态与读取。
 
-平台对**外部内容 JSON**（上游模板 / 数据集对齐格式）不做重写：`media_context.
-content_json` 里存的就是导入时那份 JSON 原文（键名、顺序、空值都不动），
-这样"资产以什么格式交付，库里就是什么格式"，便于回溯与对账。
+`media_context.content_json` 一律存**上游模板形态**（`new_json.txt`：每个
+字段都在，缺值 null、空列表 []），由 `content_template.to_template()` 归一化
+后写入；`GET /assets/{id}/contexts/{id}` 也按同一形态返回。
 
 平台内部仍需要归一化结构（生成标签、渲染 prompt、算证据），所以在**读**的
 时候才转换一次：`load_content()` 判别存储形态后返回 `ContentJSON`。
@@ -11,7 +11,8 @@ content_json` 里存的就是导入时那份 JSON 原文（键名、顺序、空
 - 上游模板：`content.description` + `scenes[].start_ms`
 - 平台内部：`content.summary` + `scenes[].time_range`
 
-历史数据（2026-11 之前导入的内部形态）继续可读，不需要迁移。
+历史数据（2026-11 之前导入的内部形态）继续可读，不需要迁移；读端点会把它
+按模板反推（情绪 code 词表反查，见 `content_template`）。
 """
 from __future__ import annotations
 

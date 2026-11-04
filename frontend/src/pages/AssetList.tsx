@@ -1,18 +1,20 @@
-// 内容资产列表（Task 11）：轻量资产表格——类型筛选（movie/series/scene）
-// 与标题搜索（回车/按钮触发），行点击进入详情页 /assets/{asset_id}。
-// 数据来自 GET /assets（asset_type 精确过滤、q 标题子串匹配），一次性
-// 返回全量（无分页契约），表格用 antd 默认前端分页。
-// 上传入口（阶段 4 任务 5，入口 A 占位）：顶部"上传视频"按钮 → Modal 单文件
-// 选择 → POST /media/upload（multipart FormData）登记资产，成功后刷新列表。
-// 占位语义：仅存文件 + 建资产行，不做识别。列表行形状（AssetSummary）无
-// 识别状态字段（context 仅存在于详情接口），故不做"未识别"假 Tag——
-// 以成功提示与 Modal 内说明承载占位语义（比弱信号推导更诚实）。
+// 内容资产列表（Task 11）：按资产类型分组展示（电影/剧集/场景），分组
+// 可折叠且默认折叠；标题搜索（回车/按钮触发），行点击进入详情页
+// /assets/{asset_id}。数据来自 GET /assets（q 标题子串匹配）。
+// 场景行标题就是场景描述（很长），列表里截断预览，点进详情再看全文
+// （AssetDetail 展示完整描述）。
+// 上传入口：顶部"上传视频"按钮 → Modal 单文件选择 → POST /media/upload
+// （multipart FormData）。文件名命中数据集影片时后端返回 build_task_id，
+// Modal 内切换为生成进度视图（轮询 /media/build-tasks/{id}），完成后刷新
+// 列表；未命中则按普通占位资产登记。
 import {
   Alert,
   Button,
   Card,
+  Collapse,
+  Empty,
   Modal,
-  Select,
+  Progress,
   Space,
   Table,
   Tag,
@@ -25,7 +27,12 @@ import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
-import { uploadMedia } from '../api/media'
+import {
+  fetchBuildTask,
+  uploadMedia,
+  type BuildTask,
+  type MediaUploadResult,
+} from '../api/media'
 import { formatTimestamp } from '../api/review'
 
 /** 资产类型中文展示（取值域与内容 JSON 契约的 Literal 一致）。 */
@@ -35,31 +42,45 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   scene: '场景',
 }
 
-/** 类型筛选固定选项（数据模型固定枚举，无动态端点）。 */
-const ASSET_TYPE_OPTIONS = Object.entries(ASSET_TYPE_LABELS).map(([value, label]) => ({
-  value,
-  label,
-}))
+/** 分组展示顺序（电影 → 剧集 → 场景；未知类型排最后）。 */
+const ASSET_TYPE_ORDER = ['movie', 'series', 'scene']
+
+/** 场景描述在列表中的预览长度：超出截断，点进详情看全文。 */
+const SCENE_TITLE_PREVIEW = 60
+
+const BUILD_STATUS_LABELS: Record<string, string> = {
+  queued: '排队中',
+  running: '生成中',
+  succeeded: '已完成',
+  failed: '失败',
+}
+
+/** 超长文本截断（场景描述预览用）。 */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
 
 export default function AssetList() {
   const navigate = useNavigate()
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  // —— 筛选状态：类型变更即拉取；标题搜索在提交（回车/按钮）时生效 ——
-  const [assetType, setAssetType] = useState<string | undefined>()
+  // —— 搜索状态：提交（回车/按钮）时才生效 ——
   const [searchQ, setSearchQ] = useState('')
   const [inputQ, setInputQ] = useState('')
 
-  // —— 上传占位（入口 A）：Modal 开关 + 已选文件 + 提交中 ——
+  // —— 上传 / 生成进度：Modal 开关 + 已选文件 + 提交中 + 后台任务 ——
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [buildTaskId, setBuildTaskId] = useState<string | null>(null)
+  const [buildTask, setBuildTask] = useState<BuildTask | null>(null)
+  const [matchedTitle, setMatchedTitle] = useState<string | null>(null)
 
   const loadAssets = useCallback(async () => {
     setLoading(true)
     try {
-      const rows = await fetchAssets({ asset_type: assetType, q: searchQ })
+      const rows = await fetchAssets({ q: searchQ })
       setAssets(rows)
       setLoadError(null)
     } catch (err) {
@@ -67,7 +88,7 @@ export default function AssetList() {
     } finally {
       setLoading(false)
     }
-  }, [assetType, searchQ])
+  }, [searchQ])
 
   useEffect(() => {
     // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
@@ -81,27 +102,73 @@ export default function AssetList() {
     }
   }, [loadAssets])
 
-  /** 打开上传 Modal：清掉上次残留的已选文件。 */
+  // 生成进度轮询：2s 一次，终态（succeeded/failed）停止；成功后刷新列表。
+  useEffect(() => {
+    if (buildTaskId === null) return
+    let cancelled = false
+    let timer: number | undefined
+    const tick = async () => {
+      try {
+        const task = await fetchBuildTask(buildTaskId)
+        if (cancelled) return
+        setBuildTask(task)
+        if (task.status === 'succeeded') {
+          message.success('资产生成完成')
+          void loadAssets()
+          return
+        }
+        if (task.status === 'failed') {
+          message.error(`生成失败：${task.error ?? '未知错误'}`)
+          return
+        }
+      } catch (err) {
+        if (!cancelled) {
+          message.error(err instanceof Error ? err.message : '进度查询失败')
+        }
+        return
+      }
+      if (!cancelled) timer = window.setTimeout(() => void tick(), 2000)
+    }
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [buildTaskId, loadAssets])
+
+  /** 打开上传 Modal：清掉上次残留的文件与进度。 */
   function openUpload() {
     setUploadFile(null)
+    setBuildTaskId(null)
+    setBuildTask(null)
+    setMatchedTitle(null)
     setUploadOpen(true)
   }
 
-  /** 提交上传：FormData（file 字段）经 api client POST。成功提示占位语义
-   * （仅登记未识别，指引入口 B）并刷新列表使新资产行出现；失败透出后端
-   * detail（422 非白名单后缀 / 413 超 2GB），保留 Modal 与已选文件供直接
-   * 重试。nginx 真实环境的 413 返回 HTML（apiFetch 拿不到 detail，回落
-   * "请求失败（HTTP 413）"），按 413 字样特判为 2GB 上限提示；后端 JSON
-   * 413 的 detail 不含 413 字样，原样透出。 */
+  /** 关闭并复位上传 Modal。 */
+  function closeUpload() {
+    setUploadOpen(false)
+    setUploadFile(null)
+    setBuildTaskId(null)
+    setBuildTask(null)
+    setMatchedTitle(null)
+  }
+
+  /** 提交上传：命中数据集 → Modal 内展示生成进度；未命中 → 占位登记。 */
   async function handleUploadSubmit() {
     if (uploadFile === null) return
     setUploading(true)
     try {
-      const res = await uploadMedia(uploadFile)
-      message.success(`已登记「${res.title}」，未导入识别内容——请经入口 B 导入识别 JSON 后打标`)
-      setUploadOpen(false)
-      setUploadFile(null)
-      await loadAssets() // 刷新列表使新登记的资产行出现
+      const res: MediaUploadResult = await uploadMedia(uploadFile)
+      if (res.build_task_id !== null) {
+        setMatchedTitle(res.matched_title ?? res.movie_id)
+        setBuildTaskId(res.build_task_id)
+        setUploading(false)
+        return
+      }
+      message.success(`已登记「${res.title}」，未匹配到影片——文件名需含 IMDb ID 或英文片名`)
+      closeUpload()
+      await loadAssets()
     } catch (err) {
       const msg = err instanceof Error ? err.message : '上传失败'
       message.error(msg.includes('413') ? '文件超过 2GB 上传上限' : msg)
@@ -110,16 +177,25 @@ export default function AssetList() {
     }
   }
 
+  /** 按类型分组（固定顺序，未知类型殿后）。 */
+  const groups: { type: string; rows: AssetSummary[] }[] = []
+  for (const type of ASSET_TYPE_ORDER) {
+    const rows = assets.filter((a) => a.asset_type === type)
+    if (rows.length > 0) groups.push({ type, rows })
+  }
+  const extraRows = assets.filter((a) => !ASSET_TYPE_ORDER.includes(a.asset_type))
+  if (extraRows.length > 0) groups.push({ type: 'other', rows: extraRows })
+
   const columns: TableProps<AssetSummary>['columns'] = [
-    { title: '标题', dataIndex: 'title' },
     {
-      title: '类型',
-      dataIndex: 'asset_type',
-      render: (v: string) => (
-        <Tag color={v === 'movie' ? 'blue' : v === 'series' ? 'purple' : 'green'}>
-          {ASSET_TYPE_LABELS[v] ?? v}
-        </Tag>
-      ),
+      title: '标题',
+      dataIndex: 'title',
+      render: (v: string, record) =>
+        record.asset_type === 'scene' ? (
+          <Typography.Text>{truncate(v, SCENE_TITLE_PREVIEW)}</Typography.Text>
+        ) : (
+          v
+        ),
     },
     {
       title: '时长',
@@ -139,26 +215,34 @@ export default function AssetList() {
     },
   ]
 
+  // 进度视图数据
+  const progressPct =
+    buildTask !== null && buildTask.total_scenes > 0
+      ? Math.round((100 * buildTask.done_scenes) / buildTask.total_scenes)
+      : 0
+  const progressStatus =
+    buildTask?.status === 'failed'
+      ? 'exception'
+      : buildTask?.status === 'succeeded'
+        ? 'success'
+        : 'active'
+
   return (
     <Card
       title="内容资产"
       extra={
-        <Button type="primary" onClick={openUpload}>
-          上传视频
-        </Button>
+        <Space>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            文件名需含 IMDb ID（如 tt0068646）或英文片名（如 The.Godfather.1972）
+          </Typography.Text>
+          <Button type="primary" onClick={openUpload}>
+            上传视频
+          </Button>
+        </Space>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Space wrap>
-          <Select
-            aria-label="类型筛选"
-            value={assetType}
-            onChange={(v) => setAssetType(v)}
-            options={ASSET_TYPE_OPTIONS}
-            allowClear
-            placeholder="类型"
-            style={{ width: 140 }}
-          />
           <Input.Search
             aria-label="标题搜索"
             placeholder="标题搜索"
@@ -172,51 +256,96 @@ export default function AssetList() {
         {loadError !== null && (
           <Alert type="error" showIcon message="资产列表加载失败" description={loadError} />
         )}
-        <Table<AssetSummary>
-          rowKey="asset_id"
-          columns={columns}
-          dataSource={assets}
-          loading={loading}
-          onRow={(record) => ({
-            onClick: () => navigate(`/assets/${record.asset_id}`),
-            style: { cursor: 'pointer' },
-          })}
-          pagination={{ showTotal: (t) => `共 ${t} 条` }}
-        />
+        {assets.length === 0 && !loading ? (
+          <Empty description="暂无资产" />
+        ) : (
+          <Collapse
+            defaultActiveKey={[]}
+            items={groups.map((group) => ({
+              key: group.type,
+              label: (
+                <Space>
+                  <Typography.Text strong>
+                    {ASSET_TYPE_LABELS[group.type] ?? group.type}
+                  </Typography.Text>
+                  <Tag>{`${group.rows.length} 条`}</Tag>
+                </Space>
+              ),
+              children: (
+                <Table<AssetSummary>
+                  rowKey="asset_id"
+                  columns={columns}
+                  dataSource={group.rows}
+                  loading={loading}
+                  onRow={(record) => ({
+                    onClick: () => navigate(`/assets/${record.asset_id}`),
+                    style: { cursor: 'pointer' },
+                  })}
+                  pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+                  size="small"
+                />
+              ),
+            }))}
+          />
+        )}
       </div>
       <Modal
-        title="上传视频"
+        title={buildTaskId === null ? '上传视频' : '资产生成进度'}
         open={uploadOpen}
         okText="开始上传"
         cancelText="取消"
         okButtonProps={{ disabled: uploadFile === null }}
         confirmLoading={uploading}
-        onOk={handleUploadSubmit}
-        onCancel={() => setUploadOpen(false)}
+        onOk={buildTaskId === null ? handleUploadSubmit : undefined}
+        onCancel={closeUpload}
+        footer={
+          buildTaskId === null
+            ? undefined
+            : [
+                <Button key="close" type="primary" onClick={closeUpload}>
+                  关闭
+                </Button>,
+              ]
+        }
         destroyOnHidden
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {/* 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr（此时文件
-              也不进内建列表），改由确认按钮经 apiFetch 提交；已选文件以
-              "已选择：文件名" 自绘展示，重复选择即替换。 */}
-          <Upload
-            accept=".mp4,.webm,.mkv"
-            maxCount={1}
-            showUploadList={false}
-            disabled={uploading}
-            beforeUpload={(file) => {
-              setUploadFile(file)
-              return false
-            }}
-          >
-            <Button>选择视频文件</Button>
-          </Upload>
-          {uploadFile !== null && <Typography.Text>已选择：{uploadFile.name}</Typography.Text>}
-          <Typography.Text type="secondary">
-            占位上传：仅保存视频文件并登记资产，不做识别。识别内容请经入口 B 导入识别 JSON
-            后再行打标。
-          </Typography.Text>
-        </div>
+        {buildTaskId === null ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr（此时文件
+                也不进内建列表），改由确认按钮经 apiFetch 提交；已选文件以
+                "已选择：文件名" 自绘展示，重复选择即替换。 */}
+            <Upload
+              accept=".mp4,.webm,.mkv"
+              maxCount={1}
+              showUploadList={false}
+              disabled={uploading}
+              beforeUpload={(file) => {
+                setUploadFile(file)
+                return false
+              }}
+            >
+              <Button>选择视频文件</Button>
+            </Upload>
+            {uploadFile !== null && <Typography.Text>已选择：{uploadFile.name}</Typography.Text>}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Typography.Text>
+              {matchedTitle === null ? '已匹配影片，后台生成中…' : `已匹配影片《${matchedTitle}》`}
+            </Typography.Text>
+            <div data-testid="build-progress">
+              <Progress percent={progressPct} status={progressStatus} />
+            </div>
+            <Typography.Text type="secondary">
+              {buildTask === null
+                ? '读取任务状态…'
+                : `${BUILD_STATUS_LABELS[buildTask.status] ?? buildTask.status} · ${buildTask.done_scenes}/${buildTask.total_scenes || '?'} 场景`}
+            </Typography.Text>
+            {buildTask?.status === 'failed' && buildTask.error !== null && (
+              <Alert type="error" showIcon message="生成失败" description={buildTask.error} />
+            )}
+          </div>
+        )}
       </Modal>
     </Card>
   )

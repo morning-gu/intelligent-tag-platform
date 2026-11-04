@@ -136,6 +136,7 @@ def persist_tags(
                 confidence=tag.confidence,
                 evidence_json=_evidence_json(tag),
                 review_status="pending",
+                level=tag.level,
                 task_id=task_id,
                 created_at=now,
                 updated_at=now,
@@ -151,6 +152,7 @@ def persist_tags(
             row.candidate_name = candidate_name
             row.candidate_type = candidate_type
             row.candidate_description = candidate_description
+            row.level = tag.level
             row.updated_at = now
             summary.updated += 1
 

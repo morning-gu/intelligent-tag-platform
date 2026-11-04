@@ -141,6 +141,11 @@ class AssetTag(Base):
     review_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="pending"
     )
+    # 标签层级：film（影片级，全片共有特征）/ scene（场景级，个别场景特征）。
+    # 生成阶段由 MTG 的 scope 决定；闭环与目录标签恒为 film。
+    level: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="film"
+    )
     task_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_task.task_id"), nullable=True
     )

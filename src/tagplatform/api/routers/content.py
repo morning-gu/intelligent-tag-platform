@@ -16,9 +16,8 @@ from sqlalchemy.orm import Session
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
 from tagplatform.content_import import import_content as import_content_svc
-from tagplatform.content_io import load_content
+from tagplatform.content_template import template_from_stored
 from tagplatform.db.models import MediaAsset, MediaContext
-from tagplatform.schemas import ContentJSON
 
 router = APIRouter(prefix="/api/v1")
 
@@ -165,11 +164,11 @@ def get_asset(asset_id: str, session: Session = Depends(get_session)) -> AssetDe
     )
 
 
-@router.get("/assets/{asset_id}/contexts/{context_id}", response_model=ContentJSON)
+@router.get("/assets/{asset_id}/contexts/{context_id}")
 def get_asset_context(
     asset_id: str, context_id: str, session: Session = Depends(get_session)
-) -> ContentJSON:
-    """单个 media_context 的完整内容 JSON（解析 content_json 返回）。
+) -> dict:
+    """单个 media_context 的完整内容 JSON（上游模板形态，字段全量：缺值 null / []）。
 
     资产不存在、上下文不存在或上下文不属于该资产 → 404。
     """
@@ -179,7 +178,7 @@ def get_asset_context(
     ctx = session.get(MediaContext, context_id)
     if ctx is None or ctx.asset_id != asset_id:
         raise HTTPException(status_code=404, detail=f"上下文不存在：{context_id}")
-    return load_content(ctx.content_json)
+    return template_from_stored(ctx.content_json)
 
 
 @router.get("/adapters", response_model=list[str])

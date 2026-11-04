@@ -38,7 +38,7 @@ CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 # 结果摘要形状（详情 results）与资产标签行（摘要 + 标识原样）的键集契约
 # （id 为 asset_tag 行主键，阶段 3 B3 暴露——Task 4 审核操作路由的定位键）
 RESULT_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
-               "review_status", "evidence"}
+               "review_status", "level", "evidence"}
 ASSET_TAG_KEYS = RESULT_KEYS | {"tag_id", "candidate_name"}
 # 任务列表项键集（brief 钉死九字段）
 TASK_KEYS = {"task_id", "asset_id", "mode", "status", "model_version",
