@@ -63,18 +63,22 @@ const TASK_STATUS_COLORS: Record<string, string> = {
 const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
 const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
-/** 结果行的审核状态中文展示与 Tag 颜色（键集与审核中心一致）。 */
+/** 结果行的来源中文展示与 Tag 颜色（origin 词表 closed|open，与审核中心
+ * 同规：闭环蓝 / 开放紫；v1 generated/catalog 词表退役）。 */
+const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
+const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
+
+/** 结果行的审核状态中文展示与 Tag 颜色（三态，与审核中心一致；
+ * merged 随"修改即通过"语义退役）。 */
 const REVIEW_STATUS_LABELS: Record<string, string> = {
   pending: '待审核',
   approved: '已通过',
   rejected: '已拒绝',
-  merged: '已合并',
 }
 const REVIEW_STATUS_COLORS: Record<string, string> = {
   pending: 'gold',
   approved: 'green',
   rejected: 'red',
-  merged: 'purple',
 }
 
 /** 创建弹窗表单值：资产非空多选 + mode（默认闭环）+ 可选策略两项。 */
@@ -133,9 +137,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
       title: '来源',
       dataIndex: 'origin',
       render: (v: string) => (
-        <Tag color={v === 'generated' ? 'blue' : 'green'}>
-          {v === 'generated' ? '生成' : '目录'}
-        </Tag>
+        <Tag color={ORIGIN_COLORS[v] ?? 'default'}>{ORIGIN_LABELS[v] ?? v}</Tag>
       ),
     },
     {
@@ -159,7 +161,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
       title: '证据',
       dataIndex: 'evidence',
       render: (v: ReviewEvidence[]) => (
-        <ResultEvidence assetId={detail.asset_id ?? ''} evidence={v} />
+        <ResultEvidence assetId={detail.asset_id} evidence={v} />
       ),
     },
   ]

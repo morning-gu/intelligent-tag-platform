@@ -1,11 +1,11 @@
-// 质量评估中心测试：mock apiFetch 按请求路径分发三个指标端点夹具，
-// 断言审核动作分布/生成质量/任务统计卡片字段与两张条形图的数据渲染；
-// 率/占比字段 None → "暂无"。
+// 质量评估中心测试（v2）：mock apiFetch 按请求路径分发三个指标端点夹具，
+// 断言审核状态终态分布三卡（通过/驳回/合并，modified 退役）/生成质量/
+// 任务统计卡片字段与两张条形图的数据渲染；率/占比字段 null → "暂无"。
 import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Quality from './Quality'
 import { apiFetch } from '../api/client'
-import type { ConfidenceBucket, MetricsSummary, TagTypeCoverageRow } from '../api/metrics'
+import type { ConfidenceBucket, DirCoverageRow, MetricsSummary } from '../api/metrics'
 
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -14,14 +14,13 @@ vi.mock('../api/client', async (importOriginal) => {
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
-/** 与后端 MetricsSummaryOut 契约同形的夹具（各率字段非 None）。 */
+/** 与后端 MetricsSummaryOut 契约同形的夹具（各率字段非 null）。 */
 const SUMMARY: MetricsSummary = {
   pending_count: 6,
   review_stats: {
     approved: { count: 12, ratio: 0.6 },
     rejected: { count: 5, ratio: 0.25 },
     merged: { count: 2, ratio: 0.1 },
-    modified: { count: 1, ratio: 0.05 },
   },
   generated_pass_rate: 0.8,
   evidence_coverage: 0.5,
@@ -41,22 +40,22 @@ const CONFIDENCE: ConfidenceBucket[] = [
   { bucket: '0.9-1.0', count: 7 },
 ]
 
-/** tag_type 覆盖夹具（后端按 total 降序返回）。 */
-const COVERAGE: TagTypeCoverageRow[] = [
-  { tag_type: 'genre', total: 10, approved: 4 },
-  { tag_type: 'mood', total: 8, approved: 3 },
+/** 目录覆盖夹具（后端按 total 降序返回；无目录归属候选行归"未归置"桶）。 */
+const COVERAGE: DirCoverageRow[] = [
+  { dir_name: '叙事结构', total: 10, approved: 4 },
+  { dir_name: '未归置', total: 8, approved: 3 },
 ]
 
 /** 按路径分发三个指标端点的 mock 装配。 */
 function mockMetricsApis(
   summary: MetricsSummary,
   confidence: ConfidenceBucket[],
-  coverage: TagTypeCoverageRow[],
+  coverage: DirCoverageRow[],
 ) {
   mockedApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/v1/metrics/summary') return summary
     if (path === '/api/v1/metrics/confidence-distribution') return confidence
-    if (path === '/api/v1/metrics/tag-type-coverage') return coverage
+    if (path === '/api/v1/metrics/dir-coverage') return coverage
     throw new Error(`未预期的请求路径：${path}`)
   })
 }
@@ -70,19 +69,20 @@ afterEach(() => {
 })
 
 describe('Quality 质量评估中心', () => {
-  it('渲染审核动作分布四卡片（计数+占比）与生成质量', async () => {
+  it('渲染审核状态终态分布三卡片（计数+占比）与生成质量', async () => {
     mockMetricsApis(SUMMARY, CONFIDENCE, COVERAGE)
 
     render(<Quality />)
 
-    expect(await screen.findByText('通过（60.0%）')).toBeInTheDocument()
+    expect(await screen.findByText('审核动作分布')).toBeInTheDocument()
+    expect(screen.getByText('通过（60.0%）')).toBeInTheDocument()
     expect(screen.getByText('12')).toBeInTheDocument()
     expect(screen.getByText('驳回（25.0%）')).toBeInTheDocument()
     expect(screen.getByText('5')).toBeInTheDocument()
     expect(screen.getByText('合并（10.0%）')).toBeInTheDocument()
     expect(screen.getByText('2')).toBeInTheDocument()
-    expect(screen.getByText('修改（5.0%）')).toBeInTheDocument()
-    expect(screen.getByText('1')).toBeInTheDocument()
+    // v1 四卡中的"修改"随"修改即通过"语义退役
+    expect(screen.queryByText(/修改（/)).not.toBeInTheDocument()
     expect(screen.getByText('新标签通过率')).toBeInTheDocument()
     expect(screen.getByText('80.0%')).toBeInTheDocument()
   })
@@ -104,7 +104,7 @@ describe('Quality 质量评估中心', () => {
     expect(screen.getByText('3000 ms')).toBeInTheDocument()
   })
 
-  it('渲染置信度分布与标签类型覆盖两张条形图', async () => {
+  it('渲染置信度分布与目录覆盖两张条形图', async () => {
     mockMetricsApis(SUMMARY, CONFIDENCE, COVERAGE)
 
     render(<Quality />)
@@ -114,19 +114,19 @@ describe('Quality 质量评估中心', () => {
     expect(screen.getByText('0.0-0.1')).toBeInTheDocument()
     expect(screen.getByText('0.9-1.0')).toBeInTheDocument()
     expect(screen.getByText('7')).toBeInTheDocument()
-    // 覆盖图：类型、总数与"通过 N"附加文本
-    expect(screen.getByText('标签类型覆盖')).toBeInTheDocument()
-    expect(screen.getByText('genre')).toBeInTheDocument()
-    expect(screen.getByText('mood')).toBeInTheDocument()
+    // 覆盖图：目录名（含"未归置"桶）、总数与"通过 N"附加文本
+    expect(screen.getByText('目录覆盖')).toBeInTheDocument()
+    expect(screen.getByText('叙事结构')).toBeInTheDocument()
+    expect(screen.getByText('未归置')).toBeInTheDocument()
     expect(screen.getByText('10')).toBeInTheDocument()
     expect(screen.getByText('通过 4')).toBeInTheDocument()
     // 三个指标端点各被请求一次
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/metrics/summary')
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/metrics/confidence-distribution')
-    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/metrics/tag-type-coverage')
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/metrics/dir-coverage')
   })
 
-  it('率/占比/耗时字段为 None 时显示"暂无"', async () => {
+  it('率/占比/耗时字段为 null 时显示"暂无"', async () => {
     mockMetricsApis(
       {
         pending_count: 0,
@@ -134,7 +134,6 @@ describe('Quality 质量评估中心', () => {
           approved: { count: 0, ratio: null },
           rejected: { count: 0, ratio: null },
           merged: { count: 0, ratio: null },
-          modified: { count: 0, ratio: null },
         },
         generated_pass_rate: null,
         evidence_coverage: null,
@@ -146,8 +145,8 @@ describe('Quality 质量评估中心', () => {
 
     render(<Quality />)
 
-    // 四个审核动作占比 + 新标签通过率 + 成功率 + 平均耗时，共 7 处"暂无"
-    expect(await screen.findAllByText(/暂无/)).toHaveLength(7)
+    // 三个审核状态占比 + 新标签通过率 + 成功率 + 平均耗时，共 6 处"暂无"
+    expect(await screen.findAllByText(/暂无/)).toHaveLength(6)
   })
 
   it('覆盖数据为空时展示空态提示', async () => {
