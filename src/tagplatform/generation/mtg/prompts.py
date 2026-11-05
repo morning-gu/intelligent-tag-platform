@@ -166,6 +166,19 @@ def build_generation_messages(content: ContentJSON,
     return [{"role": "user", "content": parts}]
 
 
+def _render_judge_content(content: ContentJSON) -> str:
+    """judge 看到的内容文本：与生成同形，但**不含台词**。
+
+    A/B 实测（同一批候选连判两次，只差台词）：角斗士 31 条、傲慢与偏见 32 条，
+    判定结果 0 处变化，而 judge prompt 分别少 24% / 36%。原因是资产里的场景
+    描述本来就是拿字幕一起生成出来的，台词对「这个标签有没有依据」不再提供
+    新证据；它只在生成阶段值钱（直接语料、语气、只可能出现在台词里的概念）。
+    """
+    text = render_content(content)
+    return "\n".join(line for line in text.splitlines()
+                     if not line.startswith("  台词："))
+
+
 def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[dict]:
     """构造 judge 请求：候选清单 + 内容证据，要求逐条判定。
 
@@ -178,9 +191,9 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[d
         "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
         "请逐个判定候选标签是否被内容真实支持。\n\n"
         "## 候选标签\n" + "\n".join(lines) + "\n\n"
-        "## 影片内容\n" + render_content(content) + "\n\n"
+        "## 影片内容\n" + _render_judge_content(content) + "\n\n"
         "## 判定标准\n"
-        "- supported：内容中有明确依据（场景描述、氛围、人物情绪或台词至少一处）；\n"
+        "- supported：内容中有明确依据（场景描述、氛围、人物情绪至少一处）；\n"
         "- insufficient：内容不足以判断（不要臆测）；\n"
         "- contradicted：内容明显与标签矛盾；\n"
         "- importance：core（贯穿全片的主要特征）/ secondary（局部但清晰）/ "
@@ -188,7 +201,7 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[d
         "- confidence：0-1，你对判定结果的把握；\n"
         "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
         "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
-        "台词或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
+        "氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
         "理由**；找不到能摘的原文就判 insufficient。\n"
         "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
         "另外注意作用域：若候选是面向全片的概括（措辞含“全片/整体/贯穿/始终”或"
