@@ -1,16 +1,19 @@
-﻿"""一次性向量迁移：存量无前缀向量 → e5 role 前缀空间重嵌（2026-11-02）。
+﻿"""全量向量重建：目录/标签双通道按 e5 passage 契约重嵌（v2）。
 
-背景：LocalEmbedder 落地 query:/passage: 前缀后，历史入库向量（无前缀
-空间）与新向量不在同一空间——本模块把 tag_catalog / media_context 的
-存量向量按新契约重嵌。纯数据迁移，无 schema 变更；幂等（重跑只是再嵌
-一遍）。
+v2 表结构（目录/标签拆双表）下的 reembed 职责：把 tag_catalog（目录）与
+tag_define（标签）两张表的**全部行**按当前嵌入器重算 embedding 覆盖落库
+——全表语义，NULL 行也回填（0007 重建后库可为全新，本模块即回填/换模
+工具）。context 通道删除：v2 media_asset 无 embedding 列（内容向量在
+生成任务启动时实时计算，doc §3.1）。
 
-- 目录行文本 ``f"{tag_name}。{description}"``、role=passage（与治理入库
-  同源同形）；
-- 上下文行文本取 content_json 的剧情摘要、role=passage（与 runner 模式 A
-  回填同源同形）；
-- 仅处理 embedding 非空的行（NULL 保持 NULL：纯迁移不新增行为）；
-- 不 commit：调用方（CLI main / 测试）统一事务边界。
+两通道文本与各自写入路径（治理入库）逐字同源同形、role 一律 passage
+（入库语料是被检索的 passage 侧，e5 契约——迁移/重建后与后续新增行落在
+同一空间同一分布）：
+
+- 目录行文本 ``f"{dir_name}。{description}"``；
+- 标签行文本 ``f"{tag_name}。{description}"``；
+
+不 commit：调用方（CLI main / 测试）统一事务边界。
 
 用法（服务器，加载 .env 走真实 e5）::
 
@@ -22,63 +25,53 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import MediaContext, TagCatalog
-from tagplatform.content_io import load_content
-from tagplatform.schemas import parse_content
+from tagplatform.db.models import TagCatalog, TagDefine
 from tagplatform.vectors import encode_vector
 
 
 @dataclass
 class ReembedSummary:
-    """迁移结果摘要：重嵌的目录行数 / 上下文行数。"""
+    """重建结果摘要：重嵌的目录行数 / 标签行数。"""
 
-    catalog_rows: int
-    context_rows: int
+    dir_rows: int
+    tag_rows: int
 
 
 def reembed_all(session: Session, embedder) -> ReembedSummary:
-    """重嵌库内全部存量向量（不 commit，调用方提交事务）。
+    """全表重嵌目录与标签两通道（不 commit，调用方提交事务）。
 
-    目录与上下文两侧均为 passage（被检索语料 / 内容侧文档），文本与
-    各自的原始写入路径（治理入库 / runner 回填）逐字同源——保证迁移后
-    与后续新增行落在同一空间同一分布。
+    目录通道在前、标签通道在后，各自一次批量调用；两通道均 passage
+    （被检索语料），文本与治理入库写入路径逐字同源（"名。描述"）。
     """
-    catalog_rows = [
-        row for row in session.query(TagCatalog).all() if row.embedding is not None
-    ]
-    context_rows = [
-        row for row in session.query(MediaContext).all()
-        if row.embedding is not None
-    ]
+    dirs = session.query(TagCatalog).all()
+    tags = session.query(TagDefine).all()
     now = datetime.now(timezone.utc)
 
-    if catalog_rows:
-        texts = [f"{row.tag_name}。{row.description}" for row in catalog_rows]
-        vecs = embedder.embed(texts, role="passage")
-        for row, vec in zip(catalog_rows, vecs):
+    if dirs:
+        vecs = embedder.embed(
+            [f"{row.dir_name}。{row.description}" for row in dirs],
+            role="passage")
+        for row, vec in zip(dirs, vecs):
             row.embedding = encode_vector(vec)
             row.updated_at = now
-    if context_rows:
-        texts = [
-            load_content(row.content_json).content.summary
-            for row in context_rows
-        ]
-        vecs = embedder.embed(texts, role="passage")
-        for row, vec in zip(context_rows, vecs):
+    if tags:
+        vecs = embedder.embed(
+            [f"{row.tag_name}。{row.description}" for row in tags],
+            role="passage")
+        for row, vec in zip(tags, vecs):
             row.embedding = encode_vector(vec)
+            row.updated_at = now
 
-    return ReembedSummary(catalog_rows=len(catalog_rows),
-                          context_rows=len(context_rows))
+    return ReembedSummary(dir_rows=len(dirs), tag_rows=len(tags))
 
 
 def main() -> None:
-    """CLI 入口：按运行环境配置（.env / TAGPLT_*）连接库并执行迁移。"""
+    """CLI 入口：按运行环境配置（.env / TAGPLT_*）连接库并执行重建。"""
     from tagplatform.db import create_engine_for, make_session_factory
     from tagplatform.embed import make_embedder
     from tagplatform.settings import get_settings
@@ -92,8 +85,8 @@ def main() -> None:
         with factory() as session:
             summary = reembed_all(session, embedder)
             session.commit()
-        print(f"reembed 完成：tag_catalog {summary.catalog_rows} 行、"
-              f"media_context {summary.context_rows} 行"
+        print(f"reembed 完成：tag_catalog {summary.dir_rows} 行、"
+              f"tag_define {summary.tag_rows} 行"
               f"（embedder: {embedder.name}）")
     finally:
         engine.dispose()

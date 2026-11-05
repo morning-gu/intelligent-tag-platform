@@ -1,18 +1,22 @@
-"""一次性向量迁移 reembed_all 测试：存量无前缀向量 → role 前缀空间重嵌。
+"""v2 全量向量重建 reembed_all 测试：目录/标签双通道 passage 重嵌。
 
-- 仅重嵌 embedding 非空的行（NULL 保持 NULL：纯迁移不新增行为）；
-- 向量确实被替换（翻转嵌入器保证非原值复写）；
-- 目录行文本 "名称。描述" / 上下文行文本取 content_json 摘要，
-  均以 passage role 嵌入（目录与内容侧都是语料方，与入库/回填同源）；
+- 双通道全表重建：行数计入 ReembedSummary(dir_rows, tag_rows)，embedding
+  全部落库（存量行被替换、NULL 行被回填——v2 语义为全表重建）；
+- 落库值与嵌入器对同文本的 passage 输出逐字一致（MockEmbedder 跨实例
+  确定：sha256 即向量）；
+- 目录文本 "目录名。描述" / 标签文本 "标签名。描述"，均 passage 角色
+  （与治理入库写入路径同源同形）；
+- 无 context 通道：v2 media_asset 无 embedding 列，媒体行不产生任何
+  嵌入调用；
 - 不 commit（调用方统一事务边界）：会话内查询即见更新。
 """
 
 from datetime import datetime, timezone
 
 import numpy as np
-from test_task_runner import _CONTENT_DATA, _make_task
 
-from tagplatform.db.models import MediaContext, TagCatalog
+from tagplatform.db.models import MediaAsset, TagCatalog, TagDefine
+from tagplatform.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
 from tagplatform.vectors import decode_vector, encode_vector
 
@@ -35,67 +39,98 @@ class _FlipEmbedder:
 
 
 def _legacy_vec() -> bytes:
-    """伪造存量无前缀向量（非单位、值恒定）：与重嵌结果必然不同。"""
+    """伪造存量向量（非单位、值恒定）：与重嵌结果必然不同。"""
     return encode_vector(np.full(8, 0.1, dtype=np.float32))
 
 
-def test_reembed_catalog_replaces_vectors(session):
-    session.add(TagCatalog(tag_id="t1", tag_name="雨夜", tag_type="genre",
-                           description="雨夜描述", status="active",
-                           embedding=_legacy_vec()))
-    session.add(TagCatalog(tag_id="t2", tag_name="黎明", tag_type="genre",
-                           description="黎明描述", status="active",
-                           embedding=None))
+def _seed_both_channels(session):
+    """目录/标签双通道各播一行存量向量 + 一行 NULL（全表语义都应重嵌）。"""
+    session.add(TagCatalog(dir_id="d1", dir_name="场景", dir_type="dir_static",
+                           description="场景目录", embedding=_legacy_vec()))
+    session.add(TagCatalog(dir_id="d2", dir_name="风格", dir_type="dir_dynamic",
+                           description="风格目录", embedding=None))
+    session.add(TagDefine(tag_id="t1", tag_name="雨夜", tag_type="val_fixed",
+                          description="雨夜描述", dir_id="d1",
+                          embedding=_legacy_vec()))
+    session.add(TagDefine(tag_id="t2", tag_name="黎明", tag_type="val_fixed",
+                          description="黎明描述", dir_id="d1", embedding=None))
     session.commit()
 
+
+def test_reembed_both_channels_rows_texts_and_role(session):
+    _seed_both_channels(session)
     flip = _FlipEmbedder()
+
     summary = reembed_all(session, flip)
 
-    assert (summary.catalog_rows, summary.context_rows) == (1, 0)
-    # 一次批量，文本与治理入库同源，role=passage
-    assert flip.calls == [("passage", ["雨夜。雨夜描述"])]
-    t1 = session.get(TagCatalog, "t1")
+    assert (summary.dir_rows, summary.tag_rows) == (2, 2)
+    # 目录通道在前、标签通道在后；文本与治理入库同源（"名。描述"），均 passage
+    assert flip.calls == [
+        ("passage", ["场景。场景目录", "风格。风格目录"]),
+        ("passage", ["雨夜。雨夜描述", "黎明。黎明描述"]),
+    ]
+    # 全表重建：存量行被替换、NULL 行被回填
+    d1 = session.get(TagCatalog, "d1")
+    assert d1.embedding is not None
+    assert not np.allclose(decode_vector(d1.embedding),
+                           decode_vector(_legacy_vec()))
+    assert session.get(TagCatalog, "d2").embedding is not None
+    t1 = session.get(TagDefine, "t1")
+    assert t1.embedding is not None
     assert not np.allclose(decode_vector(t1.embedding),
                            decode_vector(_legacy_vec()))
-    # NULL 行保持 NULL
-    assert session.get(TagCatalog, "t2").embedding is None
+    assert session.get(TagDefine, "t2").embedding is not None
 
 
-def test_reembed_context_replaces_summary_vector(session):
-    t = _make_task(session)  # 播种 asset + media_context（content_json 为夹具）
-    ctx = session.get(MediaContext, t.context_id)
-    ctx.embedding = _legacy_vec()
+def test_reembed_persists_mockembedder_passage_vectors(session):
+    """落库字节 = 嵌入器对同文本 passage 输出（MockEmbedder 跨实例确定）。"""
+    _seed_both_channels(session)
+
+    summary = reembed_all(session, MockEmbedder())
+
+    assert (summary.dir_rows, summary.tag_rows) == (2, 2)
+    mock = MockEmbedder()
+    d1 = session.get(TagCatalog, "d1")
+    assert np.allclose(decode_vector(d1.embedding),
+                       mock.embed(["场景。场景目录"], role="passage")[0])
+    t2 = session.get(TagDefine, "t2")
+    assert np.allclose(decode_vector(t2.embedding),
+                       mock.embed(["黎明。黎明描述"], role="passage")[0])
+
+
+def test_reembed_media_rows_produce_no_channel(session):
+    """无 context 通道：v2 媒体行不参与重嵌（media_asset 无 embedding 列）。"""
+    _seed_both_channels(session)
+    session.add(MediaAsset(asset_id="a1", asset_type="movie", title="片名"))
     session.commit()
 
     flip = _FlipEmbedder()
     summary = reembed_all(session, flip)
 
-    assert summary.catalog_rows == 0 and summary.context_rows == 1
-    # 文本与 runner 回填同源：content_json 的剧情摘要，role=passage
-    assert ("passage", [_CONTENT_DATA["content"]["summary"]]) in flip.calls
-    refreshed = session.get(MediaContext, t.context_id)
-    assert refreshed.embedding is not None
-    assert not np.allclose(decode_vector(refreshed.embedding),
-                           decode_vector(_legacy_vec()))
-    # catalog 无行可嵌：不产生额外调用
-    assert len(flip.calls) == 1
+    # 仅目录/标签两个通道各一次批量调用，媒体行零涉及
+    assert len(flip.calls) == 2
+    assert (summary.dir_rows, summary.tag_rows) == (2, 2)
 
 
 def test_reembed_empty_db_no_calls(session):
     flip = _FlipEmbedder()
     summary = reembed_all(session, flip)
-    assert (summary.catalog_rows, summary.context_rows) == (0, 0)
+    assert (summary.dir_rows, summary.tag_rows) == (0, 0)
     assert flip.calls == []
 
 
 def test_reembed_refreshes_updated_at(session):
     stale = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    session.add(TagCatalog(tag_id="t1", tag_name="雨夜", tag_type="genre",
-                           description="雨夜描述", status="active",
-                           embedding=_legacy_vec(), created_at=stale,
-                           updated_at=stale))
+    session.add(TagCatalog(dir_id="d1", dir_name="场景", dir_type="dir_static",
+                           description="场景目录", embedding=_legacy_vec(),
+                           created_at=stale, updated_at=stale))
+    session.add(TagDefine(tag_id="t1", tag_name="雨夜", tag_type="val_fixed",
+                          description="雨夜描述", dir_id="d1",
+                          embedding=_legacy_vec(), created_at=stale,
+                          updated_at=stale))
     session.commit()
 
     reembed_all(session, _FlipEmbedder())
 
-    assert session.get(TagCatalog, "t1").updated_at > stale
+    assert session.get(TagCatalog, "d1").updated_at > stale
+    assert session.get(TagDefine, "t1").updated_at > stale
