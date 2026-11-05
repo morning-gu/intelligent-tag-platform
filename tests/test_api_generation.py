@@ -1,13 +1,13 @@
-"""生成任务 API 测试（v2 重写，Task 6）。
+"""生成任务 API 测试（v2 重写，Task 6；open 端到端随 Task 7 恢复）。
 
-覆盖契约（错误映射约定见 brief；open 模式端到端归 Task 7——其 mtg
-流水线 origin 词表 v2 化之前无法成功落库）：
+覆盖契约（错误映射约定见 brief）：
 - POST /api/v1/generation/tasks：端到端同步执行（conftest client fixture
   generation_workers=0，submit 返回即执行完）——closed 模式成功路径
   （响应 tasks 状态 succeeded、详情 results 取 pre_asset_tag、
-  /assets/{id}/tags 仅 approved 挂载）、mode 未知 422（列可用 mode）、
-  资产未识别（content_json 空，如场景子资产）422、空 asset_ids 422、
-  未知资产 404；
+  /assets/{id}/tags 仅 approved 挂载）、open 模式 mtg 产线成功路径
+  （全部 open 自由候选行：origin=open、candidate_name 原文、tag_id 空）、
+  mode 未知 422（列可用 mode）、资产未识别（content_json 空，如场景子资产）
+  422、空 asset_ids 422、未知资产 404；
 - GET /api/v1/generation/tasks：status/mode/asset_id 过滤 + created_at
   降序（task_id 决胜）+ limit/offset 分页（asset_id 直列，无外连）；
 - GET /api/v1/generation/tasks/{task_id}：详情 + results 摘要（pre 行：
@@ -170,6 +170,45 @@ def test_generation_e2e_closed_succeeded(client):
     assert row["tag_name"] == first["tag_name"]  # 挂载行拷贝定义名
     assert row["origin"] == "closed"
     assert row["created_at"] is not None
+
+
+def test_generation_e2e_open_open_rows(client):
+    """open 模式端到端（Task 7 恢复）：MockLLM mtg 产线 → succeeded →
+    全部 open 自由候选行（库内 30 枚标签与 Mock 候选近正交，归一不命中）。"""
+    _import_catalog(client)
+    _import_content(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": ["movie_001"], "mode": "open",
+        "policy": {"min_confidence": 0.5}})
+    assert resp.status_code == 200
+    tasks = resp.json()["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["asset_id"] == "movie_001"
+    # 同步模式（generation_workers=0）：POST 返回时任务已执行完
+    assert tasks[0]["status"] == "succeeded"
+    task_id = tasks[0]["task_id"]
+
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}").json()
+    assert detail["status"] == "succeeded"
+    assert detail["mode"] == "open"
+    assert detail["model_version"] == "mock-1"
+    assert detail["prompt_version"] == "mtg-v1"  # 自拼 prompt 生产器的口径版本
+    results = detail["results"]
+    assert len(results) == 3  # MockLLM mtg 固定三候选（三轮合并去重）
+    names = {r["tag_name"] for r in results}
+    assert names == {"多线叙事", "情感张力", "视听风格"}
+    for row in results:
+        assert row["origin"] == "open"  # v2 词表：自由候选行 origin=open
+        assert row["tag_id"] is None    # 未命中标签定义：自由候选
+        assert row["candidate_name"] == row["tag_name"]  # candidate_name 原文
+        assert isinstance(row["id"], int) and row["id"] > 0  # 行主键
+        assert len({r["id"] for r in results}) == len(results)  # 行 id 唯一
+        assert row["relevance_score"] is None  # 未命中：无相关度
+        assert row["review_status"] == "pending"
+        # MockLLM 场景证据：mtg 产线证据卡同样来自场景行（fixture 单场景恒定）
+        assert row["evidence"] == [{
+            "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
+            "description": "两名人物在仓库中发生激烈争执"}]
 
 
 def test_create_task_empty_asset_ids_422(client):

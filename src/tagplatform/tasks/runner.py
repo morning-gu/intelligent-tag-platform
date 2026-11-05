@@ -283,6 +283,8 @@ def run_generation_task(task_id: str, session: Session, llm,
         #    IGNORE，替换语义完全由这步先删承担。v1 按 producer 的
         #    replaces_pending 声明门控（closed 靠 persist 覆盖更新），v2
         #    persist 不覆盖更新，两模式统一先删后插。
+        #    mode/origin 词表耦合注记：v2 mode 注册表恰为 closed|open ==
+        #    origin 词表，Task 7 open 流程落地后此耦合成立。
         cleared = _clear_pending(session, asset_id, task.mode)
         if cleared:
             logger.info("重跑替换：资产 %s 清掉 origin=%s 的 %d 条未审核候选",

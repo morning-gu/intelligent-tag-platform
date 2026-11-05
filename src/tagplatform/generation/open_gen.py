@@ -11,8 +11,10 @@
 - `prompt_version = MTG_VERSION`：任务表记录口径版本（如 `mtg-v1`），
   换算法时能区分历史结果。
 
-空目录语义保留：开放式生成不依赖既有标签库，全部落 generated 待审核；
-命中目录（相似度 ≥ `open_match_threshold`）的仍标 origin=catalog。
+空库语义保留：开放式生成不依赖既有标签库，未命中为自由候选（tag_id 空、
+candidate_name 原文）待审核；归一命中（相似度 ≥ `open_match_threshold`）
+的行生成时即带 tag_id——v2 词表下 origin 统一 open（命中行与自由候选行
+同词表，v1 的 catalog/generated 退役，doc §6.2/§3.5）。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -30,6 +32,8 @@ class OpenTagProducer:
 
     mode = "open"
     builds_prompt = True
+    # 保留声明：runner 的重跑替换已统一按 origin 清 pending（不再读本属性），
+    # 保留仅为注册表声明语义的向后兼容
     replaces_pending = True
     prompt_version = MTG_VERSION
 

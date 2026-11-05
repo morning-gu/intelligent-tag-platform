@@ -18,8 +18,8 @@
 - test_run_task_persist_failure_rolls_back_partial_writes：persist 中途
   契约校验失败（closed 缺 tag_id）时，先前未提交的插行一并回滚（零残留）；
 - test_executor_thread_pool / test_executor_workers_zero_synchronous：
-  真线程池与同步模式（open 模式的执行器路径归 Task 7 验收——其 mtg
-  流水线 origin 词表 v2 化之前无法成功落库）。
+  真线程池（closed + open 双模式，open 执行器路径随 Task 7 origin 词表
+  切换恢复）与同步模式。
 
 Mock 技巧（与 llm/mock.py 咬合，v1 同款消 flake 构造）：
 - MockLLM 模式 A 按 sha256(run_id + tag_id) < 0.4 独立采样选中，
@@ -239,8 +239,7 @@ def test_executor_thread_pool(tmp_path):
     """真线程池 + 文件库：线程内独立 session 执行，submit 后轮询至 succeeded。
 
     :memory: 库每连接独立，工作线程会话看不到主线程数据——必须文件库。
-    （open 模式的执行器路径归 Task 7 验收：其 mtg 流水线 origin 词表
-    v2 化之前无法成功落库。）
+    同时覆盖 open 模式执行器路径（mtg 产线 → pre_asset_tag 落库，Task 7）。
     """
     engine = create_engine_for(str(tmp_path / "runner_pool.db"))
     Base.metadata.create_all(engine)
@@ -249,30 +248,45 @@ def test_executor_thread_pool(tmp_path):
         _seed_catalog(s)
         closed = _make_task(s, task_id="pool_closed",
                             policy_json='{"min_confidence": 0.5}')
-        closed_id = closed.task_id
+        open_task = _make_task(s, mode="open", task_id="pool_open")
+        closed_id, open_id = closed.task_id, open_task.task_id
 
     executor = TaskExecutor(factory, MOCK_LLM, MOCK_EMBEDDER, workers=2)
     try:
         executor.submit(closed_id)
-        # 轮询 task.status 至 succeeded（上限 10s）
+        executor.submit(open_id)
+        # 轮询 task.status 至双双 succeeded（上限 10s）
         deadline = time.monotonic() + 10.0
-        status = None
+        statuses: dict[str, str] = {}
         while time.monotonic() < deadline:
             with factory() as s:
-                status = s.get(TagGenerationTask, closed_id).status
-            if status == "succeeded":
+                statuses = {row.task_id: row.status
+                            for row in s.query(TagGenerationTask).all()}
+            if all(statuses.get(tid) == "succeeded"
+                   for tid in (closed_id, open_id)):
                 break
             time.sleep(0.05)
         with factory() as s:
-            row = s.get(TagGenerationTask, closed_id)
-            assert row.status == "succeeded", status
-            assert row.model_version == "mock-1"
+            closed_row = s.get(TagGenerationTask, closed_id)
+            open_row = s.get(TagGenerationTask, open_id)
+            assert closed_row.status == "succeeded", statuses
+            assert open_row.status == "succeeded", statuses
+            assert closed_row.model_version == "mock-1"
             # prompt_version 列为 Text（模型契约）：写入侧即字符串
             # （runner 写 str(template.version)），新会话读回仍为 "1"
-            assert str(row.prompt_version) == "1"
+            assert str(closed_row.prompt_version) == "1"
             # closed 任务有标签产出（min_confidence=0.5 下零选中概率 ≈ 2e-7）
             assert s.query(PreAssetTag).filter(
                 PreAssetTag.task_id == closed_id).count() >= 1
+            # open 任务：mtg 产线三候选全部落库为 open 自由候选（库内 30 枚
+            # 标签与 Mock 候选近正交，归一不命中），prompt_version=mtg-v1
+            open_rows = (s.query(PreAssetTag)
+                         .filter(PreAssetTag.task_id == open_id).all())
+            assert len(open_rows) == 3
+            assert all(row.origin == "open" and row.tag_id is None
+                       and row.candidate_name and row.review_status == "pending"
+                       for row in open_rows)
+            assert str(open_row.prompt_version) == "mtg-v1"
     finally:
         executor.shutdown()
     engine.dispose()

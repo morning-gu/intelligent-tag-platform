@@ -4,7 +4,7 @@
 调用点逐一钉死（v2）：
 - governance 入库向量 passage（存进 tag_define 成为语料）；
 - recall 内容查询文本 query（库内标签向量是 passage 持久化 BLOB，doc §5）；
-- open 候选归一 query（Task 7 域，用例保持红直到其流水线 v2 化）；
+- open 候选归一 query（Task 7 落地：mtg `_catalog_hits` 查 tag_define）；
 - v2 删除 runner 上下文摘要向量回填（内容向量生成任务启动时实时计算、
   不落库，doc §3.1）——closed 任务仅 query 一种 role。
 """
@@ -19,8 +19,7 @@ from tagplatform.tasks import run_generation_task
 from tagplatform.vectors import encode_vector
 
 # 跨模块播种助手延迟导入：test_task_runner / test_generation_open 属
-# Task 6/7 域，生成侧用例在对应域任务落地时恢复（open_gen 相关用例
-# 保持红属 Task 7 范围）。
+# Task 6/7 域，生成侧用例已随两任务落地恢复。
 
 
 class RecordingEmbedder:

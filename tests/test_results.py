@@ -247,6 +247,25 @@ def test_persist_open_free_candidate(session):
     assert row.review_status == "pending" and row.task_id == "t1"
 
 
+def test_persist_open_hit_row_keeps_candidate_name(session):
+    """open 归一命中行（Task 7）：tag_id + candidate_name 并存落库——生成时
+    即带 tag_id 的命中行仍保留候选原文（doc §6.2 可溯原则，并入既有也留
+    原文）；candidate_description 恒空（仅自由候选填写，doc §3.5，即使
+    ProducedTag 带了描述也被门拦下）。"""
+    g = ProducedTag(
+        origin="open", tag_id="tag_1", tag_name="悬疑",
+        candidate_type="genre", candidate_description="不应入库的描述",
+        relevance_score=0.93, confidence=0.9,
+        evidence=[Evidence("scene_001", 1000, 2000, "证据")])
+    s = persist_tags(session, "a1", "t1", [g], "r1")
+    assert s == PersistSummary(inserted=1, deleted_pending=0, skipped_finalized=0)
+    row = _row(session, tag_id="tag_1")
+    assert row.candidate_name == "悬疑"  # 并存：命中行保留候选原文
+    assert row.candidate_description is None  # 描述门按 tag_id 拦截
+    assert row.origin == "open" and row.candidate_dir_id is None
+    assert row.relevance_score == pytest.approx(0.93)
+
+
 # ---- 契约校验（零副作用）----
 
 
