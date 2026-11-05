@@ -23,7 +23,7 @@
 | 迁移策略 | 0007+ 重建系列（§9）；服务器业务数据已清零（2026-11-05），仅保留账号与模板种子 | 裁量 |
 | 识别状态表达 | media 合并后不设 recognition_status 列，`content_json IS NULL` 即未完成识别 | 裁量 |
 | 时间戳 ORM 类型 | DateTime（datetime 对象）沿用 v1，DDL 列 DATETIME；PG 目标 TIMESTAMPTZ | 裁量 |
-| merge 两支语义 | v1 merge 能力保留：并入既有（pre 行赋 tag_id，不建新标签）+ 合入新建（建 tag_define）；`open_match_threshold` 转为审核端匹配建议 | 裁量 |
+| merge 两支语义 | v1 merge 能力保留：并入既有（pre 行赋 tag_id，不建新标签）+ 合入新建（建 tag_define）；`open_match_threshold` 语义不变（mtg 归一命中阈值） | 裁量 |
 | 沿用三表不动 | user_account / prompt_template / asset_build_task 本期物理不动、ORM 保持 v1 形状；DDL 所示 CHECK/索引为 PG 目标形态 | 裁量 |
 | 审核指标口径 | 动作分布统计改为按 review_status 终态分布；merge 次数从 tag_change_log 补 | 裁量 |
 
@@ -370,6 +370,8 @@ CREATE INDEX idx_build_task_status ON asset_build_task(status);
 
 ## 4. content_json 结构约定
 
+> **本期契约不变**：content_json 沿用现行适配器产出形状（`content.summary`、`scenes[].time_range` 等，契约定义见 `src/tagplatform/schemas/content.py`）；下述结构是外部视频理解适配器的**目标契约**（阶段 1 Task 12，样例 JSON 待定），本期不实现。
+
 角色在内容层统一定义，场景通过 `character_ids` 引用；资产物理元数据由表列管理，不在 JSON 中重复。
 
 ```json
@@ -423,7 +425,7 @@ CREATE INDEX idx_build_task_status ON asset_build_task(status);
 
 | 粒度 | 字段路径 | 用途 | 状态 |
 |---|---|---|---|
-| 内容级 | `content.description` | 整片语义，closed 模式 query 向量 | **本期启用** |
+| 内容级 | `content.summary` + 场景描述（现行 `embed_content_texts` 提取规则） | 整片语义，closed 模式 query 向量 | **本期启用** |
 | 角色级 | `content.characters[].name` + `aliases[]` + `description` | 角色语义，角色标签召回 | 预留 |
 | 场景级 | `content.scenes[].description` + `location` | 场景语义，场景标签召回 | 预留 |
 | 证据 | `content.scenes[].dialogues[].text` + `start_ms` + `end_ms` | 标签证据回溯 | 启用（证据展示） |
@@ -441,7 +443,7 @@ CREATE INDEX idx_build_task_status ON asset_build_task(status);
 
 closed 模式召回流程（沿用 v1 已验证的 e5 前缀契约）：
 
-1. 从 `content_json` 提取 `content.description`（本期仅内容级）
+1. 按 `embed_content_texts` 现行规则提取摘要与场景文本（本期仅内容级）
 2. 用配置的 embedding 模型编码为 L2 归一化向量（**query: 前缀**）
 3. 与 `tag_define.embedding`（**passage: 前缀**）做余弦相似度 top-k 检索
 4. 召回候选注入 LLM 上下文做相关性判断
@@ -463,7 +465,7 @@ SQLite 实现下余弦相似度在应用层计算（BLOB 解包 + numpy）；PG 
 | `pending` | **删旧插新**（最新一轮的证据/分数进审核队列） |
 | 无旧行 | 直接插入 |
 
-实现：任务写结果前先删除该资产该 target 的全部 `pending` 行，再逐行 `INSERT OR IGNORE`。open 候选（candidate_name）同一套规则。唯一索引即幂等边界——跨任务去重（非 per-task 存档），pre 表因此是 asset×tag 去重视图，每资产每标签至多一行。
+实现：任务写结果前先删除该资产**同 origin** 的全部 `pending` 行（沿用 v1 重跑语义——closed 重跑不清 open 的待审行），再逐行 `INSERT OR IGNORE`。open 候选（candidate_name）同一套规则。唯一索引即幂等边界——跨任务去重（非 per-task 存档），pre 表因此是 asset×tag 去重视图，每资产每标签至多一行。
 
 跨轮次生成质量分析（含阈值重校准）不查本表，查 mtg 审计文件（每轮原始输出全量落盘）。
 
@@ -481,7 +483,7 @@ v1 的审核动作映射为行操作（merge 保留 v1 的两支语义——并�
 | merge·并入既有（v1 merge） | 审核员认定候选 = 库内已有标签：pre 行赋 `tag_id`（candidate_name 原文保留可溯）→ 走 approve 流程，**不新建标签** |
 | merge·合入新建 | 库内确无对应：建 `tag_define` 行（change_log 记 `merge`）→ pre 行赋 `tag_id`/`candidate_dir_id` → 走 approve 流程 |
 
-open 候选近似命中既有标签时（`open_match_threshold`），服务端给出建议 tag_id 供审核员一键「并入既有」——v1 已有此流，语义不变，阈值继续作为审核端匹配建议生效。
+open 生成时的归一命中沿用 v1：mtg `_catalog_hits` 按 `open_match_threshold` 与库内标签向量匹配，命中行生成时即带 tag_id（origin 仍为 open）；审核端合并对话框由审核员自行搜索目标标签。
 
 **指标口径：** v1 按 ReviewRecord.action 的审核动作分布统计改为按 `review_status` 终态分布（modify/merge 的终态均为 approved）；merge 次数可从 `tag_change_log.action = 'merge'` 补出。
 
