@@ -2,16 +2,17 @@
 
 三条主线：
 1. 彩排升级：临时文件库程序化升到 0006 → 手工插外键链完整的 v1 数据
-   （账号、目录父/子、资产+上下文+生成任务、挂载两行、change_log）→
-   upgrade head → 断言旧业务表消失、user_account / prompt 3 行种子 /
-   media_asset 行原样保留、v2 新表结构与 db.models 逐字对拍（列/NOT NULL/
-   默认值/CHECK/索引名）、合法行可插且非法枚举 / FK 违例 / 幂等唯一索引
-   拒绝、PRAGMA foreign_key_check 为空。
+   （账号、目录父/子、资产（父/子两行）+上下文+生成任务、挂载两行、
+   change_log）→ upgrade head → 断言旧业务表消失、user_account / prompt
+   3 行种子 / media_asset 两行原样保留、v2 新表结构与 db.models 逐字对拍
+   （列/NOT NULL/默认值/CHECK/索引名，media_asset 含 §3.1 定稿 CHECK 与
+   两个索引——升级库与 create_all 库同构）、合法行可插且非法枚举 / FK
+   违例 / 幂等唯一索引拒绝、PRAGMA foreign_key_check 为空。
 2. 全新空库 0001→head：种子迁移链（0002/0005 import 种子常量）不断，
    prompt_template 3 行种子齐备——恢复 v1 test_models.py 退役的迁移链
    种子覆盖（deferred minor 闭环点）。
 3. downgrade 0006：v2 新表移除、v1 空表重建（数据不回迁）、media_asset
-   摘除合并列，再 round-trip 升回 0007 验证迁移可重入。
+   重建回 v1 形状，再 round-trip 升回 0007 验证迁移可重入。
 
 测试自建临时 sqlite 文件库（tmp_path），经 TAGPLT_DATABASE_PATH 驱动
 alembic env.py（get_settings 有 lru_cache，前后各清一次缓存），不碰任何
@@ -64,8 +65,8 @@ UNTOUCHED_TABLES = {"user_account", "prompt_template", "asset_build_task", "medi
 PROMPT_SEEDS = [("closed", 1, 1), ("open", 1, 1), ("open", 2, 0)]
 
 # 列规格对拍基准（PRAGMA table_info：name, type, notnull, dflt_value），
-# 与 db/models.py v2 模型逐字对应；media_asset 为 v1 七列 + 追加的两列
-# （迁移按计划只 add_column，不重建——v1 形状的 CHECK/索引留待 PG 迁移对齐）
+# 与 db/models.py v2 模型逐字对应；media_asset 为重建后的 v2 形状（v1 七列
+# 全部保留 + content_json/source 按 models.py 列序插入）
 EXPECTED_COLUMNS = {
     "media_asset": [
         ("asset_id", "TEXT", 1, None),
@@ -74,9 +75,9 @@ EXPECTED_COLUMNS = {
         ("title", "TEXT", 1, None),
         ("duration_ms", "INTEGER", 0, None),
         ("video_uri", "TEXT", 0, None),
-        ("created_at", "DATETIME", 0, None),
         ("content_json", "TEXT", 0, None),
         ("source", "TEXT", 0, None),
+        ("created_at", "DATETIME", 0, None),
     ],
     "tag_catalog": [
         ("dir_id", "TEXT", 1, None),
@@ -164,6 +165,9 @@ EXPECTED_COLUMNS = {
 
 # CHECK / UNIQUE 约束片段（doc §3 内联 DDL 逐字；出现在 CREATE TABLE 正文中）
 EXPECTED_CHECK_FRAGMENTS = {
+    "media_asset": [
+        "CHECK (asset_type IN ('movie', 'series', 'scene'))",
+    ],
     "tag_catalog": [
         "CHECK (dir_type IN ('dir_static', 'dir_dynamic'))",
         "CHECK (applicable_scope IN ('content', 'scene', 'character'))",
@@ -198,6 +202,8 @@ EXPECTED_CHECK_FRAGMENTS = {
 # CREATE INDEX 级索引名（表内 UNIQUE 约束在 SQLite 中是 sqlite_autoindex_*，
 # 不经 CREATE INDEX 建出，故不在本集合）
 EXPECTED_INDEXES = {
+    "idx_media_asset_parent",
+    "idx_media_asset_type",
     "idx_tag_catalog_type",
     "idx_tag_catalog_scope",
     "idx_tag_define_status",
@@ -308,9 +314,10 @@ def _fk_check(db_path: Path) -> list[tuple]:
 def _seed_v1_data(db_path: Path) -> None:
     """彩排数据：0006 时刻表形状下、外键父/子链完整的 v1 业务行。
 
-    目录父/子（v1 目录/标签混表）、资产 + 上下文 + 生成任务 + 挂载两行
-    （closed 带 tag_id / open 带候选名）、账号一行、change_log 一行。
-    种子连接自身开 PRAGMA foreign_keys=ON，外键链断了当场报错。
+    目录父/子（v1 目录/标签混表）、资产父/子两行（media_asset 自引用外键
+    经重建/RENAME 后仍有效）+ 上下文 + 生成任务 + 挂载两行（closed 带
+    tag_id / open 带候选名）、账号一行、change_log 一行。种子连接自身开
+    PRAGMA foreign_keys=ON，外键链断了当场报错。
     """
     ts = "2026-11-01 08:00:00"
     conn = sqlite3.connect(str(db_path))
@@ -334,10 +341,18 @@ def _seed_v1_data(db_path: Path) -> None:
         " 'content', 'active', ?, ?)",
         (ts, ts),
     )
+    # media_asset 父/子两行（子级 scene 经 parent_id 挂父级）
     conn.execute(
         "INSERT INTO media_asset (asset_id, asset_type, parent_id, title, duration_ms,"
         " video_uri, created_at)"
         " VALUES ('asset_movie_001', 'movie', NULL, '彩排影片', 120000, '/media/demo.mp4', ?)",
+        (ts,),
+    )
+    conn.execute(
+        "INSERT INTO media_asset (asset_id, asset_type, parent_id, title, duration_ms,"
+        " video_uri, created_at)"
+        " VALUES ('asset_scene_001', 'scene', 'asset_movie_001', '彩排场景一',"
+        " NULL, NULL, ?)",
         (ts,),
     )
     conn.execute(
@@ -381,12 +396,13 @@ def _seed_v1_data(db_path: Path) -> None:
 
 
 def _invalid_enum_rows() -> list:
-    """每张 v2 新表一条枚举列非法值行（验证 CHECK 库层兜底）。
+    """media_asset + 每张 v2 新表各一条枚举列非法值行（验证 CHECK 库层兜底）。
 
     各行取互不冲突的主键 / (asset_id, target_id, tag_id, candidate_name)
     组合，保证失败只可能由 CHECK 触发，不与唯一索引/FK 混淆。
     """
     return [
+        MediaAsset(asset_id="probe_asset", asset_type="bogus", title="坏资产"),
         TagCatalog(dir_id="probe_dir", dir_name="坏目录", dir_type="bogus", description="x"),
         TagDefine(tag_id="probe_tag1", tag_name="坏标签1", tag_type="bogus",
                   description="x", dir_id="dir_comedy"),
@@ -436,10 +452,19 @@ def test_0007_upgrade_rehearsal(rehearsal):
         ).fetchall()
         assert rows == PROMPT_SEEDS
 
+        # media_asset 两行保留（重建数据搬迁不动 v1 七列的值，新列落 NULL；
+        # 父/子外键行经 RENAME 后仍成立）
         rows = conn.execute(
-            "SELECT asset_id, title, content_json, source FROM media_asset"
+            "SELECT asset_id, asset_type, parent_id, title, duration_ms,"
+            " video_uri, created_at, content_json, source FROM media_asset"
+            " ORDER BY asset_id"
         ).fetchall()
-        assert rows == [("asset_movie_001", "彩排影片", None, None)]
+        assert rows == [
+            ("asset_movie_001", "movie", None, "彩排影片", 120000,
+             "/media/demo.mp4", "2026-11-01 08:00:00", None, None),
+            ("asset_scene_001", "scene", "asset_movie_001", "彩排场景一",
+             None, None, "2026-11-01 08:00:00", None, None),
+        ]
     finally:
         conn.close()
 
@@ -551,7 +576,7 @@ def test_fresh_db_full_chain(rehearsal):
 
 
 def test_downgrade_to_0006(rehearsal):
-    """downgrade 0006：v1 空表重建（数据不回迁）、media_asset 摘列、可重入。"""
+    """downgrade 0006：v1 空表重建（数据不回迁）、media_asset 回 v1 形状、可重入。"""
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0006")
     _seed_v1_data(db_path)
@@ -570,14 +595,23 @@ def test_downgrade_to_0006(rehearsal):
     asset_tag_cols = [c[0] for c in _table_columns(db_path, "asset_tag")]
     assert "candidate_type" in asset_tag_cols and "target_type" not in asset_tag_cols
 
-    # media_asset 摘除合并列，既有行保留
+    # media_asset 回 v1 形状：摘除合并列，且无 CHECK、无 v2 索引
     cols = [c[0] for c in _table_columns(db_path, "media_asset")]
     assert "content_json" not in cols and "source" not in cols
+    media_sql = _create_table_sql(db_path, "media_asset")
+    assert media_sql is not None and "CHECK (" not in media_sql
+    assert "idx_media_asset_type" not in _index_names(db_path)
 
     conn = sqlite3.connect(str(db_path))
     try:
-        rows = conn.execute("SELECT asset_id, title FROM media_asset").fetchall()
-        assert rows == [("asset_movie_001", "彩排影片")]
+        # 重建回 v1 形状时既有行保留（两行都在）
+        rows = conn.execute(
+            "SELECT asset_id, title FROM media_asset ORDER BY asset_id"
+        ).fetchall()
+        assert rows == [
+            ("asset_movie_001", "彩排影片"),
+            ("asset_scene_001", "彩排场景一"),
+        ]
         # v1 空表：0007 期间被 drop 的业务数据不回迁
         for table in GONE_V1_TABLES:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -587,8 +621,20 @@ def test_downgrade_to_0006(rehearsal):
         assert conn.execute("SELECT COUNT(*) FROM prompt_template").fetchone()[0] == 3
     finally:
         conn.close()
+    # 重建后的 v1 media_asset 自引用外键仍然成立（子行指向父行）
+    assert _fk_check(db_path) == []
 
-    # round-trip：0006 → 0007 可重入（batch 摘列后的 media_asset 仍可再补列）
+    # round-trip：0006 → 0007 可重入（v1 形状 media_asset 可再重建为 v2，
+    # CHECK/索引/数据行全部回到位）
     command.upgrade(cfg, "head")
     assert V2_NEW_TABLES <= _table_names(db_path)
+    assert EXPECTED_INDEXES <= _index_names(db_path)
+    media_sql = _create_table_sql(db_path, "media_asset")
+    assert "CHECK (asset_type IN ('movie', 'series', 'scene'))" in media_sql
+    conn = sqlite3.connect(str(db_path))
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM media_asset").fetchone()[0]
+        assert count == 2
+    finally:
+        conn.close()
     assert _fk_check(db_path) == []

@@ -1,10 +1,13 @@
 """v2 表结构重建（目录/标签拆分、pre/正式分离、media 合并）
 
 doc table_design.md §8 迁移策略：服务器业务数据已清零（2026-11-05），0007
-对 v2 变更所及的 7 张 v1 业务表 drop 重建（数据不迁移）；user_account /
-prompt_template / asset_build_task 三表物理不动；media_asset 仅追加
-content_json / source 两列（v1 + media_context 合并，识别状态 =
-content_json IS NULL，doc §3.1）。
+对 v2 变更所及的 7 张 v1 业务表 drop 重建（数据不迁移）；media_asset 按
+doc §3.1 定稿 DDL 重建——v1 七列 + content_json / source（v1 + media_context
+合并，识别状态 = content_json IS NULL）+ asset_type CHECK +
+idx_media_asset_parent / idx_media_asset_type 索引，数据行经 INSERT SELECT
+保留（服务器业务数据已清零，零数据成本）；user_account / prompt_template /
+asset_build_task 三表物理不动。升级库（迁移路径）与 create_all 库（测试
+路径）由此同构。
 
 v2 变更对照（doc §2.1）：
 - 目录/标签拆双表：tag_catalog（目录树，dir_static/dir_dynamic）+
@@ -44,10 +47,35 @@ def upgrade() -> None:
     op.drop_table("import_batch")
     op.drop_table("tag_catalog")
 
-    # 2) media_asset 追加 v2 合并列（识别产出 JSON 串 + 识别结果来源；
-    #    不重建表，既有行保留、新列落 NULL）
-    op.add_column("media_asset", sa.Column("content_json", sa.Text(), nullable=True))
-    op.add_column("media_asset", sa.Column("source", sa.Text(), nullable=True))
+    # 2) media_asset 重建对齐 v2（v1 + media_context 合并，doc §3.1 定稿
+    #    DDL）：追加 content_json / source 两列，补齐 asset_type CHECK 与
+    #    parent/type 索引；数据行 INSERT SELECT 保留。沿用 0006 的临时表
+    #    重建模式（self-FK 引用临时名，RENAME 时 SQLite 自动改写为自引用）。
+    op.create_table(
+        "_media_asset_new",
+        sa.Column("asset_id", sa.Text(), nullable=False),
+        sa.Column("asset_type", sa.Text(), nullable=False),
+        sa.Column("parent_id", sa.Text(), nullable=True),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("duration_ms", sa.Integer(), nullable=True),
+        sa.Column("video_uri", sa.Text(), nullable=True),
+        sa.Column("content_json", sa.Text(), nullable=True),
+        sa.Column("source", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.CheckConstraint("asset_type IN ('movie', 'series', 'scene')"),
+        sa.ForeignKeyConstraint(["parent_id"], ["_media_asset_new.asset_id"]),
+        sa.PrimaryKeyConstraint("asset_id"),
+    )
+    op.execute(
+        "INSERT INTO _media_asset_new (asset_id, asset_type, parent_id, title, "
+        "duration_ms, video_uri, content_json, source, created_at) "
+        "SELECT asset_id, asset_type, parent_id, title, duration_ms, video_uri, "
+        "NULL, NULL, created_at FROM media_asset"
+    )
+    op.drop_table("media_asset")
+    op.rename_table("_media_asset_new", "media_asset")
+    op.create_index("idx_media_asset_parent", "media_asset", ["parent_id"])
+    op.create_index("idx_media_asset_type", "media_asset", ["asset_type"])
 
     # 3) create v2 新表（父表在前），DDL 与 db/models.py 逐字对应
     # tag_catalog：目录树（目录本身不是标签，doc §3.2）
@@ -224,7 +252,8 @@ def downgrade() -> None:
     """反向重建 v1 空表。
 
     业务数据已清零口径下不回迁数据（0007 期间 drop 的 v1 业务行不复活，
-    重建的表为空）；media_asset 摘除合并列时既有行经 batch 重建保留。
+    重建的表为空）；media_asset 重建回 v1 形状时既有行经 INSERT SELECT
+    保留。
     """
     op.execute("PRAGMA foreign_keys=OFF")
 
@@ -237,10 +266,27 @@ def downgrade() -> None:
     op.drop_table("tag_define")
     op.drop_table("tag_catalog")
 
-    # 2) media_asset 摘除 v2 合并列（batch 重建保留既有行）
-    with op.batch_alter_table("media_asset") as batch_op:
-        batch_op.drop_column("content_json")
-        batch_op.drop_column("source")
+    # 2) media_asset 重建回 v1 形状（摘除合并列与 CHECK/索引，数据行保留）
+    op.create_table(
+        "_media_asset_v1",
+        sa.Column("asset_id", sa.Text(), nullable=False),
+        sa.Column("asset_type", sa.Text(), nullable=False),
+        sa.Column("parent_id", sa.Text(), nullable=True),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("duration_ms", sa.Integer(), nullable=True),
+        sa.Column("video_uri", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.ForeignKeyConstraint(["parent_id"], ["_media_asset_v1.asset_id"]),
+        sa.PrimaryKeyConstraint("asset_id"),
+    )
+    op.execute(
+        "INSERT INTO _media_asset_v1 (asset_id, asset_type, parent_id, title, "
+        "duration_ms, video_uri, created_at) "
+        "SELECT asset_id, asset_type, parent_id, title, duration_ms, video_uri, "
+        "created_at FROM media_asset"
+    )
+    op.drop_table("media_asset")
+    op.rename_table("_media_asset_v1", "media_asset")
 
     # 3) 重建 v1 空表（0001 形状；tag_catalog 为 0006 重建后的形状）
     op.create_table(
