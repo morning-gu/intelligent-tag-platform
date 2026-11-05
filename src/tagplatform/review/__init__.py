@@ -1,4 +1,4 @@
-"""人工审核服务（Task 4）：四动作审核与审核记录写入。"""
+"""人工审核服务（Task 8）：pre_asset_tag 四动作行操作审核（行即日志）。"""
 
 from tagplatform.review.service import ConflictError, apply_review
 
