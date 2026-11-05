@@ -23,17 +23,52 @@ export type ReviewAction = 'approve' | 'reject' | 'modify' | 'merge'
  * - modify：候选展示字段两键可选 + 备注（更新后直接 approve）；
  * - merge 两支互斥——并入既有标签（merge_to_tag_id）或新建标签入库
  *   （new_tag_name + new_dir_id 必填，描述/备注可选）。
- * 联合类型使 merge 两支混用（同时给 merge_to_tag_id 与 new_tag_name）与
- * 必填键缺失在编译期报错。 */
+ *
+ * 真互斥实现：各分支以 `?: never` 哨兵钉死他支专属键。普通可选字段联合
+ * 挡不住混用——TS 对联合目标的溢出属性检查跨成员池化（键存在于任一成员
+ * 即放行，如 merge_to_tag_id 与 new_tag_name 并存可静默通过），never 钉死
+ * 后混用对象对所有成员均不可赋值，编译期必报错。动作与载荷的对应关系
+ * （如 merge 配裸 {comment}）超出本类型表达力，由调用方保证、后端 422
+ * 兜底；互斥哨兵用例见 review.test.ts 顶部 @ts-expect-error 反向哨兵块。 */
 export type ReviewActionPayload =
-  | { comment?: string }
-  | { candidate_name?: string; candidate_description?: string; comment?: string }
-  | { merge_to_tag_id: string }
+  /** approve/reject：仅备注（modify/merge 专属键 never 钉死） */
+  | {
+      comment?: string
+      candidate_name?: never
+      candidate_description?: never
+      merge_to_tag_id?: never
+      new_tag_name?: never
+      new_dir_id?: never
+      new_description?: never
+    }
+  /** modify：候选展示字段 + 备注（merge 两支专属键 never 钉死） */
+  | {
+      candidate_name?: string
+      candidate_description?: string
+      comment?: string
+      merge_to_tag_id?: never
+      new_tag_name?: never
+      new_dir_id?: never
+      new_description?: never
+    }
+  /** merge 支一：并入既有标签（new_tag 三键 + modify 两键 never 钉死） */
+  | {
+      merge_to_tag_id: string
+      candidate_name?: never
+      candidate_description?: never
+      new_tag_name?: never
+      new_dir_id?: never
+      new_description?: never
+    }
+  /** merge 支二：新建标签入库（merge_to_tag_id + modify 两键 never 钉死） */
   | {
       new_tag_name: string
       new_dir_id: string
       new_description?: string
       comment?: string
+      candidate_name?: never
+      candidate_description?: never
+      merge_to_tag_id?: never
     }
 
 /** 单条证据明细（与后端 EvidenceOut 一致）。 */

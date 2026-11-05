@@ -12,7 +12,26 @@ import {
   fetchTags,
   formatTimestamp,
   reviewAssetTag,
+  type ReviewActionPayload,
 } from './review'
+
+// ---- ReviewActionPayload 类型互斥哨兵（编译期契约，运行时不执行）----
+// payload 各分支以 `?: never` 钉死他支专属键（机制见 review.ts 类型 JSDoc）：
+// 以下故意混用/缺键的载荷必须持续编译报错。若类型退化为普通可选字段联合
+// （不再互斥——TS 对联合的溢出属性检查跨成员池化，混用键会静默放行），
+// 下方 @ts-expect-error 因"未使用的期望错误"在 tsc 阶段反向报错，形成哨兵。
+// 验证命令：npx tsc --noEmit -p tsconfig.app.json（裸 tsc --noEmit 因
+// solution tsconfig files:[] 空转，测不到本哨兵；vitest/esbuild 不做类型
+// 检查，本块运行时恒过）。
+// @ts-expect-error merge 两支混用（merge_to_tag_id + new_tag_name 并存）必须编译报错
+const _mixedMerge: ReviewActionPayload = { merge_to_tag_id: 'tag-a', new_tag_name: '新标签' }
+// @ts-expect-error modify 混入 merge 支二专属键（new_dir_id）必须编译报错
+const _mixedModify: ReviewActionPayload = { candidate_name: '新名', new_dir_id: 'dir-1' }
+// @ts-expect-error merge 支二缺必填键（new_dir_id）必须编译报错
+const _missingDirId: ReviewActionPayload = { new_tag_name: '新标签' }
+void _mixedMerge
+void _mixedModify
+void _missingDirId
 
 vi.mock('./client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./client')>()
