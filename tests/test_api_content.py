@@ -1,22 +1,26 @@
-"""内容导入与资产查询 API 测试（Task 11）。
+"""内容导入与资产查询 API 测试（v2 合并语义）。
 
 覆盖契约（错误映射约定见 brief）：
-- POST /api/v1/content/import：合法平台格式导入端到端（影片/场景/上下文
-  落库 + 详情 contexts 含 recognition_status + 完整 content JSON 取回）；
-  video_root 不存在 → 422（Review Focus 4）；未知 kind → 422 且 detail
+- POST /api/v1/content/import：合法平台格式导入端到端（影片/场景落库 +
+  content_json 直写影片级行 + 详情带 recognized + 完整 content JSON 经
+  GET /assets/{asset_id}/content 取回）；响应形状 {asset_id, scene_asset_ids}
+  （context_id 退役）；video_root 不存在 → 422；未知 kind → 422 且 detail
   列出可用 kind（含 "platform"）；data 校验失败 → 422 带摘要；
-  parent_id 指向不存在资产 → 422（修复 1：原先裸 IntegrityError 500）；
+  parent_id 指向不存在资产 → 422；
 - GET /api/v1/assets：asset_type 过滤 + q 对 title 子串匹配，含
-  video_uri/parent_id；
-- GET /api/v1/assets/{asset_id}：详情含 contexts 摘要（不含 content_json
-  大字段）；
-- GET /api/v1/assets/{asset_id}/contexts/{context_id}：完整 content JSON；
-  未知资产/上下文/上下文不属于该资产 → 404；
-- GET /api/v1/adapters：已注册 kind 列表。
+  video_uri/parent_id（本任务不动，回归钉住）；
+- GET /api/v1/assets/{asset_id}：详情带 recognized（content_json 非空），
+  不再有 contexts 数组；
+- GET /api/v1/assets/{asset_id}/content：完整 content JSON；未知资产 → 404
+  （"资产不存在"）、content_json 为空 → 404（"未完成内容识别"）；
+- GET /api/v1/assets/{asset_id}/contexts/{context_id}：路由已删除 → 404；
+- GET /api/v1/adapters：已注册 kind 列表（本任务不动，回归钉住）。
 """
 
 import json
 from pathlib import Path
+
+from tagplatform.db.models import MediaAsset
 
 # 原始内容 JSON dict（未经 parse_content 解析，供 POST body 直接携带）
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "content_movie.json"
@@ -28,11 +32,17 @@ def test_content_import_via_api(client):
         "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT})
     assert resp.status_code == 200
     body = resp.json()
+    assert set(body) == {"asset_id", "scene_asset_ids"}   # context_id 退役
     assert len(body["scene_asset_ids"]) == 1
     detail = client.get(f"/api/v1/assets/{body['asset_id']}").json()
-    assert detail["contexts"][0]["recognition_status"] == "completed"
-    full = client.get(f"/api/v1/assets/{body['asset_id']}/contexts/{body['context_id']}")
-    assert full.json()["content"]["summary"]
+    assert detail["recognized"] is True
+    full = client.get(f"/api/v1/assets/{body['asset_id']}/content")
+    assert full.status_code == 200
+    parsed = full.json()
+    assert parsed["content"]["summary"]
+    # 识别元信息在 content_json 内（doc §3.1：不单设 model_version 列）
+    assert parsed["metadata"]["recognition_status"] == "completed"
+    assert parsed["metadata"]["model_version"] == "vlm_v1"
 
 
 VISION_PAYLOAD = {
@@ -62,23 +72,49 @@ def test_content_import_vision_kind(client):
     resp = client.post("/api/v1/content/import", json={
         "kind": "vision", "video_root": None, "data": VISION_PAYLOAD})
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    ctx = client.get(
-        f"/api/v1/assets/{body['asset_id']}/contexts/{body['context_id']}").json()
+    asset_id = resp.json()["asset_id"]
+    ctx = client.get(f"/api/v1/assets/{asset_id}/content").json()
     assert ctx["metadata"]["source"] == "video_understanding"
     assert ctx["content"]["characters"][0]["name"] == "周野"
     assert ctx["content"]["scenes"][0]["emotions"] == ["压抑"]
     assert ctx["content"]["scenes"][0]["audio_events"][0]["event_type"] == "background_music"
 
 
-def test_content_import_bad_video_root_422(client):   # Review Focus 4
+def test_content_endpoint_404_unrecognized(client):
+    """content_json 为空（上传占位资产未识别）→ 404，detail 含"未完成内容识别"。"""
+    with client.app.state.session_factory() as session:
+        session.add(MediaAsset(asset_id="movie_raw", asset_type="movie",
+                               title="未识别占位"))
+        session.commit()
+
+    resp = client.get("/api/v1/assets/movie_raw/content")
+    assert resp.status_code == 404
+    assert "未完成内容识别" in resp.json()["detail"]
+
+
+def test_content_endpoint_404_unknown_asset(client):
+    resp = client.get("/api/v1/assets/asset_none/content")
+    assert resp.status_code == 404
+    assert "资产不存在" in resp.json()["detail"]
+
+
+def test_contexts_route_removed(client):
+    """v2 合并：contexts 端点整条退役 → 404（无此路由）。"""
+    resp = client.post("/api/v1/content/import", json={
+        "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT})
+    asset_id = resp.json()["asset_id"]
+    assert client.get(
+        f"/api/v1/assets/{asset_id}/contexts/ctx_any").status_code == 404
+
+
+def test_content_import_bad_video_root_422(client):
     resp = client.post("/api/v1/content/import", json={
         "kind": "platform", "video_root": "Z:/不存在", "data": CONTENT_FIXTURE_DICT})
     assert resp.status_code == 422
 
 
 def test_content_import_parent_missing_422(client):
-    """修复 1：parent_id 指向不存在资产 → 422（原先裸 IntegrityError 500）。"""
+    """parent_id 指向不存在资产 → 422（写库前拦截，杜绝裸 IntegrityError 500）。"""
     bad = {**CONTENT_FIXTURE_DICT,
            "asset": {**CONTENT_FIXTURE_DICT["asset"], "parent_id": "asset_none"}}
     resp = client.post("/api/v1/content/import", json={
@@ -131,27 +167,22 @@ def test_assets_list_and_filters(client):
     assert client.get("/api/v1/assets?q=不存在的词").json() == []
 
 
-def test_asset_detail_and_404(client):
+def test_asset_detail_recognized_and_404(client):
     resp = client.post("/api/v1/content/import", json={
         "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT})
     body = resp.json()
 
-    # 详情：contexts 摘要字段齐全且不含 content_json 大字段
+    # 详情：recognized=True（content_json 非空），contexts 数组已退役，
+    # content_json 大字段不出详情
     detail = client.get(f"/api/v1/assets/{body['asset_id']}").json()
     assert detail["asset_type"] == "movie" and detail["video_uri"]
-    ctx = detail["contexts"][0]
-    assert ctx["context_id"] == body["context_id"]
-    assert ctx["model_version"] == "vlm_v1" and ctx["created_at"]
-    assert "content_json" not in ctx
+    assert detail["recognized"] is True
+    assert "contexts" not in detail
+    assert "content_json" not in detail
 
-    # 场景资产没有 media_context：contexts 为空列表
+    # 场景资产没有内容识别：recognized=False
     scene_detail = client.get(f"/api/v1/assets/{body['scene_asset_ids'][0]}").json()
-    assert scene_detail["contexts"] == []
+    assert scene_detail["recognized"] is False
 
-    # 未知资产 / 未知上下文 / 上下文不属于该资产 → 404
+    # 未知资产 → 404
     assert client.get("/api/v1/assets/asset_none").status_code == 404
-    assert client.get(
-        f"/api/v1/assets/{body['asset_id']}/contexts/ctx_none").status_code == 404
-    assert client.get(
-        f"/api/v1/assets/{body['scene_asset_ids'][0]}/contexts/{body['context_id']}"
-    ).status_code == 404

@@ -1,4 +1,10 @@
-"""内容导入服务：统一内容 JSON → media_asset 层级 + media_context 落库。
+"""内容导入服务：统一内容 JSON → media_asset 层级落库（v2 合并语义）。
+
+v2 起 media_asset 与 media_context 合并（doc §3.1）：content_json（识别
+产出 JSON 串）与 source（识别结果来源）直写**影片级 MediaAsset 行**，
+重新导入直接**覆盖**（历史版本由 mtg 审计文件留档）——不再新建 context
+行，也没有任何清理步骤。识别元信息（model_version/recognition_status）
+存 content_json 内的 metadata，不单设列。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）；video_root 非法
 抛 ValueError，由 API 层（Task 11）捕获转 422。
@@ -11,15 +17,13 @@
   IntegrityError 逃逸；upsert 路径 parent 冻结不校验；
 - **video 路径解析** resolve_video_path 四规则（见函数 docstring）；
 - **asset_id**：content.asset.asset_id 非空则 upsert（存在则仅更新
-  title/duration_ms/video_uri，不动 parent——asset_id 是主键不允许变更，
-  parent 一并冻结；不存在则插入）；为空则生成 asset_ + uuid4().hex[:8]；
+  title/duration_ms/video_uri/content_json/source，不动 parent——asset_id
+  是主键不允许变更，parent 一并冻结；不存在则插入）；为空则生成
+  asset_ + uuid4().hex[:8]；
 - **场景资产**：asset_id = f"{movie_asset_id}::{scene_id}"、
-  asset_type="scene"、duration_ms = end - start、video_uri 同影片；
-  重复导入 upsert（同 scene_id 不重复插行）；
-- **media_context**：每次导入新建一行（不做 upsert）——context_id =
-  ctx_ + uuid4().hex[:8]、content_json 为 ContentJSON 全量序列化、
-  source/model_version/recognition_status 取 metadata、embedding 留空
-  （由嵌入生产任务回填）。
+  asset_type="scene"、duration_ms = end - start、video_uri 同影片、
+  content_json 保持 NULL（内容挂影片级，场景行是层级占位）；
+  重复导入 upsert（同 scene_id 不重复插行）。
 
 实现注意：
 - MediaAsset.parent_id 外键无 relationship()：影片行先 flush 落库，
@@ -39,16 +43,15 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy.orm import Session
 
 from tagplatform.content_io import dump_for_storage
-from tagplatform.db.models import MediaAsset, MediaContext
+from tagplatform.db.models import MediaAsset
 from tagplatform.schemas import ContentJSON
 
 
 @dataclass
 class ImportResult:
-    """导入结果：影片 asset_id、本次新建 context_id、场景 asset_id 列表。"""
+    """导入结果：影片 asset_id 与场景 asset_id 列表（v2 无 context 概念）。"""
 
     asset_id: str
-    context_id: str
     scene_asset_ids: list[str]
 
 
@@ -76,7 +79,7 @@ def import_content(
     content: ContentJSON, session: Session, video_root: str | None,
     raw: dict | None = None,
 ) -> ImportResult:
-    """导入统一内容 JSON：影片/场景资产 upsert + 上下文新建并提交。
+    """导入统一内容 JSON：影片/场景资产 upsert + content_json 落影片行并提交。
 
     video_root 非 None 时必须为已存在目录，否则抛 ValueError（任何
     数据库写入之前先校验，失败零副作用）。
@@ -94,6 +97,9 @@ def import_content(
         if content.asset.video_uri is not None
         else None
     )
+    # 库存原文：模型/协议信息（metadata）就在这份 JSON 里，不单设列（doc §3.1）
+    content_json = (dump_for_storage(raw) if raw is not None
+                    else content.model_dump_json())
 
     # ---------- 影片资产：提供 asset_id 则 upsert，为空则生成 ----------
     asset_id = content.asset.asset_id
@@ -105,6 +111,9 @@ def import_content(
         # video_uri 为 None 时保留原值：上传绑定的文件不能被内容 JSON 抹掉
         if video_uri is not None:
             existing.video_uri = video_uri
+        # v2 合并语义：重识别直接覆盖 content_json/source，无清理步骤
+        existing.content_json = content_json
+        existing.source = content.metadata.source
     else:
         if not asset_id:
             asset_id = f"asset_{uuid.uuid4().hex[:8]}"
@@ -122,6 +131,8 @@ def import_content(
             title=content.asset.title,
             duration_ms=content.asset.duration_ms,
             video_uri=video_uri,
+            content_json=content_json,
+            source=content.metadata.source,
             created_at=now,
         ))
     # 无 relationship()：影片行（父）先 flush 落库，场景行外键才成立
@@ -150,21 +161,5 @@ def import_content(
             ))
         scene_asset_ids.append(scene_asset_id)
     session.flush()
-
-    # ---------- media_context：每次导入新建一行（不做 upsert） ----------
-    context_id = f"ctx_{uuid.uuid4().hex[:8]}"
-    session.add(MediaContext(
-        context_id=context_id,
-        asset_id=asset_id,
-        content_json=(dump_for_storage(raw) if raw is not None
-                      else content.model_dump_json()),
-        embedding=None,  # 留空，由嵌入生产任务写入
-        source=content.metadata.source,
-        model_version=content.metadata.model_version,
-        recognition_status=content.metadata.recognition_status,
-        created_at=now,
-    ))
     session.commit()
-    return ImportResult(
-        asset_id=asset_id, context_id=context_id, scene_asset_ids=scene_asset_ids
-    )
+    return ImportResult(asset_id=asset_id, scene_asset_ids=scene_asset_ids)

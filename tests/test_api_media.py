@@ -3,8 +3,8 @@
 覆盖契约（POST /api/v1/media/upload，multipart `file`，登录即可上传）：
 - 成功上传三断言组：响应形状 {asset_id, title, video_uri} / 文件真实落盘
   （uuid 存盘名 + 字节一致）/ media_asset 行入库（asset_type=movie、
-  duration_ms 为空、created_at 显式）+ 占位语义（无 media_context，资产
-  列表可见、详情 contexts 为空）；
+  duration_ms 为空、created_at 显式）+ 占位语义（v2：content_json 为空
+  即未识别，资产列表可见、详情 recognized=False）；
 - 后缀白名单 {".mp4", ".webm", ".mkv"} 大小写不敏感；非白名单 → 422
   {"detail": "不支持的视频格式"}，零副作用（目录不建、行不入）；
 - 大小 >2GB → 413。两条拦截路径各自独立测试：
@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset, MediaContext
+from tagplatform.db.models import MediaAsset
 
 # 上传内容体（任意字节即可，测试零真实视频依赖）
 PAYLOAD = b"fake-video-bytes"
@@ -64,7 +64,7 @@ def _count_rows(media_client) -> int:
 
 
 def test_upload_success(media_client, tmp_path):
-    """成功上传：响应形状 / 文件真实落盘 / 行入库 + 占位语义（无 context）。"""
+    """成功上传：响应形状 / 文件真实落盘 / 行入库 + 占位语义（未识别）。"""
     resp = _upload(media_client, name="clip.mp4", content=PAYLOAD)
     assert resp.status_code == 200
     body = resp.json()
@@ -91,13 +91,14 @@ def test_upload_success(media_client, tmp_path):
         assert row.duration_ms is None
         assert row.video_uri == body["video_uri"]
         assert row.created_at is not None
-        assert s.query(MediaContext).filter(
-            MediaContext.asset_id == body["asset_id"]).count() == 0
-    # 占位语义的前端证据：资产列表可见、详情 contexts 为空（未导入识别内容）
+        # v2 占位语义：content_json 为空 = 未完成内容识别
+        assert row.content_json is None
+        assert row.source is None
+    # 占位语义的前端证据：资产列表可见、详情 recognized=False（未导入识别内容）
     listing = media_client.get("/api/v1/assets").json()
     assert body["asset_id"] in {a["asset_id"] for a in listing}
     detail = media_client.get(f"/api/v1/assets/{body['asset_id']}").json()
-    assert detail["contexts"] == []
+    assert detail["recognized"] is False
 
 
 def test_upload_suffix_case_insensitive(media_client):

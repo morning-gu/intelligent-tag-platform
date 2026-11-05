@@ -1,16 +1,20 @@
 ﻿"""内容 JSON 存储形态测试（2026-11：库里存原文，读时归一化）。
 
 覆盖：
-- 上游模板形态入库后，`content_json` 原文与提交的一致（键不改名、不裁剪）；
+- 上游模板形态入库后，`media_asset.content_json` 原文与提交的一致
+  （键不改名、不裁剪）；
 - 读取时 `load_content` 能还原成平台内部 ContentJSON（API 响应形状不变）；
 - 历史内部形态（summary/time_range）继续可读，不需要迁移；
 - 判别函数对两种形态与空场景的判定。
+
+v2：存储位置从 media_context.content_json 换成影片级 media_asset.content_json，
+完整 JSON 经 `GET /assets/{asset_id}/content` 取回。
 """
 
 import json
 
 from tagplatform.content_io import is_upstream_shape, load_content
-from tagplatform.db.models import MediaContext
+from tagplatform.db.models import MediaAsset
 from tagplatform.schemas import parse_content
 
 TEMPLATE = {
@@ -40,14 +44,14 @@ TEMPLATE = {
 
 
 def test_template_is_stored_verbatim(client):
-    """经 /content/import 提交的模板 JSON，库里逐字保存（含键名与空值）。"""
+    """经 /content/import 提交的模板 JSON，影片资产行逐字保存（含键名与空值）。"""
     resp = client.post("/api/v1/content/import",
                        json={"kind": "vision", "data": TEMPLATE})
     assert resp.status_code == 200, resp.text
-    context_id = resp.json()["context_id"]
+    asset_id = resp.json()["asset_id"]
 
     with client.app.state.session_factory() as session:
-        row = session.get(MediaContext, context_id)
+        row = session.get(MediaAsset, asset_id)
         stored = json.loads(row.content_json)
 
     assert stored == TEMPLATE                       # 一字不差
@@ -60,8 +64,8 @@ def test_api_reads_back_internal_shape(client):
     """读端点仍返回平台内部形状（前端 dist 不改也能用）。"""
     resp = client.post("/api/v1/content/import",
                        json={"kind": "vision", "data": TEMPLATE})
-    context_id = resp.json()["context_id"]
-    detail = client.get(f"/api/v1/assets/movie_tt1/contexts/{context_id}")
+    asset_id = resp.json()["asset_id"]
+    detail = client.get(f"/api/v1/assets/{asset_id}/content")
     assert detail.status_code == 200
     body = detail.json()
     assert body["content"]["summary"] == "整片剧情"
@@ -84,9 +88,9 @@ def test_legacy_internal_shape_still_readable(client):
     resp = client.post("/api/v1/content/import",
                        json={"kind": "platform", "data": legacy})
     assert resp.status_code == 200, resp.text
-    context_id = resp.json()["context_id"]
+    asset_id = resp.json()["asset_id"]
     with client.app.state.session_factory() as session:
-        row = session.get(MediaContext, context_id)
+        row = session.get(MediaAsset, asset_id)
         # 平台格式：库内存的就是内部形态（原样）
         assert json.loads(row.content_json) == legacy
         assert load_content(row.content_json).content.summary == "旧摘要"
