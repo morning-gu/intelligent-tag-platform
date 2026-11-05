@@ -11,8 +11,8 @@
 //   拒绝/合并——直接 approve/modify 后端 422，修改弹窗仅在 tag_id 行出现。
 // - 修改弹窗：候选名/候选描述/备注，提交即通过（后端 modify=更新候选后
 //   直接走 approve 流程，无需二次点击）。
-// - 合并弹窗两支互斥（Radio 切换）：并入既有=搜索选择既有标签
-//   （fetchTags kind=tag）；合入新建=选目录（fetchTagCatalog kind=dir
+// - 合并弹窗两支互斥（Radio 切换，备注两支共用）：并入既有=搜索选择既有
+//   标签（fetchTags kind=tag）；合入新建=选目录（fetchTagCatalog kind=dir
 //   lazily 拉取）+新标签名+描述。payload 走 never 互斥类型，不会混。
 // - 行展开 EvidenceCard 展示证据明细，点击跳内容详情并定位场景。
 // - 勾选行批量通过/拒绝（逐条独立端点）；冲突处理（Review Focus 1）：
@@ -289,13 +289,14 @@ export default function ReviewCenter() {
       return // 必填校验失败（合并目标/目录/新标签名）：字段已原位提示
     }
     const comment = values.comment?.trim() || undefined
-    // 两支 payload 走 never 互斥类型：键集按支精确构造，不会混。支一
-    // 键集恰为 merge_to_tag_id（备注仅 modify/支二携带——契约分支如此，
-    // 支一表单因此不设备注字段）
+    // 两支 payload 走 never 互斥类型：键集按支精确构造，不会混
     let payload: ReviewActionPayload
     if (mergeMode === 'existing') {
-      // 支一：并入既有标签（merge_to_tag_id 必填已由表单规则校验）
-      payload = { merge_to_tag_id: values.merge_to_tag_id as string }
+      // 支一：并入既有标签（merge_to_tag_id 必填已由表单规则校验，备注可选）
+      const mergeTo = values.merge_to_tag_id as string
+      payload = comment !== undefined
+        ? { merge_to_tag_id: mergeTo, comment }
+        : { merge_to_tag_id: mergeTo }
     } else {
       // 支二：新建标签入库（new_tag_name + new_dir_id 必填，描述/备注可选）
       payload = {
@@ -528,7 +529,7 @@ export default function ReviewCenter() {
             <Input.TextArea rows={2} />
           </Form.Item>
           <Form.Item name="comment" label="备注">
-            <Input />
+            <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
       </Modal>
@@ -591,11 +592,12 @@ export default function ReviewCenter() {
               <Form.Item name="new_description" label="新标签描述">
                 <Input.TextArea rows={2} />
               </Form.Item>
-              <Form.Item name="comment" label="备注">
-                <Input />
-              </Form.Item>
             </>
           )}
+          {/* 备注两支共用（并入既有/合入新建同款 TextArea） */}
+          <Form.Item name="comment" label="备注">
+            <Input.TextArea rows={2} />
+          </Form.Item>
         </Form>
       </Modal>
     </div>

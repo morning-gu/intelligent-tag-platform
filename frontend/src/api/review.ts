@@ -21,8 +21,8 @@ export type ReviewAction = 'approve' | 'reject' | 'modify' | 'merge'
 /** 审核动作 payload（按动作分形，doc §6.2）：
  * - approve/reject：仅可选备注；
  * - modify：候选展示字段两键可选 + 备注（更新后直接 approve）；
- * - merge 两支互斥——并入既有标签（merge_to_tag_id）或新建标签入库
- *   （new_tag_name + new_dir_id 必填，描述/备注可选）。
+ * - merge 两支互斥——并入既有标签（merge_to_tag_id，备注可选）或新建标签
+ *   入库（new_tag_name + new_dir_id 必填，描述/备注可选）。
  *
  * 真互斥实现：各分支以 `?: never` 哨兵钉死他支专属键。普通可选字段联合
  * 挡不住混用——TS 对联合目标的溢出属性检查跨成员池化（键存在于任一成员
@@ -51,9 +51,11 @@ export type ReviewActionPayload =
       new_dir_id?: never
       new_description?: never
     }
-  /** merge 支一：并入既有标签（new_tag 三键 + modify 两键 never 钉死） */
+  /** merge 支一：并入既有标签（new_tag 三键 + modify 两键 never 钉死；
+   * comment 为四动作共享键，支一同样可携带） */
   | {
       merge_to_tag_id: string
+      comment?: string
       candidate_name?: never
       candidate_description?: never
       new_tag_name?: never

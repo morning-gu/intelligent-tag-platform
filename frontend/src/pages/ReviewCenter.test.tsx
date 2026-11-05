@@ -342,7 +342,7 @@ describe('ReviewCenter 审核中心', () => {
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
   })
 
-  it('合并弹窗·并入既有：搜索选择目标标签，提交 merge_to_tag_id 载荷', async () => {
+  it('合并弹窗·并入既有：搜索选择目标标签，提交 merge_to_tag_id+comment 载荷', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
@@ -359,11 +359,12 @@ describe('ReviewCenter 审核中心', () => {
     // 同下拉筛选：点击真实选项（title 定位，避开隐藏无障碍克隆）
     fireEvent.click(await screen.findByTitle('犯罪'))
 
+    fireEvent.change(screen.getByLabelText('备注'), { target: { value: '并入既有目标' } })
     fireEvent.click(screen.getByRole('button', { name: /确\s*定/ }))
     await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
       action: 'merge',
-      payload: { merge_to_tag_id: 'tag-crime' },
+      payload: { merge_to_tag_id: 'tag-crime', comment: '并入既有目标' },
     })
   })
 
