@@ -1,14 +1,11 @@
-// assets API 契约测试（Task 11）：mock apiFetch 模块，断言资产列表查询串
-// 组装、详情/上下文/资产标签三端点的路径形状。类型形状与后端 content.py /
-// generation.py 契约对齐。
+// assets API 契约测试（v2）：mock apiFetch 模块，断言资产列表查询串组装、
+// 详情（recognized 识别状态）/内容 JSON（/content 端点）/正式挂载标签
+// （AssetMount 形状）三端点的路径形状与响应透传。类型形状与后端
+// content.py（AssetOut/AssetDetail/ContentJSON）、generation.py
+// （AssetTagOut）契约对齐；v1 的 contexts 端点与摘要随内容合并退役。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiFetch } from './client'
-import {
-  fetchAssetContext,
-  fetchAssetDetail,
-  fetchAssets,
-  fetchAssetTags,
-} from './assets'
+import { fetchAssetContent, fetchAssetDetail, fetchAssets, fetchAssetTags } from './assets'
 
 vi.mock('./client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./client')>()
@@ -53,28 +50,47 @@ describe('fetchAssets 查询串组装', () => {
   })
 })
 
-describe('资产详情/上下文/标签端点契约', () => {
-  it('fetchAssetDetail：GET /api/v1/assets/{asset_id}', async () => {
-    mockedApiFetch.mockResolvedValue({ asset_id: 'a1', contexts: [] } as never)
+describe('资产详情/内容/挂载端点契约（v2）', () => {
+  it('fetchAssetDetail：GET /api/v1/assets/{asset_id}，响应带 recognized', async () => {
+    mockedApiFetch.mockResolvedValue({ asset_id: 'a1', recognized: true } as never)
 
-    await fetchAssetDetail('a1')
+    const detail = await fetchAssetDetail('a1')
 
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/assets/a1')
+    expect(detail).toEqual({ asset_id: 'a1', recognized: true })
   })
 
-  it('fetchAssetContext：GET /api/v1/assets/{asset_id}/contexts/{context_id}', async () => {
-    mockedApiFetch.mockResolvedValue({ schema_version: '1.0' } as never)
+  it('fetchAssetContent：GET /api/v1/assets/{asset_id}/content，响应透传 ContentContext', async () => {
+    const content = {
+      schema_version: '1.0',
+      asset: {
+        asset_id: 'a1',
+        asset_type: 'movie',
+        title: '片名',
+        duration_ms: 6_000,
+        video_uri: null,
+        parent_id: null,
+      },
+      content: { summary: '剧情摘要', scenes: [] },
+      metadata: { source: 'test', model_version: 'm1', recognition_status: 'completed' },
+    }
+    mockedApiFetch.mockResolvedValue(content as never)
 
-    await fetchAssetContext('a1', 'ctx-9')
+    const result = await fetchAssetContent('a1')
 
-    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/assets/a1/contexts/ctx-9')
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/assets/a1/content')
+    expect(result).toBe(content)
   })
 
-  it('fetchAssetTags：GET /api/v1/assets/{asset_id}/tags', async () => {
-    mockedApiFetch.mockResolvedValue([] as never)
+  it('fetchAssetTags：GET /api/v1/assets/{asset_id}/tags，响应为 AssetMount 挂载行', async () => {
+    const mounts = [
+      { id: 1, tag_id: 'tag-1', tag_name: '打斗', origin: 'closed', created_at: null },
+    ]
+    mockedApiFetch.mockResolvedValue(mounts as never)
 
-    await fetchAssetTags('a1')
+    const rows = await fetchAssetTags('a1')
 
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/assets/a1/tags')
+    expect(rows).toBe(mounts)
   })
 })
