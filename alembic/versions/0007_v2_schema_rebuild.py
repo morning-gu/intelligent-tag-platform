@@ -230,7 +230,7 @@ def upgrade() -> None:
     op.create_index("idx_import_task_status", "tag_import_task", ["status"])
 
     # tag_change_log：变更日志（tag_id 不加外键——可指向已废弃/合并的标签，
-    # doc §3.8）
+    # doc §3.8；action 枚举含 delete——v1 生命周期已有动作，2026-11-06 补入）
     op.create_table(
         "tag_change_log",
         sa.Column("log_id", sa.Integer(), nullable=False),
@@ -240,7 +240,7 @@ def upgrade() -> None:
         sa.Column("after_json", sa.Text(), nullable=True),
         sa.Column("operator", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=True),
-        sa.CheckConstraint("action IN ('create', 'update', 'merge', 'deprecate', 'import')"),
+        sa.CheckConstraint("action IN ('create', 'update', 'merge', 'deprecate', 'import', 'delete')"),
         sa.PrimaryKeyConstraint("log_id"),
     )
     op.create_index("idx_change_log_tag", "tag_change_log", ["tag_id"])

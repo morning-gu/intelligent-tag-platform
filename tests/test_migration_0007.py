@@ -195,7 +195,7 @@ EXPECTED_CHECK_FRAGMENTS = {
         "CHECK (status IN ('processing', 'completed', 'failed', 'revoked'))",
     ],
     "tag_change_log": [
-        "CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import'))",
+        "CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import', 'delete'))",
     ],
 }
 

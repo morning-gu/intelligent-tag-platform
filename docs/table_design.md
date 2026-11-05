@@ -299,7 +299,7 @@ v1 `import_batch` 改名，结构不变（含 revoke/导出语义）。
 CREATE TABLE tag_change_log (
     log_id      INTEGER PRIMARY KEY,
     tag_id      TEXT NOT NULL,
-    action      TEXT NOT NULL CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import')),
+    action      TEXT NOT NULL CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import', 'delete')),
     before_json TEXT,
     after_json  TEXT,
     operator    TEXT,

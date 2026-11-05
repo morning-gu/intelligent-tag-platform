@@ -17,9 +17,10 @@
 - 生命周期三端点只作用于 tag_define（目录 id → 404 且文案含"目录"）；
   deactivate/activate 写 change_log（action deprecate/update，状态字面量
   v2 统一 deprecated，同状态重复调用不重复写日志）；
-- DELETE：被 asset_tag 正式挂载引用 → 409；无引用删除并自下而上剪空祖
-  先目录，响应带 parent 重定向信息（change_log action 取枚举内语义最近
-  的 deprecate——v1 写的 "delete" 不在 v2 CHECK 枚举内，不发明新枚举值）；
+- DELETE：被 asset_tag 正式挂载或 pre_asset_tag 待审核候选引用 → 409；
+  无引用删除并自下而上剪空祖先目录，响应带 parent 重定向信息
+  （change_log action 沿 v1 写 "delete"——该值 2026-11-06 补入 doc §3.8
+  枚举，v1 无 CHECK 属历史漏网的文档缺口修复）；
 - 导出双端点（GET /tags/export 与 GET /import/tasks/{task_id}/export）：
   zip 含 xlsx+xml，叶子 = tag_define 行、祖先路径 = tag_catalog 链
   （xlsx 六列与 xml 嵌套逐字沿 v1 格式，仅叶子标签入库导出）。
@@ -38,6 +39,7 @@ import openpyxl
 from tagplatform.db.models import (
     AssetTag,
     MediaAsset,
+    PreAssetTag,
     TagCatalog,
     TagChangeLog,
     TagDefine,
@@ -450,6 +452,28 @@ def test_delete_tag_referenced_by_asset_tag_409(client):
     assert client.get(f"/api/v1/tags/{tag_id}").status_code == 200
 
 
+def test_delete_tag_referenced_by_pending_pre_tag_409(client):
+    """被 pre_asset_tag 待审核候选引用（任意 review_status）→ 409 而非 FK
+    500（Ruling 15：v1 单表引用检查拆双表后的完整映射）。"""
+    _import(client, HIER_XLSX)
+    tag_id = _node_id(client, "反转")
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(MediaAsset(asset_id="mv2", asset_type="movie", title="候选影片",
+                         created_at=_NOW))
+        s.flush()  # 跨表插入分步 flush：父行先落库再插候选行
+        s.add(PreAssetTag(asset_id="mv2", target_type="content", target_id="mv2",
+                          tag_id=tag_id, origin="closed", review_status="pending",
+                          created_at=_NOW, updated_at=_NOW))
+        s.commit()
+
+    resp = client.delete(f"/api/v1/tags/{tag_id}")
+    assert resp.status_code == 409
+    assert "待审核候选" in resp.json()["detail"]
+    # 标签与候选行均原样保留
+    assert client.get(f"/api/v1/tags/{tag_id}").status_code == 200
+
+
 def test_delete_tag_prunes_empty_ancestor_directories(client):
     _import(client, [
         ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
@@ -485,10 +509,10 @@ def test_delete_tag_keeps_non_empty_parent_and_redirects(client):
     assert client.get("/api/v1/tags", params={"q": "叙事"}).json()["items"] == []
     assert client.get("/api/v1/tags", params={"q": "反转"}).json()["items"]
 
-    # 删除留痕：action 取 v2 CHECK 枚举内的 deprecate（v1 写 "delete" 不可用）
+    # 删除留痕：action 沿 v1 写 delete（doc §3.8 枚举 2026-11-06 补值）
     with client.app.state.session_factory() as s:
         log = s.query(TagChangeLog).filter_by(tag_id=multi_id).filter(
-            TagChangeLog.action == "deprecate").one()  # 排除导入审计行
+            TagChangeLog.action == "delete").one()  # 排除导入审计行
         before = json.loads(log.before_json)
         assert before["tag_name"] == "多线" and before["dir_id"] == story_id
         assert log.after_json is None

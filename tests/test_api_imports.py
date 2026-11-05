@@ -6,15 +6,16 @@
 - GET /api/v1/import/tasks/{task_id}：result_summary 解析后的 issues 明细；
   未知任务 404；
 - POST /api/v1/import/tasks/{task_id}/revoke：删除批内新建目录与标签、
-  复活行还原 before 状态；409 四分支——已撤销 / 非 completed / 批内标签
-  被 asset_tag 挂载引用 / 批内目录被他批子节点（标签或子目录）引用。
+  复活行还原 before 状态；409 五分支——已撤销 / 非 completed / 批内标签
+  被 asset_tag 挂载引用 / 批内标签被 pre_asset_tag 待审核候选引用 /
+  批内目录被他批子节点（标签或子目录）引用。
   撤销对象经 tag_change_log（action='import'，after_json.task_id + kind）
   反查；播种/值断言经 client.app.state.session_factory 直查临时文件库
   （test_api_review 同款模式）。
 
 xlsx 字节流由 build_xlsx 用 openpyxl 现场构造，不依赖外部文件。
-export 端点（GET /{task_id}/export）本任务仅保留路由注册，双表化归
-Task 5——本文件不触达。
+export 端点（GET /{task_id}/export）双表化已由 Task 5 落地（与
+/tags/export 共用 tags._build_export_archive），用例见 test_api_tags。
 """
 
 import io
@@ -26,6 +27,7 @@ import openpyxl
 from tagplatform.db.models import (
     AssetTag,
     MediaAsset,
+    PreAssetTag,
     TagCatalog,
     TagDefine,
     TagImportTask,
@@ -191,6 +193,32 @@ def test_revoke_rejected_when_tag_referenced_by_asset(client):
     resp = client.post(f"/api/v1/import/tasks/{task_id}/revoke")
     assert resp.status_code == 409
     assert "资产" in resp.json()["detail"]
+    # 引用仍在：任务未被撤销
+    assert client.get(f"/api/v1/import/tasks/{task_id}").json()["status"] == "completed"
+
+
+def test_revoke_rejected_when_tag_referenced_by_pre_tag(client):
+    """批内标签被 pre_asset_tag 待审核候选引用（任意 review_status）→ 409
+    而非 FK 500（Ruling 15：v1 单表引用检查拆双表后的完整映射）。"""
+    factory = client.app.state.session_factory
+    imported = client.post("/api/v1/tags/import",
+                           files={"file": ("pre-refs.xlsx", XLSX_BYTES)})
+    task_id = imported.json()["task_id"]
+    with factory() as s:
+        tag = s.query(TagDefine).one()
+        now = datetime.now(timezone.utc)
+        s.add(MediaAsset(asset_id="movie_pre", asset_type="movie",
+                         title="候选测试影片", created_at=now))
+        s.flush()  # 父行先落库再插候选行（无 relationship() 的跨表插入）
+        s.add(PreAssetTag(asset_id="movie_pre", target_type="content",
+                          target_id="movie_pre", tag_id=tag.tag_id,
+                          origin="closed", review_status="pending",
+                          created_at=now, updated_at=now))
+        s.commit()
+
+    resp = client.post(f"/api/v1/import/tasks/{task_id}/revoke")
+    assert resp.status_code == 409
+    assert "待审核候选" in resp.json()["detail"]
     # 引用仍在：任务未被撤销
     assert client.get(f"/api/v1/import/tasks/{task_id}").json()["status"] == "completed"
 

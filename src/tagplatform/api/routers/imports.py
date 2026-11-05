@@ -7,7 +7,8 @@ result_summary JSON（治理流水线写入）解析为结构化摘要（issues 
 v1 的 /api/v1/import/batches 前缀与 batch_id 字段随表结构 v2 对照表退役
 （import_batch → tag_import_task，doc §2.1/§3.7）。撤销端点照 v1 语义
 迁移到双表：批内新建目录/标签经 tag_change_log（action='import'，
-after_json.task_id 反查，kind 区分 dir/tag）定位，被 asset_tag 挂载引用
+after_json.task_id 反查，kind 区分 dir/tag）定位，被 asset_tag 挂载、
+pre_asset_tag 待审核候选（v1 单表时二者同表，引用检查随之双表完整映射）
 或被他批子节点（标签/子目录）引用时 409，复活行按 before_json 还原。
 
 export 端点（GET /{task_id}/export）与 tags.py 共用 `_build_export_archive`
@@ -27,6 +28,7 @@ from tagplatform.api import get_session
 from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
 from tagplatform.db.models import (
     AssetTag,
+    PreAssetTag,
     TagCatalog,
     TagChangeLog,
     TagDefine,
@@ -152,8 +154,9 @@ def export_import_task(task_id: str, session: Session = Depends(get_session)) ->
 def revoke_import_task(task_id: str, session: Session = Depends(get_session)) -> ImportTaskOut:
     """撤销导入任务：删除批内新建目录与标签、复活行还原 before 状态。
 
-    409 分支（v1 四类语义迁移到双表）：已撤销 / 非 completed / 批内标签
-    被 asset_tag 挂载引用 / 批内目录被他批子节点（标签或子目录）引用。
+    409 分支（v1 语义迁移到双表）：已撤销 / 非 completed / 批内标签被
+    asset_tag 挂载或 pre_asset_tag 待审核候选引用 / 批内目录被他批子节点
+    （标签或子目录）引用。
     """
     task = session.get(TagImportTask, task_id)
     if task is None:
@@ -168,6 +171,12 @@ def revoke_import_task(task_id: str, session: Session = Depends(get_session)) ->
     dir_ids = _batch_dir_ids(task_id, session)
     if tag_ids and session.query(AssetTag.id).filter(AssetTag.tag_id.in_(tag_ids)).first():
         raise HTTPException(status_code=409, detail="批次标签已被资产引用，无法撤销")
+    # 待审核候选（任意 review_status）经 tag_id 外键引用批内标签：v1 单表
+    # 时与正式挂载同表一并拦截，v2 拆表后补齐第二档引用检查（防 FK 500）
+    if tag_ids and session.query(PreAssetTag.id).filter(
+        PreAssetTag.tag_id.in_(tag_ids)
+    ).first():
+        raise HTTPException(status_code=409, detail="批次标签已被待审核候选引用，无法撤销")
     if dir_ids:
         # 他批子标签挂在本批目录上（本批自身标签经 tag_ids 排除）
         if session.query(TagDefine.tag_id).filter(

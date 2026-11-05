@@ -340,7 +340,8 @@ class TagChangeLog(Base):
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tag_id: Mapped[str] = mapped_column(Text, nullable=False)
-    # 取值 create|update|merge|deprecate|import
+    # 取值 create|update|merge|deprecate|import|delete（delete 为 v1 生命周期
+    # 已有动作，2026-11-06 补入枚举——v1 无 CHECK 属历史漏网的文档缺口修复）
     action: Mapped[str] = mapped_column(Text, nullable=False)
     before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -349,7 +350,7 @@ class TagChangeLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('create', 'update', 'merge', 'deprecate', 'import')"
+            "action IN ('create', 'update', 'merge', 'deprecate', 'import', 'delete')"
         ),
         Index("idx_change_log_tag", "tag_id"),
     )

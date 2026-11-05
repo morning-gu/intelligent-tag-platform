@@ -30,7 +30,14 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from tagplatform.api import get_embedder, get_session
-from tagplatform.db.models import AssetTag, TagCatalog, TagChangeLog, TagDefine, TagImportTask
+from tagplatform.db.models import (
+    AssetTag,
+    PreAssetTag,
+    TagCatalog,
+    TagChangeLog,
+    TagDefine,
+    TagImportTask,
+)
 from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
 
 router = APIRouter(prefix="/api/v1/tags")
@@ -517,16 +524,17 @@ def activate_tag(tag_id: str, session: Session = Depends(get_session)) -> TagNod
 def delete_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDeleteResponse:
     """删除标签定义（仅 tag_define；目录 id → 404）。
 
-    被 asset_tag 正式挂载引用 → 409；删除后自下而上剪除空祖先目录
-    （空 = 无子目录且无挂载标签，v1 手法沿用）；响应带重定向上级目录。
-    变更日志 action 取 v2 CHECK 枚举（create|update|merge|deprecate|import）
-    内语义最近的 "deprecate"——v1 写的 "delete" 不在枚举内（v1 无 CHECK
-    属历史漏网），按"不发明新枚举值"约束对齐；before_json 留全量快照、
-    after_json 为空以区分于停用。
+    被 asset_tag 正式挂载或 pre_asset_tag 待审核候选引用 → 409；删除后自下
+    而上剪除空祖先目录（空 = 无子目录且无挂载标签，v1 手法沿用）；响应带
+    重定向上级目录。变更日志沿 v1 生命周期行为写 action="delete"（该值
+    2026-11-06 已补入 doc §3.8 的 CHECK 枚举——v1 无 CHECK 属历史漏网的
+    文档缺口），before_json 留全量快照、after_json 为空。
     """
     define = _get_define_or_404(tag_id, session)
     if session.query(AssetTag.id).filter(AssetTag.tag_id == tag_id).first():
         raise HTTPException(status_code=409, detail="标签已被资产引用，无法删除")
+    if session.query(PreAssetTag.id).filter(PreAssetTag.tag_id == tag_id).first():
+        raise HTTPException(status_code=409, detail="标签已被待审核候选引用，无法删除")
 
     before = {
         "tag_id": define.tag_id,
@@ -558,7 +566,7 @@ def delete_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDelet
 
     session.add(TagChangeLog(
         tag_id=tag_id,
-        action="deprecate",
+        action="delete",
         before_json=json.dumps(before, ensure_ascii=False),
         after_json=None,
         operator="governance",

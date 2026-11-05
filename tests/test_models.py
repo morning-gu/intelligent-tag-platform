@@ -96,7 +96,7 @@ def make_log(**kw):
 
 # ---------- 枚举 CHECK 约束 ----------
 
-# (构造器, 枚举列, 合法值, 非法值)；非法值混入 v1 退役字面量验证口径切换
+# (构造器, 枚举列, 合法值, 非法值)；非法值混入 v1 退役字面量与杜撰值验证口径切换
 CHECK_CASES = [
     (make_asset, "asset_type", ("movie", "series", "scene"), "episode"),
     (make_dir, "dir_type", ("dir_static", "dir_dynamic"), "static"),
@@ -113,7 +113,7 @@ CHECK_CASES = [
     (make_import_task, "status",
      ("processing", "completed", "failed", "revoked"), "done"),
     (make_log, "action",
-     ("create", "update", "merge", "deprecate", "import"), "delete"),
+     ("create", "update", "merge", "deprecate", "import", "delete"), "remove"),
 ]
 
 # 合法值批量入库/非法值单行入库时按序号改写主键与唯一键列，避免自撞
