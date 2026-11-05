@@ -229,50 +229,53 @@ def apply_review(session: Session, pre_tag_id: int, action: str,
             raise ValueError(f"标签定义不存在：{row.tag_id}")
 
     # ---- 执行动作（前置已全部通过）----
+    # 整段执行包在 IntegrityError 转译内：执行期任何 flush（合入新建的
+    # 定义落库、行更新 autoflush）或提交撞唯一索引（ux_asset_tag：同资产
+    # 同标签已挂载 / ux_pre_tag_catalog：同资产已有同 tag_id 行 /
+    # ux_tag_define_dir_name 并发窗口）→ 回滚丢弃本次全部变更（行保持
+    # pending、新建定义与变更日志一并丢弃），按冲突语义上抛而非裸 500
+    # （API 层映射 409）
     now = datetime.now(timezone.utc)
-    if action == "reject":
-        row.review_status = "rejected"
-        row.reviewer_id = reviewer
-        row.review_comment = comment
-        row.updated_at = now
-    else:  # approve / modify / merge 共用 approve 流程（approved + 复制挂载）
-        if action == "modify":
-            for field, value in new_fields.items():
-                setattr(row, field, value)
-        elif action == "merge":
-            if new_define is not None:
-                # 合入新建：建定义 + change_log，pre 行赋 tag_id/candidate_dir_id
-                define = _create_merged_define(session, new_define, reviewer, now)
-                row.candidate_dir_id = define.dir_id
-                row.tag_id = define.tag_id
-            else:
-                # 并入既有：pre 行赋 tag_id，candidate_name 原文保留（可溯）
-                # ——定义行先取（get 触发 autoflush，须在行变更前完成，否则
-                # 撞索引时 IntegrityError 从 autoflush 裸抛、绕过提交期转译）
-                define = session.get(TagDefine, merge_to)
-                row.tag_id = merge_to
-        row.review_status = "approved"
-        row.reviewer_id = reviewer
-        row.review_comment = comment
-        row.updated_at = now
-        session.add(AssetTag(
-            asset_id=row.asset_id,
-            target_type=row.target_type,
-            target_id=row.target_id,
-            tag_id=row.tag_id,
-            # 冗余拷贝取 define 现值（doc §3.6/§6.3——candidate_* 不参与）
-            tag_name=define.tag_name,
-            created_at=now,
-            updated_at=now,
-        ))
-
     try:
+        if action == "reject":
+            row.review_status = "rejected"
+            row.reviewer_id = reviewer
+            row.review_comment = comment
+            row.updated_at = now
+        else:  # approve / modify / merge 共用 approve 流程（approved + 复制挂载）
+            if action == "modify":
+                for field, value in new_fields.items():
+                    setattr(row, field, value)
+            elif action == "merge":
+                if new_define is not None:
+                    # 合入新建：建定义 + change_log，pre 行赋
+                    # tag_id/candidate_dir_id（doc §6.4 赋值时序）
+                    define = _create_merged_define(
+                        session, new_define, reviewer, now)
+                    row.candidate_dir_id = define.dir_id
+                    row.tag_id = define.tag_id
+                else:
+                    # 并入既有：pre 行赋 tag_id，candidate_name 原文保留
+                    # （可溯）——定义行先取（get 触发 autoflush，须在行变更
+                    # 前完成，避免撞索引时异常点偏离提交期）
+                    define = session.get(TagDefine, merge_to)
+                    row.tag_id = merge_to
+            row.review_status = "approved"
+            row.reviewer_id = reviewer
+            row.review_comment = comment
+            row.updated_at = now
+            session.add(AssetTag(
+                asset_id=row.asset_id,
+                target_type=row.target_type,
+                target_id=row.target_id,
+                tag_id=row.tag_id,
+                # 冗余拷贝取 define 现值（doc §3.6/§6.3——candidate_* 不参与）
+                tag_name=define.tag_name,
+                created_at=now,
+                updated_at=now,
+            ))
         session.commit()  # 审核是用户操作，服务内即时落库
     except IntegrityError:
-        # 撞唯一索引（ux_asset_tag：同资产同标签已挂载 / ux_pre_tag_catalog：
-        # 同资产已有同 tag_id 行）：回滚丢弃本次全部变更（行保持 pending、
-        # 新建定义与变更日志一并丢弃），按冲突语义上抛而非裸 500（API 层
-        # 映射 409）
         session.rollback()
         raise ConflictError("该资产已挂此标签")
     return row
