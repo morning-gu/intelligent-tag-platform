@@ -10,9 +10,9 @@ v1 的 /api/v1/import/batches 前缀与 batch_id 字段随表结构 v2 对照表
 after_json.task_id 反查，kind 区分 dir/tag）定位，被 asset_tag 挂载引用
 或被他批子节点（标签/子目录）引用时 409，复活行按 before_json 还原。
 
-export 端点（GET /{task_id}/export）本任务仅保留路由注册与 v1 body——
-v2 双表化（跨目录/标签路径推导）与 `_build_export_archive` 一并归
-Task 5；调用期 NameError/AttributeError 属过渡期预期。
+export 端点（GET /{task_id}/export）与 tags.py 共用 `_build_export_archive`
+（Task 5 落地）：批内标签行 = 叶子，祖先路径 = tag_catalog 链，zip 格式
+逐字沿 v1。
 """
 
 import json
@@ -130,23 +130,19 @@ def get_import_task(task_id: str, session: Session = Depends(get_session)) -> Im
 
 @router.get("/{task_id}/export")
 def export_import_task(task_id: str, session: Session = Depends(get_session)) -> Response:
-    """v1 body 原样保留（过渡期）：双表化归 Task 5，与 _build_export_archive
-    一并落地——调用期 NameError（ImportBatch）/AttributeError（v1 列形状）
-    属过渡期预期，本任务测试不触达本端点。"""
-    batch = session.get(ImportBatch, task_id)
-    if batch is None:
-        raise HTTPException(status_code=404, detail=f"导入批次不存在：{task_id}")
-    changes = _batch_tag_changes(task_id, session)
-    tag_ids = set(changes)
-    tags = session.query(TagCatalog).filter(TagCatalog.tag_id.in_(tag_ids)).all() if tag_ids else []
-    by_id = {tag.tag_id: tag for tag in session.query(TagCatalog).all()}
+    """导出导入批次的标签为 zip（xlsx+xml）：批内标签行 = 叶子（tag_define，
+    全部即叶子），祖先路径 = tag_catalog 链；构建器与 /tags/export 共用。"""
+    task = session.get(TagImportTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"导入任务不存在：{task_id}")
+    tag_ids = set(_batch_tag_changes(task_id, session))
+    leaves = (
+        session.query(TagDefine).filter(TagDefine.tag_id.in_(tag_ids)).all()
+        if tag_ids else []
+    )
+    dirs_by_id = {d.dir_id: d for d in session.query(TagCatalog).all()}
     return Response(
-        content=_build_export_archive(
-            [tag for tag in tags if not session.query(TagCatalog.tag_id).filter(
-                TagCatalog.parent_id == tag.tag_id
-            ).first()],
-            by_id,
-        ),
+        content=_build_export_archive(leaves, dirs_by_id),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{task_id}-export.zip"'},
     )

@@ -1,6 +1,11 @@
-"""审核操作服务测试（Task 4）。
+"""审核操作服务测试（Task 4 / v2 过渡态）。
 
-覆盖契约（brief 四动作 + 前置 + 记录写入）：
+**v2 过渡态说明**：v2 表结构切换后 AssetTag 形状变更（candidate_* 字段
+退役进 pre_asset_tag、ReviewRecord 表删除），除 Task 5 新增的
+`refresh_mounted_tag_names` 用例外，本文件用例仍为 v1 body——运行期红
+（TypeError/NameError）属预期，Task 8 审核域重写时整体翻新。
+
+v1 覆盖契约（供 Task 8 重写对照）：
 - approve/reject：review_status → approved/rejected，写一行 review_record；
 - modify：payload 字段映射到 AssetTag 现有语义字段（candidate_*，generated
   行即展示字段；catalog 行按计划"改 AssetTag 上现有语义字段"最小化——
@@ -19,13 +24,17 @@
   reviewer_id/comment 落库、服务内 commit（rollback 后数据仍在）。
 """
 
+# 注解惰性求值：v1 用例的 ReviewRecord 注解在 v2 models 中已不存在，
+# 不再于收集期求值（过渡态运行期红属预期，Task 8 重写时移除本行）
+from __future__ import annotations
+
 from datetime import datetime, timezone
 
 import json
 
 import pytest
 
-from tagplatform.db.models import AssetTag, MediaAsset, ReviewRecord, TagCatalog
+from tagplatform.db.models import AssetTag, MediaAsset, TagCatalog, TagDefine
 from tagplatform.review import ConflictError, apply_review
 
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -34,13 +43,21 @@ _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 @pytest.fixture(autouse=True)
 def _seed_parents(session):
     """补齐外键父行（asset_tag.asset_id → media_asset、asset_tag.tag_id →
-    tag_catalog），test_results.py 同款播种模式。"""
+    tag_define，目录行 dir_1 承载定义；test_results.py 同款播种模式）。"""
     session.add(MediaAsset(asset_id="a1", asset_type="movie", title="测试影片",
                            created_at=_NOW))
-    session.add(TagCatalog(tag_id="tag_1", tag_name="悬疑", tag_type="genre",
-                           description="以悬念和谜题为核心"))
-    session.add(TagCatalog(tag_id="tag_2", tag_name="喜剧", tag_type="genre",
-                           description="以笑点为核心"))
+    session.add(TagCatalog(dir_id="dir_1", dir_name="剧情", dir_type="dir_static",
+                           description="剧情类目录", parent_id=None, aliases=None,
+                           applicable_scope="content", embedding=None,
+                           created_at=_NOW, updated_at=_NOW))
+    session.add(TagDefine(tag_id="tag_1", tag_name="悬疑", tag_type="val_fixed",
+                          description="以悬念为核心", dir_id="dir_1", aliases=None,
+                          status="active", embedding=None,
+                          created_at=_NOW, updated_at=_NOW))
+    session.add(TagDefine(tag_id="tag_2", tag_name="喜剧", tag_type="val_fixed",
+                          description="以笑点为核心", dir_id="dir_1", aliases=None,
+                          status="active", embedding=None,
+                          created_at=_NOW, updated_at=_NOW))
     session.commit()
 
 
@@ -299,3 +316,49 @@ def test_service_commits_immediately(session):
     session.rollback()  # 撤销一切未提交变更
     assert session.get(AssetTag, row.id).review_status == "approved"
     assert session.query(ReviewRecord).filter_by(result_id=row.id).count() == 1
+
+
+# ---------- tag_name 冗余拷贝刷新（Task 5，doc §6.3） ----------
+
+
+def test_refresh_mounted_tag_names_syncs_all_mounts(session):
+    """改 tag_define.tag_name 后刷新助手：该 tag_id 全部 asset_tag 挂载行
+    tag_name 同步为新名，返回更新行数；无挂载 → 0；定义缺失 → ValueError。
+
+    助手契约（本期无 rename 端点，Task 8 rename 流程消费）：调用方先改
+    TagDefine.tag_name 并自行写变更日志、提交事务；助手只做挂载侧批量
+    UPDATE（flush 不 commit，与调用方同事务原子落库）。
+    """
+    from tagplatform.review.service import refresh_mounted_tag_names
+
+    session.add(MediaAsset(asset_id="a2", asset_type="movie", title="影片二",
+                           created_at=_NOW))
+    session.add(MediaAsset(asset_id="a3", asset_type="movie", title="影片三",
+                           created_at=_NOW))
+    session.flush()  # 跨表插入分步 flush：父行先落库再插挂载行
+    # 3 条挂载（content 粒度 target_id = asset_id 本身）
+    session.add_all([
+        AssetTag(asset_id="a1", target_type="content", target_id="a1",
+                 tag_id="tag_1", tag_name="旧名", created_at=_NOW, updated_at=_NOW),
+        AssetTag(asset_id="a2", target_type="content", target_id="a2",
+                 tag_id="tag_1", tag_name="旧名", created_at=_NOW, updated_at=_NOW),
+        AssetTag(asset_id="a3", target_type="content", target_id="a3",
+                 tag_id="tag_1", tag_name="旧名", created_at=_NOW, updated_at=_NOW),
+    ])
+    session.commit()
+
+    define = session.get(TagDefine, "tag_1")
+    define.tag_name = "新名"
+    session.commit()
+
+    updated = refresh_mounted_tag_names(session, "tag_1")
+    assert updated == 3
+    # 批量 UPDATE 不同步已加载对象，过期后重读验证挂载行全量同步
+    session.expire_all()
+    names = {m.tag_name for m in session.query(AssetTag).filter_by(tag_id="tag_1")}
+    assert names == {"新名"}
+
+    # 无挂载的标签 → 0；未知定义 → ValueError（API 层映射 422）
+    assert refresh_mounted_tag_names(session, "tag_2") == 0
+    with pytest.raises(ValueError, match="标签定义不存在"):
+        refresh_mounted_tag_names(session, "tag_none")

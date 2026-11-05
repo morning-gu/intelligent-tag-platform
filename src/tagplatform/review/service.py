@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, TagCatalog
+from tagplatform.db.models import AssetTag, TagCatalog, TagDefine
 
 
 class ConflictError(Exception):
@@ -169,3 +169,29 @@ def apply_review(session: Session, asset_tag_id: int, action: str,
         session.rollback()
         raise ConflictError("该资产已挂此标签")
     return row
+
+
+# ---------- tag_name 冗余拷贝刷新（doc §6.3 契约助手） ----------
+
+def refresh_mounted_tag_names(session: Session, tag_id: str) -> int:
+    """把某标签定义的最新 tag_name 同步到其全部 asset_tag 挂载行，返回更新行数。
+
+    doc §6.3：asset_tag.tag_name 是 tag_define.tag_name 的冗余拷贝
+    （val_fixed），定义侧改名/合并后调用本助手消除两处漂移。调用契约：
+    调用方先改 TagDefine.tag_name（并自行写 tag_change_log 留证、提交
+    事务）——本助手只做挂载侧批量 UPDATE，flush 不 commit，与调用方的
+    行变更同事务原子落库；本期无 rename 端点（助手 + 测试即交付，Task 8
+    rename 流程消费）。定义不存在 → ValueError（API 层映射 422）。
+    """
+    define = session.get(TagDefine, tag_id)
+    if define is None:
+        raise ValueError(f"标签定义不存在：{tag_id}")
+    rowcount = session.query(AssetTag).filter(AssetTag.tag_id == tag_id).update(
+        {
+            AssetTag.tag_name: define.tag_name,
+            AssetTag.updated_at: datetime.now(timezone.utc),
+        },
+        synchronize_session=False,
+    )
+    session.flush()
+    return rowcount

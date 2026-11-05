@@ -1,27 +1,49 @@
-"""标签导入 API 测试（import 用例，v2 契约）。
+"""标签 API 测试：import 用例（v2 契约，Task 4）+ 混合树/详情/生命周期/导出（Task 5）。
 
-覆盖契约（错误映射约定见 brief；批次列表/详情/撤销用例已迁移至
-test_api_imports.py 的 /api/v1/import/tasks）：
+覆盖契约：
 - POST /api/v1/tags/import：响应 {task_id, summary}（v1 batch_id 退役），
   inserted 仅计标签行（目录行落 tag_catalog 不计入）；重复导入 skipped==1
   且 200（Review Focus 2：重复导入不 5xx）；层级模板同名标签挂不同目录
   合法共存；坏表头 422 {"detail": header_error}；损坏 xlsx 字节（openpyxl
   抛异常）由 API 层映射 422；行级解析错误进响应 parse_errors 并回写任务
-  result_summary（该行不计入 total）；
-- 停用标签再导入复活（deprecated → active）。
+  result_summary（该行不计入 total）；停用标签再导入复活（deprecated →
+  active）。
+- GET /api/v1/tags 混合树（TagNodeOut 契约）：parent_id 下同时返回子目录
+  + 直挂叶子标签（目录先、名字序；kind/dir_type/status/has_children/
+  aliases 按契约）、root 仅顶层目录（标签必挂目录，无根标签）、scope_id
+  递归子树（标签的后代 = 其目录的后代目录下的标签，直挂 scope 本体的
+  标签不在结果内）、q 对目录与标签的 name+aliases 都命中、kind 二值过滤；
+- GET /api/v1/tags/{id}：id 可为 dir_id 或 tag_id，path/path_ids 含本节点；
+- 生命周期三端点只作用于 tag_define（目录 id → 404 且文案含"目录"）；
+  deactivate/activate 写 change_log（action deprecate/update，状态字面量
+  v2 统一 deprecated，同状态重复调用不重复写日志）；
+- DELETE：被 asset_tag 正式挂载引用 → 409；无引用删除并自下而上剪空祖
+  先目录，响应带 parent 重定向信息（change_log action 取枚举内语义最近
+  的 deprecate——v1 写的 "delete" 不在 v2 CHECK 枚举内，不发明新枚举值）；
+- 导出双端点（GET /tags/export 与 GET /import/tasks/{task_id}/export）：
+  zip 含 xlsx+xml，叶子 = tag_define 行、祖先路径 = tag_catalog 链
+  （xlsx 六列与 xml 嵌套逐字沿 v1 格式，仅叶子标签入库导出）。
 
-非 import 用例（/tags 列表/详情/导出/DELETE 生命周期）为 Task 5 域，
-v1 body 原样保留、此时红属中期预期。xlsx 字节流由 build_xlsx 现场构造。
+xlsx 字节流由 build_xlsx 现场构造。
 """
 
 import io
+import json
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import openpyxl
 
-from tagplatform.db.models import TagCatalog, TagDefine
+from tagplatform.db.models import (
+    AssetTag,
+    MediaAsset,
+    TagCatalog,
+    TagChangeLog,
+    TagDefine,
+)
+
+_NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def build_xlsx(rows: list[list]) -> bytes:
@@ -35,7 +57,7 @@ def build_xlsx(rows: list[list]) -> bytes:
     return buffer.getvalue()
 
 
-# 扁平模板：1 行标签（v2 落「未分类」目录）
+# 扁平模板：1 行标签（v2 落「未分类」目录），带别名供 q 命中断言
 XLSX_BYTES = build_xlsx([
     ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
     ["悬疑", "genre", "以悬念为核心", None, "悬念,推理", "active"],
@@ -43,6 +65,48 @@ XLSX_BYTES = build_xlsx([
 
 # 坏表头：缺 description 必需列 → header_error 非空
 BAD_HEADER_BYTES = build_xlsx([["tag_name", "tag_type"]])
+
+# 层级模板：目录树 内容 > (剧情 > (反转, 叙事 > 多线), 情感 > 温馨)
+# ——剧情下同时有直挂标签（反转）与子目录（叙事），供混合树断言
+HIER_XLSX = build_xlsx([
+    ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+    ["内容", "剧情", None, "反转", "情节反转", None],
+    ["内容", "剧情", "叙事", "多线", "多线叙事", None],
+    ["内容", "情感", None, "温馨", "", None],
+])
+
+
+def _import(client, rows: list[list] | bytes) -> dict:
+    """上传 xlsx（行集或现成字节流）→ 导入响应 JSON。"""
+    payload = rows if isinstance(rows, bytes) else build_xlsx(rows)
+    resp = client.post("/api/v1/tags/import", files={"file": ("t.xlsx", payload)})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _node_id(client, keyword: str) -> str:
+    """按 q 精确命中取单节点 id（测试辅助：关键词须全库唯一）。"""
+    items = client.get("/api/v1/tags", params={"q": keyword}).json()["items"]
+    assert len(items) == 1, f"q={keyword!r} 命中 {len(items)} 个节点"
+    return items[0]["id"]
+
+
+def _norm_row(row: tuple) -> tuple:
+    """openpyxl 回读空白单元格为 None → 归一 ""（写侧写入的是空串列）。"""
+    return tuple("" if c is None else c for c in row)
+
+
+def _workbook_rows(archive_bytes: bytes) -> dict[str, tuple]:
+    """zip 字节流 → {标签名: xlsx 数据行}（读 tags-export.xlsx，空白归一）。"""
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
+        return {
+            row[3]: _norm_row(row)
+            for row in workbook.active.iter_rows(min_row=2, values_only=True)
+        }
+
+
+# ---------- import（Task 4 契约） ----------
 
 
 def test_import_excel_via_api(client):
@@ -52,25 +116,6 @@ def test_import_excel_via_api(client):
     assert body["task_id"]
     assert body["summary"]["inserted"] == 1 and body["summary"]["issues"] == []
     assert body["summary"]["total"] == 1 and body["summary"]["skipped"] == 0
-
-
-def test_export_tags_as_xlsx_and_xml(client):
-    resp = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
-    assert resp.status_code == 200
-
-    exported = client.get("/api/v1/tags/export?q=悬疑")
-    assert exported.status_code == 200
-    assert exported.headers["content-type"].startswith("application/zip")
-    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
-        assert set(archive.namelist()) == {"tags-export.xlsx", "tags-export.xml"}
-        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
-        xml_root = ET.fromstring(archive.read("tags-export.xml"))
-
-    rows = list(workbook.active.iter_rows(values_only=True))
-    assert rows[0][:4] == ("一级标签名称", "二级标签名称", "三级标签名称", "标签")
-    assert rows[1][3] == "悬疑"
-    assert xml_root.find("tag") is not None
-    assert xml_root.find("tag").text == "悬疑"
 
 
 def test_import_allows_same_tag_name_under_different_parents(client):
@@ -174,23 +219,18 @@ def test_import_parse_errors_in_response_and_batch(client):
 
 
 def test_reimport_reactivates_deprecated_tag(client):
-    """停用标签（status=deprecated）按相同目录再导入时恢复为启用。
-
-    v1 用例经 deactivate 端点造停用态（Task 5 域）；v2 改为直接播种
-    deprecated 行，只覆盖本任务的导入复活语义。
-    """
+    """停用标签（status=deprecated）按相同目录再导入时恢复为启用。"""
     factory = client.app.state.session_factory
     with factory() as s:
-        now = datetime.now(timezone.utc)
         s.add(TagCatalog(
             dir_id="dir_seed", dir_name="未分类", dir_type="dir_static",
             description="", parent_id=None, aliases=None,
             applicable_scope="content", embedding=None,
-            created_at=now, updated_at=now))
+            created_at=_NOW, updated_at=_NOW))
         s.add(TagDefine(
             tag_id="tag_seed", tag_name="悬疑", tag_type="val_fixed",
             description="旧描述", dir_id="dir_seed", aliases=None,
-            status="deprecated", embedding=None, created_at=now, updated_at=now))
+            status="deprecated", embedding=None, created_at=_NOW, updated_at=_NOW))
         s.commit()
 
     reimported = client.post("/api/v1/tags/import",
@@ -202,41 +242,330 @@ def test_reimport_reactivates_deprecated_tag(client):
         assert row.status == "active" and row.tag_id == "tag_seed"
 
 
-# ---------- 以下为 Task 5 域（v1 body 原样保留，中期红属预期） ----------
-
-def test_delete_tag_cleans_empty_parent_directories(client):
-    imported = client.post(
-        "/api/v1/tags/import",
-        files={"file": ("delete.xlsx", build_xlsx([
-            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
-            ["内容", "剧情", None, "反转", "", None],
-        ]))},
-    )
-    assert imported.status_code == 200
-    tag_id = client.get("/api/v1/tags?q=反转").json()["items"][0]["tag_id"]
-
-    deleted = client.delete(f"/api/v1/tags/{tag_id}")
-    assert deleted.status_code == 200
-    assert deleted.json()["parent_id"] is None
-    assert client.get("/api/v1/tags?root=true").json()["items"] == []
+# ---------- 混合树列表（Task 5） ----------
 
 
-def test_delete_tag_keeps_non_empty_parent(client):
-    client.post(
-        "/api/v1/tags/import",
-        files={"file": ("delete-two.xlsx", build_xlsx([
-            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
-            ["内容", "剧情", None, "反转", "", None],
-            ["内容", "剧情", None, "悬疑", "", None],
-        ]))},
-    )
-    tag_id = client.get("/api/v1/tags?q=反转").json()["items"][0]["tag_id"]
+def test_list_hybrid_children_mix_dirs_and_tags(client):
+    """parent_id 下同时返回子目录与直挂标签：目录先、契约字段逐项断言。"""
+    _import(client, HIER_XLSX)
+    plot_id = _node_id(client, "剧情")
 
-    deleted = client.delete(f"/api/v1/tags/{tag_id}")
-    assert deleted.status_code == 200
-    assert deleted.json()["parent_name"] == "剧情"
-    assert client.get("/api/v1/tags?q=悬疑").json()["items"]
+    resp = client.get("/api/v1/tags", params={"parent_id": plot_id})
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    # 目录（叙事）在前、标签（反转）在后
+    assert [(i["kind"], i["name"]) for i in items] == [("dir", "叙事"), ("tag", "反转")]
+
+    story, reversal = items
+    # 目录节点：id=dir_id、dir_type 有值、status 无列为 None、has_children 真
+    assert story["dir_type"] == "dir_static"
+    assert story["parent_id"] == plot_id
+    assert story["has_children"] is True
+    assert story["status"] is None
+    assert story["aliases"] == []
+    # 标签节点：id=tag_id、dir_type 无、status=active、parent=所属目录
+    assert reversal["dir_type"] is None
+    assert reversal["parent_id"] == plot_id
+    assert reversal["has_children"] is False
+    assert reversal["status"] == "active"
+    assert reversal["aliases"] == []
 
 
-def test_tag_404(client):
+def test_list_root_returns_only_top_dirs(client):
+    _import(client, HIER_XLSX)
+    roots = client.get("/api/v1/tags", params={"root": True}).json()["items"]
+    assert [i["name"] for i in roots] == ["内容"]
+    assert roots[0]["kind"] == "dir"
+    assert roots[0]["parent_id"] is None
+    assert roots[0]["has_children"] is True
+
+
+def test_list_dirs_precede_tags_name_sorted(client):
+    """全量列表：目录段在前按名字序，标签段在后按名字序；limit/offset 生效。"""
+    _import(client, HIER_XLSX)
+    items = client.get("/api/v1/tags").json()["items"]
+    kinds = [i["kind"] for i in items]
+    assert set(kinds) == {"dir", "tag"}
+    assert kinds == sorted(kinds, key=lambda k: 0 if k == "dir" else 1)  # 目录全在前
+
+    dir_names = [i["name"] for i in items if i["kind"] == "dir"]
+    tag_names = [i["name"] for i in items if i["kind"] == "tag"]
+    assert dir_names == sorted(dir_names)
+    assert tag_names == sorted(tag_names)
+    assert set(dir_names) == {"内容", "剧情", "叙事", "情感"}
+    assert set(tag_names) == {"反转", "多线", "温馨"}
+
+    # 分页在合并排序后的列表上切（limit=2 取前两个目录）
+    paged = client.get("/api/v1/tags", params={"limit": 2}).json()["items"]
+    assert [i["name"] for i in paged] == sorted(dir_names)[:2]
+
+
+def test_list_q_matches_dir_tag_names_and_aliases(client):
+    """q：目录名/标签名/标签别名/目录别名都命中（LIKE 子串，纯字面）。"""
+    _import(client, HIER_XLSX)
+    _import(client, XLSX_BYTES)  # 扁平：未分类/悬疑（别名 悬念,推理）
+
+    # 目录名命中
+    assert [i["name"] for i in client.get("/api/v1/tags", params={"q": "剧情"}).json()["items"]] == ["剧情"]
+    # 标签名命中
+    assert [i["name"] for i in client.get("/api/v1/tags", params={"q": "反转"}).json()["items"]] == ["反转"]
+    # 标签别名命中
+    assert {i["name"] for i in client.get("/api/v1/tags", params={"q": "悬念"}).json()["items"]} == {"悬疑"}
+
+    # 目录别名命中：给「内容」目录补别名后查询
+    content_id = _node_id(client, "内容")
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.get(TagCatalog, content_id).aliases = json.dumps(["故事内容"], ensure_ascii=False)
+        s.commit()
+    assert {i["name"] for i in client.get("/api/v1/tags", params={"q": "故事内容"}).json()["items"]} == {"内容"}
+
+
+def test_list_kind_filter(client):
+    _import(client, HIER_XLSX)
+    tags = client.get("/api/v1/tags", params={"kind": "tag"}).json()["items"]
+    assert {i["kind"] for i in tags} == {"tag"} and len(tags) == 3
+    dirs = client.get("/api/v1/tags", params={"kind": "dir"}).json()["items"]
+    assert {i["kind"] for i in dirs} == {"dir"} and len(dirs) == 4
+    # kind 仅接受 dir|tag
+    assert client.get("/api/v1/tags", params={"kind": "leaf"}).status_code == 422
+
+
+def test_list_scope_subtree(client):
+    """scope_id：后代目录 + 后代目录下的标签；scope 本体与其直挂标签不在内。"""
+    _import(client, HIER_XLSX)
+    # 直挂 scope 本体的标签（扁平行 parent_tag=内容 → 挂库内「内容」目录）
+    _import(client, [
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["直接挂载", "genre", "直挂内容目录", "内容", None, None],
+    ])
+    content_id = _node_id(client, "内容")
+
+    items = client.get("/api/v1/tags", params={"scope_id": content_id}).json()["items"]
+    got = {(i["kind"], i["name"]) for i in items}
+    assert got == {
+        ("dir", "剧情"), ("dir", "叙事"), ("dir", "情感"),
+        ("tag", "反转"), ("tag", "多线"), ("tag", "温馨"),
+    }
+    names = {i["name"] for i in items}
+    assert "内容" not in names        # scope 本体不在结果内
+    assert "直接挂载" not in names    # 直挂 scope 的标签：其目录非"后代目录"
+
+
+# ---------- 详情 ----------
+
+
+def test_detail_dir_and_tag_paths(client):
+    _import(client, HIER_XLSX)
+    content_id = _node_id(client, "内容")
+    plot_id = _node_id(client, "剧情")
+    story_id = _node_id(client, "叙事")
+    multi_id = _node_id(client, "多线")
+
+    d = client.get(f"/api/v1/tags/{story_id}")
+    assert d.status_code == 200
+    d = d.json()
+    assert d["kind"] == "dir" and d["dir_type"] == "dir_static"
+    assert d["path"] == ["内容", "剧情", "叙事"]
+    assert d["path_ids"] == [content_id, plot_id, story_id]
+    assert d["has_children"] is True  # 多线挂在其下
+
+    t = client.get(f"/api/v1/tags/{multi_id}")
+    assert t.status_code == 200
+    t = t.json()
+    assert t["kind"] == "tag" and t["dir_type"] is None
+    assert t["path"] == ["内容", "剧情", "叙事", "多线"]
+    assert t["path_ids"] == [content_id, plot_id, story_id, multi_id]
+    assert t["status"] == "active"
+
     assert client.get("/api/v1/tags/tag_none").status_code == 404
+
+
+# ---------- 生命周期（仅 tag_define） ----------
+
+
+def test_deactivate_activate_writes_change_log(client):
+    _import(client, HIER_XLSX)
+    tag_id = _node_id(client, "反转")
+
+    off = client.post(f"/api/v1/tags/{tag_id}/deactivate")
+    assert off.status_code == 200
+    assert off.json()["status"] == "deprecated"
+    on = client.post(f"/api/v1/tags/{tag_id}/activate")
+    assert on.status_code == 200
+    assert on.json()["status"] == "active"
+
+    with client.app.state.session_factory() as s:
+        logs = s.query(TagChangeLog).filter_by(tag_id=tag_id).filter(
+            TagChangeLog.action != "import").order_by(  # 排除导入审计行
+            TagChangeLog.log_id).all()
+        assert [(l.action, json.loads(l.before_json), json.loads(l.after_json))
+                for l in logs] == [
+            ("deprecate", {"status": "active"}, {"status": "deprecated"}),
+            ("update", {"status": "deprecated"}, {"status": "active"}),
+        ]
+
+    # 同状态重复 deactivate：早返回不重复写日志
+    client.post(f"/api/v1/tags/{tag_id}/deactivate")
+    with client.app.state.session_factory() as s:
+        assert s.query(TagChangeLog).filter_by(tag_id=tag_id).filter(
+            TagChangeLog.action != "import").count() == 3
+
+
+def test_lifecycle_on_dir_id_404(client):
+    """目录 id 打生命周期端点 → 404 且文案含"目录"字样；未知 id 同 404。"""
+    _import(client, HIER_XLSX)
+    dir_id = _node_id(client, "剧情")
+    for method, path in [
+        ("post", f"/api/v1/tags/{dir_id}/deactivate"),
+        ("post", f"/api/v1/tags/{dir_id}/activate"),
+        ("delete", f"/api/v1/tags/{dir_id}"),
+    ]:
+        resp = getattr(client, method)(path)
+        assert resp.status_code == 404
+        assert "目录" in resp.json()["detail"]
+    assert client.post("/api/v1/tags/tag_none/deactivate").status_code == 404
+    assert client.delete("/api/v1/tags/tag_none").status_code == 404
+
+
+# ---------- 删除（409 / 剪空目录 / 重定向信息） ----------
+
+
+def test_delete_tag_referenced_by_asset_tag_409(client):
+    _import(client, HIER_XLSX)
+    tag_id = _node_id(client, "反转")
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(MediaAsset(asset_id="mv1", asset_type="movie", title="引用影片",
+                         created_at=_NOW))
+        s.flush()  # 跨表插入分步 flush：父行先落库再插挂载行
+        s.add(AssetTag(asset_id="mv1", target_type="content", target_id="mv1",
+                       tag_id=tag_id, tag_name="反转",
+                       created_at=_NOW, updated_at=_NOW))
+        s.commit()
+
+    resp = client.delete(f"/api/v1/tags/{tag_id}")
+    assert resp.status_code == 409
+    # 标签与挂载行均原样保留
+    assert client.get(f"/api/v1/tags/{tag_id}").status_code == 200
+
+
+def test_delete_tag_prunes_empty_ancestor_directories(client):
+    _import(client, [
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", None, "反转", "", None],
+    ])
+    tag_id = _node_id(client, "反转")
+
+    deleted = client.delete(f"/api/v1/tags/{tag_id}")
+    assert deleted.status_code == 200
+    # 空祖先链（剧情、内容）全剪：无上级可跳转
+    assert deleted.json()["tag_id"] == tag_id
+    assert deleted.json()["parent_id"] is None
+    assert deleted.json()["parent_name"] is None
+    assert client.get("/api/v1/tags", params={"root": True}).json()["items"] == []
+    with client.app.state.session_factory() as s:
+        assert s.query(TagCatalog).count() == 0
+        assert s.query(TagDefine).count() == 0
+
+
+def test_delete_tag_keeps_non_empty_parent_and_redirects(client):
+    _import(client, HIER_XLSX)
+    multi_id = _node_id(client, "多线")
+    story_id = _node_id(client, "叙事")
+
+    deleted = client.delete(f"/api/v1/tags/{multi_id}")
+    assert deleted.status_code == 200
+    # 叙事被剪空后跳过，重定向到仍有子节点的剧情
+    plot_id = _node_id(client, "剧情")
+    assert deleted.json()["parent_id"] == plot_id
+    assert deleted.json()["parent_name"] == "剧情"
+    # 被删标签与剪空目录消失，非空兄弟保留
+    assert client.get("/api/v1/tags", params={"q": "多线"}).json()["items"] == []
+    assert client.get("/api/v1/tags", params={"q": "叙事"}).json()["items"] == []
+    assert client.get("/api/v1/tags", params={"q": "反转"}).json()["items"]
+
+    # 删除留痕：action 取 v2 CHECK 枚举内的 deprecate（v1 写 "delete" 不可用）
+    with client.app.state.session_factory() as s:
+        log = s.query(TagChangeLog).filter_by(tag_id=multi_id).filter(
+            TagChangeLog.action == "deprecate").one()  # 排除导入审计行
+        before = json.loads(log.before_json)
+        assert before["tag_name"] == "多线" and before["dir_id"] == story_id
+        assert log.after_json is None
+
+
+# ---------- 导出（双端点，zip = xlsx + xml） ----------
+
+
+def test_export_zip_carries_dir_ancestor_paths(client):
+    """/tags/export：叶子 = tag_define 行，祖先路径 = tag_catalog 链。"""
+    _import(client, HIER_XLSX)
+
+    exported = client.get("/api/v1/tags/export")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        assert set(archive.namelist()) == {"tags-export.xlsx", "tags-export.xml"}
+        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
+        xml_root = ET.fromstring(archive.read("tags-export.xml"))
+
+    rows = {r[3]: _norm_row(r)
+            for r in workbook.active.iter_rows(values_only=True) if r[3] != "标签"}
+    # 六列 v1 格式逐字沿用：三级列路径含叶子名沿 v1 计算，标签列重复叶子名
+    assert rows["反转"][:5] == ("内容", "剧情", "反转", "反转", "情节反转")
+    assert rows["多线"][:5] == ("内容", "剧情", "叙事", "多线", "多线叙事")
+    assert rows["温馨"][:5] == ("内容", "情感", "温馨", "温馨", "")
+    assert all(r[5] == "系统生成" for r in rows.values())
+
+    # xml 嵌套：内容 > 剧情 > (反转, 叙事 > 多线) + 内容 > 情感 > 温馨
+    top = xml_root.find("level1")
+    assert top.get("name") == "内容"
+    assert {t.text for t in top.iter("tag")} == {"反转", "多线", "温馨"}
+
+
+def test_export_scope_and_q_filters(client):
+    """scope_id 导出作用域全部标签（含直挂）；q 命中目录导出子树叶子、
+    命中标签导出该标签；未知 scope → 404。"""
+    _import(client, HIER_XLSX)
+    _import(client, XLSX_BYTES)  # 未分类/悬疑
+    _import(client, [
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["直接挂载", "genre", "直挂内容目录", "内容", None, None],
+    ])
+    content_id = _node_id(client, "内容")
+
+    scoped = _workbook_rows(client.get(
+        "/api/v1/tags/export", params={"scope_id": content_id}).content)
+    # v1 语义「该目录及其全部标签」：直挂标签一并导出，未分类不在作用域
+    assert set(scoped) == {"反转", "多线", "温馨", "直接挂载"}
+
+    by_name = _workbook_rows(client.get("/api/v1/tags/export", params={"q": "悬疑"}).content)
+    assert set(by_name) == {"悬疑"}
+    assert by_name["悬疑"][:4] == ("未分类", "悬疑", "", "悬疑")
+
+    by_dir = _workbook_rows(client.get("/api/v1/tags/export", params={"q": "叙事"}).content)
+    assert set(by_dir) == {"多线"}  # 目录名命中 → 其子树叶子
+
+    assert client.get("/api/v1/tags/export",
+                      params={"scope_id": "dir_none"}).status_code == 404
+
+
+def test_import_task_export_zip(client):
+    """GET /import/tasks/{task_id}/export：批内标签经同一构建器导出。"""
+    imported = _import(client, XLSX_BYTES)
+    task_id = imported["task_id"]
+
+    resp = client.get(f"/api/v1/import/tasks/{task_id}/export")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/zip")
+    assert f"{task_id}-export.zip" in resp.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
+        xml_root = ET.fromstring(archive.read("tags-export.xml"))
+    rows = [_norm_row(r)
+            for r in workbook.active.iter_rows(min_row=2, values_only=True)]
+    assert rows == [("未分类", "悬疑", "", "悬疑", "以悬念为核心", "系统生成")]
+    assert xml_root.find("level1").get("name") == "未分类"
+    assert xml_root.find(".//tag").text == "悬疑"
+
+    assert client.get("/api/v1/import/tasks/task_none/export").status_code == 404
