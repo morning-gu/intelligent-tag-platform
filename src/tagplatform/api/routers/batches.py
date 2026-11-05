@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
-from tagplatform.db.models import AssetTag, ImportBatch, TagCatalog, TagChangeLog
+from tagplatform.db.models import AssetTag, TagCatalog, TagChangeLog, TagImportTask
 
 router = APIRouter(prefix="/api/v1/import/batches")
 

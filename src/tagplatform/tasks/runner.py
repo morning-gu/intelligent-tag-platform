@@ -35,7 +35,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, GenerationTask, MediaContext, TagCatalog
+from tagplatform.db.models import AssetTag, TagCatalog, TagGenerationTask
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.recall import embed_content_texts, recall_by_type
 from tagplatform.prompts import get_active_prompt, render_prompt
@@ -329,8 +329,8 @@ def reset_orphan_running(session: Session) -> int:
     启动时调用本函数一次性复位（error="进程重启中断"）。
     """
     orphans = (
-        session.query(GenerationTask)
-        .filter(GenerationTask.status == "running")
+        session.query(TagGenerationTask)
+        .filter(TagGenerationTask.status == "running")
         .all()
     )
     now = datetime.now(timezone.utc)

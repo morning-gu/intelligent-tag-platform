@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, GenerationTask, ReviewRecord, TagCatalog
+from tagplatform.db.models import AssetTag, TagCatalog, TagGenerationTask
 
 # 已终审的审核状态（新标签通过率的分母集合；pending 不计入）
 _TERMINAL_REVIEW_STATUSES = ("approved", "rejected", "merged")

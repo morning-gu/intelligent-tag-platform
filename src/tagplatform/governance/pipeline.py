@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 import numpy as np
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import ImportBatch, TagCatalog, TagChangeLog
+from tagplatform.db.models import TagCatalog, TagChangeLog, TagImportTask
 from tagplatform.governance.excel import TagRow
 from tagplatform.settings import get_settings
 from tagplatform.vectors import decode_vector, encode_vector, search_similar

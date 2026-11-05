@@ -20,7 +20,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from tagplatform.api import get_embedder, get_session
-from tagplatform.db.models import AssetTag, ImportBatch, TagCatalog, TagChangeLog
+from tagplatform.db.models import AssetTag, TagCatalog, TagChangeLog, TagImportTask
 from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
 
 router = APIRouter(prefix="/api/v1/tags")

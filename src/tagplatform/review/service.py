@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, ReviewRecord, TagCatalog
+from tagplatform.db.models import AssetTag, TagCatalog
 
 
 class ConflictError(Exception):

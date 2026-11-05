@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
-from tagplatform.db.models import AssetTag, GenerationTask, MediaAsset, MediaContext, TagCatalog
+from tagplatform.db.models import AssetTag, MediaAsset, TagCatalog, TagGenerationTask
 from tagplatform.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 

@@ -46,9 +46,9 @@ from tagplatform.api.routers.generation import (
 )
 from tagplatform.db.models import (
     AssetTag,
-    GenerationTask,
     MediaAsset,
     TagCatalog,
+    TagGenerationTask,
     UserAccount,
 )
 from tagplatform.review import ConflictError, apply_review
