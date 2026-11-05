@@ -4,13 +4,13 @@
 // - 标题搜索传参（提交触发而非输入即触发）；
 // - 上传：未命中 → 占位登记提示；命中 → Modal 内轮询生成进度并刷新列表；
 // - 422/413 失败透出后端 detail 且不刷新列表（nginx HTML 413 特判）。
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetList from './AssetList'
-import { ApiError, apiFetch } from '../api/client'
+import { apiFetch } from '../api/client'
 import type { AssetSummary } from '../api/assets'
-import type { BuildTask, MediaUploadResult } from '../api/media'
+import type { BuildTask, MediaMatchResult, MediaUploadResult } from '../api/media'
 
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -123,39 +123,104 @@ function renderAssetList() {
 
 // ---------- 上传场景 mock 装配与查询辅助 ----------
 
-/** 上传场景的 apiFetch 桩：资产列表 + /media/upload + 进度查询。 */
+/** 选文件预检的默认应答：没命中（不干扰原有上传用例）。 */
+const NO_MATCH: MediaMatchResult = {
+  matched: false,
+  movie_id: null,
+  matched_title: null,
+  match_how: null,
+  asset_id: null,
+  has_content: false,
+  content_source: null,
+  scene_count: 0,
+  built_at: null,
+}
+
+/** 已生成过的影片：选完文件就该被拦在上传之前。 */
+const MATCH_WITH_CONTENT: MediaMatchResult = {
+  matched: true,
+  movie_id: 'tt0172495',
+  matched_title: '角斗士',
+  match_how: 'imdb_id',
+  asset_id: 'movie_tt0172495',
+  has_content: true,
+  content_source: 'asset_builder:v5-infer',
+  scene_count: 7,
+  built_at: '2026-11-04T02:30:00',
+}
+
+/** 上传成功后列表该多一行（finishUpload 触发）。 */
+let markUploaded: () => void = () => {}
+
+/** 资产列表 + 预检 + 进度查询的 apiFetch 桩；上传改走 XHR（见 MockXhr）。 */
 function mockUploadApis(
   options: {
-    uploadError?: Error
-    uploadResult?: MediaUploadResult
+    match?: MediaMatchResult
     tasks?: BuildTask[]
   } = {},
 ) {
-  let assets: AssetSummary[] = ASSETS
   const tasks = [...(options.tasks ?? [RUNNING_TASK, DONE_TASK])]
-  mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
-    const method = init?.method ?? 'GET'
-    if (method === 'POST' && path === '/api/v1/media/upload') {
-      if (options.uploadError) throw options.uploadError
-      assets = [NEW_ASSET, ...ASSETS] // 上传成功：后端新增资产行
-      return options.uploadResult ?? UNMATCHED_UPLOAD
-    }
+  let uploaded = false
+  markUploaded = () => {
+    uploaded = true
+  }
+  mockedApiFetch.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/v1/media/match')) return options.match ?? NO_MATCH
     if (path.startsWith('/api/v1/media/build-tasks/')) {
       const next = tasks.length > 1 ? tasks.shift()! : tasks[0]
       return next
     }
-    if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) return assets
-    throw new Error(`未预期的请求：${method} ${path}`)
+    if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) {
+      return uploaded ? [NEW_ASSET, ...ASSETS] : ASSETS
+    }
+    throw new Error(`未预期的请求：${path}`)
   })
 }
 
-/** 上传端点的调用（未请求过返回 undefined）。 */
-function uploadCall(): [string, RequestInit] | undefined {
-  return mockedApiFetch.mock.calls.find(
-    ([p, init]) =>
-      p === '/api/v1/media/upload' && (init as RequestInit | undefined)?.method === 'POST',
-  ) as [string, RequestInit] | undefined
+// ---------- XMLHttpRequest 桩：上传走 XHR 才能拿到 upload.onprogress ----------
+
+class MockXhr {
+  upload: { onprogress: ((event: ProgressEvent) => void) | null } = { onprogress: null }
+  status = 0
+  responseText = ''
+  withCredentials = false
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+
+  open(): void {}
+
+  send(body: FormData): void {
+    lastUploadForm = body
+    activeXhr = this
+  }
 }
+
+let activeXhr: MockXhr | null = null
+let lastUploadForm: FormData | null = null
+
+/** 模拟传输进度（percent 0-100）；act 包裹避免 React 状态更新告警。 */
+function emitUploadProgress(percent: number): void {
+  act(() => {
+    activeXhr?.upload.onprogress?.({
+      lengthComputable: true,
+      loaded: percent,
+      total: 100,
+    } as ProgressEvent)
+  })
+}
+
+/** 模拟上传结束；非 2xx 即失败路径（响应体按后端 detail 形状给）。 */
+async function finishUpload(status = 200, body?: string): Promise<void> {
+  const xhr = activeXhr
+  if (xhr === null) throw new Error('上传尚未开始')
+  await act(async () => {
+    xhr.status = status
+    xhr.responseText = body ?? JSON.stringify(UNMATCHED_UPLOAD)
+    if (status >= 200 && status < 300) markUploaded()
+    xhr.onload?.()
+  })
+}
+
 
 /** 资产列表端点的调用次数（上传成功刷新后递增）。 */
 function assetsCallCount(): number {
@@ -172,6 +237,9 @@ async function openUploadAndSelectFile(name = '新片.mkv') {
   expect(input).not.toBeNull()
   const file = new File(['fake-video-bytes'], name)
   fireEvent.change(input, { target: { files: [file] } })
+  // 选完文件会异步打 /media/match：等预检落地，否则确认按钮还在
+  // checkingFile 的禁用态，后续点击不会触发上传
+  await waitFor(() => expect(screen.queryByText('正在识别文件名…')).not.toBeInTheDocument())
   return file
 }
 
@@ -194,11 +262,17 @@ beforeEach(() => {
   mockedApiFetch.mockReset()
   mockedApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) return ASSETS
+    if (path.startsWith('/api/v1/media/match')) return NO_MATCH
     throw new Error(`未预期的请求：${path}`)
   })
+  activeXhr = null
+  lastUploadForm = null
+  markUploaded = () => {}
+  vi.stubGlobal('XMLHttpRequest', MockXhr)
 })
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
 
@@ -286,7 +360,7 @@ describe('上传视频与生成进度', () => {
     await screen.findByText('电影')
 
     const file = await openUploadAndSelectFile()
-    expect(screen.getByText('已选择：新片.mkv')).toBeInTheDocument()
+    expect(screen.getByText(/已选择：新片\.mkv/)).toBeInTheDocument()
     // 上传按钮旁只给文件名要求（IMDb ID / 英文片名），不放其他说明
     expect(
       screen.getByText('文件名需含 IMDb ID（如 tt0068646）或英文片名（如 The.Godfather.1972）'),
@@ -294,10 +368,12 @@ describe('上传视频与生成进度', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
 
-    await waitFor(() => expect(uploadCall()).toBeDefined())
-    const body = uploadCall()![1].body as FormData
-    expect(body).toBeInstanceOf(FormData)
-    expect(body.get('file')).toBe(file)
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    expect(lastUploadForm).toBeInstanceOf(FormData)
+    expect(lastUploadForm?.get('file')).toBe(file)
+    expect(lastUploadForm?.get('force')).toBeNull() // 常规上传不带 force
+
+    await finishUpload()
 
     expect(
       await screen.findByText('已登记「新片」，未匹配到影片——文件名需含 IMDb ID 或英文片名'),
@@ -312,12 +388,15 @@ describe('上传视频与生成进度', () => {
   })
 
   it('命中影片：Modal 切换为生成进度视图并轮询到完成', async () => {
-    mockUploadApis({ uploadResult: MATCHED_UPLOAD })
+    mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
 
     await openUploadAndSelectFile('角斗士.mp4')
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    await finishUpload(200, JSON.stringify(MATCHED_UPLOAD))
 
     // 进度视图：匹配片名 + 进度条 + 场景计数
     expect(await screen.findByText('已匹配影片《角斗士》')).toBeInTheDocument()
@@ -342,44 +421,94 @@ describe('上传视频与生成进度', () => {
     fireEvent.click(screen.getByRole('button', { name: /取\s*消/ }))
     await finishModalLeaveMotion()
     await waitFor(() => expect(screen.queryByText('选择视频文件')).not.toBeInTheDocument())
-    expect(uploadCall()).toBeUndefined()
+    expect(activeXhr).toBeNull()
+  })
+
+  it('上传进度：显示百分比，传到 100% 后提示服务端仍在处理', async () => {
+    mockUploadApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.mp4')
+    fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+
+    emitUploadProgress(37)
+    expect(await screen.findByText('正在上传 37%')).toBeInTheDocument()
+
+    emitUploadProgress(100)
+    expect(await screen.findByText('上传完成，服务器正在存盘登记…')).toBeInTheDocument()
+
+    await finishUpload(200, JSON.stringify(MATCHED_UPLOAD))
+    expect(await screen.findByText('已匹配影片《角斗士》')).toBeInTheDocument()
+  })
+
+  it('已生成过的影片：选完文件就被拦住，点"仍然重新生成"才放行', async () => {
+    mockUploadApis({ match: MATCH_WITH_CONTENT })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.mp4')
+
+    // 预检命中且已有同口径内容 → 警告 + 确认按钮禁用
+    expect(await screen.findByText('该片已有资产，无需重新上传视频')).toBeInTheDocument()
+    expect(screen.getByText(/已生成\s*7 个场景/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '开始上传' })).toBeDisabled()
+
+    // 选择"仍然重新生成" → 提示将覆盖 + 按钮可点
+    fireEvent.click(screen.getByRole('button', { name: '仍然重新生成（覆盖现有内容）' }))
+    expect(
+      await screen.findByText('将清空该片现有的资产内容，重新跑一遍生成'),
+    ).toBeInTheDocument()
+    const ok = screen.getByRole('button', { name: '开始上传' })
+    await waitFor(() => expect(ok).not.toBeDisabled())
+
+    fireEvent.click(ok)
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    expect(lastUploadForm?.get('force')).toBe('true')
   })
 
   it('上传失败（422 非白名单后缀）：透出后端 detail，Modal 保留可重试，列表不刷新', async () => {
-    mockUploadApis({ uploadError: new ApiError(422, '不支持的视频格式') })
+    mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    await finishUpload(422, JSON.stringify({ detail: '不支持的视频格式' }))
 
     expect(await screen.findByText('不支持的视频格式')).toBeInTheDocument()
     expect(assetsCallCount()).toBe(1) // 未刷新
     expect(screen.getByText('选择视频文件')).toBeInTheDocument() // Modal 仍在
-    expect(screen.getByText('已选择：新片.mkv')).toBeInTheDocument() // 已选文件保留供重试
+    expect(screen.getByText(/已选择：新片\.mkv/)).toBeInTheDocument() // 已选文件保留供重试
   })
 
   it('上传失败（413 超 2GB 上限）：透出后端 detail，列表不刷新', async () => {
-    mockUploadApis({ uploadError: new ApiError(413, '文件大小超出上传上限') })
+    mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    await finishUpload(413, JSON.stringify({ detail: '文件大小超出上传上限' }))
 
     expect(await screen.findByText('文件大小超出上传上限')).toBeInTheDocument()
     expect(assetsCallCount()).toBe(1)
   })
 
   it('上传失败（413 且响应为 HTML，nginx 环境）：回落文案特判为 2GB 上限提示，列表不刷新', async () => {
-    // 真实 nginx 413 返回 HTML：readErrorDetail 拿不到 detail，回落
-    // "请求失败（HTTP 413）"——组件按 413 字样换成可行动文案
-    mockUploadApis({ uploadError: new ApiError(413, '请求失败（HTTP 413）') })
+    // 真实 nginx 413 返回 HTML：解析不出 detail，回落 "请求失败（HTTP 413）"
+    // ——组件按 413 字样换成可行动文案
+    mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
 
     await openUploadAndSelectFile()
     fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    await finishUpload(413, '<html><body>413 Request Entity Too Large</body></html>')
 
     expect(await screen.findByText('文件超过 2GB 上传上限')).toBeInTheDocument()
     expect(assetsCallCount()).toBe(1)

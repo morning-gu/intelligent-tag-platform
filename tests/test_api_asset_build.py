@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tagplatform import asset_build
+from tagplatform.assets import source_tag
 from tagplatform.content_io import load_content
 from tagplatform.db.models import AssetBuildTask, MediaAsset, MediaContext
 from tagplatform.llm import LLMResponse
@@ -83,7 +84,7 @@ def _upload(client, name: str):
 def test_upload_matches_dataset_and_creates_task(dataset_client, monkeypatch):
     submitted: list[str] = []
     monkeypatch.setattr(asset_build, "submit",
-                        lambda task_id, settings=None: submitted.append(task_id))
+                        lambda task_id, settings=None, **kw: submitted.append(task_id))
     resp = _upload(dataset_client, "Test.Movie.1999.1080p.BluRay.x264.mkv")
     assert resp.status_code == 200
     body = resp.json()
@@ -259,3 +260,120 @@ def test_execute_reuses_same_version(dataset_client, monkeypatch):
     assert len(calls) == used
     with dataset_client.app.state.session_factory() as s:
         assert s.get(AssetBuildTask, second["build_task_id"]).status == "succeeded"
+
+
+def test_execute_force_rebuilds_same_version(dataset_client, monkeypatch):
+    """force=True：同口径也重跑模型，且旧内容被清掉（只留一份）。"""
+    calls: list[str] = []
+
+    class Counting(FakeClient):
+        def complete(self, messages, run_id):
+            calls.append(run_id)
+            return super().complete(messages, run_id)
+
+    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+                        lambda settings=None: Counting())
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    settings = dataset_client.app.state.settings.model_copy(update={
+        "asset_workers": 1, "asset_frames": 1})
+    asset_id = _upload(dataset_client, "Test.Movie.1999.mkv").json()["asset_id"]
+    first = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    asset_build.execute(first["build_task_id"], settings)
+    used = len(calls)
+
+    second = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    asset_build.execute(second["build_task_id"], settings, force=True)
+
+    assert len(calls) > used
+    with dataset_client.app.state.session_factory() as s:
+        assert s.get(AssetBuildTask, second["build_task_id"]).status == "succeeded"
+        rows = s.query(MediaContext).filter_by(asset_id=asset_id).all()
+        assert len(rows) == 1
+
+
+def test_upload_passes_force_flag_to_executor(dataset_client, monkeypatch):
+    """表单 force=true 要透传到后台执行（前端"仍然重新生成"）。"""
+    seen: list[bool] = []
+
+    def fake_submit(task_id, settings=None, *, force=False):
+        seen.append(force)
+
+    monkeypatch.setattr(asset_build, "submit", fake_submit)
+    _upload(dataset_client, "Test.Movie.1999.mkv")
+    assert seen == [False]
+
+    dataset_client.post(
+        "/api/v1/media/upload",
+        files={"file": ("Test.Movie.1999.mkv", PAYLOAD, "application/octet-stream")},
+        data={"force": "true"},
+    )
+    assert seen == [False, True]
+
+
+# ---------- 选文件预检：/media/match ----------
+
+
+def test_match_endpoint_unmatched(dataset_client):
+    """文件名匹配不到数据集：matched=false，不影响任何东西。"""
+    resp = dataset_client.get("/api/v1/media/match",
+                              params={"filename": "完全无关.mp4"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["matched"] is False
+    assert body["has_content"] is False and body["asset_id"] is None
+
+
+def test_match_endpoint_matched_without_content(dataset_client):
+    """命中影片但还没生成过资产：matched=true / has_content=false。"""
+    body = dataset_client.get(
+        "/api/v1/media/match",
+        params={"filename": "Test.Movie.1999.1080p.mkv"}).json()
+    assert body["matched"] is True
+    assert body["movie_id"] == MOVIE_ID
+    assert body["matched_title"] == "Test Movie"
+    assert body["asset_id"] == f"movie_{MOVIE_ID}"
+    assert body["has_content"] is False
+    assert body["scene_count"] == 0
+
+
+def test_match_endpoint_reports_built_content(dataset_client, monkeypatch):
+    """已生成过：has_content=true + 场景数 + 口径与时间（前端据此拦重复上传）。"""
+    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+                        lambda settings=None: FakeClient())
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    settings = dataset_client.app.state.settings.model_copy(update={
+        "asset_workers": 1, "asset_frames": 1})
+    task_id = _upload(dataset_client, "Test.Movie.1999.mkv").json()["build_task_id"]
+    asset_build.execute(task_id, settings)
+
+    body = dataset_client.get(
+        "/api/v1/media/match",
+        params={"filename": "Test.Movie.1999.mkv"}).json()
+    assert body["matched"] is True
+    assert body["has_content"] is True
+    assert body["content_source"] == source_tag(True)
+    assert body["scene_count"] == 1
+    assert body["built_at"] is not None
+
+
+def test_match_endpoint_ignores_other_source(dataset_client):
+    """旧口径的内容不算可复用：has_content=false，但场景数仍可展示。"""
+    from tagplatform.db.models import MediaAsset, MediaContext
+
+    with dataset_client.app.state.session_factory() as s:
+        s.add(MediaAsset(asset_id=f"movie_{MOVIE_ID}", asset_type="movie",
+                         title="Test Movie"))
+        s.add(MediaContext(
+            context_id="ctx_old", asset_id=f"movie_{MOVIE_ID}",
+            content_json=json.dumps({"content": {"scenes": [{}, {}]}}),
+            source="asset_builder:v0-legacy", model_version=None,
+            recognition_status=None,
+        ))
+        s.commit()
+
+    body = dataset_client.get(
+        "/api/v1/media/match",
+        params={"filename": "Test.Movie.1999.mkv"}).json()
+    assert body["has_content"] is False
+    assert body["content_source"] == "asset_builder:v0-legacy"
+    assert body["scene_count"] == 2

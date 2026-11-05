@@ -80,13 +80,17 @@ def _executor() -> ThreadPoolExecutor:
         return _EXECUTOR
 
 
-def submit(task_id: str, settings: Settings | None = None) -> None:
+def submit(task_id: str, settings: Settings | None = None, *,
+           force: bool = False) -> None:
     """把任务丢进后台线程池（返回不等于完成）。
 
     settings 显式传入：后台线程不能依赖进程环境变量重新解析配置，
     否则测试实例会连到别的库（`get_settings()` 只在没传时兜底）。
+
+    force：同一口径已生成过也强制重跑（用户在「该片已有资产」提示上
+    选了"仍然重新生成"）。
     """
-    _executor().submit(execute, task_id, settings)
+    _executor().submit(execute, task_id, settings, force)
 
 
 def _asset_out_dir(settings: Settings) -> Path:
@@ -113,8 +117,13 @@ def _purge_contexts(session: Session, asset_id: str) -> None:
     session.commit()
 
 
-def execute(task_id: str, settings: Settings | None = None) -> None:
-    """后台执行：生成 → 导入 → 更新任务状态。任何异常都落成 failed。"""
+def execute(task_id: str, settings: Settings | None = None,
+            force: bool = False) -> None:
+    """后台执行：生成 → 导入 → 更新任务状态。任何异常都落成 failed。
+
+    force=True 时忽略「同口径已生成过」的复用判断，清掉旧内容重跑
+    （用户明确要求重新生成的情形）。
+    """
     settings = settings or get_settings()
     engine = create_engine_for(settings.database_path)
     factory = make_session_factory(engine)
@@ -129,7 +138,7 @@ def execute(task_id: str, settings: Settings | None = None) -> None:
         wanted_source = source_tag(settings.asset_infer)
         existing = (session.query(MediaContext)
                     .filter(MediaContext.asset_id == task.asset_id).all())
-        if any(row.source == wanted_source for row in existing):
+        if not force and any(row.source == wanted_source for row in existing):
             # 同一口径已生成过：秒回，不烧 token
             task.status = "succeeded"
             task.done_scenes = task.total_scenes
@@ -137,8 +146,8 @@ def execute(task_id: str, settings: Settings | None = None) -> None:
             session.commit()
             return
         if existing:
-            # 旧口径（早期精简资产 / 更早的生成版本）：先清掉父与场景子资产的
-            # context，避免资产详情里堆着多份互相矛盾的内容
+            # 旧口径（早期精简资产 / 更早的生成版本），或用户要求强制重跑：
+            # 先清掉父与场景子资产的 context，避免堆着多份互相矛盾的内容
             _purge_contexts(session, task.asset_id)
 
         def progress(done: int, total: int) -> None:

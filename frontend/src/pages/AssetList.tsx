@@ -29,8 +29,10 @@ import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
 import {
   fetchBuildTask,
+  matchMedia,
   uploadMedia,
   type BuildTask,
+  type MediaMatchResult,
   type MediaUploadResult,
 } from '../api/media'
 import { formatTimestamp } from '../api/review'
@@ -60,6 +62,20 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+/** 文件大小展示（GB/MB，一位小数）：几百 MB 的片子传多久心里有数。 */
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`
+}
+
+/** 后端 ISO 时间 → `YYYY-MM-DD HH:mm`（预检里"生成于…"用；解析失败原样回显）。 */
+function formatBuiltAt(iso: string): string {
+  const when = new Date(iso)
+  if (Number.isNaN(when.getTime())) return iso
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`
+}
+
 export default function AssetList() {
   const navigate = useNavigate()
   const [assets, setAssets] = useState<AssetSummary[]>([])
@@ -76,6 +92,12 @@ export default function AssetList() {
   const [buildTaskId, setBuildTaskId] = useState<string | null>(null)
   const [buildTask, setBuildTask] = useState<BuildTask | null>(null)
   const [matchedTitle, setMatchedTitle] = useState<string | null>(null)
+  // 选文件预检：命中影片且已有当前口径内容时，先拦住"白传一遍视频"
+  const [preflight, setPreflight] = useState<MediaMatchResult | null>(null)
+  const [checkingFile, setCheckingFile] = useState(false)
+  const [forceRebuild, setForceRebuild] = useState(false)
+  // 浏览器 → 服务器的传输进度（0-100）；100 之后还有服务端落盘，见文案
+  const [uploadPct, setUploadPct] = useState(0)
 
   const loadAssets = useCallback(async () => {
     setLoading(true)
@@ -142,6 +164,9 @@ export default function AssetList() {
     setBuildTaskId(null)
     setBuildTask(null)
     setMatchedTitle(null)
+    setPreflight(null)
+    setForceRebuild(false)
+    setUploadPct(0)
     setUploadOpen(true)
   }
 
@@ -152,14 +177,39 @@ export default function AssetList() {
     setBuildTaskId(null)
     setBuildTask(null)
     setMatchedTitle(null)
+    setPreflight(null)
+    setForceRebuild(false)
+    setUploadPct(0)
+  }
+
+  /** 选完文件先预检：命中影片且已有当前口径内容 → 提示不必再传视频。
+   *
+   * 预检失败不挡上传（比如老后端没有这个接口），直接按原流程走。 */
+  async function checkMediaFile(file: File) {
+    setUploadFile(file)
+    setPreflight(null)
+    setForceRebuild(false)
+    setUploadPct(0)
+    setCheckingFile(true)
+    try {
+      setPreflight(await matchMedia(file.name))
+    } catch {
+      setPreflight(null)
+    } finally {
+      setCheckingFile(false)
+    }
   }
 
   /** 提交上传：命中数据集 → Modal 内展示生成进度；未命中 → 占位登记。 */
   async function handleUploadSubmit() {
     if (uploadFile === null) return
     setUploading(true)
+    setUploadPct(0)
     try {
-      const res: MediaUploadResult = await uploadMedia(uploadFile)
+      const res: MediaUploadResult = await uploadMedia(uploadFile, {
+        force: forceRebuild,
+        onProgress: setUploadPct,
+      })
       if (res.build_task_id !== null) {
         setMatchedTitle(res.matched_title ?? res.movie_id)
         setBuildTaskId(res.build_task_id)
@@ -226,6 +276,10 @@ export default function AssetList() {
       : buildTask?.status === 'succeeded'
         ? 'success'
         : 'active'
+
+  // 已有同口径资产、且用户没点"仍然重新生成"：挡在上传之前（避免白传一遍）
+  const blockedByExisting =
+    preflight !== null && preflight.matched && preflight.has_content && !forceRebuild
 
   return (
     <Card
@@ -294,7 +348,7 @@ export default function AssetList() {
         open={uploadOpen}
         okText="开始上传"
         cancelText="取消"
-        okButtonProps={{ disabled: uploadFile === null }}
+        okButtonProps={{ disabled: uploadFile === null || checkingFile || blockedByExisting }}
         confirmLoading={uploading}
         onOk={buildTaskId === null ? handleUploadSubmit : undefined}
         onCancel={closeUpload}
@@ -311,22 +365,71 @@ export default function AssetList() {
       >
         {buildTaskId === null ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {/* 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr（此时文件
-                也不进内建列表），改由确认按钮经 apiFetch 提交；已选文件以
-                "已选择：文件名" 自绘展示，重复选择即替换。 */}
+            {/* 手动上传：beforeUpload 返回 false 阻断 antd 自带上传（文件也不进
+                内建列表），选完先调 /media/match 预检，再由确认按钮经 XHR 提交
+                （XHR 只为拿 upload.onprogress 的真实百分比）。 */}
             <Upload
               accept=".mp4,.webm,.mkv"
               maxCount={1}
               showUploadList={false}
               disabled={uploading}
               beforeUpload={(file) => {
-                setUploadFile(file)
+                void checkMediaFile(file)
                 return false
               }}
             >
-              <Button>选择视频文件</Button>
+              <Button disabled={uploading}>选择视频文件</Button>
             </Upload>
-            {uploadFile !== null && <Typography.Text>已选择：{uploadFile.name}</Typography.Text>}
+            {uploadFile !== null && (
+              <Typography.Text>
+                已选择：{uploadFile.name}（{formatSize(uploadFile.size)}）
+              </Typography.Text>
+            )}
+            {checkingFile && (
+              <Typography.Text type="secondary">正在识别文件名…</Typography.Text>
+            )}
+            {blockedByExisting && preflight !== null && (
+              <Alert
+                type="warning"
+                showIcon
+                message="该片已有资产，无需重新上传视频"
+                description={
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <span>
+                      《{preflight.matched_title ?? preflight.movie_id}》已生成{' '}
+                      {preflight.scene_count} 个场景
+                      {preflight.built_at !== null
+                        ? `，生成于 ${formatBuiltAt(preflight.built_at)}`
+                        : ''}
+                      。直接打开资产详情就能看内容、跑标签生成。
+                    </span>
+                    <Button size="small" danger onClick={() => setForceRebuild(true)}>
+                      仍然重新生成（覆盖现有内容）
+                    </Button>
+                  </div>
+                }
+              />
+            )}
+            {forceRebuild && (
+              <Alert
+                type="info"
+                showIcon
+                message="将清空该片现有的资产内容，重新跑一遍生成"
+              />
+            )}
+            {uploading && (
+              <div
+                data-testid="upload-progress"
+                style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
+              >
+                <Progress percent={uploadPct} size="small" status="active" />
+                <Typography.Text type="secondary">
+                  {uploadPct >= 100
+                    ? '上传完成，服务器正在存盘登记…'
+                    : `正在上传 ${uploadPct}%`}
+                </Typography.Text>
+              </div>
+            )}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

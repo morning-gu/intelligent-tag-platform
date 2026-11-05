@@ -18,6 +18,9 @@ multipart 提取与错误映射：
   核心层流式累计兜底）。
 """
 
+import json
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -25,7 +28,8 @@ from sqlalchemy.orm import Session
 
 from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
-from tagplatform.db.models import AssetBuildTask, MediaAsset
+from tagplatform.assets import source_tag
+from tagplatform.db.models import AssetBuildTask, MediaAsset, MediaContext
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
@@ -42,6 +46,21 @@ class MediaUploadResponse(BaseModel):
     matched_title: str | None = None
     match_how: str | None = None
     build_task_id: str | None = None
+
+
+class MediaMatchResponse(BaseModel):
+    """选完文件后的预检结果：命中哪部片、该片是否已有可直接复用的内容。"""
+
+    matched: bool
+    movie_id: str | None = None
+    matched_title: str | None = None
+    match_how: str | None = None
+    asset_id: str | None = None
+    # 已有**当前口径**的内容 → 不必再传视频；口径不符则仍会重建
+    has_content: bool = False
+    content_source: str | None = None
+    scene_count: int = 0
+    built_at: datetime | None = None
 
 
 class BuildTaskOut(BaseModel):
@@ -69,12 +88,59 @@ def enforce_upload_size_limit(request: Request) -> None:
         raise HTTPException(status_code=413, detail="文件大小超出上传上限")
 
 
+@router.get("/media/match", response_model=MediaMatchResponse)
+def match_media(
+    filename: str,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> MediaMatchResponse:
+    """按文件名预检：命中的影片是否已生成过资产。
+
+    只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**
+    判断"这部片已经有资产了，不用再传一遍视频"。
+
+    内容口径与后台 `execute` 的复用判断一致：只有 source 等于当前
+    asset_infer 口径的行才算"可直接复用"，口径不符时上传仍会重建。
+    """
+    matched = asset_build.match_filename(filename, settings.dataset_root)
+    if matched is None:
+        return MediaMatchResponse(matched=False)
+
+    asset_id = f"movie_{matched.movie.movie_id}"
+    rows = (session.query(MediaContext)
+            .filter(MediaContext.asset_id == asset_id)
+            .order_by(MediaContext.created_at)
+            .all())
+    wanted = source_tag(settings.asset_infer)
+    usable = [row for row in rows if row.source == wanted]
+    latest = (usable or rows or [None])[-1]
+    scene_count = 0
+    if latest is not None:
+        try:
+            payload = json.loads(latest.content_json)
+            scene_count = len((payload.get("content") or {}).get("scenes") or [])
+        except (ValueError, AttributeError):
+            scene_count = 0
+    return MediaMatchResponse(
+        matched=True,
+        movie_id=matched.movie.movie_id,
+        matched_title=matched.movie.title,
+        match_how=matched.how,
+        asset_id=asset_id,
+        has_content=bool(usable),
+        content_source=latest.source if latest is not None else None,
+        scene_count=scene_count,
+        built_at=latest.created_at if latest is not None else None,
+    )
+
+
 @router.post("/media/upload", response_model=MediaUploadResponse)
 def upload_media(
     request: Request,
     file: UploadFile,
     asset_id: str | None = Form(None),
     auto_build: bool = Form(True),
+    force: bool = Form(False),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaUploadResponse:
@@ -83,6 +149,8 @@ def upload_media(
     同步 def：磁盘落盘与登记为阻塞操作，走线程池不占事件循环。进入本
     函数时 multipart 已由 FastAPI 收完解析（磁盘 spool，内存不上爆），
     先按 Content-Length 头早拒，再交核心层流式落盘与登记。
+
+    force=True：该片已有同口径内容也重新生成（前端"仍然重新生成"）。
     """
     enforce_upload_size_limit(request)
     filename = file.filename or ""
@@ -119,7 +187,7 @@ def upload_media(
     if matched is not None and auto_build:
         task = asset_build.create_task(session, stored.asset_id,
                                        matched.movie.movie_id)
-        asset_build.submit(task.task_id, settings)
+        asset_build.submit(task.task_id, settings, force=force)
 
     return MediaUploadResponse(
         asset_id=stored.asset_id,
