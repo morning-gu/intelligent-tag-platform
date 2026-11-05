@@ -72,8 +72,8 @@ class Settings(BaseSettings):
     asset_frames: int = 3
     # 场景级并发（生成资产的模型调用）
     asset_workers: int = 4
-    # 每场景最多带几行字幕（台词进资产，但全量会让 JSON 涨 8 倍）
-    asset_dialogue_limit: int = 5
+    # 每场景最多带几行字幕（进资产 JSON；标签生成会全量使用这些台词）
+    asset_dialogue_limit: int = 8
     # 是否让模型推断数据集没有的字段（中文描述/氛围/事件/说话人/剧情时间地点）。
     # False = 只填数据集事实，一次模型调用都不发。
     asset_infer: bool = True

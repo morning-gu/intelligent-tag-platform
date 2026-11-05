@@ -42,9 +42,10 @@ JUDGE_MARKER = "## 审核任务"
 
 # prompt 内明细上限（控制 token；资产本身已按场景裁剪过台词）
 _MAX_CAST = 8
-_MAX_DIALOGUES = 3
 _MAX_SCENE_DESC = 240
 _MAX_SUMMARY = 600
+# 台词不设上限：资产侧已按 asset_dialogue_limit 控量（8 条/场景），这里全用——
+# 台词是情绪与主题最直接的证据，按条数筛掉的往往正是关键那句。
 
 
 def _encode_image(path: Path) -> str:
@@ -86,7 +87,7 @@ def render_content(content: ContentJSON) -> str:
             lines.append(f"  地点：{scene.location}")
         if scene.background_music:
             lines.append(f"  音乐：{scene.background_music}")
-        for dialogue in scene.dialogues[:_MAX_DIALOGUES]:
+        for dialogue in scene.dialogues:
             tone = (f"（{dialogue.emotion.text_emotion}）"
                     if dialogue.emotion and dialogue.emotion.text_emotion else "")
             lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
