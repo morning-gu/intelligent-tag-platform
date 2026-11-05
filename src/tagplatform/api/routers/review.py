@@ -40,9 +40,7 @@ from tagplatform.api.depends import get_current_user
 from tagplatform.api.routers.generation import (
     AssetTagOut,
     EvidenceOut,
-    _catalog_names,
     _parse_evidence,
-    _result_out,
 )
 from tagplatform.db.models import (
     AssetTag,
@@ -248,7 +246,7 @@ def list_review_items(
         .all()
     )
 
-    # 目录名批量解析（限本页行集）。与 generation._catalog_names 不同：
+    # 目录名批量解析（限本页行集）。与 generation._define_names 不同：
     # 这里按"行带 tag_id 即取"——含 merged 行（origin=generated 但已并入
     # 目录）的 tag_name 回退，不做 origin 过滤
     tag_ids = {row.tag_id for row, _, _, _ in rows if row.tag_id}

@@ -1,12 +1,16 @@
-"""模式 A 分组召回：内容多段文本嵌入 → 按标签类型分组取 top_k（Task 5）。
+"""closed 分组召回：内容多段文本嵌入 → 按标签目录分组取 top_k（v2 Task 6）。
 
 召回是封闭式提取的候选筛选层：把内容查询文本（剧情摘要 + 各场景描述，
-见 `embed_content_texts`）一次性批量嵌入，对 tag_catalog 有效行（排除
-status=="deprecate" 与 embedding 为空）按 tag_type 分组；每 query × 每组
-余弦检索，组内合并命中取最高分截 top_k，跨组并集按 tag_id 去重。
+见 `embed_content_texts`）一次性批量嵌入，对 tag_define 有效行（排除
+status=="deprecated" 与 embedding 为空）按 dir_id（标签所属目录）分组；
+每 query × 每组余弦检索，组内合并命中取最高分截 top_k，跨组并集按
+tag_id 去重。v1 按 tag_type 分组——v2 目录/标签拆双表后，分组键自然
+映射为标签的所属目录（doc §3.3/§5）。
 
 检索复用 vectors.search_similar（Embedder 契约保证向量已 L2 归一化，
-点积即余弦）；top_k 由 ClosedTagProducer 读全局配置传入。
+点积即余弦）；内容查询向量 query 角色，库内标签向量是入库/更新时按
+passage 角色算好的持久化 BLOB（doc §5 沿用 v1 已验证的 e5 前缀契约）。
+top_k 由 ClosedTagProducer 读全局配置传入。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagCatalog
+from tagplatform.db.models import TagDefine
 from tagplatform.schemas import ContentJSON
 from tagplatform.vectors import decode_vector, search_similar
 
@@ -25,28 +29,30 @@ def embed_content_texts(content: ContentJSON) -> list[str]:
             *(scene.description for scene in content.content.scenes)]
 
 
-def recall_by_type(session: Session, queries: list[str], embedder,
-                   top_k: int) -> list[TagCatalog]:
-    """按 tag_type 分组召回：组内跨 query 取最高分 top_k，跨组按 tag_id 去重。
+def recall_by_dir(session: Session, queries: list[str], embedder,
+                  top_k: int) -> list[TagDefine]:
+    """按所属目录（dir_id）分组召回：组内跨 query 取最高分 top_k，跨组按
+    tag_id 去重。
 
-    - 有效行：status != "deprecate"（NULL 视为有效）且 embedding 非空
+    - 有效行：status != "deprecated"（NULL 视为有效）且 embedding 非空
       （None / 空字节均排除）；
-    - queries 一次批量嵌入（embedder 契约返回 (n, d)，逐行对应 queries）；
+    - queries 一次批量嵌入（embedder 契约返回 (n, d)，逐行对应 queries），
+      role=query（内容查询侧，与库内 passage 语料相对，doc §5）；
     - 无命中返回 []。
     """
     query_vecs = embedder.embed(queries, role="query")
 
-    # 全量有效行按 tag_type 分组（deprecate 与无向量行不参与召回）
-    groups: dict[str, list[TagCatalog]] = {}
-    for row in session.query(TagCatalog).all():
-        if row.status == "deprecate" or not row.embedding:
+    # 全量有效行按所属目录分组（deprecated 与无向量行不参与召回）
+    groups: dict[str, list[TagDefine]] = {}
+    for row in session.query(TagDefine).all():
+        if row.status == "deprecated" or not row.embedding:
             continue
-        groups.setdefault(row.tag_type, []).append(row)
+        groups.setdefault(row.dir_id, []).append(row)
 
-    picked: list[TagCatalog] = []
+    picked: list[TagDefine] = []
     seen: set[str] = set()
-    for tag_type in sorted(groups):  # 组序确定：按 tag_type 排序遍历
-        rows = groups[tag_type]
+    for dir_id in sorted(groups):  # 组序确定：按 dir_id 排序遍历
+        rows = groups[dir_id]
         rows_by_id = {row.tag_id: row for row in rows}
         candidates = [(row.tag_id, decode_vector(row.embedding)) for row in rows]
         # 每 query 命中合并：同标签跨 query 取最高分
