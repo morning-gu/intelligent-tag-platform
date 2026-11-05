@@ -1,27 +1,27 @@
-"""标签导入/批次/标签查询 API 测试（Task 10）。
+"""标签导入 API 测试（import 用例，v2 契约）。
 
-覆盖契约（错误映射约定见 brief）：
-- POST /api/v1/tags/import：合法模板导入 inserted 计数与 q 查询（tag_name
-  与 aliases 子串匹配）、type 过滤、详情含 aliases；重复导入 skipped==1 且
-  200（Review Focus 2：重复导入不 5xx）；坏表头 422 {"detail": header_error}；
-  损坏 xlsx 字节（openpyxl 抛异常）由 API 层映射 422；
-- GET /api/v1/import/batches：created_at 降序，file_name 为回填后的真实
-  上传文件名（治理流水线写入的是占位 "governance"）；
-- GET /api/v1/import/batches/{batch_id}：result_summary 解析后的 issues 明细；
-  未知批次 404；
-- 修复 3：上传含行级解析错误的 xlsx → 响应 parse_errors 明细 + 批次详情
-  result_summary 同样携带（该行不计入 total）；
-- GET /api/v1/tags/{tag_id}：未知 tag 404。
+覆盖契约（错误映射约定见 brief；批次列表/详情/撤销用例已迁移至
+test_api_imports.py 的 /api/v1/import/tasks）：
+- POST /api/v1/tags/import：响应 {task_id, summary}（v1 batch_id 退役），
+  inserted 仅计标签行（目录行落 tag_catalog 不计入）；重复导入 skipped==1
+  且 200（Review Focus 2：重复导入不 5xx）；层级模板同名标签挂不同目录
+  合法共存；坏表头 422 {"detail": header_error}；损坏 xlsx 字节（openpyxl
+  抛异常）由 API 层映射 422；行级解析错误进响应 parse_errors 并回写任务
+  result_summary（该行不计入 total）；
+- 停用标签再导入复活（deprecated → active）。
 
-xlsx 字节流由 build_xlsx 用 openpyxl 现场构造，不依赖外部文件。
+非 import 用例（/tags 列表/详情/导出/DELETE 生命周期）为 Task 5 域，
+v1 body 原样保留、此时红属中期预期。xlsx 字节流由 build_xlsx 现场构造。
 """
 
 import io
-import time
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 import openpyxl
+
+from tagplatform.db.models import TagCatalog, TagDefine
 
 
 def build_xlsx(rows: list[list]) -> bytes:
@@ -35,7 +35,7 @@ def build_xlsx(rows: list[list]) -> bytes:
     return buffer.getvalue()
 
 
-# 合法模板：1 行标签（别名 悬念/推理，供 q 的别名子串匹配断言）
+# 扁平模板：1 行标签（v2 落「未分类」目录）
 XLSX_BYTES = build_xlsx([
     ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
     ["悬疑", "genre", "以悬念为核心", None, "悬念,推理", "active"],
@@ -49,33 +49,9 @@ def test_import_excel_via_api(client):
     resp = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["batch_id"]
+    assert body["task_id"]
     assert body["summary"]["inserted"] == 1 and body["summary"]["issues"] == []
     assert body["summary"]["total"] == 1 and body["summary"]["skipped"] == 0
-
-    # q 对 tag_name 子串匹配
-    got = client.get("/api/v1/tags?q=悬疑")
-    assert got.status_code == 200
-    items = got.json()["items"]
-    assert [i["tag_name"] for i in items] == ["悬疑"]
-    first = items[0]
-    assert first["tag_type"] == "genre" and first["status"] == "active"
-    assert first["parent_id"] is None and first["tag_id"]
-    assert "description" in first
-
-    # q 对 aliases 子串匹配：「推理」仅出现在别名中
-    by_alias = client.get("/api/v1/tags?q=推理")
-    assert [i["tag_name"] for i in by_alias.json()["items"]] == ["悬疑"]
-
-    # type 过滤：genre 命中、movie 为空
-    assert len(client.get("/api/v1/tags?type=genre").json()["items"]) == 1
-    assert client.get("/api/v1/tags?type=movie").json()["items"] == []
-
-    # 单条详情：在列表字段之上展开 aliases 列表
-    detail = client.get(f"/api/v1/tags/{first['tag_id']}")
-    assert detail.status_code == 200
-    assert detail.json()["aliases"] == ["悬念", "推理"]
-    assert detail.json()["path"] == ["悬疑"]
 
 
 def test_export_tags_as_xlsx_and_xml(client):
@@ -106,10 +82,14 @@ def test_import_allows_same_tag_name_under_different_parents(client):
     resp = client.post("/api/v1/tags/import", files={"file": ("scoped.xlsx", payload)})
 
     assert resp.status_code == 200
-    assert resp.json()["summary"]["inserted"] == 6
-    matches = client.get("/api/v1/tags?q=其他").json()["items"]
-    assert len(matches) == 2
-    assert {item["tag_name"] for item in matches} == {"其他"}
+    # v2 inserted 仅计标签行：4 个目录 + 2 个「其他」标签 → inserted == 2
+    assert resp.json()["summary"]["inserted"] == 2
+    assert resp.json()["summary"]["issues"] == []
+    # 同名标签分属不同目录（(dir, name) 唯一键允许共存）
+    with client.app.state.session_factory() as s:
+        others = s.query(TagDefine).filter_by(tag_name="其他").all()
+        assert len(others) == 2
+        assert len({t.dir_id for t in others}) == 2
 
 
 def test_import_xml_via_api(client):
@@ -125,9 +105,9 @@ def test_import_xml_via_api(client):
 
     assert resp.status_code == 200
     body = resp.json()
+    # v2 inserted 仅计标签行：2 个目录（内容/剧情）+ 1 个标签（喜剧）
     assert body["summary"]["total"] == 3
-    assert body["summary"]["inserted"] == 3
-    assert client.get("/api/v1/tags?q=喜剧").json()["items"][0]["tag_type"] == "genre"
+    assert body["summary"]["inserted"] == 1
 
 
 def test_import_xml_detected_by_content(client):
@@ -135,13 +115,18 @@ def test_import_xml_detected_by_content(client):
     resp = client.post("/api/v1/tags/import", files={"file": ("tags", xml)})
 
     assert resp.status_code == 200
-    assert resp.json()["summary"]["inserted"] == 2
+    # 无扩展名文件按内容嗅探走 XML 解析。注意：解析层把层级节点摊平为
+    # TagRow（不保留"目录节点"标记），末级空目录无子引用时按标签行落位
+    # （内容→目录、剧情→内容目录下的标签），inserted 仅计标签行 == 1
+    assert resp.json()["summary"]["total"] == 2
+    assert resp.json()["summary"]["inserted"] == 1
 
 
 def test_import_twice_reports_duplicates(client):
     resp1 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
     resp2 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
     assert resp1.status_code == 200
+    assert resp1.json()["task_id"]
     assert resp2.json()["summary"]["skipped"] == 1
     assert resp2.status_code == 200          # Review Focus 2：重复导入不 5xx
 
@@ -160,7 +145,7 @@ def test_corrupt_xlsx_422(client):
 
 
 def test_import_parse_errors_in_response_and_batch(client):
-    """修复 3：行级解析错误不再整条丢弃——响应 parse_errors 明细 + 回写批次
+    """行级解析错误不再整条丢弃——响应 parse_errors 明细 + 回写任务
     result_summary（total 语义维持"进入治理的行数"，坏行不计入）。
     """
     mixed = build_xlsx([
@@ -179,8 +164,8 @@ def test_import_parse_errors_in_response_and_batch(client):
     assert by_row[3]["code"] == "missing_field" and by_row[3]["tag_name"] is None
     assert by_row[4]["code"] == "bad_type" and by_row[4]["tag_name"] == "坏单元格"
 
-    # 批次详情的 result_summary 同样带 parse_errors 明细（API 层回写）
-    detail = client.get(f"/api/v1/import/batches/{resp.json()['batch_id']}")
+    # 导入任务详情的 result_summary 同样带 parse_errors 明细（API 层回写）
+    detail = client.get(f"/api/v1/import/tasks/{resp.json()['task_id']}")
     assert detail.status_code == 200
     detail_summary = detail.json()["summary"]
     assert len(detail_summary["parse_errors"]) == 2
@@ -188,91 +173,36 @@ def test_import_parse_errors_in_response_and_batch(client):
     assert detail_summary["total"] == 1 and detail_summary["inserted"] == 1
 
 
-def test_batch_list_and_detail(client):
-    r1 = client.post("/api/v1/tags/import", files={"file": ("a.xlsx", XLSX_BYTES)})
-    time.sleep(0.01)  # Windows 时钟粒度：强制两批次 created_at 可分辨
-    r2 = client.post("/api/v1/tags/import", files={"file": ("b.xlsx", XLSX_BYTES)})
-    batch1, batch2 = r1.json()["batch_id"], r2.json()["batch_id"]
+def test_reimport_reactivates_deprecated_tag(client):
+    """停用标签（status=deprecated）按相同目录再导入时恢复为启用。
 
-    listing = client.get("/api/v1/import/batches")
-    assert listing.status_code == 200
-    batches = listing.json()
-    assert len(batches) == 2
-    # created_at 降序：后导入的批次在前
-    assert [b["batch_id"] for b in batches] == [batch2, batch1]
-    assert batches[0]["file_name"] == "b.xlsx"   # API 层回填真实上传文件名
-    assert batches[0]["status"] == "completed"
-    assert batches[0]["created_at"]
+    v1 用例经 deactivate 端点造停用态（Task 5 域）；v2 改为直接播种
+    deprecated 行，只覆盖本任务的导入复活语义。
+    """
+    factory = client.app.state.session_factory
+    with factory() as s:
+        now = datetime.now(timezone.utc)
+        s.add(TagCatalog(
+            dir_id="dir_seed", dir_name="未分类", dir_type="dir_static",
+            description="", parent_id=None, aliases=None,
+            applicable_scope="content", embedding=None,
+            created_at=now, updated_at=now))
+        s.add(TagDefine(
+            tag_id="tag_seed", tag_name="悬疑", tag_type="val_fixed",
+            description="旧描述", dir_id="dir_seed", aliases=None,
+            status="deprecated", embedding=None, created_at=now, updated_at=now))
+        s.commit()
 
-    detail = client.get(f"/api/v1/import/batches/{batch2}")
-    assert detail.status_code == 200
-    body = detail.json()
-    assert body["batch_id"] == batch2 and body["file_name"] == "b.xlsx"
-    # result_summary 解析后的 issues 明细：第二次导入命中 duplicate_name
-    assert body["summary"]["total"] == 1
-    assert body["summary"]["inserted"] == 0
-    assert body["summary"]["skipped"] == 1
-    assert body["summary"]["issues"][0]["code"] == "duplicate_name"
-    assert body["summary"]["issues"][0]["tag_name"] == "悬疑"
-
-    # 未知批次 → 404
-    assert client.get("/api/v1/import/batches/batch_none").status_code == 404
-
-
-def test_revoke_batch_exports_and_removes_imported_tags(client):
-    imported = client.post("/api/v1/tags/import", files={"file": ("revoke.xlsx", XLSX_BYTES)})
-    batch_id = imported.json()["batch_id"]
-
-    exported = client.get(f"/api/v1/import/batches/{batch_id}/export")
-    assert exported.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
-        assert set(archive.namelist()) == {"tags-export.xlsx", "tags-export.xml"}
-
-    revoked = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
-    assert revoked.status_code == 200
-    assert revoked.json()["status"] == "revoked"
-    assert client.get(f"/api/v1/import/batches/{batch_id}").json()["status"] == "revoked"
-    assert client.get("/api/v1/tags?q=悬疑").json()["items"] == []
-
-    again = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
-    assert again.status_code == 409
-
-    reimported = client.post(
-        "/api/v1/tags/import",
-        files={"file": ("reimport.xlsx", XLSX_BYTES)},
-    )
+    reimported = client.post("/api/v1/tags/import",
+                             files={"file": ("status-again.xlsx", XLSX_BYTES)})
     assert reimported.status_code == 200
     assert reimported.json()["summary"]["inserted"] == 1
+    with factory() as s:
+        row = s.get(TagDefine, "tag_seed")
+        assert row.status == "active" and row.tag_id == "tag_seed"
 
 
-def test_revoke_nested_batch_does_not_violate_parent_foreign_key(client):
-    imported = client.post(
-        "/api/v1/tags/import",
-        files={"file": ("nested.xlsx", build_xlsx([
-            ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
-            ["内容", "剧情", "悬疑", "反转", "", None],
-        ]))},
-    )
-    batch_id = imported.json()["batch_id"]
-
-    revoked = client.post(f"/api/v1/import/batches/{batch_id}/revoke")
-    assert revoked.status_code == 200
-    assert client.get("/api/v1/tags?root=true").json()["items"] == []
-
-
-def test_deactivate_reactivate_and_reimport_tag(client):
-    imported = client.post("/api/v1/tags/import", files={"file": ("status.xlsx", XLSX_BYTES)})
-    tag_id = client.get("/api/v1/tags?q=悬疑").json()["items"][0]["tag_id"]
-
-    stopped = client.post(f"/api/v1/tags/{tag_id}/deactivate")
-    assert stopped.status_code == 200
-    assert stopped.json()["status"] == "deprecate"
-
-    reimported = client.post("/api/v1/tags/import", files={"file": ("status-again.xlsx", XLSX_BYTES)})
-    assert reimported.status_code == 200
-    assert reimported.json()["summary"]["inserted"] == 1
-    assert client.get(f"/api/v1/tags/{tag_id}").json()["status"] == "active"
-
+# ---------- 以下为 Task 5 域（v1 body 原样保留，中期红属预期） ----------
 
 def test_delete_tag_cleans_empty_parent_directories(client):
     imported = client.post(

@@ -51,8 +51,9 @@ class ParseErrorOut(BaseModel):
 class ImportSummary(BaseModel):
     """导入结果摘要：total/inserted/skipped 计数 + issues/parse_errors 明细列表。
 
-    语义与 import_batch.result_summary（治理流水线写入）一致：total 为
-    传入治理的行数（行级解析错误的行不进 rows，不计入），skipped =
+    语义与 tag_import_task.result_summary（治理流水线写入）一致：total 为
+    传入治理的行数（目录行与标签行合计；行级解析错误的行不进 rows，不计
+    入），inserted 仅计标签行（目录行落 tag_catalog 不计入），skipped =
     total - inserted，issues 为治理问题明细（与入库行不相交）；
     parse_errors 为行级解析错误明细（治理流水线不感知解析层 errors，
     由本路由层与 file_name 回填同一模式并入 result_summary），计数以
@@ -67,9 +68,9 @@ class ImportSummary(BaseModel):
 
 
 class ImportResponse(BaseModel):
-    """导入响应：本批批次号 + 结果摘要。"""
+    """导入响应：本批导入任务号 + 结果摘要（v1 batch_id 字段退役）。"""
 
-    batch_id: str
+    task_id: str
     summary: ImportSummary
 
 
@@ -126,7 +127,7 @@ def import_tags(
     session: Session = Depends(get_session),
     embedder=Depends(get_embedder),
 ) -> ImportResponse:
-    """上传标签 Excel/XML：解析 → 治理入库 → 返回批次号与结果摘要。
+    """上传标签 Excel/XML：解析 → 治理双表入库 → 返回导入任务号与结果摘要。
 
     同步 def：治理流水线（embed + DB）为阻塞操作，走线程池不占事件循环。
     """
@@ -154,18 +155,18 @@ def import_tags(
 
     # 回填真实上传文件名（治理流水线写入的是占位 "governance"），并把
     # 行级解析错误明细并入 result_summary——治理流水线不感知 parsed.errors，
-    # 与 file_name 回填同一模式：本路由层更新已提交的批次行
+    # 与 file_name 回填同一模式：本路由层更新已提交的任务行
     parse_errors = [ParseErrorOut(**asdict(e)) for e in parsed.errors]
-    batch = session.get(ImportBatch, result.batch_id)
-    if batch is not None:
-        batch.file_name = file.filename or "upload"
-        summary_data = json.loads(batch.result_summary)
+    task = session.get(TagImportTask, result.task_id)
+    if task is not None:
+        task.file_name = file.filename or "upload"
+        summary_data = json.loads(task.result_summary)
         summary_data["parse_errors"] = [asdict(e) for e in parsed.errors]
-        batch.result_summary = json.dumps(summary_data, ensure_ascii=False)
+        task.result_summary = json.dumps(summary_data, ensure_ascii=False)
         session.commit()
 
     return ImportResponse(
-        batch_id=result.batch_id,
+        task_id=result.task_id,
         summary=ImportSummary(
             total=len(parsed.rows),
             inserted=len(result.inserted),

@@ -11,8 +11,6 @@
 """
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
-from test_generation_open import _build_spec
-from test_task_runner import _make_task, _seed_catalog
 
 from tagplatform.db.models import TagCatalog
 from tagplatform.generation.open_gen import OpenTagProducer
@@ -20,6 +18,11 @@ from tagplatform.generation.recall import recall_by_type
 from tagplatform.governance import TagRow, run_governance
 from tagplatform.tasks import run_generation_task
 from tagplatform.vectors import encode_vector
+
+# 跨模块播种助手延迟导入：test_task_runner / test_generation_open 属
+# Task 6/7 域，其 v1 模型 import（GenerationTask/MediaContext）未就位时
+# 不应拖垮本文件收集——治理/召回用例先行验收（Task 4），生成侧用例在
+# 对应域任务落地时恢复。
 
 
 class RecordingEmbedder:
@@ -56,6 +59,8 @@ def test_recall_embeds_content_as_query(session):
 
 
 def test_open_producer_embeds_candidates_as_query(session, content_fixture):
+    from test_generation_open import _build_spec
+
     spec = _build_spec(session, content_fixture, run_id="r1")
     rec = RecordingEmbedder()
     OpenTagProducer().produce(spec, session, MOCK_LLM, rec)
@@ -64,6 +69,8 @@ def test_open_producer_embeds_candidates_as_query(session, content_fixture):
 
 
 def test_runner_closed_task_uses_query_and_passage(session):
+    from test_task_runner import _make_task, _seed_catalog
+
     _seed_catalog(session)
     t = _make_task(session, policy_json='{"min_confidence": 0.5}')
     rec = RecordingEmbedder()
@@ -74,6 +81,8 @@ def test_runner_closed_task_uses_query_and_passage(session):
 
 
 def test_runner_open_task_only_query(session):
+    from test_task_runner import _make_task
+
     t = _make_task(session, mode="open", task_id="task_role_open")
     rec = RecordingEmbedder()
     run_generation_task(t.task_id, session, MOCK_LLM, rec)

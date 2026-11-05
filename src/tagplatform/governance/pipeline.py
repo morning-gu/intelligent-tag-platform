@@ -1,65 +1,75 @@
-"""标签治理流水线：TagRow 行集 → 逐行校验 → 拓扑序入库 + 批次/审计落库。
+"""标签治理流水线 v2：TagRow 行集 → 目录/标签双表落位 + 导入任务与审计。
 
-两遍法（brief 处理规则）：
-- 第一遍逐行按契约顺序判定 issue、判定即停（一行只报首个命中的 code），
-  通过全部检查的行进入"有效行集"；
-- 第二遍对有效行集按批内父子拓扑序统一插入（先父后子，逐行 flush——
-  TagCatalog 自引用外键无 relationship()，同批 flush 会按类名字母序
-  先插子行而炸外键），最后写 import_batch 摘要并提交。
+落位规则（计划契约速查，docs/table_design.md §2.1/§8）：
+- 行分类：名称被批内任一行的 parent_tag 引用 → **目录行**（tag_catalog，
+  一律 dir_static、applicable_scope 缺省 content）；其余 → **标签行**
+  （tag_define，tag_type 一律 val_fixed）。层级 Excel/XML 的一/二/三级
+  天然被下级行引用成目录链，「标签」列与扁平行不被引用即标签——分类
+  无需感知解析层模板形状。已知边界：解析层把层级节点摊平为 TagRow（不
+  保留"目录节点"标记），**无子引用的末级空目录**（如 XML 的
+  `<level2 name="剧情"/>` 且其下无标签）会退化为标签行；层级 Excel 不受
+  影响（标签列必填，层级行恒被本行标签引用）；
+- 标签行归属目录：parent_tag 命中批内目录行 > 库内同名目录（根目录
+  优先、同级按 dir_id 稳定）> parent_tag 为空时自动创建/复用根目录
+  「未分类」；三者皆不中报 parent_not_found；
+- 目录行幂等复用：同 (父目录, 目录名) 已存在（库内或批内已计划）则
+  复用，不报 issue、不重复建、不写变更日志；
+- 状态字面量 v2 统一 "deprecated"：行 status 的 v1 取值 "deprecate"
+  一并归一，其余取值按 active 入库（CHECK 约束兜底）；
+- 停用标签同 (dir, name) 再导入复活：保留原 tag_id 恢复 active，写
+  before_json 供撤销还原（v1 语义沿用）。
 
-判定顺序（控制器裁决：按处理规则序，tag_type_invalid 提前至语义检查
-之前；Task 4 批量编码后各行统一预 embed，"非法类型省 embed 开销"不再
-是排序动机，但判定序本身为契约不变）：
-    duplicate_name → alias_conflict → tag_type_invalid →
-    semantic_similar → parent_not_found → parent_cycle
+两遍法保留 v1 形状：第一遍逐行判定、判定即停（目录行按父链依赖序先行
+检查——父计划就绪后子行才判定，被拒父的批内子孙自动级联拦截，零静默
+搁浅；issue 最终按行序回排）；第二遍统一插入（目录链拓扑序 + 逐行
+flush——自引用外键无 relationship()，保证父行先落库）。判定序
+（v1 的 tag_type_invalid 随白名单校验退役而移除）：
+    duplicate_name → alias_conflict → semantic_similar → parent_not_found
+    （目录行另有 parent_cycle；标签行是叶子，无环可成）
 
-Task 4（阶段 2 终审建议落地）：
-- 显式配置：run_governance 增可选 config（GovernanceConfig），None 回退
-  get_settings()——既有调用方与全部判定行为不变；
-- 批量编码：第一遍前对全部待检行一次 embed，语义检查与第二遍插入共用
-  同一批向量（_ValidRow.vec 缓存），embed 调用从逐行 N 次降为 1 次。
+语义比对沿用 v1：对 define 文本、passage 角色批量预 embed（全批一次
+调用，判定与插入共用同一批向量）；候选排除同名——同名不同目录是
+( dir_id, tag_name ) 唯一键下的合法共存，同名同目录已被 duplicate_name
+前置拦截。
 
-契约细则的实现解读（详见 task-7-report）：
-- duplicate_name 对"同名不同 tag_type"的行不立即判停：test_semantic_
-  threshold_inclusive 契约要求该情形让位给 semantic_similar（同名 →
-  同名同描述文本 → 余弦 1.0 ≥ 阈值）；若语义未命中，则回填 duplicate_name
-  ——tag_name 列有唯一约束，放行必然 IntegrityError，故同名必拦截。
-- alias_conflict 为批内全局预扫描（"批内两行共享同一 alias"）：共享别名的
-  两行均判 alias_conflict、均不插入（test_alias_cross_conflict 断言
-  res2.inserted == []）。
-- parent_not_found 的"批内有效行"按名取自整批行集（含尚未判定的行）：
-  test_parent_missing_and_cycle 中甲行判定时乙行尚未过检，若只看已过检
-  行会误报 parent_not_found。父名只命中批内未通过校验行的情况在第二遍
-  插入时兜底拦截（报 parent_not_found、不插入）；兜底跳过时把该行从
-  valid_by_name 摘除**级联**——其批内子孙下一轮因父不在有效行集而就绪，
-  同样走兜底逐一拦截。记账不变量：每行要么入库要么有 issue，零静默丢弃
-  （否则被跳过行的子孙会因就绪集为空而无声搁浅）。
-- parent_cycle 只查批内新增边：父链走出批内（命中库内名）即止，库内
-  已有链由库保证无环。
-- 时间戳列无默认值，插入时显式赋 UTC now（Task 3 审查遗留注意项）。
+审计：每个新建目录/标签行写 tag_change_log(action='import')，after_json
+带 task_id（revoke/export 反查键，替代 v1 的 batch_id 字段名）与 kind
+（'dir'|'tag'，撤销需区分删除对象——目录行复用不记日志）。
+
+记账不变量（v2 口径）：每行要么产生新实体（inserted / 变更日志）、要么
+幂等复用已有目录、要么有 issue。
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 import numpy as np
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagCatalog, TagChangeLog, TagImportTask
+from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.governance.excel import TagRow
 from tagplatform.settings import get_settings
 from tagplatform.vectors import decode_vector, encode_vector, search_similar
 
-# run_governance 无文件名入参，import_batch.file_name 记录写入来源；
-# API 层（Task 10）如需真实文件名可在拿到 batch_id 后回填
-_BATCH_FILE_NAME = "governance"
+# run_governance 无文件名入参，tag_import_task.file_name 记录写入来源；
+# API 层拿到 task_id 后回填真实上传文件名（与 parse_errors 同一回写）
+_TASK_FILE_NAME = "governance"
+
+# 扁平标签行（parent_tag 为空）落入的自动根目录
+_UNCATEGORIZED_DIR_NAME = "未分类"
 
 # 审计日志操作者标识：本流水线产生的 import 动作统一记 governance
 _OPERATOR = "governance"
+
+# v2 落位常量：导入路径一律静态目录 + content 范围 + 固定值标签
+_DIR_TYPE_STATIC = "dir_static"
+_SCOPES = ("content", "scene", "character")
+_DEFAULT_SCOPE = "content"
+_TAG_TYPE_FIXED = "val_fixed"
 
 
 @dataclass
@@ -74,359 +84,476 @@ class Issue:
 
 @dataclass
 class GovernanceResult:
-    """治理结果：本批 batch_id、入库 tag_id 列表、问题列表（与插入行不相交）。"""
+    """治理结果：本批 task_id、入库标签 tag_id 列表（目录行不计入——
+    inserted 语义沿 v1 为"标签入库数"，目录创建属结构落位）、问题列表
+    （与插入行不相交；目录复用行既不在 inserted 也无 issue）。"""
 
-    batch_id: str
+    task_id: str
     inserted: list[str]
     issues: list[Issue]
 
 
 @dataclass
 class GovernanceConfig:
-    """治理显式配置（阶段 2 终审建议：显式传参替代全局依赖）。
-
-    run_governance(config=None) 时回退 get_settings()（向后兼容，行为
-    不变）；显式路径下 allowed_tag_types 直接收 set，逗号串解析仅发生
-    在全局回退路径。
-    """
+    """治理显式配置。v2 仅保留相似阈值——v1 的 allowed_tag_types 白名单
+    校验随 tag_type 枚举化（tag_define.tag_type 一律 val_fixed）退役；
+    run_governance(config=None) 时回退 get_settings().semantic_similar_threshold
+    （既有调用方与判定行为不变）。"""
 
     similar_threshold: float = 0.90
-    allowed_tag_types: set[str] = field(default_factory=set)
 
 
 @dataclass(eq=False)
-class _ValidRow:
-    """通过全部校验的行：预生成 tag_id（父子引用一致）并缓存查询向量。"""
+class _DirPlan:
+    """批内目录行的落位计划：依赖序检查通过后按序插入/复用。"""
+
+    row: TagRow
+    vec: np.ndarray  # 本行向量（批量编码矩阵中本行向量，仅用于入库存储）
+    dir_id: str  # 复用库内目录时为库内 dir_id，新建时为预生成 id
+    parent_plan: _DirPlan | None  # 父为批内目录行时指向其计划
+    parent_db_id: str | None  # 父为库内已有目录时的 dir_id
+    reused: bool  # True = 幂等复用库内目录（不插入、不记变更日志）
+
+
+@dataclass(eq=False)
+class _ValidTag:
+    """通过全部校验的标签行：目标目录已解析、向量与 tag_id 就绪。"""
 
     row: TagRow
     tag_id: str
-    vec: np.ndarray  # 1-D float32 归一化向量（批量编码矩阵中本行向量，判定与插入共用）
+    vec: np.ndarray  # 1-D float32 归一化向量（判定与插入共用）
+    dir_id: str  # 目标目录 id（批内新目录为预生成 id，插入阶段已落库）
+    reactivate: TagDefine | None  # 非 None = 复活该库内停用行（UPDATE 而非 INSERT）
 
 
-def _parse_allowed_types(raw: str) -> set[str]:
-    """逗号分隔白名单解析；空串/纯分隔符 → 空集（不校验）。"""
-    return {part.strip() for part in raw.split(",") if part.strip()}
+def _normalize_scope(raw: str | None) -> str:
+    """目录 applicable_scope 归一：非法取值回退 content（CHECK 兜底）。"""
+    return raw if raw in _SCOPES else _DEFAULT_SCOPE
 
 
-def _load_config(config: GovernanceConfig | None) -> tuple[float, set[str]]:
-    """治理参数装载：显式 config 优先；None 回退全局 get_settings()。
-
-    返回 (similar_threshold, allowed_types 集合)；回退路径沿用逗号串
-    白名单解析（既有行为不变），显式路径浅拷贝入参集合防调用方突变。
-    """
-    if config is not None:
-        return config.similar_threshold, set(config.allowed_tag_types)
-    settings = get_settings()
-    return (settings.semantic_similar_threshold,
-            _parse_allowed_types(settings.allowed_tag_types))
-
-
-def _chain_reaches_cycle(row: TagRow, batch_by_name: dict[str, TagRow]) -> bool:
-    """沿批内 parent 链上行，链中重现任一名称即成环。
-
-    父名不在批内（命中库内或缺失）时链出批：库内已有链不会成环，
-    缺失父链由 parent_not_found 单独负责。
-    """
-    seen: set[str] = set()
-    current = row
-    while True:
-        if current.tag_name in seen:
-            return True
-        seen.add(current.tag_name)
-        parent_name = current.parent_tag
-        if parent_name is None or parent_name not in batch_by_name:
-            return False
-        current = batch_by_name[parent_name]
+def _normalize_status(raw: str | None) -> str:
+    """标签 status 归一：v1 字面量 "deprecate" 并入 v2 "deprecated"。"""
+    return "deprecated" if raw in ("deprecated", "deprecate") else "active"
 
 
 def run_governance(rows: list[TagRow], session: Session, embedder,
                    config: GovernanceConfig | None = None) -> GovernanceResult:
-    """治理一批标签行：校验 → 拓扑序入库 → 批次摘要与审计日志落库并提交。
+    """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
+    审计日志落库并提交。
 
-    config 为显式治理配置（GovernanceConfig）；None 回退 get_settings()，
-    既有调用方（API 路由等按三参调用）行为不变。
+    config 为显式治理配置（GovernanceConfig，仅 similar_threshold）；
+    None 回退 get_settings()，既有调用方（API 路由等按三参调用）行为不变。
     """
-    threshold, allowed_types = _load_config(config)
+    if config is not None:
+        threshold = config.similar_threshold
+    else:
+        threshold = get_settings().semantic_similar_threshold
 
-    # 库内基线：同一父目录下名称唯一；非废弃行用于父解析/别名冲突/
-    # 语义比对（废弃标签不参与这些解析）。
-    db_rows = session.query(TagCatalog).all()
-    db_parent_names = {
-        t.tag_id: next(
-            (parent.tag_name for parent in db_rows if parent.tag_id == t.parent_id),
-            None,
-        )
-        for t in db_rows
-    }
-    db_all_by_key = {
-        (db_parent_names[t.tag_id], t.tag_name): t for t in db_rows
-    }
-    db_by_name = {t.tag_name: t for t in db_rows if t.status != "deprecate"}
-    db_candidates = [
-        (t.tag_name, decode_vector(t.embedding), db_parent_names[t.tag_id])
-        for t in db_rows
-        if t.status != "deprecate" and t.embedding is not None
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+    # ---------- 库内基线 ----------
+    db_dirs = session.query(TagCatalog).all()
+    # 裸名解析：根目录优先、同级按 dir_id 稳定（多目录同名时取首个，
+    # 与 v1 batch_by_name/db_by_name 的"按名解析"语义一脉相承）
+    db_dir_by_name: dict[str, TagCatalog] = {}
+    for d in sorted(db_dirs, key=lambda d: (d.parent_id is not None, d.dir_id)):
+        db_dir_by_name.setdefault(d.dir_name, d)
+    # (父目录 id, 目录名) → 目录行：目录幂等复用查表（根目录 NULL 键由
+    # 服务层查重——UNIQUE 对 NULL 互不区分，沿 v1 0006 口径）
+    db_dir_by_key: dict[tuple[str | None, str], TagCatalog] = {}
+    for d in db_dirs:
+        db_dir_by_key.setdefault((d.parent_id, d.dir_name), d)
+
+    db_defines = session.query(TagDefine).all()
+    db_define_by_key = {(t.dir_id, t.tag_name): t for t in db_defines}
+    db_define_names = {t.tag_name for t in db_defines if t.status != "deprecated"}
+    db_define_candidates = [
+        (t.tag_name, t.dir_id, decode_vector(t.embedding))
+        for t in db_defines
+        if t.status != "deprecated" and t.embedding is not None
     ]
 
-    # 批内预扫描：按名索引（parent 解析/成环走查用）与共享别名归属（批内全局判冲突）
-    batch_by_name: dict[str, TagRow] = {}
-    for r in rows:
-        batch_by_name.setdefault(r.tag_name, r)
-    alias_owners: dict[str, list[int]] = {}
-    name_owners: dict[str, list[int]] = {}
-    name_scope_owners: dict[tuple[str | None, str], list[int]] = {}
+    # ---------- 批内分类：被引用名为目录行，其余为标签行 ----------
+    referenced_names = {r.parent_tag for r in rows if r.parent_tag is not None}
+    dir_items = [(i, r) for i, r in enumerate(rows) if r.tag_name in referenced_names]
+    dir_row_by_name: dict[str, TagRow] = {}
+    for _i, r in dir_items:
+        # 裸名引用解析取首个出现的目录行（v1 batch_by_name.setdefault 语义）
+        dir_row_by_name.setdefault(r.tag_name, r)
+    tag_name_owners: dict[str, list[int]] = {}
     for i, r in enumerate(rows):
-        # TagRow.aliases 标注 list[str]，但直接构造可传 None（brief 用例
-        # 即如此）：治理层按"None = 无别名"兼容
+        if r.tag_name not in referenced_names:
+            tag_name_owners.setdefault(r.tag_name, []).append(i)
+
+    # 别名归属预扫描（批内全局，v1 语义：共享别名判冲突，全部行参与）
+    alias_owners: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        # TagRow.aliases 标注 list[str]，但直接构造可传 None：按"None = 无
+        # 别名"兼容
         for alias in (r.aliases or []):
             alias_owners.setdefault(alias, []).append(i)
-        name_owners.setdefault(r.tag_name, []).append(i)
-        name_scope_owners.setdefault((r.parent_tag, r.tag_name), []).append(i)
 
-    # ---------- 批量编码：全部待检行一次 embed（Task 4 终审建议） ----------
-    # 判定阶段的语义检查与第二遍插入共用同一批向量（_ValidRow.vec 缓存），
-    # embed 调用从逐行 N 次降为 1 次；空批不发起调用。向量与行按下标对齐。
+    def _alias_conflict(r: TagRow, i: int) -> tuple[str | None, str | None]:
+        """别名撞库内标签名 / 撞批内其他标签行名 / 批内共享（预扫描）。"""
+        for alias in (r.aliases or []):
+            if alias in db_define_names:
+                return alias, f"别名「{alias}」与库内标签名称冲突"
+            # 撞批内其他标签行名（owners 含自身下标，须排除 i；别名与本行
+            # 同名但无其他行同名时不冲突——自别名合法）
+            if any(owner != i for owner in tag_name_owners.get(alias, [])):
+                return alias, f"别名「{alias}」与本批其他标签名称冲突"
+            if any(owner != i for owner in alias_owners.get(alias, [])):
+                return alias, f"别名「{alias}」与本批其他行共享"
+        return None, None
+
+    # ---------- 批量编码：全部待检行一次 embed ----------
+    # 判定阶段的语义检查与第二遍插入共用同一批向量；扁平标签行需要自动
+    # 「未分类」目录且库内没有时，其文本作为尾项并入同一批调用（仍是
+    # 单次批量编码，无逐行调用）。向量与行按下标对齐，尾项向量单独取用。
     # role=passage：入库向量成为被检索语料（与召回/归一的 query 侧相对）。
+    uncat_existing = db_dir_by_name.get(_UNCATEGORIZED_DIR_NAME)
+    uncat_dir_id = (uncat_existing.dir_id if uncat_existing is not None
+                    else f"dir_{uuid.uuid4().hex[:8]}")
+    needs_uncat = any(
+        r.parent_tag is None and r.tag_name not in referenced_names for r in rows
+    )
+    uncat_vec: np.ndarray | None = None
     texts = [f"{r.tag_name}。{r.description}" for r in rows]
+    if needs_uncat and uncat_existing is None:
+        texts.append(f"{_UNCATEGORIZED_DIR_NAME}。")
     batch_vecs = embedder.embed(texts, role="passage") if texts else []
+    if needs_uncat and uncat_existing is None and len(batch_vecs) > len(rows):
+        uncat_vec = batch_vecs[len(rows)]
 
-    # ---------- 第一遍：逐行判定，判定即停，累计有效行集 ----------
-    issues: list[Issue] = []
-    valid: list[_ValidRow] = []
-    valid_by_name: dict[str, _ValidRow] = {}
-    earlier: list[tuple[str, str]] = []  # 批内更早行的 (tag_name, tag_type)
+    issues: list[tuple[int, Issue]] = []  # (行下标, issue)——最终按行序回排
+
+    def _check_dir_row(i: int, r: TagRow, parent_index: int | None) -> None:
+        """单个目录行的依赖序检查：alias_conflict → 父解析 → 幂等复用/计划。
+
+        父行已检查但无计划（被拒）→ 本行 parent_not_found 并级联——其批内
+        子孙下一轮因父无计划而同样走此分支，零静默搁浅。
+        """
+        checked_dir.add(i)
+        vec = batch_vecs[i]
+
+        # 1) alias_conflict（目录行别名同样不得撞标签名/批内共享）
+        conflict_alias, conflict_detail = _alias_conflict(r, i)
+        if conflict_alias is not None:
+            issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
+            return
+
+        # 2) 父解析：批内目录行计划 / 库内同名目录 / 根
+        parent_plan: _DirPlan | None = None
+        parent_db_id: str | None = None
+        if r.parent_tag is not None:
+            if parent_index is not None:
+                parent_plan = plans.get(parent_index)
+                if parent_plan is None:
+                    # 父目录行在本批未通过校验：本行拦截，子孙级联
+                    issues.append((i, Issue(
+                        r.tag_name, "parent_not_found",
+                        f"父目录「{r.parent_tag}」在本批未通过校验")))
+                    return
+            else:
+                db_parent = db_dir_by_name.get(r.parent_tag)
+                if db_parent is None:
+                    issues.append((i, Issue(
+                        r.tag_name, "parent_not_found",
+                        f"父目录「{r.parent_tag}」不在库内或本批")))
+                    return
+                parent_db_id = db_parent.dir_id
+
+        # 3) 幂等复用：同 (父目录, 目录名) 的批内计划 / 库内目录直接复用
+        parent_id = (parent_plan.dir_id if parent_plan is not None
+                     else parent_db_id)
+        key = (parent_id, r.tag_name)
+        dedup = plan_by_key.get(key)
+        if dedup is not None:
+            plan_by_name.setdefault(r.tag_name, dedup)
+            return
+        db_reuse = db_dir_by_key.get(key)
+        if db_reuse is not None:
+            plan = _DirPlan(row=r, vec=vec, dir_id=db_reuse.dir_id,
+                            parent_plan=parent_plan, parent_db_id=parent_db_id,
+                            reused=True)
+        else:
+            plan = _DirPlan(row=r, vec=vec,
+                            dir_id=(r.tag_id if r.tag_id
+                                    else f"dir_{uuid.uuid4().hex[:8]}"),
+                            parent_plan=parent_plan, parent_db_id=parent_db_id,
+                            reused=False)
+        plans[i] = plan
+        plan_by_name.setdefault(r.tag_name, plan)
+        plan_by_key[key] = plan
+        checked_plans.append(plan)
+
+    # ---------- 第一遍 A：目录行按父链依赖序检查（父计划就绪才判子行） ----------
+    # 目录行不能按行序直判（子行可能先于父行出现），按依赖序反复扫描：
+    # 父目录行已决（有计划或已被拒）才检查本行；永不能就绪的行即批内环
+    # 链成员（含链入环的行），整链报 parent_cycle。
+    checked_dir: set[int] = set()
+    plans: dict[int, _DirPlan] = {}  # 行下标 → 计划
+    plan_by_name: dict[str, _DirPlan] = {}  # 裸名 → 首个同名目录行计划
+    plan_by_key: dict[tuple[str | None, str], _DirPlan] = {}  # (父id, 名) → 计划
+    checked_plans: list[_DirPlan] = []  # 拓扑序（父先于子），插入阶段按序消费
+    item_by_name: dict[str, tuple[int, TagRow]] = {}
+    for i, r in dir_items:
+        item_by_name.setdefault(r.tag_name, (i, r))
+
+    remaining = list(dir_items)
+    while remaining:
+        progressed = False
+        still_pending: list[tuple[int, TagRow]] = []
+        for i, r in remaining:
+            parent_item = item_by_name.get(r.parent_tag) if r.parent_tag else None
+            if parent_item is not None and parent_item[0] not in checked_dir:
+                still_pending.append((i, r))  # 父目录行未决，等下一轮
+                continue
+            progressed = True
+            _check_dir_row(i, r, parent_item[0] if parent_item else None)
+        remaining = still_pending
+        if not progressed:
+            break
+    for i, r in remaining:
+        # 批内父链成环（含链入环的行）：目录行整链拦截
+        issues.append((i, Issue(
+            r.tag_name, "parent_cycle", f"批内父链成环（涉及「{r.parent_tag}」）")))
+        checked_dir.add(i)
+
+    # ---------- 第一遍 B：标签行按行序检查，判定即停 ----------
+    valid_tags: list[_ValidTag] = []
+    claimed: set[tuple[str, str]] = set()  # (目标目录标识, 标签名) 批内占用
 
     for i, r in enumerate(rows):
-        # 1) duplicate_name：同名同 type 立即判停；同名不同 type 让位语义检查
-        #    （见模块 docstring），先记为待定，语义未命中时回填
-        dup_now: str | None = None
-        dup_deferred: str | None = None
-        db_hit = db_all_by_key.get((r.parent_tag, r.tag_name))
-        if db_hit is not None:
-            if db_hit.status == "deprecate":
-                # 停用标签再次导入时恢复启用，保留原 tag_id。
-                pass
-            elif db_hit.tag_type == r.tag_type:
-                dup_now = f"已存在 tag_id={db_hit.tag_id}"
-            else:
-                dup_deferred = (
-                    f"同名标签已存在 tag_id={db_hit.tag_id}（tag_type 不同）")
-        if dup_now is None:
-            for earlier_name, earlier_type in earlier:
-                if earlier_name != r.tag_name:
-                    continue
-                if len(name_scope_owners.get((r.parent_tag, r.tag_name), [])) < 2:
-                    continue
-                if earlier_type == r.tag_type:
-                    dup_now = "批内重复"
-                    break
-                if dup_deferred is None:
-                    dup_deferred = "批内更早行存在同名标签（tag_type 不同）"
-        if dup_now is not None:
-            issues.append(Issue(r.tag_name, "duplicate_name", dup_now))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
+        if r.tag_name in referenced_names:
+            continue  # 目录行已在 A 段处理
 
-        # 2) alias_conflict：别名撞库内名称 / 撞批内其他行名称 / 批内共享（预扫描）
-        conflict_alias: str | None = None
-        conflict_detail: str | None = None
-        for alias in (r.aliases or []):
-            if alias in db_by_name:
-                conflict_alias, conflict_detail = alias, f"别名「{alias}」与库内标签名称冲突"
-                break
-            # 撞批内其他行名称（name_owners 含自身下标，须排除 i；别名与
-            # 本行同名但无其他行同名时不冲突——自别名合法）
-            if any(owner != i for owner in name_owners.get(alias, [])):
-                conflict_alias, conflict_detail = alias, f"别名「{alias}」与本批其他行标签名称冲突"
-                break
-            if any(owner != i for owner in alias_owners.get(alias, [])):
-                conflict_alias, conflict_detail = alias, f"别名「{alias}」与本批其他行共享"
-                break
-        if conflict_alias is not None:
-            issues.append(Issue(r.tag_name, "alias_conflict", conflict_detail))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
-
-        # 3) tag_type_invalid：白名单非空且不在白名单（先于语义检查判定，
-        #    报 tag_type_invalid 而非 semantic_similar——顺序为契约，见模块
-        #    docstring；向量已批量预取，此处判停不取用即可）
-        if allowed_types and r.tag_type not in allowed_types:
-            issues.append(Issue(
-                r.tag_name, "tag_type_invalid",
-                f"tag_type「{r.tag_type}」不在白名单：{'、'.join(sorted(allowed_types))}"))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
-
-        # 4) semantic_similar：与库内向量（含本批已过检行）余弦 ≥ 阈值（含等于）
-        #    （向量取自批量预取结果——与插入阶段同一批，不再逐行 embed）
         vec = batch_vecs[i]
+        # 目标目录解析：批内目录行计划 > 库内同名目录 > 「未分类」> 缺失
+        if r.parent_tag is None:
+            target_dir_id = uncat_dir_id
+            target_missing = False
+        elif (plan := plan_by_name.get(r.parent_tag)) is not None:
+            target_dir_id = plan.dir_id
+            target_missing = False
+        elif (db_dir := db_dir_by_name.get(r.parent_tag)) is not None:
+            target_dir_id = db_dir.dir_id
+            target_missing = False
+        else:
+            target_dir_id = None
+            target_missing = True
+
+        # 1) duplicate_name：库内 (dir_id, tag_name)（停用行放行待复活）
+        #    与批内占用两路；目标缺失时按缺失父标识占位判批内重复
+        reactivate: TagDefine | None = None
+        if not target_missing:
+            db_hit = db_define_by_key.get((target_dir_id, r.tag_name))
+            if db_hit is not None:
+                if db_hit.status == "deprecated":
+                    reactivate = db_hit  # 停用标签再导入复活，保留原 tag_id
+                else:
+                    issues.append((i, Issue(
+                        r.tag_name, "duplicate_name",
+                        f"已存在 tag_id={db_hit.tag_id}")))
+                    continue
+            claim_key = target_dir_id
+        else:
+            claim_key = f"missing:{r.parent_tag}"
+        if (claim_key, r.tag_name) in claimed:
+            issues.append((i, Issue(r.tag_name, "duplicate_name", "批内重复")))
+            continue
+
+        # 2) alias_conflict（目录行与标签行同规则：别名不得撞标签名）
+        conflict_alias, conflict_detail = _alias_conflict(r, i)
+        if conflict_alias is not None:
+            issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
+            continue
+
+        # 3) semantic_similar：与库内/批内已过检标签向量余弦 ≥ 阈值（含等
+        #    于）；候选排除同名（同名不同目录为合法共存——(dir_id, tag_name)
+        #    唯一键；同名同目录已由 duplicate_name 前置拦截）
+        candidates = db_define_candidates + [
+            (v.row.tag_name, v.dir_id, v.vec) for v in valid_tags
+        ]
         hits = search_similar(
             vec,
-            [
-                (name, candidate_vec)
-                for name, candidate_vec, candidate_scope in (
-                    db_candidates
-                    + [(v.row.tag_name, v.vec, v.row.parent_tag) for v in valid]
-                )
-                if name != r.tag_name or candidate_scope == r.parent_tag
-            ],
+            [(name, cand_vec) for name, cand_dir, cand_vec in candidates
+             if name != r.tag_name or cand_dir == target_dir_id],
             top_k=1,
         )
         if hits and hits[0][1] >= threshold:
             similar_name, score = hits[0]
-            issues.append(Issue(
+            issues.append((i, Issue(
                 r.tag_name, "semantic_similar",
                 f"与已有标签「{similar_name}」余弦相似度 {score:.3f} ≥ 阈值 {threshold}",
-                similar_to=similar_name))
-            earlier.append((r.tag_name, r.tag_type))
+                similar_to=similar_name)))
             continue
 
-        # 5) 同级同名不同 type 且语义未命中 → 回填 duplicate_name
-        if dup_deferred is not None:
-            issues.append(Issue(r.tag_name, "duplicate_name", dup_deferred))
-            earlier.append((r.tag_name, r.tag_type))
+        # 4) parent_not_found：父名既不在批内目录行也不在库内目录
+        if target_missing:
+            issues.append((i, Issue(
+                r.tag_name, "parent_not_found",
+                f"父目录「{r.parent_tag}」不在库内或本批")))
             continue
 
-        # 6) parent_not_found：父名既不在库内也不在批内任一行
-        if r.parent_tag is not None and r.parent_tag not in db_by_name \
-                and r.parent_tag not in batch_by_name:
-            issues.append(Issue(
-                r.tag_name, "parent_not_found", f"父标签「{r.parent_tag}」不在库内或本批"))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
-
-        # 7) parent_cycle：只查批内新增边（父链走出批内即无环风险）
-        if r.parent_tag is not None and r.parent_tag in batch_by_name \
-                and _chain_reaches_cycle(r, batch_by_name):
-            issues.append(Issue(
-                r.tag_name, "parent_cycle", f"批内父链成环（涉及「{r.parent_tag}」）"))
-            earlier.append((r.tag_name, r.tag_type))
-            continue
-
-        # 通过全部检查 → 有效行集（tag_id 此时定死，供子行 parent 引用）
-        valid_row = _ValidRow(
+        # 通过全部检查 → 有效标签行（复活行沿用库内 tag_id，其余按行自带
+        # tag_id 或预生成——与 v1 的 id 来源语义一致）
+        valid_tags.append(_ValidTag(
             row=r,
-            tag_id=(
-                db_hit.tag_id
-                if db_hit is not None and db_hit.status == "deprecate"
-                else (r.tag_id if r.tag_id else f"tag_{uuid.uuid4().hex[:8]}")
-            ),
+            tag_id=(reactivate.tag_id if reactivate is not None
+                    else (r.tag_id if r.tag_id else f"tag_{uuid.uuid4().hex[:8]}")),
             vec=vec,
-        )
-        valid.append(valid_row)
-        valid_by_name[r.tag_name] = valid_row
-        earlier.append((r.tag_name, r.tag_type))
+            dir_id=target_dir_id,
+            reactivate=reactivate,
+        ))
+        claimed.add((claim_key, r.tag_name))
 
-    # ---------- 第二遍：有效行集按批内父子拓扑序统一插入 ----------
-    now = datetime.now(timezone.utc)
-    batch_id = f"batch_{uuid.uuid4().hex[:8]}"
+    # ---------- 第二遍：双表拓扑序统一插入（逐行 flush 保证父行先落库） ----------
     inserted: list[str] = []
-    inserted_names: set[str] = set()
-    pending = list(valid)
-    while pending:
-        # 就绪 = 无批内父、父已插入、或父已不在有效行集（库内父 / 已被
-        # 兜底级联摘除两种情形）
-        ready = [v for v in pending
-                 if v.row.parent_tag is None
-                 or v.row.parent_tag in inserted_names
-                 or v.row.parent_tag not in valid_by_name]
-        if not ready:
-            # 防御性兜底：环行已在第一遍全部拦截，有效行集批内父链无环，
-            # 就绪集理应非空；此处仅防御未来改动引入死循环
-            break
-        for v in ready:
-            pending.remove(v)
-            parent_name = v.row.parent_tag
-            parent_id: str | None = None
-            if parent_name is not None:
-                if parent_name in db_by_name:
-                    parent_id = db_by_name[parent_name].tag_id
-                elif parent_name in valid_by_name:
-                    parent_id = valid_by_name[parent_name].tag_id
-                else:
-                    # 父名只命中批内未通过校验的行：本行不插入，并从
-                    # valid_by_name 摘除以级联——其批内子孙下一轮因父不在
-                    # 有效行集而就绪，同样走此兜底逐一报 parent_not_found。
-                    # 若只摘 pending 不摘 valid_by_name，子孙的父仍"看似
-                    # 有效"，就绪集变空会静默搁浅整条子孙链（零 issue）。
-                    issues.append(Issue(
-                        v.row.tag_name, "parent_not_found",
-                        f"父标签「{parent_name}」在本批未通过校验"))
-                    valid_by_name.pop(v.row.tag_name, None)
-                    continue
-            status = v.row.status or "active"  # status 缺省语义由入库层决定
-            existing = session.get(TagCatalog, v.tag_id)
-            before_json = None
-            if existing is None:
-                session.add(TagCatalog(
-                    tag_id=v.tag_id,
-                    tag_name=v.row.tag_name,
-                    tag_type=v.row.tag_type,
-                    description=v.row.description,
-                    parent_id=parent_id,
-                    aliases=json.dumps(v.row.aliases, ensure_ascii=False) if v.row.aliases else None,
-                    applicable_scope=v.row.applicable_scope,
-                    status=status,
-                    embedding=encode_vector(v.vec),
-                    created_at=now,
-                    updated_at=now,
-                ))
-            else:
-                before_json = json.dumps(
-                    {"status": existing.status}, ensure_ascii=False)
-                existing.tag_type = v.row.tag_type
-                existing.description = v.row.description
-                existing.parent_id = parent_id
-                existing.aliases = (
-                    json.dumps(v.row.aliases, ensure_ascii=False)
-                    if v.row.aliases else None
-                )
-                existing.applicable_scope = v.row.applicable_scope
-                existing.status = status
-                existing.embedding = encode_vector(v.vec)
-                existing.updated_at = now
-            # 自引用外键无 relationship()：逐行 flush 保证父行先落库
-            session.flush()
-            after = {
-                "tag_id": v.tag_id,
-                "tag_name": v.row.tag_name,
-                "tag_type": v.row.tag_type,
-                "description": v.row.description,
-                "parent_id": parent_id,
-                "aliases": v.row.aliases,
-                "applicable_scope": v.row.applicable_scope,
-                "status": status,
-                "batch_id": batch_id,
-            }
-            session.add(TagChangeLog(
-                tag_id=v.tag_id,
-                action="import",
-                before_json=before_json,
-                after_json=json.dumps(after, ensure_ascii=False),
-                operator=_OPERATOR,
-                created_at=now,
-            ))
-            inserted.append(v.tag_id)
-            inserted_names.add(v.row.tag_name)
 
-    # ---------- 批次摘要落库并提交 ----------
+    # 1) 目录：按拓扑序插入未复用计划（自引用外键无 relationship()，逐行
+    #    flush 保证父行先落库）；复用计划不插入不记日志
+    for plan in checked_plans:
+        if plan.reused:
+            continue
+        parent_id = (plan.parent_plan.dir_id if plan.parent_plan is not None
+                     else plan.parent_db_id)
+        session.add(TagCatalog(
+            dir_id=plan.dir_id,
+            dir_name=plan.row.tag_name,
+            dir_type=_DIR_TYPE_STATIC,
+            description=plan.row.description,
+            parent_id=parent_id,
+            aliases=(json.dumps(plan.row.aliases, ensure_ascii=False)
+                     if plan.row.aliases else None),
+            applicable_scope=_normalize_scope(plan.row.applicable_scope),
+            embedding=encode_vector(plan.vec),
+            created_at=now,
+            updated_at=now,
+        ))
+        session.flush()
+        after = {
+            "kind": "dir",
+            "dir_id": plan.dir_id,
+            "dir_name": plan.row.tag_name,
+            "parent_id": parent_id,
+            "task_id": task_id,
+        }
+        session.add(TagChangeLog(
+            tag_id=plan.dir_id,
+            action="import",
+            before_json=None,
+            after_json=json.dumps(after, ensure_ascii=False),
+            operator=_OPERATOR,
+            created_at=now,
+        ))
+
+    # 2) 「未分类」根目录：有扁平标签落点且库内没有时创建（幂等复用）
+    if needs_uncat and uncat_existing is None:
+        session.add(TagCatalog(
+            dir_id=uncat_dir_id,
+            dir_name=_UNCATEGORIZED_DIR_NAME,
+            dir_type=_DIR_TYPE_STATIC,
+            description="",
+            parent_id=None,
+            aliases=None,
+            applicable_scope=_DEFAULT_SCOPE,
+            embedding=encode_vector(uncat_vec) if uncat_vec is not None else None,
+            created_at=now,
+            updated_at=now,
+        ))
+        session.flush()
+        after = {
+            "kind": "dir",
+            "dir_id": uncat_dir_id,
+            "dir_name": _UNCATEGORIZED_DIR_NAME,
+            "parent_id": None,
+            "task_id": task_id,
+        }
+        session.add(TagChangeLog(
+            tag_id=uncat_dir_id,
+            action="import",
+            before_json=None,
+            after_json=json.dumps(after, ensure_ascii=False),
+            operator=_OPERATOR,
+            created_at=now,
+        ))
+
+    # 3) 标签：逐行插入 / 复活（dir_id 已就绪），逐行 flush + 变更日志
+    for v in valid_tags:
+        existing = v.reactivate
+        before_json = None
+        if existing is None:
+            session.add(TagDefine(
+                tag_id=v.tag_id,
+                tag_name=v.row.tag_name,
+                tag_type=_TAG_TYPE_FIXED,
+                description=v.row.description,
+                dir_id=v.dir_id,
+                aliases=(json.dumps(v.row.aliases, ensure_ascii=False)
+                         if v.row.aliases else None),
+                status=_normalize_status(v.row.status),
+                embedding=encode_vector(v.vec),
+                created_at=now,
+                updated_at=now,
+            ))
+        else:
+            before_json = json.dumps(
+                {"status": existing.status}, ensure_ascii=False)
+            existing.tag_type = _TAG_TYPE_FIXED
+            existing.description = v.row.description
+            existing.dir_id = v.dir_id
+            existing.aliases = (
+                json.dumps(v.row.aliases, ensure_ascii=False)
+                if v.row.aliases else None
+            )
+            existing.status = _normalize_status(v.row.status)
+            existing.embedding = encode_vector(v.vec)
+            existing.updated_at = now
+        session.flush()
+        after = {
+            "kind": "tag",
+            "tag_id": v.tag_id,
+            "tag_name": v.row.tag_name,
+            "dir_id": v.dir_id,
+            "description": v.row.description,
+            "aliases": v.row.aliases,
+            "status": _normalize_status(v.row.status),
+            "task_id": task_id,
+        }
+        session.add(TagChangeLog(
+            tag_id=v.tag_id,
+            action="import",
+            before_json=before_json,
+            after_json=json.dumps(after, ensure_ascii=False),
+            operator=_OPERATOR,
+            created_at=now,
+        ))
+        inserted.append(v.tag_id)
+
+    # ---------- 导入任务摘要落库并提交 ----------
     total = len(rows)
-    session.add(ImportBatch(
-        batch_id=batch_id,
-        file_name=_BATCH_FILE_NAME,
+    session.add(TagImportTask(
+        task_id=task_id,
+        file_name=_TASK_FILE_NAME,
         status="completed",
         result_summary=json.dumps(
             {
                 "total": total,
+                # inserted 仅计标签行（v1 语义延续）；目录复用行既不计入
+                # inserted 也无 issue，体现在 skipped = total - inserted 中
                 "inserted": len(inserted),
                 "skipped": total - len(inserted),
-                # issues 为明细列表（非计数）：GET /api/v1/import/batches/{batch_id}
-                # 与阶段 3 待处理列表按此解析（Task 10 消费契约）
-                "issues": [asdict(i) for i in issues],
+                # issues 为明细列表（非计数）：GET /api/v1/import/tasks/{task_id}
+                # 与前端导入任务页按此解析（Task 12 消费契约）
+                "issues": [asdict(issue) for _i, issue in
+                           sorted(issues, key=lambda pair: pair[0])],
             },
             ensure_ascii=False,
         ),
         created_at=now,
     ))
     session.commit()
-    return GovernanceResult(batch_id=batch_id, inserted=inserted, issues=issues)
+    ordered_issues = [issue for _i, issue in sorted(issues, key=lambda pair: pair[0])]
+    return GovernanceResult(task_id=task_id, inserted=inserted, issues=ordered_issues)
