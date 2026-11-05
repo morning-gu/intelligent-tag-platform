@@ -158,7 +158,7 @@ def test_protected_api_without_cookie_401_health_open(client):
     """/api/v1/* 无 cookie → 401；/health 无需登录（开放例外）。"""
     client.cookies.delete("tagplatform_session")
     assert client.get("/api/v1/tags").status_code == 401
-    assert client.get("/api/v1/import/batches").status_code == 401
+    assert client.get("/api/v1/import/tasks").status_code == 401
     assert client.get("/api/v1/assets").status_code == 401
     assert client.get("/api/v1/generation/tasks").status_code == 401
     assert client.get("/api/v1/prompts").status_code == 401
