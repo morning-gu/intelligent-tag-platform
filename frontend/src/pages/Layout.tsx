@@ -20,7 +20,7 @@ const BASE_MENU_ITEMS: MenuItems = [
   { key: '/review', label: '审核中心' },
   { key: '/assets', label: '内容资产' },
   { key: '/tasks', label: '生产任务' },
-  { key: '/imports', label: '标签导入' },
+  { key: '/imports', label: '导入任务' },
   { key: '/tags', label: '标签库' },
   { key: '/quality', label: '质量评估' },
 ]

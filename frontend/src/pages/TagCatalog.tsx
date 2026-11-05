@@ -1,9 +1,13 @@
-// 标签库页（Task 13）：标准标签目录的查询与详情查看（阶段 3 无标签编辑/
-// 删除契约，仅读）。
-// - 目录 Table：q 名称/别名子串搜索（提交触发）；后端 limit/offset 分页且列表
-//   响应无 total 字段——每页多取一条探测后续页（探测行不展示），分页 total
-//   以"当前页末 + 是否还有后续"拼装，翻到末页时自然收敛为精确值。
-// - 行点击 → 详情 Drawer：GET /tags/{id}，含 aliases 列表与父标签/状态。
+// 标签库页（v2 混合树）：/tags 目录+标签合并列表的查询与详情查看。
+// - 目录 Table：根视图（root=true）/scope 视图（parent_id）/子级展开
+//   （parent_id）/q 名称+别名子串搜索（提交触发）。徽标直接取节点 kind
+//   （目录/标签），has_children 驱动展开箭头语义；目录节点无 status 列，
+//   状态列显示 "—" 且详情无生命周期按钮（v2 后端对目录生命周期操作一律 404）。
+// - TreeSelect 目录层级选择器：懒加载沿 parent_id 递归且只拉目录（kind=dir）。
+// - 行点击 → 详情 Drawer：GET /tags/{id}（目录/标签通用），含 path 路径
+//   （父目录可点击跳 scope）与 aliases；启用/停用 + 删除仅对 kind=tag 渲染，
+//   删除后跳转 result.parent_id 对应 scope。
+// - 标签导出按钮：downloadTagCatalog 走 /tags/export，与本页筛选联动。
 import {
   Alert,
   Button,
@@ -27,30 +31,36 @@ import {
   activateTag,
   deactivateTag,
   deleteTag,
-  type TagCatalogDetail,
-  type TagCatalogItem,
+  type TagNode,
+  type TagNodeDetail,
 } from '../api/catalog'
 
-/** 标签状态中文展示与 Tag 颜色（active/deprecate 与治理流水线入库语义一致）。 */
+/** 标签状态中文展示与 Tag 颜色（active/deprecated 与 v2 治理流水线入库语义
+ * 一致；目录节点 status 恒 null，两表均不查值直接显示 "—"）。 */
 const TAG_STATUS_LABELS: Record<string, string> = {
   active: '启用',
-  deprecate: '停用',
+  deprecated: '停用',
 }
 const TAG_STATUS_COLORS: Record<string, string> = {
   active: 'green',
-  deprecate: 'orange',
+  deprecated: 'orange',
 }
 
-function sortDirectoriesFirst(items: TagCatalogItem[]): TagCatalogItem[] {
+/** 目录行排前（与后端目录先排序一致；搜索结果兜底）。 */
+function sortDirectoriesFirst<T extends TagNode>(items: T[]): T[] {
   return [...items].sort(
-    (left, right) => Number(right.has_children === true) - Number(left.has_children === true),
+    (left, right) => Number(right.kind === 'dir') - Number(left.kind === 'dir'),
   )
 }
 
+/** 页内树形装配节点：API TagNode 之上挂客户端下级缓存（仅内存态，不随请求
+ * 发送；后端 TagNode 无 children 字段）。 */
+type TagTreeNode = TagNode & { children?: TagTreeNode[] }
+
 export default function TagCatalog() {
   // —— 树状目录：首屏只加载根节点，展开时按父节点加载子节点 ——
-  const [items, setItems] = useState<TagCatalogItem[]>([])
-  const [directoryItems, setDirectoryItems] = useState<TagCatalogItem[]>([])
+  const [items, setItems] = useState<TagTreeNode[]>([])
+  const [directoryItems, setDirectoryItems] = useState<TagTreeNode[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
@@ -64,7 +74,7 @@ export default function TagCatalog() {
 
   // —— 详情 Drawer ——
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null)
-  const [detail, setDetail] = useState<TagCatalogDetail | null>(null)
+  const [detail, setDetail] = useState<TagNodeDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
@@ -93,7 +103,7 @@ export default function TagCatalog() {
       const res = await fetchTagCatalog({
         q: searchQ,
         parent_id: scopeId,
-        // 默认只展示一级目录；搜索时返回所有匹配节点，避免子级标签
+        // 默认只展示一级节点；搜索时返回所有匹配节点，避免子级标签
         // 因 root=true 被过滤掉，同时保留目录节点的下级展开能力。
         root: scopeId === undefined && searchQ === '' ? true : undefined,
       })
@@ -120,7 +130,7 @@ export default function TagCatalog() {
     }
   }, [loadCatalog])
 
-  /** 打开标签详情 Drawer：在事件内重置详情态（含上次残留）并记录标签 ID，
+  /** 打开节点详情 Drawer：在事件内重置详情态（含上次残留）并记录节点 ID，
    * 拉取交给下方 effect（effect 内不做同步 setState）。 */
   function openTag(tagId: string) {
     setDetail(null)
@@ -129,7 +139,7 @@ export default function TagCatalog() {
     setSelectedTagId(tagId)
   }
 
-  // selectedTagId 变化即拉取标签详情（仅异步置 state）
+  // selectedTagId 变化即拉取节点详情（目录或标签通用，仅异步置 state）
   useEffect(() => {
     if (selectedTagId === null) return
     let cancelled = false
@@ -152,20 +162,21 @@ export default function TagCatalog() {
     }
   }, [selectedTagId])
 
+  /** TreeSelect 目录懒加载：只拉目录（kind=dir），标签不进层级选择器。 */
   async function loadDirectoryChildren(node: { value?: string | number }) {
     if (typeof node.value !== 'string') return
     const parentId = node.value
-    const res = await fetchTagCatalog({ parent_id: parentId })
+    const res = await fetchTagCatalog({ parent_id: parentId, kind: 'dir' })
     setDirectoryItems((current) => updateDirectoryChildren(current, parentId, res.items))
   }
 
   function updateDirectoryChildren(
-    nodes: TagCatalogItem[],
+    nodes: TagTreeNode[],
     parentId: string,
-    children: TagCatalogItem[],
-  ): TagCatalogItem[] {
+    children: TagTreeNode[],
+  ): TagTreeNode[] {
     return nodes.map((node) => {
-      if (node.tag_id === parentId) {
+      if (node.id === parentId) {
         return { ...node, children: sortDirectoriesFirst(children) }
       }
       if (node.children) {
@@ -184,17 +195,17 @@ export default function TagCatalog() {
     setExpandedRowKeys([])
   }
 
-  function confirmDeleteTag(tag: TagCatalogDetail) {
+  function confirmDeleteTag(tag: TagNodeDetail) {
     Modal.confirm({
       title: '删除标签',
-      content: `确定删除标签“${tag.tag_name}”吗？如果目录为空，空目录也会被删除。`,
+      content: `确定删除标签“${tag.name}”吗？如果目录为空，空目录也会被删除。`,
       okText: '删除',
       cancelText: '取消',
       okButtonProps: { danger: true },
       onOk: async () => {
         setDeleting(true)
         try {
-          const result = await deleteTag(tag.tag_id)
+          const result = await deleteTag(tag.id)
           setSelectedTagId(null)
           selectDirectory(result.parent_id ?? undefined, result.parent_name ?? undefined)
           await loadCatalog()
@@ -207,9 +218,9 @@ export default function TagCatalog() {
     })
   }
 
-  function findDirectory(nodes: TagCatalogItem[], id: string): TagCatalogItem | undefined {
+  function findDirectory(nodes: TagTreeNode[], id: string): TagTreeNode | undefined {
     for (const node of nodes) {
-      if (node.tag_id === id) return node
+      if (node.id === id) return node
       if (node.children) {
         const found = findDirectory(node.children, id)
         if (found) return found
@@ -222,26 +233,26 @@ export default function TagCatalog() {
     if (scopeId === undefined) return
     const current = findDirectory(directoryItems, scopeId)
     const parent = current?.parent_id ? findDirectory(directoryItems, current.parent_id) : undefined
-    selectDirectory(parent?.tag_id, parent?.tag_name)
+    selectDirectory(parent?.id, parent?.name)
   }
 
-  async function expandSelectedDirectory(record: TagCatalogItem) {
+  async function expandSelectedDirectory(record: TagTreeNode) {
     if (record.has_children !== true) return
     setExpandedRowKeys((current) =>
-      current.includes(record.tag_id)
-        ? current.filter((key) => key !== record.tag_id)
-        : [...current, record.tag_id],
+      current.includes(record.id)
+        ? current.filter((key) => key !== record.id)
+        : [...current, record.id],
     )
     if (record.children !== undefined) return
     try {
-      const res = await fetchTagCatalog({ parent_id: record.tag_id })
-      setItems((current) => updateDirectoryChildren(current, record.tag_id, res.items))
+      const res = await fetchTagCatalog({ parent_id: record.id })
+      setItems((current) => updateDirectoryChildren(current, record.id, res.items))
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : '下级标签加载失败')
     }
   }
 
-  function toTreeData(nodes: TagCatalogItem[]): Array<{
+  function toTreeData(nodes: TagTreeNode[]): Array<{
     title: string
     value: string
     children?: Array<{
@@ -253,21 +264,21 @@ export default function TagCatalog() {
     isLeaf?: boolean
   }> {
     return nodes
-      .filter((node) => node.has_children === true)
+      .filter((node) => node.kind === 'dir' && node.has_children === true)
       .map((node) => ({
-      title: node.tag_name,
-      value: node.tag_id,
+      title: node.name,
+      value: node.id,
       children: node.children ? toTreeData(node.children) : undefined,
       isLeaf: false,
       }))
   }
 
-  const columns: TableProps<TagCatalogItem>['columns'] = [
+  const columns: TableProps<TagTreeNode>['columns'] = [
     {
       title: '名称',
-      dataIndex: 'tag_name',
-      render: (name: string, record: TagCatalogItem) => (
-        record.tag_id === '__back__' ? (
+      dataIndex: 'name',
+      render: (name: string, record: TagTreeNode) => (
+        record.id === '__back__' ? (
           <Button type="link" onClick={goToParentDirectory} style={{ padding: 0 }}>
             ← {name}
           </Button>
@@ -282,13 +293,13 @@ export default function TagCatalog() {
               height: 22,
               padding: '0 6px',
               borderRadius: 11,
-              background: record.has_children ? '#e6f4ff' : '#f6ffed',
-              color: record.has_children ? '#1677ff' : '#389e0d',
+              background: record.kind === 'dir' ? '#e6f4ff' : '#f6ffed',
+              color: record.kind === 'dir' ? '#1677ff' : '#389e0d',
               fontSize: 12,
               lineHeight: '22px',
             }}
           >
-            {record.has_children ? '目录' : '标签'}
+            {record.kind === 'dir' ? '目录' : '标签'}
           </span>
           <span>{name}</span>
         </Space>
@@ -308,16 +319,18 @@ export default function TagCatalog() {
     },
   ]
 
-  const displayItems: TagCatalogItem[] = scopeId
+  const displayItems: TagTreeNode[] = scopeId
     ? [
         {
-          tag_id: '__back__',
-          tag_name: '返回上级目录',
-          tag_type: '',
+          id: '__back__',
+          name: '返回上级目录',
+          kind: 'tag',
+          dir_type: null,
           description: '',
           parent_id: null,
           status: null,
           has_children: false,
+          aliases: [],
         },
         ...items,
       ]
@@ -331,7 +344,7 @@ export default function TagCatalog() {
             aria-label="目录层级"
             treeData={[
               { title: '所有', value: '__all__', isLeaf: true },
-              ...(scopeId && scopeLabel && !directoryItems.some((item) => item.tag_id === scopeId)
+              ...(scopeId && scopeLabel && !directoryItems.some((item) => item.id === scopeId)
                 ? [{ title: scopeLabel, value: scopeId, isLeaf: true }]
                 : []),
               ...toTreeData(directoryItems),
@@ -365,8 +378,8 @@ export default function TagCatalog() {
         {loadError !== null && (
           <Alert type="error" showIcon message="标签库加载失败" description={loadError} />
         )}
-        <Table<TagCatalogItem>
-          rowKey="tag_id"
+        <Table<TagTreeNode>
+          rowKey="id"
           columns={columns}
           dataSource={displayItems}
           loading={loading}
@@ -411,12 +424,12 @@ export default function TagCatalog() {
           }}
           onRow={(record) => ({
             onClick: () => {
-              if (record.tag_id === '__back__') {
+              if (record.id === '__back__') {
                 goToParentDirectory()
               } else if (record.has_children === true) {
                 void expandSelectedDirectory(record)
               } else {
-                openTag(record.tag_id)
+                openTag(record.id)
               }
             },
             style: { cursor: 'pointer' },
@@ -425,7 +438,7 @@ export default function TagCatalog() {
         />
       </div>
       <Drawer
-        title="标签详情"
+        title="节点详情"
         open={selectedTagId !== null}
         width={520}
         destroyOnHidden
@@ -440,16 +453,25 @@ export default function TagCatalog() {
           <Descriptions
             column={1}
             items={[
-              { key: 'id', label: '标签 ID', children: detail.tag_id },
+              {
+                key: 'kind',
+                label: '种类',
+                children: (
+                  <Tag color={detail.kind === 'dir' ? 'blue' : 'green'}>
+                    {detail.kind === 'dir' ? '目录' : '标签'}
+                  </Tag>
+                ),
+              },
+              { key: 'id', label: 'ID', children: detail.id },
               {
                 key: 'name',
-                label: '标签名',
+                label: '名称',
                 children: (
                   <Space size={4} wrap>
-                    {(detail.path ?? [detail.tag_name]).map((name, index) => {
-                      const isTag = index === (detail.path?.length ?? 1) - 1
+                    {(detail.path ?? [detail.name]).map((name, index) => {
+                      const isSelf = index === (detail.path?.length ?? 1) - 1
                       const directoryId = detail.path_ids?.[index]
-                      return isTag || directoryId === undefined ? (
+                      return isSelf || directoryId === undefined ? (
                         <span key={`${name}-${index}`}>
                           {index > 0 ? ' / ' : ''}
                           {name}
@@ -500,32 +522,38 @@ export default function TagCatalog() {
               },
             ]}
           />
-          <Button
-            danger={detail.status === 'active'}
-            loading={statusUpdating}
-            onClick={async () => {
-              setStatusUpdating(true)
-              try {
-                const next = detail.status === 'deprecate'
-                  ? await activateTag(detail.tag_id)
-                  : await deactivateTag(detail.tag_id)
-                setDetail(next)
-              } catch (err) {
-                setDetailError(err instanceof Error ? err.message : '状态更新失败')
-              } finally {
-                setStatusUpdating(false)
-              }
-            }}
-          >
-            {detail.status === 'deprecate' ? '启用' : '停用'}
-          </Button>
-          <Button
-            danger
-            loading={deleting}
-            onClick={() => confirmDeleteTag(detail)}
-          >
-            删除
-          </Button>
+          {/* 生命周期操作仅对标签渲染：目录节点 status 恒 null 且后端对目录
+              的生命周期操作一律 404，前端直接不显示入口。 */}
+          {detail.kind === 'tag' && (
+            <>
+            <Button
+              danger={detail.status === 'active'}
+              loading={statusUpdating}
+              onClick={async () => {
+                setStatusUpdating(true)
+                try {
+                  const next = detail.status === 'deprecated'
+                    ? await activateTag(detail.id)
+                    : await deactivateTag(detail.id)
+                  setDetail(next)
+                } catch (err) {
+                  setDetailError(err instanceof Error ? err.message : '状态更新失败')
+                } finally {
+                  setStatusUpdating(false)
+                }
+              }}
+            >
+              {detail.status === 'deprecated' ? '启用' : '停用'}
+            </Button>
+            <Button
+              danger
+              loading={deleting}
+              onClick={() => confirmDeleteTag(detail)}
+            >
+              删除
+            </Button>
+            </>
+          )}
           </>
         )}
       </Drawer>
