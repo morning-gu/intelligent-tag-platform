@@ -17,7 +17,6 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.api import create_app
 from tagplatform.embed import make_embedder
 from tagplatform.llm import MockLLMClient
 from tagplatform.settings import Settings
@@ -52,6 +51,11 @@ def client(tmp_path):
       admin123）——在 fixture 内读取环境变量而非依赖测试内 monkeypatch
       （fixture 与测试体的执行顺序不保证）。
     """
+    # api 延迟 import：与 session/content_fixture 同理——顶部 import 会经
+    # tagplatform.api → tasks/routers 拉起全链路服务模块，其 models 导入在
+    # 表结构切换期（Task 1-10）未就位时拖垮整个测试套件的收集；放进
+    # fixture 体内只影响使用 client 的测试。
+    from tagplatform.api import create_app
     from tagplatform.db import create_engine_for
     from tagplatform.db.models import Base
 
