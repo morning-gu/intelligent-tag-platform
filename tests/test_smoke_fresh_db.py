@@ -17,7 +17,9 @@ fixture：登录是冒烟链路的第 1 步，须由用例自己断言，而非 
 5. POST /api/v1/asset-tags/{id}/review action=approve → 挂载出现在
    GET /api/v1/assets/{asset_id}/tags；
 6. GET /api/v1/metrics/summary 三键非零（pending / approved 计数 /
-   任务 succeeded）+ GET /metrics/dir-coverage 非空。
+   任务 succeeded）+ GET /metrics/dir-coverage 与 GET
+   /metrics/confidence-distribution 非空（承诺二③④的 metrics 三端点
+   全部触达）。
 
 Mock 咬合（消 flake 构造，同 test_api_generation/test_generation_closed）：
 - 30 枚候选配 policy.min_confidence=0.5：MockLLM confidence ∈ [0.5,1) 恒
@@ -32,11 +34,14 @@ Mock 咬合（消 flake 构造，同 test_api_generation/test_generation_closed�
 import io
 import json
 import os
+import re
 from pathlib import Path
 
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
+
+from tagplatform.db.models import MediaAsset
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "content_movie.json"
 CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -100,7 +105,7 @@ def smoke_client(tmp_path):
 
 def test_fresh_db_smoke_full_chain(smoke_client):
     """全新库六步链：登录 → 导层级标签 → 导内容 → closed 生成 → 审核
-    approve → metrics 两端点有数（每步断言到值级，不止状态码）。"""
+    approve → metrics 三端点有数（每步断言到值级，不止状态码）。"""
     client = smoke_client
 
     # 1. 登录 admin（cookie 会话）：200 + 角色 + 会话 cookie + 登录态可用
@@ -167,6 +172,19 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert first["evidence"][0]["start_ms"] == 120000
     assert first["evidence"][0]["end_ms"] == 180000
 
+    # 召回中间量钉死（消静默退化：治理导入漏算向量/召回行被拦减少时在此
+    # 暴露，而非仅靠 MockLLM 选中概率兜底）——按 runner 同款路径复算：
+    # 30 枚导入标签全量召回（top_k=50 ≥ 每目录 10 枚）
+    from tagplatform.content_io import load_content
+    from tagplatform.generation.recall import embed_content_texts, recall_by_dir
+    with client.app.state.session_factory() as s:
+        content = load_content(s.get(MediaAsset, asset_id).content_json)
+        candidates = recall_by_dir(s, embed_content_texts(content),
+                                   client.app.state.embedder, 50)
+    assert len(candidates) == 30
+    # 产出 ⊆ 候选（同键闭合：LLM 只能从候选清单选择，不得编造）
+    assert {r["tag_id"] for r in results} <= {c.tag_id for c in candidates}
+
     # 5. 审核 approve → 正式挂载出现在 /assets/{id}/tags（asset_tag 复制行）
     approve = client.post(f"/api/v1/asset-tags/{first['id']}/review",
                           json={"action": "approve"})
@@ -199,3 +217,13 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert rows  # 非空
     assert sum(row["total"] for row in rows) == len(results)
     assert sum(row["approved"] for row in rows) == 1
+
+    # metrics 第三端点：confidence 分桶——非空、桶标签格式、与互锁风格一致
+    # （各桶 count 之和 == 全部带置信度行数；本链全部行带 confidence）
+    buckets = client.get("/api/v1/metrics/confidence-distribution")
+    assert buckets.status_code == 200
+    dist = buckets.json()
+    assert dist
+    assert all(re.fullmatch(r"\d\.\d-\d\.\d", row["bucket"]) for row in dist)
+    assert dist[0]["bucket"] == "0.0-0.1"  # 恒返回全部桶，首桶 0.0 起
+    assert sum(row["count"] for row in dist) == len(results)
