@@ -260,6 +260,33 @@ def test_status_literal_normalized_to_deprecated(session):
     assert session.get(TagDefine, res.inserted[0]).status == "deprecated"
 
 
+# ---------- 审计日志 ----------
+
+def test_change_log_import_rows_carry_task_id(session):
+    # 审计直测：每个新建目录/标签行各落一条 tag_change_log(action='import')，
+    # after_json 带 task_id（revoke/export 的反查键，替代 v1 batch_id）与
+    # kind（'dir'|'tag'，撤销据此区分删除对象）；日志 tag_id 分别指向
+    # tag_catalog.dir_id 与 tag_define.tag_id
+    res = run_governance([
+        _row("内容", None, ""),
+        _row("剧情", "内容", ""),
+        _row("反转", "剧情", "情节反转"),
+    ], session, MOCK_EMBEDDER)
+    logs = session.query(TagChangeLog).filter_by(action="import").all()
+    by_id = {log.tag_id: log for log in logs}
+    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
+    tags = {t.tag_name: t for t in session.query(TagDefine).all()}
+    assert set(by_id) == {
+        dirs["内容"].dir_id, dirs["剧情"].dir_id, tags["反转"].tag_id}
+    for log in logs:
+        after = json.loads(log.after_json)
+        assert after["task_id"] == res.task_id
+        assert after["kind"] in ("dir", "tag")
+    assert json.loads(by_id[tags["反转"].tag_id].after_json)["kind"] == "tag"
+    assert json.loads(by_id[dirs["内容"].dir_id].after_json)["kind"] == "dir"
+    assert json.loads(by_id[dirs["剧情"].dir_id].after_json)["kind"] == "dir"
+
+
 # ---------- 配置与批量编码 ----------
 
 def test_governance_config_threshold_only(session):
