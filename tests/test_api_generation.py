@@ -36,9 +36,9 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "content_movie.json"
 CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 # 结果摘要形状（详情 results）与资产标签行（摘要 + 标识原样）的键集契约
-# （id 为 asset_tag 行主键，阶段 3 B3 暴露——Task 4 审核操作路由的定位键）
+# （id 为 pre_asset_tag 行主键，审核操作路由的定位键）
 RESULT_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
-               "review_status", "level", "evidence"}
+               "review_status", "target_type", "evidence"}
 ASSET_TAG_KEYS = RESULT_KEYS | {"tag_id", "candidate_name"}
 # 任务列表项键集（brief 钉死九字段）
 TASK_KEYS = {"task_id", "asset_id", "mode", "status", "model_version",
@@ -114,7 +114,7 @@ def test_generation_e2e_closed_succeeded(client):
     assert set(first.keys()) == RESULT_KEYS
     assert isinstance(first["id"], int) and first["id"] > 0  # 行主键（B3 暴露）
     assert len({r["id"] for r in results}) == len(results)  # 行 id 唯一
-    assert first["origin"] == "catalog"
+    assert first["origin"] == "closed"
     assert first["tag_name"].startswith(("类型标签", "情绪标签"))
     assert first["review_status"] == "pending"
     assert 0.5 <= first["confidence"] <= 1.0
@@ -125,7 +125,12 @@ def test_generation_e2e_closed_succeeded(client):
         "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
         "description": "两名人物在仓库中发生激烈争执"}]
 
-    # 资产标签视图：摘要形状 + tag_id/candidate_name 原样（catalog 行）
+    # 资产标签视图只收 approved 行：待审核阶段不可见
+    assert client.get("/api/v1/assets/movie_001/tags").json() == []
+    # 逐条通过后可见，形状 + tag_id/candidate_name 原样（库内标签行）
+    for res in results:
+        assert client.post(f"/api/v1/asset-tags/{res['id']}/review",
+                           json={"action": "approve"}).status_code == 200
     tags_resp = client.get("/api/v1/assets/movie_001/tags")
     assert tags_resp.status_code == 200
     tags = tags_resp.json()
@@ -134,7 +139,7 @@ def test_generation_e2e_closed_succeeded(client):
         assert set(row.keys()) == ASSET_TAG_KEYS
         assert row["tag_id"] is not None and row["candidate_name"] is None
         assert row["tag_name"] == res["tag_name"]  # 同按入库行序，逐行对应
-        assert row["id"] == res["id"]  # 两端点同一批行的主键一致（B3 暴露）
+        assert row["id"] == res["id"]  # 两端点同一批行的主键一致
 
 
 def test_generation_e2e_open_generated_rows(client):
@@ -155,7 +160,7 @@ def test_generation_e2e_open_generated_rows(client):
     names = {r["tag_name"] for r in results}
     assert names == {"多线叙事", "情感张力", "视听风格"}
     for row in results:
-        assert row["origin"] == "generated"
+        assert row["origin"] == "open"
         assert isinstance(row["id"], int) and row["id"] > 0  # 行主键（B3 暴露）
         assert row["relevance_score"] is None  # 未命中目录：无相关度
         assert row["review_status"] == "pending"
@@ -164,7 +169,11 @@ def test_generation_e2e_open_generated_rows(client):
             "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
             "description": "两名人物在仓库中发生激烈争执"}]
 
-    # 资产标签视图：generated 行 tag_id 为空、candidate_name 原样
+    # 资产标签视图只收 approved 行：新词行全部通过后可见（tag_id 为空）
+    assert client.get("/api/v1/assets/movie_001/tags").json() == []
+    for row in results:
+        assert client.post(f"/api/v1/asset-tags/{row['id']}/review",
+                           json={"action": "approve"}).status_code == 200
     tags = client.get("/api/v1/assets/movie_001/tags").json()
     assert len(tags) == 3
     for row in tags:
@@ -190,7 +199,7 @@ def test_create_task_unknown_mode_422(client):
 
 
 def test_create_task_scene_without_context_422(client):
-    """资产存在但无 media_context（场景资产）→ 整请求 422。"""
+    """资产存在但无识别内容（场景资产无 content_json）→ 整请求 422。"""
     imported = _import_content(client)
     scene_id = imported["scene_asset_ids"][0]
     resp = client.post("/api/v1/generation/tasks",
@@ -331,7 +340,7 @@ def test_lifespan_orphan_reset_on_startup(tmp_path):
 
     from tagplatform.api import create_app
     from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.db.models import Base, GenerationTask, MediaAsset, MediaContext
+    from tagplatform.db.models import Base, MediaAsset, TagGenerationTask
     from tagplatform.settings import Settings
 
     db_path = str(tmp_path / "orphan.db")
@@ -346,11 +355,8 @@ def test_lifespan_orphan_reset_on_startup(tmp_path):
         s.add(MediaAsset(asset_id="movie_001", asset_type="movie",
                          title="示例电影", created_at=None))
         s.flush()
-        s.add(MediaContext(context_id="ctx_orphan", asset_id="movie_001",
-                           content_json="{}"))
-        s.flush()
-        s.add(GenerationTask(task_id="task_orphan", context_id="ctx_orphan",
-                             mode="closed", status="running"))
+        s.add(TagGenerationTask(task_id="task_orphan", asset_id="movie_001",
+                                mode="closed", status="running"))
         s.commit()
         task_id = "task_orphan"
 
@@ -358,7 +364,7 @@ def test_lifespan_orphan_reset_on_startup(tmp_path):
     with TestClient(app):  # 上下文进入触发 lifespan 启动（孤儿清理执行）
         pass
     with factory() as s:
-        row = s.get(GenerationTask, task_id)
+        row = s.get(TagGenerationTask, task_id)
         assert row.status == "failed" and row.error == "进程重启中断"
         assert row.finished_at is not None
     app.state.engine.dispose()

@@ -133,8 +133,8 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
       title: '来源',
       dataIndex: 'origin',
       render: (v: string) => (
-        <Tag color={v === 'generated' ? 'blue' : 'green'}>
-          {v === 'generated' ? '生成' : '目录'}
+        <Tag color={v === 'closed' ? 'green' : 'blue'}>
+          {v === 'closed' ? '目录召回' : '开放生成'}
         </Tag>
       ),
     },

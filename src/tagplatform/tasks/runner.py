@@ -32,10 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, GenerationTask, MediaContext, TagCatalog
+from tagplatform.db.models import MediaAsset, TagGenerationTask
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.recall import embed_content_texts, recall_by_type
 from tagplatform.prompts import get_active_prompt, render_prompt
@@ -43,25 +42,8 @@ from tagplatform.results import persist_tags
 from tagplatform.content_io import load_content
 from tagplatform.schemas import ContentJSON, parse_content
 from tagplatform.settings import get_settings
-from tagplatform.vectors import encode_vector
 
 logger = logging.getLogger(__name__)
-
-
-def _clear_pending(session: Session, asset_id: str, mode: str) -> int:
-    """删除该资产"同模式生成任务产生的、尚未审核"的候选行（重跑替换）。
-
-    只删 pending：人工已定稿的行（approved/rejected/merged）不受影响；只删
-    同 mode 的任务行：closed 的待审候选不会被 open 重跑误清。返回删除行数。
-    """
-    task_ids = select(GenerationTask.task_id).where(GenerationTask.mode == mode)
-    result = session.execute(
-        delete(AssetTag).where(
-            AssetTag.asset_id == asset_id,
-            AssetTag.review_status == "pending",
-            AssetTag.task_id.in_(task_ids),
-        ).execution_options(synchronize_session=False))
-    return result.rowcount or 0
 
 
 # prompt 明细注入上限：长片场景多，防止 content 文本无界增长（token 成本）
@@ -166,26 +148,24 @@ def _render_candidates_text(candidates: list[TagCatalog]) -> str:
 
 
 def run_generation_task(task_id: str, session: Session, llm,
-                        embedder) -> GenerationTask:
+                        embedder) -> TagGenerationTask:
     """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
 
     八步流程（计划钉死）：
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
-    2. context 缺失 → failed + error、commit、返回 task；
-    3. parse_content(json.loads(context.content_json))；资产 id 取
-       content.asset.asset_id（缺省回落 context.asset_id）；
+    2. 资产或其 content_json 缺失 → failed + error、commit、返回 task；
+    3. load_content(asset.content_json)；资产 id 即 task.asset_id（任务直绑资产）；
     4. get_producer(task.mode)；closed 额外召回候选组装 candidates 文本，
        render_prompt 渲染激活模板（open 模板无 candidates 占位符，只传 content）；
     5. policy_json 空 → 默认 GenerationPolicy，否则按 JSON 构造；
     6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
        写入后置 failed（error=str(e)、finished_at）、commit、返回 task
        （不 re-raise，调用方看状态）；
-    7. persist_tags（不 commit，随终态同事务落库）+ 模式 A 回填
-       context.embedding（摘要向量 runner 独立重算——计划定案，接口简单）；
+    7. persist_tags 写 pre_asset_tag（不 commit，随终态同事务落库）；
     8. task.model_version = llm.model、prompt_version = 激活模板版本
        （写入字符串）、succeeded、finished_at、一次性 commit、返回 task。
     """
-    task = session.get(GenerationTask, task_id)
+    task = session.get(TagGenerationTask, task_id)
     if task is None:
         raise ValueError(f"任务不存在: {task_id}")
     if task.status != "queued":
@@ -194,19 +174,22 @@ def run_generation_task(task_id: str, session: Session, llm,
     task.status = "running"
     session.commit()
 
-    # 2. 上下文缺失属数据错误：显式失败，不留 running 僵尸
-    context = session.get(MediaContext, task.context_id)
-    if context is None:
+    # 2. 资产/内容缺失属数据错误：显式失败，不留 running 僵尸
+    asset = session.get(MediaAsset, task.asset_id)
+    if asset is None or not (asset.content_json or "").strip():
         task.status = "failed"
-        task.error = f"媒体上下文不存在: {task.context_id}"
+        task.error = (
+            f"资产不存在: {task.asset_id}" if asset is None
+            else f"资产无识别内容: {task.asset_id}")
         task.finished_at = datetime.now(timezone.utc)
         session.commit()
         return task
 
     try:
-        # 3. 内容解析与资产归属
-        content = load_content(context.content_json)
-        asset_id = content.asset.asset_id or context.asset_id
+        # 3. 内容解析与资产归属（任务即资产，content 内 id 仅作校验兜底）
+        content = load_content(asset.content_json)
+        asset_id = task.asset_id
+
         # 4. producer 分发与 prompt 组装渲染
         #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
         #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板。
@@ -236,24 +219,13 @@ def run_generation_task(task_id: str, session: Session, llm,
             policy=policy, prompt_text=prompt_text, run_id=run_id,
         )
         tags = producer.produce(spec, session, llm, embedder)
-        # 6.5 重跑替换：自拼 prompt 的生产器（如 open/mtg）声明 replaces_pending
-        #     时，先清掉该资产"同模式、尚未审核"的旧候选，再落本次结果。
-        #     否则每重跑一次就在审核队列里叠一份近义标签（实测 3 次后
-        #     Memento 积到 29 条待审）。已定稿行（approved/rejected/merged）
-        #     不在此列，persist_tags 的"已定跳过"语义不变。
-        if getattr(producer, "replaces_pending", False):
-            cleared = _clear_pending(session, asset_id, task.mode)
-            if cleared:
-                logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
-                            asset_id, cleared)
-        # 7. 结果入库（不 commit）+ 模式 A 回填上下文摘要向量（与 prompt
-        #    组装同源的摘要文本）
-        persist_tags(session, asset_id, task.task_id, tags, run_id)
-        if task.mode == "closed":
-            # role=passage：内容侧文档向量（与被检索的目录语料相对）
-            context.embedding = encode_vector(
-                embedder.embed([content.content.summary],
-                               role="passage")[0])
+        # 7. 结果入库（不 commit）：persist_tags 内部先清同 origin 的 pending
+        #    行再逐条插入，重跑不会在审核队列里叠加历史候选
+        summary = persist_tags(session, asset_id, task.task_id, tags, task.mode)
+        if summary.cleared:
+            logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
+                        asset_id, summary.cleared)
+
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
@@ -329,8 +301,8 @@ def reset_orphan_running(session: Session) -> int:
     启动时调用本函数一次性复位（error="进程重启中断"）。
     """
     orphans = (
-        session.query(GenerationTask)
-        .filter(GenerationTask.status == "running")
+        session.query(TagGenerationTask)
+        .filter(TagGenerationTask.status == "running")
         .all()
     )
     now = datetime.now(timezone.utc)

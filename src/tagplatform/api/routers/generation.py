@@ -21,7 +21,9 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
-from tagplatform.db.models import AssetTag, GenerationTask, MediaAsset, MediaContext, TagCatalog
+from tagplatform.db.models import (
+    MediaAsset, PreAssetTag, TagCatalog, TagGenerationTask,
+)
 from tagplatform.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 
@@ -83,9 +85,8 @@ class EvidenceOut(BaseModel):
 
 
 class GenerationResultOut(BaseModel):
-    """生成结果摘要行：id 为 asset_tag 行主键（阶段 3 B3 暴露——Task 4
-    审核操作路由与前端行操作的定位键）；tag_name 展示解析 candidate_*
-    优先、目录名回退（catalog 行经审核 modify 后显示修改值）。"""
+    """生成结果摘要行：id 为 pre_asset_tag 行主键（审核操作路由与前端行操作
+    的定位键）；tag_name 展示解析 candidate_name 优先、目录名回退。"""
 
     id: int
     tag_name: str
@@ -93,7 +94,8 @@ class GenerationResultOut(BaseModel):
     relevance_score: float | None = None
     confidence: float | None = None
     review_status: str
-    level: str = "film"
+    # 挂载粒度：本期恒为 content（scene/character 为结构预留）
+    target_type: str = "content"
     evidence: list[EvidenceOut] = []
 
 
@@ -138,21 +140,20 @@ def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
         return []
 
 
-def _catalog_names(session: Session, rows: list[AssetTag]) -> dict[str, str]:
-    """catalog 来源行的 tag_id → 目录标签名映射（一次批量取全）。"""
-    tag_ids = {r.tag_id for r in rows if r.origin == "catalog" and r.tag_id}
+def _catalog_names(session: Session, rows: list[PreAssetTag]) -> dict[str, str]:
+    """行内 tag_id → 目录标签名映射（一次批量取全，含 open 合入的行）。"""
+    tag_ids = {r.tag_id for r in rows if r.tag_id}
     if not tag_ids:
         return {}
     return {t.tag_id: t.tag_name
             for t in session.query(TagCatalog).filter(TagCatalog.tag_id.in_(tag_ids))}
 
 
-def _result_out(row: AssetTag, names: dict[str, str]) -> GenerationResultOut:
-    """asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用，含行主键 id）。
+def _result_out(row: PreAssetTag, names: dict[str, str]) -> GenerationResultOut:
+    """pre_asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。
 
     tag_name 展示解析与审核列表同规：candidate_name 非空优先（审核 modify
-    落在行内的展示字段，改了什么显示什么），否则回退目录名（names 按
-    origin=catalog 行的 tag_id 预取；merged 行 candidate 已清空不受影响）。
+    落在行内的展示字段，改了什么显示什么），否则回退目录名。
     """
     tag_name = row.candidate_name or names.get(row.tag_id or "", "")
     return GenerationResultOut(
@@ -162,7 +163,7 @@ def _result_out(row: AssetTag, names: dict[str, str]) -> GenerationResultOut:
         relevance_score=row.relevance_score,
         confidence=row.confidence,
         review_status=row.review_status,
-        level=row.level,
+        target_type=row.target_type,
         evidence=_parse_evidence(row.evidence_json),
     )
 
@@ -180,7 +181,7 @@ def create_generation_tasks(
     校验全部通过才建任务（任一失败整请求拒绝，零部分创建）：
     - mode 未注册 → 422（detail 列出可用 mode）；
     - 资产不存在 → 404；
-    - 资产无最新识别内容（无 media_context）→ 422。
+    - 资产无识别内容（content_json 为空）→ 422。
     每资产建一条 queued 任务（policy_json 持久化请求策略），先落库（执行器
     线程用独立会话读行）再逐条 executor.submit；随后重读真实状态返回——
     同步模式（generation_workers=0）submit 返回即执行完，回 succeeded/failed
@@ -191,49 +192,43 @@ def create_generation_tasks(
             status_code=422,
             detail=f"未知 mode: {body.mode}（可用: {', '.join(list_producers())}）")
 
-    contexts: list[MediaContext] = []
+    assets: list[MediaAsset] = []
     for asset_id in body.asset_ids:
-        if session.get(MediaAsset, asset_id) is None:
+        asset = session.get(MediaAsset, asset_id)
+        if asset is None:
             raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
-        # 最新 media_context：created_at 降序第一（context_id 降序决胜，保证确定性）
-        context = (
-            session.query(MediaContext)
-            .filter(MediaContext.asset_id == asset_id)
-            .order_by(MediaContext.created_at.desc(), MediaContext.context_id.desc())
-            .first()
-        )
-        if context is None:
+        if not (asset.content_json or "").strip():
             raise HTTPException(
                 status_code=422, detail=f"资产 {asset_id} 无识别内容")
-        contexts.append(context)
+        assets.append(asset)
 
     now = datetime.now(timezone.utc)
     # 策略序列化持久化（执行器按 JSON 解析 GenerationPolicy）；未传则
     # policy_json 置空，执行器回退默认策略（缺省值与 GenerationPolicyIn 一致）
     policy_json = body.policy.model_dump_json() if body.policy is not None else None
-    created: list[tuple[GenerationTask, str]] = []
-    for asset_id, context in zip(body.asset_ids, contexts):
-        task = GenerationTask(
+    created: list[TagGenerationTask] = []
+    for asset in assets:
+        task = TagGenerationTask(
             task_id=f"gen_{uuid.uuid4().hex[:12]}",
-            context_id=context.context_id,
+            asset_id=asset.asset_id,
             mode=body.mode,
             policy_json=policy_json,
             status="queued",
             created_at=now,
         )
         session.add(task)
-        created.append((task, asset_id))
+        created.append(task)
     session.commit()
 
-    for task, _ in created:
+    for task in created:
         executor.submit(task.task_id)
 
     # 重读执行状态（expire_on_commit=False 下对象属性不含线程内写入，须 refresh）
     items = []
-    for task, asset_id in created:
+    for task in created:
         session.refresh(task)
         items.append(GenerationTaskItemOut(
-            task_id=task.task_id, asset_id=asset_id, status=task.status))
+            task_id=task.task_id, asset_id=task.asset_id, status=task.status))
     return GenerationTaskCreateResponse(tasks=items)
 
 
@@ -247,22 +242,21 @@ def list_generation_tasks(
     session: Session = Depends(get_session),
 ) -> list[GenerationTaskOut]:
     """任务列表：status/mode/asset_id 过滤，created_at 降序（task_id 决胜），
-    limit/offset 分页（默认 100/0）。asset_id 经 media_context 关联。"""
-    query = session.query(GenerationTask, MediaContext.asset_id).outerjoin(
-        MediaContext, GenerationTask.context_id == MediaContext.context_id)
+    limit/offset 分页（默认 100/0）。资产直接来自任务行。"""
+    query = session.query(TagGenerationTask)
     if status is not None:
-        query = query.filter(GenerationTask.status == status)
+        query = query.filter(TagGenerationTask.status == status)
     if mode is not None:
-        query = query.filter(GenerationTask.mode == mode)
+        query = query.filter(TagGenerationTask.mode == mode)
     if asset_id is not None:
-        query = query.filter(MediaContext.asset_id == asset_id)
+        query = query.filter(TagGenerationTask.asset_id == asset_id)
     rows = query.order_by(
-        GenerationTask.created_at.desc(), GenerationTask.task_id,
+        TagGenerationTask.created_at.desc(), TagGenerationTask.task_id,
     ).offset(offset).limit(limit).all()
     return [
         GenerationTaskOut(
             task_id=task.task_id,
-            asset_id=ctx_asset_id,
+            asset_id=task.asset_id,
             mode=task.mode,
             status=task.status,
             model_version=task.model_version,
@@ -271,7 +265,7 @@ def list_generation_tasks(
             created_at=task.created_at,
             finished_at=task.finished_at,
         )
-        for task, ctx_asset_id in rows
+        for task in rows
     ]
 
 
@@ -279,26 +273,21 @@ def list_generation_tasks(
 def get_generation_task(
     task_id: str, session: Session = Depends(get_session)
 ) -> GenerationTaskDetail:
-    """任务详情 + 结果摘要列表（tag_name 按 origin 取、evidence 解析）；未知任务 → 404。"""
-    task = session.get(GenerationTask, task_id)
+    """任务详情 + 结果摘要列表（tag_name 按 candidate_name/目录名解析）；
+    未知任务 → 404。"""
+    task = session.get(TagGenerationTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
-    asset_id = (
-        session.query(MediaContext.asset_id)
-        .filter(MediaContext.context_id == task.context_id)
-        .scalar()
-        if task.context_id is not None else None
-    )
     rows = (
-        session.query(AssetTag)
-        .filter(AssetTag.task_id == task_id)
-        .order_by(AssetTag.id)  # 入库行序（producer 产出序：相关度降序截断后）
+        session.query(PreAssetTag)
+        .filter(PreAssetTag.task_id == task_id)
+        .order_by(PreAssetTag.id)  # 入库行序（producer 产出序：相关度降序截断后）
         .all()
     )
     names = _catalog_names(session, rows)
     return GenerationTaskDetail(
         task_id=task.task_id,
-        asset_id=asset_id,
+        asset_id=task.asset_id,
         mode=task.mode,
         status=task.status,
         model_version=task.model_version,
@@ -320,7 +309,7 @@ def retry_generation_task(
     """重试失败任务：仅 failed 可重试（否则 422）；状态回 queued、
     error/finished_at 清空并重新提交执行。响应回提交受理态 queued，
     实际终态（同步模式 submit 返回时可能已执行完）经 GET 查询。"""
-    task = session.get(GenerationTask, task_id)
+    task = session.get(TagGenerationTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
     if task.status != "failed":
@@ -337,14 +326,17 @@ def retry_generation_task(
 def list_asset_tags(
     asset_id: str, session: Session = Depends(get_session)
 ) -> list[AssetTagOut]:
-    """资产全部生成标签（跨任务，按入库行序）：摘要形状 + 行主键 id +
-    tag_id/candidate_name 原样；未知资产 → 404。"""
+    """资产标签行（跨任务）：只返回审核已通过的行（v2 语义：pre 表审核通过
+    ≈ 正式挂载；入库复制逻辑实现后再切 asset_tag）；未知资产 → 404。"""
     if session.get(MediaAsset, asset_id) is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
     rows = (
-        session.query(AssetTag)
-        .filter(AssetTag.asset_id == asset_id)
-        .order_by(AssetTag.id)
+        session.query(PreAssetTag)
+        .filter(
+            PreAssetTag.asset_id == asset_id,
+            PreAssetTag.review_status == "approved",
+        )
+        .order_by(PreAssetTag.id)
         .all()
     )
     names = _catalog_names(session, rows)

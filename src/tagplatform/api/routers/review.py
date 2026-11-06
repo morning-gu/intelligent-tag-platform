@@ -45,9 +45,8 @@ from tagplatform.api.routers.generation import (
     _result_out,
 )
 from tagplatform.db.models import (
-    AssetTag,
-    GenerationTask,
     MediaAsset,
+    PreAssetTag,
     TagCatalog,
     UserAccount,
 )
@@ -98,7 +97,7 @@ def review_asset_tag(
     落库撞部分唯一索引（"该资产已挂此标签"）；422 载荷非法（merge 缺/坏
     merge_to、modify 空值/空串/超长）或非法 action（Literal 声明校验）。
     """
-    if session.get(AssetTag, asset_tag_id) is None:
+    if session.get(PreAssetTag, asset_tag_id) is None:
         raise HTTPException(status_code=404,
                             detail=f"标签行不存在：{asset_tag_id}")
     try:
@@ -147,7 +146,7 @@ def batch_review_asset_tags(
 # ---------- 审核列表与筛选（Task 5，审核中心页面数据源） ----------
 
 # 契约固定枚举（statuses/modes 不查库，与数据模型注释的取值集合同源）
-_REVIEW_STATUSES = ["pending", "approved", "rejected", "merged"]
+_REVIEW_STATUSES = ["pending", "approved", "rejected"]
 _GENERATION_MODES = ["closed", "open"]
 
 
@@ -156,8 +155,7 @@ class ReviewItemOut(BaseModel):
 
     tag_name/tag_type 展示解析 candidate_* 优先、目录回退：行带非空
     candidate_name（审核 modify 落在行内的展示字段，改了什么显示什么）
-    → 候选名/类型；否则带 tag_id（catalog 行或已并入目录的 merged 行）
-    → tag_catalog 字典名/类型（merged 行 candidate_* 已清空自然回退）。
+    → 候选名；否则带 tag_id（命中库内标签的行）→ tag_catalog 字典名。
     """
 
     id: int
@@ -170,9 +168,12 @@ class ReviewItemOut(BaseModel):
     confidence: float | None = None
     relevance: float | None = None
     review_status: str
-    level: str = "film"
+    # 挂载粒度：本期恒为 content
+    target_type: str = "content"
     evidence: list[EvidenceOut] = []
     task_id: str | None = None
+    reviewer_id: str | None = None
+    review_comment: str | None = None
 
 
 class ReviewItemsResponse(BaseModel):
@@ -207,52 +208,45 @@ def list_review_items(
 ) -> ReviewItemsResponse:
     """审核列表：待审核/已审行，七筛选参数自由组合。
 
-    join media_asset（asset_title）/tag_catalog（目录名与类型）/
-    generation_task（mode）；默认 confidence 升序（低分先审，无置信度行
-    置后——不挡低分行审核）、id 决胜保证确定性；page/page_size 分页，
-    total 为过滤后总数；未知筛选值一律空列表（不报错）。三个 outerjoin
-    均按对方主键 1:1 关联，无行放大，count 直接可用。
+    join media_asset（asset_title）/tag_catalog（库内标签名与类型）；mode 与
+    origin 同义（行的产出来源即任务模式）；默认 confidence 升序（低分先审，
+    无置信度行置后）；page/page_size 分页，total 为过滤后总数；未知筛选值
+    一律空列表（不报错）。两个 outerjoin 均按对方主键 1:1 关联，无行放大。
     """
     query = (
         session.query(
-            AssetTag, MediaAsset.title, TagCatalog.tag_type, GenerationTask.mode,
+            PreAssetTag, MediaAsset.title, TagCatalog.tag_type,
         )
-        .outerjoin(MediaAsset, AssetTag.asset_id == MediaAsset.asset_id)
-        .outerjoin(TagCatalog, AssetTag.tag_id == TagCatalog.tag_id)
-        .outerjoin(GenerationTask, AssetTag.task_id == GenerationTask.task_id)
+        .outerjoin(MediaAsset, PreAssetTag.asset_id == MediaAsset.asset_id)
+        .outerjoin(TagCatalog, PreAssetTag.tag_id == TagCatalog.tag_id)
     )
     if status is not None:
-        query = query.filter(AssetTag.review_status == status)
+        query = query.filter(PreAssetTag.review_status == status)
     if confidence_min is not None:
-        query = query.filter(AssetTag.confidence >= confidence_min)
+        query = query.filter(PreAssetTag.confidence >= confidence_min)
     if confidence_max is not None:
-        query = query.filter(AssetTag.confidence <= confidence_max)
+        query = query.filter(PreAssetTag.confidence <= confidence_max)
     if tag_type is not None:
-        # 行类型 origin 感知：带 tag_id 行（catalog/merged）按目录类型，
-        # generated 行按候选类型（merged 行 candidate 已清空不会误配）
-        query = query.filter(
-            (TagCatalog.tag_type == tag_type)
-            | (AssetTag.candidate_type == tag_type))
+        # 本期行内不再存候选类型：类型恒取自库内标签（库外新词无类型）
+        query = query.filter(TagCatalog.tag_type == tag_type)
     if mode is not None:
-        query = query.filter(GenerationTask.mode == mode)
+        query = query.filter(PreAssetTag.origin == mode)
     if asset_id is not None:
-        query = query.filter(AssetTag.asset_id == asset_id)
+        query = query.filter(PreAssetTag.asset_id == asset_id)
     if origin is not None:
-        query = query.filter(AssetTag.origin == origin)
+        query = query.filter(PreAssetTag.origin == origin)
 
     total = query.count()
     rows = (
         query
-        .order_by(nullslast(AssetTag.confidence.asc()), AssetTag.id.asc())
+        .order_by(nullslast(PreAssetTag.confidence.asc()), PreAssetTag.id.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
 
-    # 目录名批量解析（限本页行集）。与 generation._catalog_names 不同：
-    # 这里按"行带 tag_id 即取"——含 merged 行（origin=generated 但已并入
-    # 目录）的 tag_name 回退，不做 origin 过滤
-    tag_ids = {row.tag_id for row, _, _, _ in rows if row.tag_id}
+    # 库内标签名批量解析（限本页行集）
+    tag_ids = {row.tag_id for row, _, _ in rows if row.tag_id}
     names = (
         {t.tag_id: t.tag_name
          for t in session.query(TagCatalog).filter(TagCatalog.tag_id.in_(tag_ids))}
@@ -264,21 +258,21 @@ def list_review_items(
             id=row.id,
             asset_id=row.asset_id,
             asset_title=asset_title,
-            # 展示解析 candidate_* 优先、目录回退：审核 modify 落在行内的
-            # 展示字段优先显示（改了什么显示什么），merged 行 candidate
-            # 已清空自然回退目录名/类型
+            # 展示解析 candidate_name 优先、库内标签回退
             tag_name=row.candidate_name or names.get(row.tag_id, ""),
             origin=row.origin,
-            mode=task_mode,
-            tag_type=row.candidate_type or catalog_tag_type,
+            mode=row.origin,
+            tag_type=catalog_tag_type,
             confidence=row.confidence,
             relevance=row.relevance_score,
             review_status=row.review_status,
-            level=row.level,
+            target_type=row.target_type,
             evidence=_parse_evidence(row.evidence_json),
             task_id=row.task_id,
+            reviewer_id=row.reviewer_id,
+            review_comment=row.review_comment,
         )
-        for row, asset_title, catalog_tag_type, task_mode in rows
+        for row, asset_title, catalog_tag_type in rows
     ]
     return ReviewItemsResponse(items=items, total=total, page=page)
 

@@ -1,10 +1,10 @@
 // 审核中心（Task 10）：标签行的五维筛选列表与四动作审核。
-// - 顶部筛选栏：状态/标签类型/置信度区间/模式/来源（statuses/modes 与
-//   origin 为契约固定枚举，tag_types 动态取自 /review/filters）；默认拉
+// - 顶部筛选栏：状态/标签类型/置信度区间/来源（statuses 与 origin 为契约
+//   固定枚举，tag_types 动态取自 /review/filters）；默认拉
 //   status=pending，后端 confidence 升序返回（低分先审）；分页走列表 API。
 // - 表格"模式"列（closed 闭环/open 开放）与"来源"列并排——来源是行
 //   数据形态（目录/生成），模式才区分分类任务与生成任务产出；行经
-//   outerjoin generation_task，任务缺失时 mode 为 null 兜底"—"。
+//   mode 与 origin 同义（行列的产出来源即任务模式）。
 // - 行展开 EvidenceCard 展示证据明细，点击跳内容详情并定位场景。
 // - 单条 通过/拒绝（Popconfirm 确认）；修改/合并（Modal 表单）；勾选行
 //   批量通过/拒绝（逐条独立端点）。
@@ -64,31 +64,20 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_FALLBACK = ['pending', 'approved', 'rejected', 'merged']
 
 /** 生成模式中文展示（契约固定枚举 closed/open）。 */
-const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-
 /** 生成模式 Tag 颜色（与生产任务页一致：闭环蓝/开放紫）。 */
-const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
-
-/** 标签层级中文展示（level 为生成契约固定枚举 film/scene）。 */
-const LEVEL_LABELS: Record<string, string> = { film: '影片', scene: '场景' }
-
-/** 标签层级 Tag 颜色：影片级蓝、场景级青。 */
-const LEVEL_COLORS: Record<string, string> = { film: 'blue', scene: 'cyan' }
-
 /** 一次拉取上限：审核队列按影片分组展示，分组需要完整行集，故用大
  * page_size 一次取回（当前规模 80–200 行；超出时页面提示收窄筛选）。 */
 const GROUPED_PAGE_SIZE = 500
 
-/** 来源下拉固定选项（origin 为数据模型固定取值，/review/filters 不返回）。 */
+/** 来源下拉固定选项（origin = 产出来源，与任务模式一致）。 */
 const ORIGIN_OPTIONS = [
-  { value: 'generated', label: '生成' },
-  { value: 'catalog', label: '目录' },
+  { value: 'closed', label: '目录召回' },
+  { value: 'open', label: '开放生成' },
 ]
 
-/** 修改弹窗表单值（tag_name/tag_type/description 至少其一 + 可选备注）。 */
+/** 修改弹窗表单值（tag_name/description 至少其一 + 可选备注）。 */
 interface ModifyFormValues {
   tag_name?: string
-  tag_type?: string
   description?: string
   comment?: string
 }
@@ -113,7 +102,6 @@ export default function ReviewCenter() {
   const [tagType, setTagType] = useState<string | undefined>()
   const [confidenceMin, setConfidenceMin] = useState<number | undefined>()
   const [confidenceMax, setConfidenceMax] = useState<number | undefined>()
-  const [mode, setMode] = useState<string | undefined>()
   const [origin, setOrigin] = useState<string | undefined>()
   const [filters, setFilters] = useState<ReviewFilters | null>(null)
 
@@ -135,8 +123,7 @@ export default function ReviewCenter() {
         confidence_min: confidenceMin,
         confidence_max: confidenceMax,
         tag_type: tagType,
-        mode,
-        origin,
+          origin,
         page: 1,
         page_size: GROUPED_PAGE_SIZE,
       })
@@ -148,7 +135,7 @@ export default function ReviewCenter() {
     } finally {
       setLoading(false)
     }
-  }, [status, confidenceMin, confidenceMax, tagType, mode, origin])
+  }, [status, confidenceMin, confidenceMax, tagType, origin])
 
   /** 按影片分组（保持后端返回顺序：低置信度优先，影片内同样低分在前）。 */
   const groups = useMemo(() => {
@@ -217,8 +204,8 @@ export default function ReviewCenter() {
 
   function openModify(item: ReviewItem) {
     modifyForm.resetFields()
-    // 预填当前展示名/类型（generated 行即候选字段，catalog 行即目录字段）
-    modifyForm.setFieldsValue({ tag_name: item.tag_name, tag_type: item.tag_type ?? undefined })
+    // 预填当前展示名（库内行取标签名，新词行取候选名）
+    modifyForm.setFieldsValue({ tag_name: item.tag_name })
     setEditing(item)
   }
 
@@ -232,17 +219,16 @@ export default function ReviewCenter() {
     }
     const payload: ReviewActionPayload = {}
     if (values.tag_name) payload.tag_name = values.tag_name
-    if (values.tag_type) payload.tag_type = values.tag_type
     if (values.description) payload.description = values.description
     if (values.comment) payload.comment = values.comment
     // 后端要求 modify 至少一个可修改字段（否则 422），前置拦截省一次往返
-    if (!payload.tag_name && !payload.tag_type && !payload.description) {
-      message.warning('请至少填写一个修改字段（标签名/类型/描述）')
+    if (!payload.tag_name && !payload.description) {
+      message.warning('请至少填写一个修改字段（标签名/描述）')
       return
     }
     try {
       await reviewAssetTag(editing.id, 'modify', payload)
-      message.success('已修改，重新进入待审核队列')
+      message.success('已修改并通过')
       setEditing(null)
       await loadItems()
     } catch (err) {
@@ -317,44 +303,17 @@ export default function ReviewCenter() {
     value: s,
     label: STATUS_LABELS[s] ?? s,
   }))
-  const modeOptions = (filters?.modes ?? []).map((m) => ({
-    value: m,
-    label: MODE_LABELS[m] ?? m,
-  }))
-  // 修改弹窗类型下拉：目录动态类型 + 当前行自身类型（generated 候选类型
-  // 可能不在目录枚举内，保留可选）
-  const modifyTypeOptions = [
-    ...new Set([...(filters?.tag_types ?? []), ...(editing?.tag_type ? [editing.tag_type] : [])]),
-  ].map((v) => ({ value: v, label: v }))
-
   const columns: TableProps<ReviewItem>['columns'] = [
     { title: '标签名', dataIndex: 'tag_name' },
     { title: '类型', dataIndex: 'tag_type', render: (v: string | null) => v ?? '—' },
     {
-      title: '标签层级',
-      dataIndex: 'level',
-      render: (v: string) => (
-        <Tag color={LEVEL_COLORS[v] ?? 'default'}>{LEVEL_LABELS[v] ?? v}</Tag>
-      ),
-    },
-    {
       title: '来源',
       dataIndex: 'origin',
       render: (v: string) => (
-        <Tag color={v === 'generated' ? 'blue' : 'green'}>
+        <Tag color={v === 'closed' ? 'green' : 'blue'}>
           {ORIGIN_OPTIONS.find((o) => o.value === v)?.label ?? v}
         </Tag>
       ),
-    },
-    {
-      title: '模式',
-      dataIndex: 'mode',
-      render: (v: string | null) =>
-        v === null ? (
-          '—'
-        ) : (
-          <Tag color={MODE_COLORS[v] ?? 'default'}>{MODE_LABELS[v] ?? v}</Tag>
-        ),
     },
     {
       title: '置信度',
@@ -440,15 +399,6 @@ export default function ReviewCenter() {
           value={confidenceMax}
           onChange={(v) => setConfidenceMax(v ?? undefined)}
           style={{ width: 130 }}
-        />
-        <Select
-          aria-label="模式筛选"
-          value={mode}
-          onChange={(v) => setMode(v)}
-          options={modeOptions}
-          allowClear
-          placeholder="模式"
-          style={{ width: 120 }}
         />
         <Select
           aria-label="来源筛选"
@@ -541,9 +491,6 @@ export default function ReviewCenter() {
         <Form form={modifyForm} layout="vertical">
           <Form.Item name="tag_name" label="标签名">
             <Input />
-          </Form.Item>
-          <Form.Item name="tag_type" label="标签类型">
-            <Select allowClear options={modifyTypeOptions} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="description" label="标签描述">
             <Input.TextArea rows={2} />

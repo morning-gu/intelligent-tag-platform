@@ -115,14 +115,27 @@ class TagCatalog(Base):
     )
 
 
-class GenerationTask(Base):
-    """标签生成任务：closed（目录内封闭生成）| open（开放候选生成）。"""
+class TagGenerationTask(Base):
+    """标签生成任务：closed（目录内封闭生成）| open（开放候选生成）。
 
-    __tablename__ = "generation_task"
+    v2 起任务直接绑资产（`asset_id`），不再经 `media_context` 中转：内容就是
+    `media_asset.content_json`，任务与资产一一对应、可多条（每次生成一条）。
+    """
+
+    __tablename__ = "tag_generation_task"
+    __table_args__ = (
+        CheckConstraint("mode IN ('closed', 'open')", name="ck_tag_gen_task_mode"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')",
+            name="ck_tag_gen_task_status",
+        ),
+        Index("idx_gen_task_asset", "asset_id"),
+        Index("idx_gen_task_status", "status"),
+    )
 
     task_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    context_id: Mapped[str | None] = mapped_column(
-        ForeignKey("media_context.context_id"), nullable=True
+    asset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("media_asset.asset_id"), nullable=False
     )
     # 取值 closed|open
     mode: Mapped[str] = mapped_column(Text, nullable=False)
@@ -136,14 +149,97 @@ class GenerationTask(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
-class AssetTag(Base):
-    """资产-标签结果行：目录挂载（origin=catalog，tag_id 必填）或开放生成
-    候选（origin=generated，candidate_name 必填）。
+class PreAssetTag(Base):
+    """待审核标签：生成结果 + 审核队列（asset×tag 去重，每资产每标签一行）。
 
-    两个部分唯一索引保证重跑幂等：
-    - ux_asset_tag_catalog：同一资产不重复挂同一目录标签；
-    - ux_asset_tag_candidate：同一资产不重复收录同一候选名。
-    approved 保留 / pending 覆盖的重跑语义由阶段 2 服务层实现，索引只保证不重复。
+    - `origin` 记录产出来源（closed/open），不可变；
+    - `tag_id` 有值 = 命中库内标签（closed 全量；open 的重复项合入时赋值）；
+    - `tag_id` 为空 + `candidate_name` 有值 = 库外新词，审核通过后由合入流程
+      补 `tag_id` / `candidate_dir_id`；
+    - `target_type/target_id` 显式挂载粒度，本期只写 content（= asset_id），
+      scene/character 为结构预留（取 `content_json` 里的 scene_id/character_id）。
+
+    v2 的 `tag_id` 外键目标是 `tag_define`；本期目录与标签仍合并在 v1 的
+    `tag_catalog` 单表，故外键暂指 `tag_catalog.tag_id`，待标签库拆分后改指。
+    """
+
+    __tablename__ = "pre_asset_tag"
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('content', 'scene', 'character')",
+            name="ck_pre_tag_target_type",
+        ),
+        CheckConstraint("origin IN ('closed', 'open')", name="ck_pre_tag_origin"),
+        CheckConstraint(
+            "review_status IN ('pending', 'approved', 'rejected')",
+            name="ck_pre_tag_review_status",
+        ),
+        Index(
+            "ux_pre_tag_catalog",
+            "asset_id",
+            "target_type",
+            "target_id",
+            "tag_id",
+            unique=True,
+            sqlite_where=text("tag_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_pre_tag_candidate",
+            "asset_id",
+            "target_type",
+            "target_id",
+            "candidate_name",
+            unique=True,
+            sqlite_where=text("tag_id IS NULL AND candidate_name IS NOT NULL"),
+        ),
+        Index("idx_pre_tag_asset", "asset_id"),
+        Index("idx_pre_tag_task", "task_id"),
+        Index("idx_pre_tag_review", "review_status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("media_asset.asset_id"), nullable=False
+    )
+    # 挂载粒度：content（本期启用）| scene | character（结构预留）
+    target_type: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="content"
+    )
+    # content 级 = asset_id；场景/角色级 = content_json 里的 scene_id / character_id
+    target_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # 命中库内标签时赋值；库外新词为空，合入标签库时补
+    tag_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tag_catalog.tag_id"), nullable=True
+    )
+    candidate_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 合入时归属目录（本期目录与标签同表，指向 tag_catalog.tag_id）
+    candidate_dir_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tag_catalog.tag_id"), nullable=True
+    )
+    candidate_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 产出来源：closed | open（不可变）
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    relevance_score: Mapped[float | None] = mapped_column(REAL, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(REAL, nullable=True)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tag_generation_task.task_id"), nullable=True
+    )
+    review_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="pending"
+    )
+    # 审核人 = 会话用户名；备注 = 审核（尤其修改）时填写的说明
+    reviewer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+
+class AssetTag(Base):
+    """【v1 遗留】资产-标签正式挂载行：v2 起由 `pre_asset_tag` 承接生成与
+    审核，通过后再复制到此表。本轮只保留结构、不再写入（入库逻辑待做），
+    读取侧统一走 `pre_asset_tag`。
     """
 
     __tablename__ = "asset_tag"
@@ -172,7 +268,7 @@ class AssetTag(Base):
         Text, nullable=False, server_default="film"
     )
     task_id: Mapped[str | None] = mapped_column(
-        ForeignKey("generation_task.task_id"), nullable=True
+        ForeignKey("tag_generation_task.task_id"), nullable=True
     )
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

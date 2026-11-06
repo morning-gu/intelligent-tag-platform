@@ -150,7 +150,12 @@ export function fetchAssetDetail(assetId: string): Promise<AssetDetailData> {
   return apiFetch<AssetDetailData>(`/api/v1/assets/${assetId}`)
 }
 
-/** 单个上下文的完整内容 JSON（场景时间轴数据源）；上下文不属于该资产 → 404。 */
+/** 资产主内容 JSON（`media_asset.content_json`，v2 唯一数据源）；无内容 → 404。 */
+export function fetchAssetContent(assetId: string): Promise<ContentContext> {
+  return apiFetch<ContentContext>(`/api/v1/assets/${assetId}/content`)
+}
+
+/** 兼容端点：单个上下文的完整内容 JSON（历史 media_context 行）；不属于该资产 → 404。 */
 export function fetchAssetContext(assetId: string, contextId: string): Promise<ContentContext> {
   return apiFetch<ContentContext>(`/api/v1/assets/${assetId}/contexts/${contextId}`)
 }

@@ -15,7 +15,7 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 
 from tagplatform.adapters import get_adapter
 from tagplatform.content_import import import_content
-from tagplatform.db.models import AssetTag, GenerationTask, MediaAsset, MediaContext
+from tagplatform.db.models import MediaAsset, MediaContext, PreAssetTag, TagGenerationTask
 from tagplatform.tasks import run_generation_task
 
 UPSTREAM = {
@@ -76,8 +76,9 @@ def test_upstream_to_pending_tags(session):
 
     # 2. 建任务并执行（mock 模式 B：固定三候选；min_confidence 降到 0.5
     #    使三条全部过线——mock 的 confidence 落在 [0.5,1)，默认 0.7 会随机丢）
-    task = GenerationTask(
-        task_id="task_e2e_001", context_id=result.context_id, mode="open",
+    #    v2：任务直绑资产，内容来自 media_asset.content_json
+    task = TagGenerationTask(
+        task_id="task_e2e_001", asset_id="movie_e2e_001", mode="open",
         policy_json='{"min_confidence": 0.5}',
         status="queued", created_at=datetime.now(timezone.utc))
     session.add(task)
@@ -89,10 +90,12 @@ def test_upstream_to_pending_tags(session):
     assert task.prompt_version == "mtg-v2"
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
-    rows = session.query(AssetTag).filter(AssetTag.asset_id == "movie_e2e_001").all()
+    rows = session.query(PreAssetTag).filter(
+        PreAssetTag.asset_id == "movie_e2e_001").all()
     assert len(rows) == 3
     assert {r.review_status for r in rows} == {"pending"}
-    assert {r.origin for r in rows} == {"generated"}  # 空目录 → 全部新候选
+    assert {r.origin for r in rows} == {"open"}  # 空目录 → 全部新候选
+    assert {r.target_type for r in rows} == {"content"}
 
     # 4. 证据锚定在上游场景的时间区间内
     scene_ranges = {(s.time_range.start_ms, s.time_range.end_ms) for s in content.content.scenes}

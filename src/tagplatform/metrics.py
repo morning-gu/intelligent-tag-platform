@@ -1,18 +1,20 @@
 """质量指标推导（Task 7，承诺二③④的数据面）——审核与生成数据的只读聚合。
 
 三个公开函数（session 级纯读，可独立于 API 复用）：
-- `compute_metrics`：总览指标——pending 计数、审核动作计数与占比、新标签
-  （origin=generated）通过率、evidence 覆盖率、生成任务统计；
-- `confidence_distribution`：全部 asset_tag 的 confidence 等宽分桶；
+- `compute_metrics`：总览指标——pending 计数、审核结果计数与占比、新标签
+  （库外新词，tag_id 为空）通过率、evidence 覆盖率、生成任务统计；
+- `confidence_distribution`：全部 pre_asset_tag 的 confidence 等宽分桶；
 - `tag_type_coverage`：每 tag_type 的标签行数与已通过数。
 
 语义约定：
 - 占比/通过率/覆盖率的**分母为 0 一律返回 None**（前端显示"暂无"），
   与计数为 0（正常返回 0，如 success_rate = 0/total）区分开；
-- review_stats 计数按 review_record 记录（action 维度），与 asset_tag 行
-  当前状态解耦（modify 记录落在仍 pending 的行上照常计数）；
-- 新标签通过率分母 = generated 且已终审（approved/rejected/merged）行，
-  numerator = 其中 approved 行（pending 不进分母，catalog 行不进分子）；
+- v2 起审核不再写流水表（review_record），review_stats 改按 pre 行状态
+  统计：approved / rejected 有值，merged（并入既有）与 modified（修改后
+  通过）与 approve 同终态、无法从行上区分，恒为 0；
+- 新标签通过率分母 = 库外新词（tag_id 为空）且已终审（approved/rejected）
+  行，numerator = 其中 approved 行（pending 不进分母，命中库内标签的行
+  不进分子）；
 - avg_duration_ms 只统计终态（succeeded/failed）且两个时间戳齐全的任务。
 
 分层红线：本模块纯读不写、不得 import fastapi（设计文档 §9.4，与
@@ -27,22 +29,17 @@ from datetime import datetime, timezone
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, GenerationTask, ReviewRecord, TagCatalog
+from tagplatform.db.models import PreAssetTag, TagCatalog, TagGenerationTask
 
 # 已终审的审核状态（新标签通过率的分母集合；pending 不计入）
-_TERMINAL_REVIEW_STATUSES = ("approved", "rejected", "merged")
+_TERMINAL_REVIEW_STATUSES = ("approved", "rejected")
 
 # 终态任务状态（时长均值只统计有始有终的任务；queued/running 无 finished_at）
 _TERMINAL_TASK_STATUSES = ("succeeded", "failed")
 
-# review_stats 展示键 → review_record.action 取值映射
-# （modified = action=="modify" 计数，brief 契约）
-_ACTION_KEYS = (
-    ("approved", "approve"),
-    ("rejected", "reject"),
-    ("merged", "merge"),
-    ("modified", "modify"),
-)
+# review_stats 展示键（v2 无审核流水表，只按行终态计数；merged/modified
+# 与 approved 同终态，行上不可区分，恒为 0）
+_REVIEW_KEYS = ("approved", "rejected", "merged", "modified")
 
 
 def _ratio(numerator: int, denominator: int | None) -> float | None:
@@ -65,55 +62,62 @@ def _as_naive_utc(dt: datetime | None) -> datetime | None:
 
 def compute_metrics(session: Session) -> dict:
     """审核推导质量指标总览（字段结构与各分母语义见模块 docstring）。"""
-    # pending 计数：asset_tag 全部 pending 行（不分 origin）
+    # pending 计数：pre_asset_tag 全部待审行（不分 origin）
     pending_count = (
-        session.query(func.count(AssetTag.id))
-        .filter(AssetTag.review_status == "pending")
+        session.query(func.count(PreAssetTag.id))
+        .filter(PreAssetTag.review_status == "pending")
         .scalar()
     )
 
-    # 审核动作计数：review_record 按 action 分组（计数与行状态解耦）
-    action_counts = dict(
-        session.query(ReviewRecord.action, func.count(ReviewRecord.record_id))
-        .group_by(ReviewRecord.action)
-        .all()
+    # 审核结果计数：按行终态统计（v2 起不再写审核流水表）
+    approved_count = (
+        session.query(func.count(PreAssetTag.id))
+        .filter(PreAssetTag.review_status == "approved")
+        .scalar()
     )
-    total_reviews = sum(action_counts.values())
+    rejected_count = (
+        session.query(func.count(PreAssetTag.id))
+        .filter(PreAssetTag.review_status == "rejected")
+        .scalar()
+    )
+    status_counts = {"approved": approved_count, "rejected": rejected_count}
+    total_reviews = approved_count + rejected_count
     review_stats = {
         key: {
-            "count": action_counts.get(action, 0),
-            "ratio": _ratio(action_counts.get(action, 0), total_reviews),
+            "count": status_counts.get(key, 0),
+            "ratio": (_ratio(status_counts.get(key, 0), total_reviews)
+                      if key in status_counts else None),
         }
-        for key, action in _ACTION_KEYS
+        for key in _REVIEW_KEYS
     }
 
-    # 新标签通过率：generated 且 approved / generated 已终审（分母 0 → None）
+    # 新标签通过率：库外新词（tag_id 为空）已终审 / 其中 approved
     generated_terminal = (
-        session.query(func.count(AssetTag.id))
+        session.query(func.count(PreAssetTag.id))
         .filter(
-            AssetTag.origin == "generated",
-            AssetTag.review_status.in_(_TERMINAL_REVIEW_STATUSES),
+            PreAssetTag.tag_id.is_(None),
+            PreAssetTag.review_status.in_(_TERMINAL_REVIEW_STATUSES),
         )
         .scalar()
     )
     generated_approved = (
-        session.query(func.count(AssetTag.id))
+        session.query(func.count(PreAssetTag.id))
         .filter(
-            AssetTag.origin == "generated",
-            AssetTag.review_status == "approved",
+            PreAssetTag.tag_id.is_(None),
+            PreAssetTag.review_status == "approved",
         )
         .scalar()
     )
     generated_pass_rate = _ratio(generated_approved, generated_terminal)
 
     # evidence 覆盖率：evidence_json 非空（非 NULL/""）且非 "[]" 的行占比
-    total_tags = session.query(func.count(AssetTag.id)).scalar()
+    total_tags = session.query(func.count(PreAssetTag.id)).scalar()
     covered_tags = (
-        session.query(func.count(AssetTag.id))
+        session.query(func.count(PreAssetTag.id))
         .filter(
-            AssetTag.evidence_json.isnot(None),
-            AssetTag.evidence_json != "",
-            AssetTag.evidence_json != "[]",
+            PreAssetTag.evidence_json.isnot(None),
+            PreAssetTag.evidence_json != "",
+            PreAssetTag.evidence_json != "[]",
         )
         .scalar()
     )
@@ -121,26 +125,26 @@ def compute_metrics(session: Session) -> dict:
 
     # 任务统计：success_rate 分母 = 全部任务（含 queued/running）；
     # avg_duration_ms 只统计终态且两时间戳齐全的任务，无则 None
-    task_total = session.query(func.count(GenerationTask.task_id)).scalar()
+    task_total = session.query(func.count(TagGenerationTask.task_id)).scalar()
     succeeded = (
-        session.query(func.count(GenerationTask.task_id))
-        .filter(GenerationTask.status == "succeeded")
+        session.query(func.count(TagGenerationTask.task_id))
+        .filter(TagGenerationTask.status == "succeeded")
         .scalar()
     )
     failed = (
-        session.query(func.count(GenerationTask.task_id))
-        .filter(GenerationTask.status == "failed")
+        session.query(func.count(TagGenerationTask.task_id))
+        .filter(TagGenerationTask.status == "failed")
         .scalar()
     )
     durations_ms = [
         (_as_naive_utc(finished_at) - _as_naive_utc(created_at)).total_seconds()
         * 1000.0
         for created_at, finished_at in (
-            session.query(GenerationTask.created_at, GenerationTask.finished_at)
+            session.query(TagGenerationTask.created_at, TagGenerationTask.finished_at)
             .filter(
-                GenerationTask.status.in_(_TERMINAL_TASK_STATUSES),
-                GenerationTask.created_at.isnot(None),
-                GenerationTask.finished_at.isnot(None),
+                TagGenerationTask.status.in_(_TERMINAL_TASK_STATUSES),
+                TagGenerationTask.created_at.isnot(None),
+                TagGenerationTask.finished_at.isnot(None),
             )
             .all()
         )
@@ -165,7 +169,7 @@ def compute_metrics(session: Session) -> dict:
 
 
 def confidence_distribution(session: Session, buckets: int = 10) -> list[dict]:
-    """全部 asset_tag 的 confidence 等宽分桶（None confidence 不计入）。
+    """全部 pre_asset_tag 的 confidence 等宽分桶（None confidence 不计入）。
 
     桶区间左闭右开 [lo, hi)：边界值归右侧桶（0.5 → "0.5-0.6"），1.0 clamp
     到末桶。返回全部桶（含 0 计数桶），前端可直接作柱状图基线。
@@ -175,8 +179,8 @@ def confidence_distribution(session: Session, buckets: int = 10) -> list[dict]:
     """
     values = [
         row[0]
-        for row in session.query(AssetTag.confidence)
-        .filter(AssetTag.confidence.isnot(None))
+        for row in session.query(PreAssetTag.confidence)
+        .filter(PreAssetTag.confidence.isnot(None))
     ]
     edges = [i / buckets for i in range(buckets + 1)]
     counts = [0] * buckets
@@ -192,24 +196,19 @@ def confidence_distribution(session: Session, buckets: int = 10) -> list[dict]:
 def tag_type_coverage(session: Session) -> list[dict]:
     """每 tag_type 的标签行数与已通过数（承诺二④），按 total 降序。
 
-    tag_type 取行语义值（与审核列表 tag_type 同规则）：行带 tag_id
-    （catalog 行或 merged 行）→ tag_catalog.tag_type；generated 行（无
-    tag_id）→ candidate_type。两者皆缺（generated 行 candidate_type 为空）
-    的行无法归类，不计入。同 total 按 tag_type 升序决胜（确定性输出）。
+    tag_type 取行语义值（与审核列表同规则）：行带 tag_id → tag_catalog.tag_type；
+    库外新词（tag_id 为空）在库内尚无类型，无法归类，不计入。同 total 按
+    tag_type 升序决胜（确定性输出）。
     """
-    tag_type_expr = case(
-        (AssetTag.tag_id.isnot(None), TagCatalog.tag_type),
-        else_=AssetTag.candidate_type,
-    ).label("tag_type")
     rows = (
         session.query(
-            tag_type_expr,
-            func.count(AssetTag.id),
-            func.sum(case((AssetTag.review_status == "approved", 1), else_=0)),
+            TagCatalog.tag_type,
+            func.count(PreAssetTag.id),
+            func.sum(case((PreAssetTag.review_status == "approved", 1), else_=0)),
         )
-        .outerjoin(TagCatalog, AssetTag.tag_id == TagCatalog.tag_id)
-        .group_by(tag_type_expr)
-        .order_by(func.count(AssetTag.id).desc(), tag_type_expr.asc())
+        .join(TagCatalog, PreAssetTag.tag_id == TagCatalog.tag_id)
+        .group_by(TagCatalog.tag_type)
+        .order_by(func.count(PreAssetTag.id).desc(), TagCatalog.tag_type.asc())
         .all()
     )
     return [

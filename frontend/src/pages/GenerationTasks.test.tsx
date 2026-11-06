@@ -79,10 +79,11 @@ const DETAIL: GenerationTaskDetail = {
     {
       id: 11,
       tag_name: '主角争执',
-      origin: 'generated',
+      origin: 'open',
       relevance_score: 0.87,
       confidence: 0.92,
       review_status: 'pending',
+      target_type: 'content',
       evidence: [
         { scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' },
       ],
@@ -90,10 +91,11 @@ const DETAIL: GenerationTaskDetail = {
     {
       id: 12,
       tag_name: '犯罪',
-      origin: 'catalog',
+      origin: 'closed',
       relevance_score: null,
       confidence: null,
       review_status: 'approved',
+      target_type: 'content',
       evidence: [],
     },
   ],
@@ -378,7 +380,7 @@ describe('GenerationTasks 生产任务页', () => {
     })
     // generated 行：标签名/来源/审核状态/置信度/相关度/证据描述与时间戳
     expect(await screen.findByText('主角争执')).toBeInTheDocument()
-    expect(screen.getByText('生成')).toBeInTheDocument()
+    expect(screen.getByText('开放生成')).toBeInTheDocument()
     expect(screen.getByText('待审核')).toBeInTheDocument()
     expect(screen.getByText('0.92')).toBeInTheDocument()
     expect(screen.getByText('0.87')).toBeInTheDocument()
@@ -386,7 +388,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(screen.getByText('01:05 - 01:11')).toBeInTheDocument()
     // catalog 行：目录/已通过，relevance/confidence 双 null 兜底
     expect(screen.getByText('犯罪')).toBeInTheDocument()
-    expect(screen.getByText('目录')).toBeInTheDocument()
+    expect(screen.getByText('目录召回')).toBeInTheDocument()
     expect(screen.getByText('已通过')).toBeInTheDocument()
     expect(screen.getAllByText('暂无')).toHaveLength(2)
     // 详情头部：模型/Prompt 版本展示

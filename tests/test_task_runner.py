@@ -38,12 +38,11 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.db.models import (
-    AssetTag,
     Base,
-    GenerationTask,
     MediaAsset,
-    MediaContext,
+    PreAssetTag,
     TagCatalog,
+    TagGenerationTask,
 )
 from tagplatform.llm.client import LLMResponse
 from tagplatform.tasks import (
@@ -65,35 +64,26 @@ def _utcnow() -> datetime:
 
 def _make_task(session: Session, mode: str = "closed",
                task_id: str = "task_runner_1", policy_json: str | None = None
-               ) -> GenerationTask:
-    """播种 asset + media_context + generation_task(status="queued")，返回任务。
+               ) -> TagGenerationTask:
+    """播种 asset（带 content_json）+ tag_generation_task(queued)，返回任务。
 
-    asset/context 首次创建后复用（tag_name/主键唯一，重复播种会撞主键）；
-    context_id 随 task_id 走（每任务独立上下文行，向量回填断言互不串扰）。
+    v2 起任务直绑资产、内容读 media_asset.content_json：资产首次创建时写入
+    内容并复用（重复播种复用同一行）。
     """
     asset_info = _CONTENT_DATA["asset"]
-    if session.get(MediaAsset, asset_info["asset_id"]) is None:
-        session.add(MediaAsset(
+    asset = session.get(MediaAsset, asset_info["asset_id"])
+    if asset is None:
+        asset = MediaAsset(
             asset_id=asset_info["asset_id"],
             asset_type=asset_info["asset_type"],
             title=asset_info["title"],
             created_at=_utcnow(),
-        ))
-        session.flush()
-    context_id = f"ctx_{task_id}"
-    if session.get(MediaContext, context_id) is None:
-        session.add(MediaContext(
-            context_id=context_id,
-            asset_id=asset_info["asset_id"],
-            content_json=json.dumps(_CONTENT_DATA, ensure_ascii=False),
-            source=_CONTENT_DATA["metadata"]["source"],
-            model_version=_CONTENT_DATA["metadata"]["model_version"],
-            recognition_status=_CONTENT_DATA["metadata"]["recognition_status"],
-            created_at=_utcnow(),
-        ))
-        session.flush()
-    task = GenerationTask(
-        task_id=task_id, context_id=context_id, mode=mode,
+        )
+        session.add(asset)
+    asset.content_json = json.dumps(_CONTENT_DATA, ensure_ascii=False)
+    session.flush()
+    task = TagGenerationTask(
+        task_id=task_id, asset_id=asset_info["asset_id"], mode=mode,
         policy_json=policy_json, status="queued", created_at=_utcnow(),
     )
     session.add(task)
@@ -135,12 +125,14 @@ def test_run_task_success_writes_tags(session):
     done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert done is t
     assert t.status == "succeeded" and t.prompt_version == "1" and t.model_version == "mock-1"
-    assert session.query(AssetTag).count() >= 1 and t.finished_at is not None
-    # 模式 A：媒体上下文摘要向量回填（runner 独立重算，计划定案）
-    assert session.get(MediaContext, t.context_id).embedding is not None
+    assert session.query(PreAssetTag).count() >= 1 and t.finished_at is not None
+    # v2：任务直绑资产，结果行 target 固定 content、origin = 任务模式
+    assert session.query(PreAssetTag).first().target_id == t.asset_id
+    assert session.query(PreAssetTag).first().origin == "closed"
     # MockLLM 场景证据（Task 6）：runner 渲染文本 prompt 含场景行 → 落库
     # evidence_json 非空，证据卡数据来自场景行（fixture 单场景 scene_001）
-    row = session.query(AssetTag).filter(AssetTag.task_id == t.task_id).first()
+    row = session.query(PreAssetTag).filter(
+        PreAssetTag.task_id == t.task_id).first()
     card = json.loads(row.evidence_json)[0]
     assert card == {"scene_id": "scene_001", "start_ms": 120000,
                     "end_ms": 180000,
@@ -158,7 +150,7 @@ def test_run_task_llm_failure_atomic(session):
     t = _make_task(session)
     run_generation_task(t.task_id, session, BrokenLLM(), MOCK_EMBEDDER)
     assert t.status == "failed" and "LLM 调用失败" in t.error
-    assert session.query(AssetTag).count() == 0   # Review Focus 1：零半截写入
+    assert session.query(PreAssetTag).count() == 0   # Review Focus 1：零半截写入
     assert t.finished_at is not None
 
 
@@ -166,7 +158,7 @@ def test_run_task_empty_catalog_fails(session):
     t = _make_task(session)
     run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert t.status == "failed" and "候选标签为空" in t.error
-    assert session.query(AssetTag).count() == 0
+    assert session.query(PreAssetTag).count() == 0
 
 
 def test_run_task_wrong_status_rejected(session):
@@ -215,7 +207,7 @@ def test_run_task_persist_failure_rolls_back_partial_writes(session):
     run_generation_task(t.task_id, session, _PartialPersistLLM(), MOCK_EMBEDDER)
     assert t.status == "failed" and "tag_id" in t.error
     # persist 中途失败：先前插行随任务级事务回滚，零残留
-    assert session.query(AssetTag).count() == 0
+    assert session.query(PreAssetTag).count() == 0
 
 
 # ---- TaskExecutor：线程池与同步模式 ----
@@ -247,14 +239,14 @@ def test_executor_thread_pool(tmp_path):
         while time.monotonic() < deadline:
             with factory() as s:
                 statuses = {row.task_id: row.status
-                            for row in s.query(GenerationTask).all()}
+                            for row in s.query(TagGenerationTask).all()}
             if all(statuses.get(tid) == "succeeded"
                    for tid in (closed_id, open_id)):
                 break
             time.sleep(0.05)
         with factory() as s:
-            closed_row = s.get(GenerationTask, closed_id)
-            open_row = s.get(GenerationTask, open_id)
+            closed_row = s.get(TagGenerationTask, closed_id)
+            open_row = s.get(TagGenerationTask, open_id)
             assert closed_row.status == "succeeded", statuses
             assert open_row.status == "succeeded", statuses
             assert closed_row.model_version == "mock-1"
@@ -262,11 +254,10 @@ def test_executor_thread_pool(tmp_path):
             # （runner 写 str(template.version)），新会话读回仍为 "1"
             assert str(closed_row.prompt_version) == "1"
             # closed 任务有标签产出（min_confidence=0.5 下零选中概率 ≈ 2e-7）
-            assert s.query(AssetTag).filter(
-                AssetTag.task_id == closed_id).count() >= 1
-            # 模式 A 才回填媒体上下文向量；open 不回填（契约仅模式 A）
-            assert s.get(MediaContext, closed_row.context_id).embedding is not None
-            assert s.get(MediaContext, open_row.context_id).embedding is None
+            assert s.query(PreAssetTag).filter(
+                PreAssetTag.task_id == closed_id).count() >= 1
+            assert closed_row.asset_id == _CONTENT_DATA["asset"]["asset_id"]
+            assert open_row.asset_id == _CONTENT_DATA["asset"]["asset_id"]
     finally:
         executor.shutdown()
     engine.dispose()
@@ -286,10 +277,10 @@ def test_executor_workers_zero_synchronous(tmp_path):
     try:
         executor.submit(task_id)
         with factory() as s:
-            row = s.get(GenerationTask, task_id)
+            row = s.get(TagGenerationTask, task_id)
             assert row.status == "succeeded" and row.finished_at is not None
-            assert s.query(AssetTag).filter(
-                AssetTag.task_id == task_id).count() >= 1
+            assert s.query(PreAssetTag).filter(
+                PreAssetTag.task_id == task_id).count() >= 1
     finally:
         executor.shutdown()
     engine.dispose()

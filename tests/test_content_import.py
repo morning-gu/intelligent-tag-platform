@@ -64,22 +64,21 @@ def test_scene_rows_pruned_when_gone(session, content_fixture):
 
 
 def test_prune_removes_tags_of_dropped_scene(session, content_fixture):
-    """删场景行前先删引用它的 asset_tag/review_record，否则外键会挡住。"""
-    from tagplatform.db.models import AssetTag, ReviewRecord
+    """删场景行前先删其待审标签，否则外键会挡住。"""
+    from tagplatform.db.models import PreAssetTag
 
     r1 = import_content(content_fixture, session, None)
-    session.add(AssetTag(id=7, asset_id=r1.scene_asset_ids[0], origin="generated",
-                         candidate_name="夜景", review_status="pending"))
-    session.flush()
-    session.add(ReviewRecord(record_id="r1", result_id=7, action="approve"))
+    scene_id = r1.scene_asset_ids[0]
+    session.add(PreAssetTag(id=7, asset_id=scene_id, target_type="content",
+                            target_id=scene_id, origin="open",
+                            candidate_name="夜景", review_status="pending"))
     session.commit()
 
     content_fixture.content.scenes.clear()
     import_content(content_fixture, session, None)
 
-    assert session.get(AssetTag, 7) is None
-    assert session.query(ReviewRecord).count() == 0
-    assert session.get(MediaAsset, r1.scene_asset_ids[0]) is None
+    assert session.get(PreAssetTag, 7) is None
+    assert session.get(MediaAsset, scene_id) is None
 
 
 def test_reimport_new_context_upserts_assets(session, content_fixture):

@@ -45,10 +45,11 @@ class Evidence:
 class ProducedTag:
     """Producer 产出的一枚候选标签（审核前的中间态，不直接入库）。
 
-    - origin="catalog"：命中既有目录标签，tag_id 必填、candidate_* 为
-      None；
-    - origin="generated"：模型新造候选，tag_id 为 None、candidate_*
-      描述新标签候选（type/description）。
+    - `origin` 是**库内命中判定**：`"catalog"` 命中库内标签（tag_id 必填、
+      candidate_* 为 None）、`"generated"` 模型新造候选（tag_id 为 None、
+      candidate_* 描述新标签）。注意它与 `pre_asset_tag.origin` 列（任务的
+      closed/open 产出来源）不是同一概念，落库时由任务模式决定。
+    - `level` 为历史字段（film/scene），当前落库只写 content 级挂载。
     """
 
     origin: str  # "catalog" | "generated"

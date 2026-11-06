@@ -4,7 +4,8 @@
 - TagCatalog 往返读写与 status 默认值 'active'；
 - AssetTag 两个部分唯一索引真实触发 IntegrityError（目录标签：同一资产
   不重复挂同一标签；候选标签：同一资产不重复收录同一候选名）；
-- alembic 迁移可升级：子进程 `upgrade head` 后 8 张表全部存在。
+- PreAssetTag 两个部分唯一索引与 target_type CHECK 真实触发 IntegrityError；
+- alembic 迁移可升级：子进程 `upgrade head` 后核心表全部存在。
 
 注：两个 IntegrityError 用例先补齐外键父行（media_asset / tag_catalog），
 确保报错确因部分唯一索引而非外键缺失——create_engine_for 逐连接开启
@@ -20,14 +21,20 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tagplatform.db.models import AssetTag, MediaAsset, TagCatalog
+from tagplatform.db.models import (
+    AssetTag,
+    MediaAsset,
+    PreAssetTag,
+    TagCatalog,
+)
 
 # 迁移测试断言用：8 张核心表名
 EXPECTED_TABLES = {
     "media_asset",
     "media_context",
     "tag_catalog",
-    "generation_task",
+    "tag_generation_task",
+    "pre_asset_tag",
     "asset_tag",
     "review_record",
     "import_batch",
@@ -65,6 +72,43 @@ def test_asset_tag_candidate_unique(session):
     session.flush()
     session.add_all([AssetTag(asset_id="a", origin="generated", candidate_name="新词"),
                      AssetTag(asset_id="a", origin="generated", candidate_name="新词")])
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_pre_asset_tag_partial_unique(session):
+    # 同资产同实体不重复挂同一库内标签（ux_pre_tag_catalog）
+    session.add(MediaAsset(asset_id="a", asset_type="movie", title="测试影片"))
+    session.add(TagCatalog(tag_id="t1", tag_name="悬疑", tag_type="genre",
+                           description="d"))
+    session.flush()
+    session.add_all([
+        PreAssetTag(asset_id="a", target_id="a", tag_id="t1", origin="closed"),
+        PreAssetTag(asset_id="a", target_id="a", tag_id="t1", origin="closed"),
+    ])
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_pre_asset_tag_candidate_unique(session):
+    # 同资产同实体不重复收录同一候选名（ux_pre_tag_candidate）
+    session.add(MediaAsset(asset_id="a", asset_type="movie", title="测试影片"))
+    session.flush()
+    session.add_all([
+        PreAssetTag(asset_id="a", target_id="a", candidate_name="新词",
+                    origin="open"),
+        PreAssetTag(asset_id="a", target_id="a", candidate_name="新词",
+                    origin="open"),
+    ])
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_pre_asset_tag_target_type_check(session):
+    session.add(MediaAsset(asset_id="a", asset_type="movie", title="测试影片"))
+    session.flush()
+    session.add(PreAssetTag(asset_id="a", target_id="a", target_type="episode",
+                            origin="closed"))
     with pytest.raises(IntegrityError):
         session.commit()
 

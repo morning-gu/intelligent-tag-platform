@@ -63,14 +63,14 @@ def test_open_producer_embeds_candidates_as_query(session, content_fixture):
     assert [role for role, _texts in rec.calls] == ["query"]
 
 
-def test_runner_closed_task_uses_query_and_passage(session):
+def test_runner_closed_task_uses_query_only(session):
+    """closed 只做召回 query：v2 不再回填 media_context 的摘要向量。"""
     _seed_catalog(session)
     t = _make_task(session, policy_json='{"min_confidence": 0.5}')
     rec = RecordingEmbedder()
     run_generation_task(t.task_id, session, MOCK_LLM, rec)
     assert t.status == "succeeded"
-    # 召回 query + 上下文摘要回填 passage
-    assert {role for role, _texts in rec.calls} == {"query", "passage"}
+    assert {role for role, _texts in rec.calls} == {"query"}
 
 
 def test_runner_open_task_only_query(session):

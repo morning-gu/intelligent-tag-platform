@@ -4,7 +4,8 @@
 业务规则全部在 tagplatform.adapters / content_import 与 DB 层，router 只做
 协议转换与错误映射（未知 kind / 内容 JSON 校验失败 / video_root 非法 →
 422；未知资产/上下文 → 404）。contexts 摘要不含 content_json 大字段，
-完整 JSON 经 `GET /assets/{asset_id}/contexts/{context_id}` 取回。
+完整 JSON 走 `GET /assets/{asset_id}/content`（media_asset 主内容，v2 唯一
+数据源）或兼容端点 `GET /assets/{asset_id}/contexts/{context_id}`。
 """
 
 from datetime import datetime
@@ -170,11 +171,26 @@ def get_asset(asset_id: str, session: Session = Depends(get_session)) -> AssetDe
     )
 
 
+@router.get("/assets/{asset_id}/content")
+def get_asset_content(asset_id: str, session: Session = Depends(get_session)) -> dict:
+    """资产主内容 JSON（`media_asset.content_json`，上游模板形态）。
+
+    这是 v2 的内容唯一数据源：生成任务与资产详情页都读这里；`media_context`
+    仅保留历史行（本期仍双写）。资产不存在 → 404；资产无内容 → 404。
+    """
+    asset = session.get(MediaAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
+    if not asset.content_json:
+        raise HTTPException(status_code=404, detail=f"资产无识别内容：{asset_id}")
+    return template_from_stored(asset.content_json)
+
+
 @router.get("/assets/{asset_id}/contexts/{context_id}")
 def get_asset_context(
     asset_id: str, context_id: str, session: Session = Depends(get_session)
 ) -> dict:
-    """单个 media_context 的完整内容 JSON（上游模板形态，字段全量：缺值 null / []）。
+    """兼容端点：单个 media_context 的完整内容 JSON（上游模板形态）。
 
     资产不存在、上下文不存在或上下文不属于该资产 → 404。
     """

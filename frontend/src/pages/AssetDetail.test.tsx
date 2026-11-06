@@ -98,6 +98,11 @@ interface MockOptions {
 function mockApis(options: MockOptions = {}) {
   mockedApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/v1/assets/a1') return options.detail ?? DETAIL
+    // v2：主内容读 media_asset.content_json；contexts 端点仅作老数据回退
+    if (path === '/api/v1/assets/a1/content') {
+      if (options.contextFail) throw new Error('上下文库不可用')
+      return options.context ?? CONTEXT
+    }
     if (path === '/api/v1/assets/a1/contexts/c1') {
       if (options.contextFail) throw new Error('上下文库不可用')
       return options.context ?? CONTEXT
@@ -255,8 +260,8 @@ describe('AssetDetail 内容资产详情', () => {
     expect(screen.queryByText('无场景数据')).not.toBeInTheDocument()
   })
 
-  it('资产无上下文：时间轴空态提示"暂无识别上下文"', async () => {
-    mockApis({ detail: { ...DETAIL, contexts: [] } })
+  it('资产无内容：时间轴空态提示"暂无识别上下文"', async () => {
+    mockApis({ detail: { ...DETAIL, has_content: false, contexts: [] } })
     renderDetail()
 
     expect(await screen.findByText('暂无识别上下文')).toBeInTheDocument()

@@ -20,8 +20,8 @@ export interface GenerationTaskSummary {
   finished_at: string | null
 }
 
-/** 任务结果行（与后端 GenerationResultOut 一致）：id 为 asset_tag 行主键
- * （审核中心行操作的定位键）；evidence 与审核列表证据同形，直接复用。 */
+/** 任务结果行（与后端 GenerationResultOut 一致）：id 为 pre_asset_tag 行
+ * 主键（审核中心行操作的定位键）；evidence 与审核列表证据同形。 */
 export interface GenerationTaskResult {
   id: number
   tag_name: string
@@ -29,6 +29,7 @@ export interface GenerationTaskResult {
   relevance_score: number | null
   confidence: number | null
   review_status: string
+  target_type: string
   evidence: ReviewEvidence[]
 }
 

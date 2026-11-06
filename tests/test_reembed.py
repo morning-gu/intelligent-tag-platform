@@ -7,6 +7,7 @@
 - 不 commit（调用方统一事务边界）：会话内查询即见更新。
 """
 
+import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -62,8 +63,13 @@ def test_reembed_catalog_replaces_vectors(session):
 
 
 def test_reembed_context_replaces_summary_vector(session):
-    t = _make_task(session)  # 播种 asset + media_context（content_json 为夹具）
-    ctx = session.get(MediaContext, t.context_id)
+    _make_task(session)  # 播种 asset（content_json 为夹具）
+    # media_context 已不再是生成侧数据源，但历史摘要向量仍可重刷
+    ctx = MediaContext(context_id="ctx_reembed", asset_id="movie_001",
+                       content_json=json.dumps(_CONTENT_DATA,
+                                               ensure_ascii=False))
+    session.add(ctx)
+    session.flush()
     ctx.embedding = _legacy_vec()
     session.commit()
 
@@ -71,9 +77,9 @@ def test_reembed_context_replaces_summary_vector(session):
     summary = reembed_all(session, flip)
 
     assert summary.catalog_rows == 0 and summary.context_rows == 1
-    # 文本与 runner 回填同源：content_json 的剧情摘要，role=passage
+    # 文本与历史回填同源：content_json 的剧情摘要，role=passage
     assert ("passage", [_CONTENT_DATA["content"]["summary"]]) in flip.calls
-    refreshed = session.get(MediaContext, t.context_id)
+    refreshed = session.get(MediaContext, "ctx_reembed")
     assert refreshed.embedding is not None
     assert not np.allclose(decode_vector(refreshed.embedding),
                            decode_vector(_legacy_vec()))

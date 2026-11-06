@@ -50,10 +50,9 @@ from sqlalchemy.orm import Session
 from tagplatform.content_io import dump_for_storage, is_upstream_shape
 from tagplatform.content_template import to_template, to_template_from_content
 from tagplatform.db.models import (
-    AssetTag,
+    PreAssetTag,
     MediaAsset,
     MediaContext,
-    ReviewRecord,
 )
 from tagplatform.schemas import ContentJSON
 from tagplatform.schemas.upstream import parse_upstream
@@ -166,7 +165,8 @@ def _prune_scenes(session: Session, asset_id: str, keep: list[str]) -> None:
     """删掉本次内容里已不存在的场景行（连同挂在上面的标签）。
 
     场景切分变化（换了生成版本、调整了场景规划）时，旧场景若留着会变成
-    没有父级内容的孤儿行，标签证据也指向不存在的场景。
+    没有父级内容的孤儿行，标签证据也指向不存在的场景。场景级待审标签
+    随之清掉（本期只写 content 级，这里是结构性防御）。
     """
     query = session.query(MediaAsset.asset_id).filter(
         MediaAsset.parent_id == asset_id,
@@ -178,12 +178,7 @@ def _prune_scenes(session: Session, asset_id: str, keep: list[str]) -> None:
     stale = [row[0] for row in query]
     if not stale:
         return
-    tag_ids = [row[0] for row in session.query(AssetTag.id).filter(
-        AssetTag.asset_id.in_(stale))]
-    if tag_ids:
-        session.execute(delete(ReviewRecord).where(
-            ReviewRecord.result_id.in_(tag_ids)))
-        session.execute(delete(AssetTag).where(AssetTag.id.in_(tag_ids)))
+    session.execute(delete(PreAssetTag).where(PreAssetTag.asset_id.in_(stale)))
     session.execute(delete(MediaAsset).where(MediaAsset.asset_id.in_(stale)))
 
 

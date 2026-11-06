@@ -160,3 +160,23 @@ def test_asset_detail_and_404(client):
     assert client.get(
         f"/api/v1/assets/{body['scene_asset_ids'][0]}/contexts/{body['context_id']}"
     ).status_code == 404
+
+
+def test_asset_content_endpoint_reads_media_asset(client):
+    """GET /assets/{id}/content：主内容取自 media_asset.content_json（v2 唯一
+    数据源），与兼容的 context 端点同形；无内容/未知资产 → 404。"""
+    body = client.post("/api/v1/content/import", json={
+        "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT}).json()
+    asset_id = body["asset_id"]
+
+    content = client.get(f"/api/v1/assets/{asset_id}/content")
+    assert content.status_code == 200
+    via_context = client.get(
+        f"/api/v1/assets/{asset_id}/contexts/{body['context_id']}").json()
+    assert content.json() == via_context
+    assert content.json()["asset"]["asset_id"] == asset_id
+
+    # 场景资产无主内容：404；未知资产：404
+    assert client.get(
+        f"/api/v1/assets/{body['scene_asset_ids'][0]}/content").status_code == 404
+    assert client.get("/api/v1/assets/asset_none/content").status_code == 404

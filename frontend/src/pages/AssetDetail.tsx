@@ -14,6 +14,7 @@ import type { TableProps } from 'antd'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import {
+  fetchAssetContent,
   fetchAssetContext,
   fetchAssetDetail,
   fetchAssetTags,
@@ -100,20 +101,21 @@ export default function AssetDetail() {
       setDetail(detailData)
       setTags(tagRows)
       setLoadError(null)
-      // 默认展示最早导入的上下文（后端按 created_at 升序返回）；多上下文
-      // 切换选择器留给后续任务
+      // 主内容读 media_asset.content_json（v2 唯一数据源）；无主内容的老数据
+      // 回退到最早导入的上下文（后端按 created_at 升序返回）
       const firstContextId = detailData.contexts[0]?.context_id
-      if (firstContextId !== undefined) {
-        try {
+      try {
+        if (detailData.has_content) {
+          setContext(await fetchAssetContent(assetId))
+        } else if (firstContextId !== undefined) {
           setContext(await fetchAssetContext(assetId, firstContextId))
-          setContextError(null)
-        } catch (err) {
+        } else {
           setContext(null)
-          setContextError(err instanceof Error ? err.message : '场景数据加载失败')
         }
-      } else {
-        setContext(null)
         setContextError(null)
+      } catch (err) {
+        setContext(null)
+        setContextError(err instanceof Error ? err.message : '场景数据加载失败')
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : '资产详情加载失败')

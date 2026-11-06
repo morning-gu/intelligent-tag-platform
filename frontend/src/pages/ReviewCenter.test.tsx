@@ -41,15 +41,17 @@ const ROW_A: ReviewItem = {
   asset_id: 'a1',
   asset_title: '星际穿越',
   tag_name: '主角争执',
-  origin: 'generated',
+  origin: 'open',
   mode: 'open',
   tag_type: 'mood',
   confidence: 0.42,
   relevance: 0.77,
   review_status: 'pending',
-  level: 'scene',
+  target_type: 'content',
   evidence: [{ scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' }],
   task_id: 'task-1',
+  reviewer_id: null,
+  review_comment: null,
 }
 
 /** catalog 行：置信度/相关度为 null（兜底"暂无"）、无证据（不可展开）。 */
@@ -58,32 +60,36 @@ const ROW_B: ReviewItem = {
   asset_id: 'a2',
   asset_title: '盗梦空间',
   tag_name: '枪战',
-  origin: 'catalog',
+  origin: 'closed',
   mode: 'closed',
   tag_type: 'genre',
   confidence: null,
   relevance: null,
   review_status: 'pending',
-  level: 'film',
+  target_type: 'content',
   evidence: [],
   task_id: null,
+  reviewer_id: null,
+  review_comment: null,
 }
 
-/** mode=null 行：模式列兜底"—"（任务缺失/被删的行经 outerjoin 得 null）。 */
+/** 新词行：tag_type 为 null（库内无类型），类型列兜底"—"。 */
 const ROW_NULL_MODE: ReviewItem = {
   id: 3,
   asset_id: 'a3',
   asset_title: '无模式资产',
   tag_name: '慢镜头',
-  origin: 'catalog',
+  origin: 'closed',
   mode: null,
-  tag_type: 'style',
+  tag_type: null,
   confidence: 0.8,
   relevance: 0.8,
   review_status: 'pending',
-  level: 'film',
+  target_type: 'content',
   evidence: [],
   task_id: null,
+  reviewer_id: null,
+  review_comment: null,
 }
 
 /** total=60 > page_size=50：分页器出现第二页按钮。 */
@@ -178,16 +184,12 @@ describe('ReviewCenter 审核中心', () => {
     const rowA = (await screen.findByText('主角争执')).closest('tr')!
     fireEvent.click(screen.getByText('盗梦空间'))
     const rowB = (await screen.findByText('枪战')).closest('tr')!
-    // 行内容：标签名 / 来源 Tag / 模式 Tag / 状态 Tag / 层级 Tag / 置信度进度条
+    // 行内容：标签名 / 类型 / 来源 Tag / 状态 Tag / 置信度进度条
     expect(rowA).toHaveTextContent('主角争执')
-    expect(rowA).toHaveTextContent('生成')
-    expect(rowA).toHaveTextContent('开放')
+    expect(rowA).toHaveTextContent('开放生成')
     expect(rowA).toHaveTextContent('待审核')
-    expect(rowA).toHaveTextContent('场景')
     expect(rowA).toHaveTextContent('42%')
-    expect(screen.getByText('目录')).toBeInTheDocument()
-    expect(rowB).toHaveTextContent('闭环')
-    expect(rowB).toHaveTextContent('影片')
+    expect(screen.getByText('目录召回')).toBeInTheDocument()
     expect(within(rowB).getAllByText('暂无')).toHaveLength(2)
 
     // 默认拉待审核，分组视图一次取回全部匹配行
@@ -198,15 +200,14 @@ describe('ReviewCenter 审核中心', () => {
     expect(paths[0]).toContain('page_size=500')
   })
 
-  it('模式列：mode 为 null 时兜底显示"—"', async () => {
+  it('库外新词行：无库内类型时类型列兜底显示"—"', async () => {
     mockApis({ items: { items: [ROW_NULL_MODE], total: 1, page: 1 } })
     renderReviewCenter()
 
     await screen.findByText('无模式资产')
     await expandAllGroups()
-    await screen.findByText('慢镜头')
-    // 该行其余列均有值（标题/类型/置信度/相关度/状态），"—"只可能来自模式列
-    expect(screen.getByText('—')).toBeInTheDocument()
+    const row = (await screen.findByText('慢镜头')).closest('tr')!
+    expect(within(row).getByText('—')).toBeInTheDocument()
   })
 
   it('修改置信度下限筛选：携带 confidence_min 重新拉取', async () => {
@@ -310,7 +311,7 @@ describe('ReviewCenter 审核中心', () => {
     await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
       action: 'modify',
-      payload: { tag_name: '主角冲突', tag_type: 'mood' },
+      payload: { tag_name: '主角冲突' },
     })
     // 成功后关弹窗并刷新列表
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))

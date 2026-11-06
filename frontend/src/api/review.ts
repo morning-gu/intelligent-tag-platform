@@ -7,13 +7,13 @@ import { apiFetch } from './client'
 /** 审核动作（与后端 ReviewRequest.action 的 Literal 取值一致）。 */
 export type ReviewAction = 'approve' | 'reject' | 'modify' | 'merge'
 
-/** 审核动作 payload：modify 用展示字段别名（tag_name/tag_type/description——
- * generated 行落 candidate_*、catalog 行改展示字段，status 回 pending），
- * merge 用 merge_to_tag_id（必填）；comment 对两动作均可选。 */
+/** 审核动作 payload：modify 用展示字段别名（tag_name/description/dir_id——
+ * 写回行内字段，改完直接按通过处理），merge 用 merge_to_tag_id（必填）；
+ * comment 对两动作均可选（落 review_comment）。 */
 export interface ReviewActionPayload {
   tag_name?: string
-  tag_type?: string
   description?: string
+  dir_id?: string
   comment?: string
   merge_to_tag_id?: string
 }
@@ -26,9 +26,9 @@ export interface ReviewEvidence {
   description: string
 }
 
-/** 审核列表单行（与后端 ReviewItemOut 一致）：tag_name/tag_type 已按 origin
- * 感知解析（catalog/merged 行取目录字典、generated 行取候选字段），
- * confidence/relevance 缺失时为 null。 */
+/** 审核列表单行（与后端 ReviewItemOut 一致）：tag_name 取候选名优先、库内
+ * 标签名回退；tag_type 只来自库内标签（库外新词为 null）；mode 与 origin
+ * 同义；confidence/relevance 缺失时为 null。 */
 export interface ReviewItem {
   id: number
   asset_id: string
@@ -40,10 +40,12 @@ export interface ReviewItem {
   confidence: number | null
   relevance: number | null
   review_status: string
-  /** 标签层级：film（影片级）/ scene（场景级）。 */
-  level: string
+  /** 挂载粒度：content（本期固定）/ scene / character（结构预留）。 */
+  target_type: string
   evidence: ReviewEvidence[]
   task_id: string | null
+  reviewer_id: string | null
+  review_comment: string | null
 }
 
 /** GET /review/items 响应：当前页行 + 过滤后总数 + 页码（分页走列表 API）。 */

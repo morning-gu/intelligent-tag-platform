@@ -389,45 +389,57 @@ Excel 上传 → 格式解析 → 字段校验 → 重复检测 → 语义相似
 
 | 数据表 | 核心字段 | 主要职责 |
 |---|---|---|
-| `media_asset` | asset_id、asset_type、parent_id、title、video_uri | 影片、剧集、场景等基础信息 |
-| `media_context` | context_id、asset_id、content_json、embedding、model_version | 多模态识别结果、内容上下文及向量 |
-| `tag_catalog` | tag_id、tag_name、tag_type、description、parent_id、aliases、embedding | 正式标签主数据、标签向量 |
-| `generation_task` | task_id、context_id、mode、model_version、status | 标签生产任务及执行记录 |
-| `asset_tag` | asset_id、tag_id、candidate_name、confidence、evidence_json、review_status | 候选标签、正式标签关联、评分及审核状态 |
-| `review_record` | record_id、result_id、action、reviewer_id、created_at | 审核操作和修改历史 |
-| `import_batch` | batch_id、file_name、status、result_summary | Excel 导入批次和异常记录 |
+| `media_asset` | asset_id、asset_type、parent_id、title、video_uri、content_json | 影片、剧集、场景基础信息与主内容 JSON |
+| `media_context` | context_id、asset_id、content_json、embedding、model_version | 历史识别结果与内容向量（生成侧已不再依赖） |
+| `tag_catalog` | tag_id、tag_name、tag_type、description、parent_id、aliases、embedding | 正式标签主数据、标签向量（本期目录与标签同表） |
+| `tag_generation_task` | task_id、asset_id、mode、model_version、status | 标签生产任务及执行记录 |
+| `pre_asset_tag` | asset_id、target_type、target_id、tag_id、candidate_*、origin、review_status | 生成结果 + 审核队列（asset×tag 去重） |
+| `asset_tag` | asset_id、tag_id、candidate_name、confidence、review_status | **v1 遗留**：正式挂载表，本期不再写入 |
+| `review_record` | record_id、result_id、action、reviewer_id、created_at | **v1 遗留**：审核流水，本期不再写入 |
 
 #### 3.6.3 核心表设计说明
 
 **media_asset：影视资源表**
 
-统一管理影片、剧集及场景，使用 `parent_id` 建立层级关系。
+统一管理影片、剧集及场景，使用 `parent_id` 建立层级关系。影片行另存
+`content_json`（上游模板形态的标准内容 JSON），是 v2 的内容唯一数据源。
 
 **media_context：内容上下文表**
 
-保存多模态识别 JSON、内容向量及模型版本。同一影视资源可以存在多份识别结果，以支持模型升级和重新识别。
+保存历史多模态识别 JSON、内容向量及模型版本。v2 起生成与资产详情页都
+改读 `media_asset.content_json`，该表只保留存量行（导入时仍双写，供回退）。
 
 **tag_catalog：标签标准库**
 
-维护正式标签名称、定义、分类、上下级关系和别名。标签向量直接存储在该表中，不额外建立 tag_embedding 表。
+维护正式标签名称、定义、分类、上下级关系和别名。标签向量直接存储在该表中，
+不额外建立 tag_embedding 表。本期目录与标签仍合并在这一张表。
 
-**generation_task：标签生产任务表**
+**tag_generation_task：标签生产任务表**
 
-记录生产模式、输入上下文、模型版本、Prompt 版本、参数及执行状态。
+任务直接绑定资产（`asset_id` 非空外键），记录生产模式（closed / open）、
+模型版本、Prompt 版本、参数及执行状态。同一资产可有多条任务；内容从
+`media_asset.content_json` 读取，不再经 media_context 中转。
 
-**asset_tag：标签关联与生产结果表**
+**pre_asset_tag：生成结果与审核队列表**
 
-该表同时承担候选标签和正式标签关联功能。
+生成产出与人工审核共用一张表，`(asset_id, target_type, target_id, tag_id)`
+与 `(asset_id, target_type, target_id, candidate_name)` 两个部分唯一索引保证
+同一资产同一挂载点不重复。
 
-- 标准标签：通过 `tag_id` 关联现有正式标签。
-- 新生成标签：暂时保存 `candidate_name`、`candidate_type`、`candidate_description`，`tag_id` 可以为空。
-- 审核通过后：匹配已有标签或创建新正式标签，再将 `tag_id` 关联到正式标签库。
-- 标签证据：通过 `evidence_json` 记录对应场景、台词及视频时间戳。
-- 审核状态：通过 `review_status` 区分待审核、通过、拒绝和合并等状态。
+- 挂载粒度：`target_type`（content / scene / character）+ `target_id`，本期只写
+  content（`target_id = asset_id`），其余为结构预留。
+- 标准标签：`tag_id` 关联库内标签（closed 全量；open 命中同义候选时写入）。
+- 新词候选：`tag_id` 为空，先存 `candidate_name` / `candidate_description`，
+  审核合入时补 `tag_id` 与 `candidate_dir_id`。
+- 产出来源：`origin`（closed / open），不可变。
+- 审核状态：`pending` / `approved` / `rejected`；审核人与备注直接落行内
+  （`reviewer_id` / `review_comment`），不另建流水表。
+- 标签证据：`evidence_json` 记录对应场景、台词及视频时间戳。
 
-**review_record：审核记录表**
+**asset_tag / review_record：v1 遗留**
 
-记录审核人员、审核动作、修改前后内容及时间，保留完整操作历史。
+v2 把正式挂载与审核流水合并进 `pre_asset_tag`，这两张表本轮只保留结构、
+不再写入；标签入库（approved → asset_tag / tag_define）待后续实现。
 
 **import_batch：导入批次表**
 
@@ -436,11 +448,11 @@ Excel 上传 → 格式解析 → 字段校验 → 重复检测 → 语义相似
 #### 3.6.4 数据精简原则
 
 1. 标签别名直接以 JSON 数组存储在 `tag_catalog`，暂不建设独立别名表。
-2. 标签证据直接以 JSON 格式存储在 `asset_tag`，暂不建设独立证据表。
+2. 标签证据以 `evidence_json` 存在 `pre_asset_tag`，暂不建设独立证据表。
 3. 标签向量直接存储在 `tag_catalog`。
-4. 内容向量直接存储在 `media_context`。
-5. 候选标签和正式标签关联统一存储在 `asset_tag`，避免重复建设标签结果表。
-6. 保留任务、导入批次和审核历史，满足运行监控及数据追溯。
+4. 内容向量直接存储在 `media_context`（历史）；新链路以 `content_json` 为准。
+5. 生成结果与审核状态统一存在 `pre_asset_tag`，不再拆分候选表与挂载表。
+6. 保留任务与导入批次，满足运行监控及数据追溯；审核历史由行内字段承载。
 
 当未来出现多模型、多版本向量、单标签多证据记录或高频别名检索需求时，再将对应字段拆分为独立数据表。
 
