@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy import (
     REAL,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    func,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -38,9 +40,18 @@ class MediaAsset(Base):
     """
 
     __tablename__ = "media_asset"
+    # 与设计文档 §3.1 对齐：asset_type 枚举约束 + parent/type 两个索引
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('movie', 'series', 'scene')",
+            name="ck_media_asset_asset_type",
+        ),
+        Index("idx_media_asset_parent", "parent_id"),
+        Index("idx_media_asset_type", "asset_type"),
+    )
 
     asset_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    # 取值 movie|series|scene
+    # 取值 movie|series|scene（CHECK 约束见上）
     asset_type: Mapped[str] = mapped_column(Text, nullable=False)
     parent_id: Mapped[str | None] = mapped_column(
         ForeignKey("media_asset.asset_id"), nullable=True
@@ -48,11 +59,14 @@ class MediaAsset(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     video_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 标准资产 JSON（结构见 new_json.txt 模板）；未生成为 NULL
+    # 标准资产 JSON（结构见 new_json.txt 模板）；未生成为 NULL。
+    # SQLite 无 JSONB，用 TEXT 存 JSON 文本；迁 PostgreSQL 时改 JSONB。
     content_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 内容口径：v5-infer（大模型补字段）/ v5-facts（只填数据集事实）
     source: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=func.now()
+    )
     # 最近一次写入内容的时间（没内容时为上传时间）
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -381,21 +395,37 @@ class AssetBuildTask(Base):
     """
 
     __tablename__ = "asset_build_task"
+    # 与设计文档 §3.10 对齐：status 枚举约束 + asset/status 两个索引
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')",
+            name="ck_asset_build_task_status",
+        ),
+        Index("idx_build_task_asset", "asset_id"),
+        Index("idx_build_task_status", "status"),
+    )
 
     task_id: Mapped[str] = mapped_column(Text, primary_key=True)
     asset_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("media_asset.asset_id"), nullable=False, index=True
+        Text, ForeignKey("media_asset.asset_id"), nullable=False
     )
     movie_id: Mapped[str] = mapped_column(Text, nullable=False)
     # 是否用大模型补充资产字段：True=多模态推断（描述/氛围/事件/说话人），
     # False=只填数据集已有的事实（不调模型）。上传时由前端勾选，建任务落库；
     # 同时决定写进资产的内容口径（v5-infer / v5-facts）。
+    # 注意：文档 §3.10 尚未收录本列，待文档补写后保持一致。
     infer: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="1"
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    total_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    done_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_scenes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    done_scenes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, server_default=func.now()
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

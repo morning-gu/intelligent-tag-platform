@@ -51,6 +51,13 @@ def run_migrations_online() -> None:
     # 复用基础层引擎：自动确保父目录存在，并逐连接强制 WAL/foreign_keys
     connectable = create_engine_for(_database_path())
     with connectable.connect() as connection:
+        # SQLite 批重建（batch_alter_table）要 drop 再改名父表；外键开着时
+        # 带子行的父表删不掉。PRAGMA 在事务里是空操作，必须在 SQLAlchemy
+        # 隐式 BEGIN 之前、用原始 DBAPI 连接关掉外键检查。
+        raw = connection.connection.dbapi_connection
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.close()
         context.configure(
             connection=connection,
             target_metadata=Base.metadata,
