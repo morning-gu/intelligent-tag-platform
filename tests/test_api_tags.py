@@ -169,6 +169,66 @@ def test_import_xml_detected_by_content(client):
     assert resp.json()["summary"]["inserted"] == 1
 
 
+def test_import_dual_sheet_template_via_api(client):
+    """双表模板（docs/movietags-template.xlsx 格式）：说明页首位 + 两数据
+    sheet，按 sheet 名探测解析（此前按 active sheet 判格式会误报
+    「表头缺少必需列：tag_name、tag_type、description」）。
+    """
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "填写说明"
+    workbook.active.append(["模板说明"])
+
+    dir_sheet = workbook.create_sheet("标签目录")
+    dir_sheet.append(["可选，留空由系统生成", "1=一级 2=二级 3=三级"])
+    dir_sheet.append(["目录ID\n(dir_id)", "目录层级", "上级目录名称",
+                      "目录名称\n(dir_name)", "目录类型\n(dir_type)",
+                      "适用范围", "目录描述", "别名"])
+    dir_sheet.append([None, 1, None, "内容", "dir_static", "content,scene", "根目录", None])
+    dir_sheet.append([None, 2, "内容", "主类型", "dir_dynamic", None, None, "剧情类"])
+
+    tag_sheet = workbook.create_sheet("标签定义")
+    tag_sheet.append(["可选，留空由系统生成", "必填"])
+    tag_sheet.append(["标签ID\n(tag_id)", "标签名称\n(tag_name)",
+                      "所属目录名称", "标签类型\n(tag_type)", "标签描述", "别名"])
+    tag_sheet.append([None, "剧情", "主类型", "val_generalized", "以剧情为核心", "情节"])
+    tag_sheet.append([None, "喜剧", "主类型", None, None, None])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    resp = client.post(
+        "/api/v1/tags/import",
+        files={"file": ("movietags-template.xlsx", buffer.getvalue())},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 2 目录 + 2 标签 → total 4；inserted 仅计标签行 == 2
+    assert body["summary"]["total"] == 4
+    assert body["summary"]["inserted"] == 2
+    assert body["summary"]["issues"] == []
+    assert body["summary"]["parse_errors"] == []
+
+    # 混合树断言：目录 dir_type 与标签字段已入库（applicable_scope 不在
+    # 列表契约内，改由节点详情/导出口径覆盖——此处断言可见字段）
+    children = client.get("/api/v1/tags", params={"root": True}).json()["items"]
+    content = next(c for c in children if c["name"] == "内容")
+    assert content["dir_type"] == "dir_static"
+    assert content["description"] == "根目录"
+
+    subs = client.get(
+        "/api/v1/tags", params={"parent_id": content["id"]}).json()["items"]
+    main_type = next(s for s in subs if s["name"] == "主类型")
+    assert main_type["dir_type"] == "dir_dynamic"
+    assert main_type["aliases"] == ["剧情类"]
+
+    tags = client.get(
+        "/api/v1/tags", params={"parent_id": main_type["id"]}).json()["items"]
+    by_name = {t["name"]: t for t in tags}
+    assert by_name["剧情"]["description"] == "以剧情为核心"
+    assert by_name["剧情"]["aliases"] == ["情节"]
+    assert by_name["喜剧"]["description"] == ""  # 缺省空字符串
+
+
 def test_import_twice_reports_duplicates(client):
     resp1 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
     resp2 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
@@ -259,8 +319,9 @@ def test_list_hybrid_children_mix_dirs_and_tags(client):
     assert [(i["kind"], i["name"]) for i in items] == [("dir", "叙事"), ("tag", "反转")]
 
     story, reversal = items
-    # 目录节点：id=dir_id、dir_type 有值、status 无列为 None、has_children 真
-    assert story["dir_type"] == "dir_static"
+    # 目录节点：id=dir_id、dir_type 有值（XML 未填目录类型 → 默认 dir_dynamic）、
+    # status 无列为 None、has_children 真
+    assert story["dir_type"] == "dir_dynamic"
     assert story["parent_id"] == plot_id
     assert story["has_children"] is True
     assert story["status"] is None
@@ -367,7 +428,7 @@ def test_detail_dir_and_tag_paths(client):
     d = client.get(f"/api/v1/tags/{story_id}")
     assert d.status_code == 200
     d = d.json()
-    assert d["kind"] == "dir" and d["dir_type"] == "dir_static"
+    assert d["kind"] == "dir" and d["dir_type"] == "dir_dynamic"
     assert d["path"] == ["内容", "剧情", "叙事"]
     assert d["path_ids"] == [content_id, plot_id, story_id]
     assert d["has_children"] is True  # 多线挂在其下
