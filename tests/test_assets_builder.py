@@ -373,9 +373,9 @@ def test_infer_off_fills_only_dataset_facts(tmp_path):
 
 
 def test_source_tag_two_modes():
-    """推断 / 纯事实两种口径的 source 标识不同（重传不会错认缓存）。"""
-    assert source_tag(True) == f"asset_builder:{ASSET_BUILDER_VERSION}-infer"
-    assert source_tag(False) == f"asset_builder:{ASSET_BUILDER_VERSION}-facts"
+    """推断 / 纯事实两种口径的 source 标识不同（写进 media_asset.source）。"""
+    assert source_tag(True) == f"{ASSET_BUILDER_VERSION}-infer"
+    assert source_tag(False) == f"{ASSET_BUILDER_VERSION}-facts"
 
 def test_build_movie_without_subtitles(tmp_path):
     """没有字幕的片：dialogues 为空，其余照常。"""

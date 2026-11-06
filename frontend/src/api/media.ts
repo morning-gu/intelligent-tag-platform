@@ -21,7 +21,7 @@ export interface MediaUploadResult {
   build_task_id: string | null
 }
 
-/** 选文件预检结果：命中哪部片、该片是否已有可直接复用的内容。 */
+/** 选文件预检结果：命中哪部片、该片是否已有资产与内容。 */
 export interface MediaMatchResult {
   matched: boolean
   movie_id: string | null
@@ -46,10 +46,11 @@ export interface BuildTask {
   error: string | null
 }
 
-/** 上传选项：进度回调 + 强制重生成（已有同口径内容也重跑）。 */
+/** 上传选项：进度回调 + 是否用大模型补字段。 */
 export interface UploadOptions {
   onProgress?: (percent: number) => void
-  force?: boolean
+  /** 是否用大模型补充资产字段；false 只填数据集已有事实（不调模型） */
+  infer?: boolean
 }
 
 /** 从 XHR 错误响应体提取 {"detail": "..."}，与 client.readErrorDetail 同口径。 */
@@ -63,24 +64,24 @@ function errorDetailFromXhr(xhr: XMLHttpRequest): string {
   return `请求失败（HTTP ${xhr.status}）`
 }
 
-/** 按文件名预检：命中哪部片、是否已有可用内容（只读，不建任务）。 */
+/** 按文件名预检：命中哪部片、是否已有资产（只读，不建任务）。 */
 export function matchMedia(filename: string): Promise<MediaMatchResult> {
   return apiFetch<MediaMatchResult>(
     `/api/v1/media/match?filename=${encodeURIComponent(filename)}`,
   )
 }
 
-/** 上传视频（multipart，字段 file；force=true 时带 force 字段）。
+/** 上传视频（multipart，字段 file）。
  *
  * onProgress 覆盖"浏览器 → 服务器"的传输段；到 100% 后服务端还要把文件
  * 复制进 media_root 并登记资产，那一段没有进度可汇报（由调用方提示文案）。 */
 export function uploadMedia(
   file: File,
-  { onProgress, force = false }: UploadOptions = {},
+  { onProgress, infer = true }: UploadOptions = {},
 ): Promise<MediaUploadResult> {
   const form = new FormData()
   form.append('file', file)
-  if (force) form.append('force', 'true')
+  form.append('infer', infer ? 'true' : 'false')
 
   return new Promise<MediaUploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest()

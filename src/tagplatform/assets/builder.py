@@ -1,4 +1,4 @@
-﻿"""精简资产构建：数据集影片 → 对齐《长视频理解数据》契约的资产 JSON。
+"""精简资产构建：数据集影片 → 对齐《长视频理解数据》契约的资产 JSON。
 
 输出严格按上游模板（`new_json.txt`，2026-11 第二版）：
 
@@ -51,14 +51,14 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 # 场景分析必须返回的键（缺任一视为解析失败，宁可重试也不写脏数据）
 _SCENE_KEYS = ("description", "atmosphere")
 
-# 生成口径版本：写进 media_context.source（asset_builder:<版本>-<模式>）。改了
-# 提示词或输出字段就 bump，重新上传同一部片会自动重生成而不是错误地复用旧内容。
+# 生成口径版本：写进 media_asset.source（v5-infer / v5-facts）。改了提示词或
+# 输出字段就 bump，重新生成的内容能看出是哪一版产的。
 ASSET_BUILDER_VERSION = "v5"
 
 
 def source_tag(infer: bool) -> str:
-    """本口径的 source 标识（推断 / 纯事实两种口径不复用缓存）。"""
-    return f"asset_builder:{ASSET_BUILDER_VERSION}-{'infer' if infer else 'facts'}"
+    """本口径的 source 标识：v5-infer（模型补字段）/ v5-facts（只填数据集事实）。"""
+    return f"{ASSET_BUILDER_VERSION}-{'infer' if infer else 'facts'}"
 
 
 # 整片描述最短长度：低于此判为残片（实测模型偶尔只回 "[1945]"）

@@ -3,12 +3,15 @@
 用户在前端上传任意 mp4（内容无所谓），文件名里通常带片名。本模块：
 
 1. `match_filename`：文件名 → 数据集影片（`assets/dataset.py` 的匹配规则）；
-2. `create_task` + `submit`：建任务行并丢进单线程池（生成要几分钟，不能
+2. `asset_for_movie`：这部片已有的资产（按构建任务反查，id 与影片一一对应）；
+3. `create_task` + `submit`：建任务行并丢进单线程池（生成要几分钟，不能
    卡住 HTTP 请求）；
-3. `execute`：跑 `AssetBuilder` 逐场景生成 → 把结果以**上传那条资产**的
-   asset_id 导入平台（`content_import` upsert），前端刷新即可看到内容。
+4. `execute`：跑 `AssetBuilder` 逐场景生成 → 把结果写进**那一条资产**
+   （`content_import` 覆盖 `content_json`）。
 
-已生成过的资产再上传同一个片名：直接命中已有 context，秒回（不烧 token）。
+语义（2026-11 起）：任务可以重复建，资产不重复——同一部片永远只有一个
+asset_id，重新生成就是覆盖旧内容。是否"已有资产、要不要重新生成"由前端
+在预检时问用户，后端不再做"已有内容就秒回"的短路。
 
 分层红线：本模块不 import fastapi；HTTP 映射在 api/routers/media.py。
 """
@@ -21,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import delete, or_
 from sqlalchemy.orm import Session
 
 from tagplatform.adapters.vision import to_content_json
@@ -58,11 +62,31 @@ def match_filename(filename: str, dataset_root: str) -> MatchResult | None:
         return None
 
 
-def create_task(session: Session, asset_id: str, movie_id: str) -> AssetBuildTask:
-    """建一条排队任务（调用方负责随后 submit）。"""
+def asset_for_movie(session: Session, movie_id: str) -> MediaAsset | None:
+    """这部片当前的资产行：按最近的构建任务反查（没有则 None）。
+
+    资产 id 是随机的 `asset_xxxxxxxx`，与影片 id 无字面关系，所以"同一部片
+    是否已有资产"只能经由任务表的 movie_id 反查。任务可以有多条，资产只有
+    一条——最近一条任务的 asset_id 就是它。
+    """
+    task = (session.query(AssetBuildTask)
+            .filter(AssetBuildTask.movie_id == movie_id)
+            .order_by(AssetBuildTask.created_at.desc(),
+                      AssetBuildTask.task_id.desc())
+            .first())
+    return session.get(MediaAsset, task.asset_id) if task is not None else None
+
+
+def create_task(session: Session, asset_id: str, movie_id: str, *,
+                infer: bool = True) -> AssetBuildTask:
+    """建一条排队任务（调用方负责随后 submit）。
+
+    infer 落到任务行上，而不是只读全局配置：同一部片可以这次"只填数据集
+    事实"、下次"让模型补字段"，两次的内容口径（source）不同，事后能查。
+    """
     task = AssetBuildTask(
         task_id=f"build_{uuid.uuid4().hex[:8]}",
-        asset_id=asset_id, movie_id=movie_id, status="queued",
+        asset_id=asset_id, movie_id=movie_id, infer=infer, status="queued",
         total_scenes=0, done_scenes=0, created_at=_now(),
     )
     session.add(task)
@@ -80,17 +104,13 @@ def _executor() -> ThreadPoolExecutor:
         return _EXECUTOR
 
 
-def submit(task_id: str, settings: Settings | None = None, *,
-           force: bool = False) -> None:
+def submit(task_id: str, settings: Settings | None = None) -> None:
     """把任务丢进后台线程池（返回不等于完成）。
 
     settings 显式传入：后台线程不能依赖进程环境变量重新解析配置，
     否则测试实例会连到别的库（`get_settings()` 只在没传时兜底）。
-
-    force：同一口径已生成过也强制重跑（用户在「该片已有资产」提示上
-    选了"仍然重新生成"）。
     """
-    _executor().submit(execute, task_id, settings, force)
+    _executor().submit(execute, task_id, settings)
 
 
 def _asset_out_dir(settings: Settings) -> Path:
@@ -98,14 +118,13 @@ def _asset_out_dir(settings: Settings) -> Path:
     return Path(settings.database_path).resolve().parent / "assets"
 
 
-def _purge_contexts(session: Session, asset_id: str) -> None:
+def _purge_contexts(session: Session, asset_id: str, *,
+                    commit: bool = True) -> None:
     """删掉该资产及其场景子资产（`<asset_id>::<scene>`）的旧 context。
 
-    重新生成时必须清：`content_import` 是「每次导入新建一行」，不清就会在
-    资产详情里堆出多份内容，审核/生成时也说不清依据的是哪一版。
+    过渡期 `content_import` 仍会新建 context 行；重新生成前清掉旧的，标签
+    生成侧读到的才是这一次的内容（否则会堆多份、取"最新"全靠时间排序）。
     """
-    from sqlalchemy import delete, or_
-
     # LIKE 的 % 与 _ 是通配符：asset_id 里出现下划线（当前 id 规则就会有）
     # 时必须转义，否则可能匹配到相邻前缀的 context
     escaped = (asset_id.replace("\\", "\\\\")
@@ -114,15 +133,17 @@ def _purge_contexts(session: Session, asset_id: str) -> None:
         MediaContext.asset_id == asset_id,
         MediaContext.asset_id.like(f"{escaped}::%", escape="\\"),
     )))
-    session.commit()
+    if commit:
+        session.commit()
 
 
-def execute(task_id: str, settings: Settings | None = None,
-            force: bool = False) -> None:
-    """后台执行：生成 → 导入 → 更新任务状态。任何异常都落成 failed。
+def execute(task_id: str, settings: Settings | None = None) -> None:
+    """后台执行：生成 → 覆盖内容 → 更新任务状态。任何异常都落成 failed。
 
-    force=True 时忽略「同口径已生成过」的复用判断，清掉旧内容重跑
-    （用户明确要求重新生成的情形）。
+    不做「已有内容就秒回」：要不要重新生成由用户在预检提示里决定，建了
+    任务就一定真跑一遍，任务表因此每次都能如实反映这一轮跑了什么。
+
+    是否用大模型补字段看**任务行**的 infer（上传时前端选的那一项）。
     """
     settings = settings or get_settings()
     engine = create_engine_for(settings.database_path)
@@ -134,21 +155,6 @@ def execute(task_id: str, settings: Settings | None = None,
             return
         task.status = "running"
         session.commit()
-
-        wanted_source = source_tag(settings.asset_infer)
-        existing = (session.query(MediaContext)
-                    .filter(MediaContext.asset_id == task.asset_id).all())
-        if not force and any(row.source == wanted_source for row in existing):
-            # 同一口径已生成过：秒回，不烧 token
-            task.status = "succeeded"
-            task.done_scenes = task.total_scenes
-            task.finished_at = _now()
-            session.commit()
-            return
-        if existing:
-            # 旧口径（早期精简资产 / 更早的生成版本），或用户要求强制重跑：
-            # 先清掉父与场景子资产的 context，避免堆着多份互相矛盾的内容
-            _purge_contexts(session, task.asset_id)
 
         def progress(done: int, total: int) -> None:
             # 独立 session：回调在生成线程里，避免与主 session 争用
@@ -172,7 +178,7 @@ def execute(task_id: str, settings: Settings | None = None,
             workers=settings.asset_workers,
             dialogue_limit=settings.asset_dialogue_limit,
             progress_cb=progress,
-            infer=settings.asset_infer,
+            infer=bool(task.infer),
         )
         stats = builder.build_movie(task.movie_id, force=True)
         if not stats.output:
@@ -185,9 +191,9 @@ def execute(task_id: str, settings: Settings | None = None,
         if asset is not None and asset.video_uri:
             payload["asset"]["video_uri"] = asset.video_uri
         content = to_content_json(parse_upstream(payload))
-        # 标记生成口径：下次上传同一部片据此判断「复用」还是「重生成」
-        content.metadata.source = wanted_source
-        # 原样入库：媒体上下文里存的就是这份交付用模板 JSON
+        content.metadata.source = source_tag(bool(task.infer))
+        # 旧 context 与新内容同一次提交里替换（过渡期双写，标签侧仍读 context）
+        _purge_contexts(session, task.asset_id, commit=False)
         import_content(content, session, None, raw=payload)
 
         task = session.get(AssetBuildTask, task_id)

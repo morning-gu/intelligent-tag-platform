@@ -13,7 +13,11 @@ export interface AssetSummary {
   title: string
   duration_ms: number | null
   video_uri: string | null
+  /** 是否已有内容（影片行 content_json 非空） */
+  has_content: boolean
   created_at: string | null
+  /** 最近一次写入内容的时间（没内容时等于上传时间） */
+  updated_at: string | null
 }
 
 /** 上下文摘要项（与后端 ContextSummaryOut 一致，不含 content_json 大字段）。 */

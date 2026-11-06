@@ -30,7 +30,12 @@ class Base(DeclarativeBase):
 
 
 class MediaAsset(Base):
-    """媒体资产：movie/series/scene 三级结构，子级经 parent_id 挂到父级。"""
+    """媒体资产：movie/series/scene 三级结构，子级经 parent_id 挂到父级。
+
+    一条影片资产只有一行，内容（标准资产 JSON）就放在 `content_json`：
+    重新生成时整块覆盖，不再像旧 `media_context` 那样每次导入堆一行。
+    场景行是物理切片，不存内容（`content_json`/`source` 恒为 NULL）。
+    """
 
     __tablename__ = "media_asset"
 
@@ -43,7 +48,13 @@ class MediaAsset(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     video_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 标准资产 JSON（结构见 new_json.txt 模板）；未生成为 NULL
+    content_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 内容口径：v5-infer（大模型补字段）/ v5-facts（只填数据集事实）
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 最近一次写入内容的时间（没内容时为上传时间）
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class MediaContext(Base):
@@ -365,7 +376,8 @@ class AssetBuildTask(Base):
 
     status 取值 queued|running|succeeded|failed；done_scenes/total_scenes 供
     前端显示「正在分析第 N/M 个场景」。asset_id 指向上传时登记的媒体资产，
-    生成完成后由内容导入服务写入同一 asset_id 的 media_context。
+    生成完成后内容写进同一条资产的 content_json（media_context 过渡期双写）。
+    任务可以多条（每次上传/重新生成一条），资产只有一条。
     """
 
     __tablename__ = "asset_build_task"
@@ -375,6 +387,12 @@ class AssetBuildTask(Base):
         Text, ForeignKey("media_asset.asset_id"), nullable=False, index=True
     )
     movie_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # 是否用大模型补充资产字段：True=多模态推断（描述/氛围/事件/说话人），
+    # False=只填数据集已有的事实（不调模型）。上传时由前端勾选，建任务落库；
+    # 同时决定写进资产的内容口径（v5-infer / v5-facts）。
+    infer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="1"
+    )
     status: Mapped[str] = mapped_column(Text, nullable=False)
     total_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     done_scenes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

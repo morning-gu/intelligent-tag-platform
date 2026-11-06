@@ -73,6 +73,7 @@ def save_upload(
     session: Session,
     media_root: str,
     asset_id: str | None = None,
+    title: str | None = None,
 ) -> StoredUpload:
     """占位上传：校验后缀 → 流式落盘（超限中止清理）→ 登记资产并提交。
 
@@ -80,15 +81,17 @@ def save_upload(
     中止读取并删除半成品；两者均不产生数据库行。上限经 MAX_UPLOAD_BYTES
     模块全局调用期读取（测试可 monkeypatch 收紧以触发流式兜底路径）。
 
-    asset_id（2026-11 上游对接）：可选的资产绑定键。
-    - 指向已存在资产 → 只更新 video_uri（不新建行、不改标题/父级）——
-      数据集/识别服务先给了资产标识、后补视频的典型顺序；
+    asset_id：可选的资产绑定键。
+    - 指向已存在资产 → 只更新 video_uri（不新建行、不改父级）——同一部片
+      重复上传走的正是这条：资产行不重复，内容是后面覆盖的；
     - 指向不存在的资产 → 以该标识新建（上传先于识别时预留主键）；
-    - 缺省 → 沿用旧的 `asset_` + uuid 生成逻辑，行为与阶段 4 一致。
+    - 缺省 → 生成 `asset_` + uuid 的新主键。
+
+    title：显示标题。缺省用文件名去后缀；命中数据集时由路由层传片名。
     """
     # 先校验后缀（失败零副作用：目录未建、文件未写、行未入）
     name = stored_filename(original_name)
-    title = Path(original_name).stem  # 文件名去后缀作资产标题
+    title = title or Path(original_name).stem
     root = Path(media_root)
     root.mkdir(parents=True, exist_ok=True)  # 上传时确保目录存在
     dest = root / name
@@ -130,6 +133,7 @@ def save_upload(
         duration_ms=None,  # 占位：时长未知，识别流水线后续补齐
         video_uri=video_uri,  # 存盘绝对路径
         created_at=datetime.now(timezone.utc),  # 时间戳列无默认值，显式赋 UTC now
+        updated_at=datetime.now(timezone.utc),
     ))
     session.commit()
     return StoredUpload(asset_id=new_id, title=title, video_uri=video_uri)

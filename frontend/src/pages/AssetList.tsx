@@ -3,14 +3,16 @@
 // /assets/{asset_id}。数据来自 GET /assets（q 标题子串匹配）。
 // 场景行标题就是场景描述（很长），列表里截断预览，点进详情再看全文
 // （AssetDetail 展示完整描述）。
-// 上传入口：顶部"上传视频"按钮 → Modal 单文件选择 → POST /media/upload
-// （multipart FormData）。文件名命中数据集影片时后端返回 build_task_id，
-// Modal 内切换为生成进度视图（轮询 /media/build-tasks/{id}），完成后刷新
-// 列表；未命中则按普通占位资产登记。
+// 上传入口：顶部"上传视频"按钮 → Modal 单文件选择 → 先 GET /media/match
+// 预检（命中影片且已有资产时问用户"是否重新生成"，不确认就不放行）→
+// POST /media/upload（multipart FormData）。文件名命中数据集影片时后端返回
+// build_task_id，Modal 内切换为生成进度视图（轮询 /media/build-tasks/{id}），
+// 完成后刷新列表；未命中则按普通占位资产登记。
 import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Collapse,
   Empty,
   Modal,
@@ -92,12 +94,16 @@ export default function AssetList() {
   const [buildTaskId, setBuildTaskId] = useState<string | null>(null)
   const [buildTask, setBuildTask] = useState<BuildTask | null>(null)
   const [matchedTitle, setMatchedTitle] = useState<string | null>(null)
-  // 选文件预检：命中影片且已有当前口径内容时，先拦住"白传一遍视频"
+  // 选文件预检：命中影片且已有内容时，先问"是否重新生成"
   const [preflight, setPreflight] = useState<MediaMatchResult | null>(null)
   const [checkingFile, setCheckingFile] = useState(false)
-  const [forceRebuild, setForceRebuild] = useState(false)
+  // 用户在提示上确认要重新生成（覆盖旧内容）
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   // 浏览器 → 服务器的传输进度（0-100）；100 之后还有服务端落盘，见文案
   const [uploadPct, setUploadPct] = useState(0)
+  // 是否让大模型补充资产字段（描述/氛围/事件/说话人），默认打开。
+  // 关掉时只落数据集已有的事实：不调模型、快，但氛围/事件/说话人为空。
+  const [useLlm, setUseLlm] = useState(true)
 
   const loadAssets = useCallback(async () => {
     setLoading(true)
@@ -165,8 +171,9 @@ export default function AssetList() {
     setBuildTask(null)
     setMatchedTitle(null)
     setPreflight(null)
-    setForceRebuild(false)
+    setConfirmRegenerate(false)
     setUploadPct(0)
+    setUseLlm(true)
     setUploadOpen(true)
   }
 
@@ -178,18 +185,15 @@ export default function AssetList() {
     setBuildTask(null)
     setMatchedTitle(null)
     setPreflight(null)
-    setForceRebuild(false)
+    setConfirmRegenerate(false)
     setUploadPct(0)
+    setUseLlm(true)
   }
 
-  /** 选完文件先预检：命中影片且已有当前口径内容 → 提示不必再传视频。
+  /** 选完文件先预检：命中影片且已有资产 → 提示"是否重新生成"。
    *
    * 预检失败不挡上传（比如老后端没有这个接口），直接按原流程走。 */
-  async function checkMediaFile(file: File) {
-    setUploadFile(file)
-    setPreflight(null)
-    setForceRebuild(false)
-    setUploadPct(0)
+  async function runPreflight(file: File) {
     setCheckingFile(true)
     try {
       setPreflight(await matchMedia(file.name))
@@ -200,6 +204,14 @@ export default function AssetList() {
     }
   }
 
+  async function checkMediaFile(file: File) {
+    setUploadFile(file)
+    setPreflight(null)
+    setConfirmRegenerate(false)
+    setUploadPct(0)
+    await runPreflight(file)
+  }
+
   /** 提交上传：命中数据集 → Modal 内展示生成进度；未命中 → 占位登记。 */
   async function handleUploadSubmit() {
     if (uploadFile === null) return
@@ -207,7 +219,7 @@ export default function AssetList() {
     setUploadPct(0)
     try {
       const res: MediaUploadResult = await uploadMedia(uploadFile, {
-        force: forceRebuild,
+        infer: useLlm,
         onProgress: setUploadPct,
       })
       if (res.build_task_id !== null) {
@@ -259,9 +271,18 @@ export default function AssetList() {
         v === null || v === '' ? <Tag>无</Tag> : <Tag color="cyan">可播放</Tag>,
     },
     {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      render: (v: string | null) => (v === null ? '—' : v.replace('T', ' ').slice(0, 19)),
+      title: '内容',
+      dataIndex: 'has_content',
+      render: (v: boolean) =>
+        v ? <Tag color="green">已生成</Tag> : <Tag>未生成</Tag>,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      render: (v: string | null) =>
+        v === null
+          ? '—'
+          : v.replace('T', ' ').slice(0, 19),
     },
   ]
 
@@ -277,9 +298,9 @@ export default function AssetList() {
         ? 'success'
         : 'active'
 
-  // 已有同口径资产、且用户没点"仍然重新生成"：挡在上传之前（避免白传一遍）
+  // 已有资产、且用户还没确认重新生成：挡在上传之前（避免白传一遍视频）
   const blockedByExisting =
-    preflight !== null && preflight.matched && preflight.has_content && !forceRebuild
+    preflight !== null && preflight.matched && preflight.has_content && !confirmRegenerate
 
   return (
     <Card
@@ -380,6 +401,22 @@ export default function AssetList() {
             >
               <Button disabled={uploading}>选择视频文件</Button>
             </Upload>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <Checkbox
+                checked={useLlm}
+                disabled={uploading}
+                onChange={(event) => {
+                  setUseLlm(event.target.checked)
+                }}
+              >
+                使用大模型补充资产字段
+              </Checkbox>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {useLlm
+                  ? '逐场景看关键帧生成描述/氛围/事件/说话人（较慢，会调用模型）'
+                  : '只填数据集已有的事实（场景描述、字幕、时间），不调用模型'}
+              </Typography.Text>
+            </div>
             {uploadFile !== null && (
               <Typography.Text>
                 已选择：{uploadFile.name}（{formatSize(uploadFile.size)}）
@@ -392,25 +429,25 @@ export default function AssetList() {
               <Alert
                 type="warning"
                 showIcon
-                message="该片已有资产，无需重新上传视频"
+                message="该视频已有对应资产，是否重新生成？"
                 description={
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <span>
-                      《{preflight.matched_title ?? preflight.movie_id}》已生成{' '}
-                      {preflight.scene_count} 个场景
+                      《{preflight.matched_title ?? preflight.movie_id}》已有资产
+                      {preflight.scene_count > 0 ? `，${preflight.scene_count} 个场景` : ''}
                       {preflight.built_at !== null
-                        ? `，生成于 ${formatBuiltAt(preflight.built_at)}`
+                        ? `，更新于 ${formatBuiltAt(preflight.built_at)}`
                         : ''}
-                      。直接打开资产详情就能看内容、跑标签生成。
+                      。重新生成会覆盖现有内容；不重新生成就直接打开资产详情查看。
                     </span>
-                    <Button size="small" danger onClick={() => setForceRebuild(true)}>
-                      仍然重新生成（覆盖现有内容）
+                    <Button size="small" danger onClick={() => setConfirmRegenerate(true)}>
+                      重新生成（覆盖现有内容）
                     </Button>
                   </div>
                 }
               />
             )}
-            {forceRebuild && (
+            {confirmRegenerate && (
               <Alert
                 type="info"
                 showIcon

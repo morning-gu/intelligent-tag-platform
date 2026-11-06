@@ -129,10 +129,10 @@ def test_assets_list_and_filters(client):
     movies = client.get("/api/v1/assets?asset_type=movie").json()
     assert [a["asset_id"] for a in movies] == [body["asset_id"]]
 
-    # q 对 title 子串匹配（影片 title=示例电影；场景 title=场景描述）
-    assert [a["asset_id"] for a in client.get("/api/v1/assets?q=示例").json()] == [
-        body["asset_id"]]
-    assert client.get("/api/v1/assets?q=仓库").json()[0]["asset_id"] in body["scene_asset_ids"]
+    # q 对 title 子串匹配：场景标题是 `{片名}_{scene_id}`，片名会同时命中
+    # 影片行与它的场景行
+    hits = {a["asset_id"] for a in client.get("/api/v1/assets?q=示例").json()}
+    assert hits == {body["asset_id"], *body["scene_asset_ids"]}
     assert client.get("/api/v1/assets?q=不存在的词").json() == []
 
 

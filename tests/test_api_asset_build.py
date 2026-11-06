@@ -1,12 +1,15 @@
 """「上传即生成资产」链路测试（2026-11）。
 
 两条链路各自验证：
-1. HTTP 层：文件名命中数据集 → 资产主键变成 `movie_<id>`、响应带匹配信息与
+1. HTTP 层：文件名命中数据集 → 建构建任务、响应带匹配信息与
    `build_task_id`、任务行入库（queued）、进度端点可查、未命中不建任务、
    未知 task_id → 404（后台线程被 monkeypatch 掉，测试不烧 token）；
 2. 执行层：`asset_build.execute` 真跑一遍（假 LLM + 假数据集），断言任务从
-   running 走到 succeeded、media_context 落到**上传那条资产**上、上传的
-   video_uri 不被生成结果抹掉、台词进库。
+   running 走到 succeeded、内容写进**上传那条资产**的 `content_json`、
+   场景行标题是 `{片名}_{scene_id}`、上传的 video_uri 不被生成结果抹掉。
+
+同一部片重复上传复用同一个 asset_id（资产不重复、内容覆盖），任务行可以
+多条——这是"任务重复、资产不重复"的落点。
 
 数据集构造与 `tests/test_assets_builder.py` 同构（meta + story + 帧 + 字幕 zip）。
 """
@@ -88,28 +91,46 @@ def test_upload_matches_dataset_and_creates_task(dataset_client, monkeypatch):
     resp = _upload(dataset_client, "Test.Movie.1999.1080p.BluRay.x264.mkv")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["asset_id"] == f"movie_{MOVIE_ID}"
+    # 资产 id 与影片 id 无字面关系：统一是 asset_ + 8 位 hex
+    assert body["asset_id"].startswith("asset_") and len(body["asset_id"]) == 14
     assert body["movie_id"] == MOVIE_ID
     assert body["matched_title"] == "Test Movie"
     assert body["match_how"] in ("exact", "contains")
     assert body["build_task_id"] and submitted == [body["build_task_id"]]
-    # 资产行用的是数据集 id，不是 asset_xxxxxxxx
     with dataset_client.app.state.session_factory() as s:
-        assert s.get(MediaAsset, f"movie_{MOVIE_ID}") is not None
+        asset = s.get(MediaAsset, body["asset_id"])
+        assert asset is not None and asset.asset_type == "movie"
+        assert asset.title == "Test Movie"      # 命中数据集时用片名，不用文件名
+        assert asset.content_json is None       # 生成前只有占位行
         task = s.get(AssetBuildTask, body["build_task_id"])
         assert task.status == "queued" and task.movie_id == MOVIE_ID
+        # 默认口径：用大模型补字段
+        assert task.infer is True
+
+
+def test_reupload_reuses_asset_row(dataset_client, monkeypatch):
+    """同一部片再传一次：资产不重复（同一 asset_id），任务多一条。"""
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    first = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    second = _upload(dataset_client, "Test.Movie.1999.1080p.mkv").json()
+    assert first["asset_id"] == second["asset_id"]
+    assert first["build_task_id"] != second["build_task_id"]
+    with dataset_client.app.state.session_factory() as s:
+        assert s.query(MediaAsset).filter_by(asset_type="movie").count() == 1
+        assert s.query(AssetBuildTask).count() == 2
 
 
 def test_build_task_endpoints(dataset_client, monkeypatch):
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
-    task_id = _upload(dataset_client,
-                      "Test.Movie.1999.mkv").json()["build_task_id"]
+    upload = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    task_id = upload["build_task_id"]
     one = dataset_client.get(f"/api/v1/media/build-tasks/{task_id}")
     assert one.status_code == 200
     assert set(one.json()) == {"task_id", "asset_id", "movie_id", "status",
                                "total_scenes", "done_scenes", "error"}
     assert one.json()["status"] == "queued"
-    many = dataset_client.get(f"/api/v1/media/build-tasks?asset_id=movie_{MOVIE_ID}")
+    many = dataset_client.get(
+        f"/api/v1/media/build-tasks?asset_id={upload['asset_id']}")
     assert many.status_code == 200 and len(many.json()) == 1
     assert dataset_client.get("/api/v1/media/build-tasks/nope").status_code == 404
 
@@ -153,6 +174,16 @@ def test_execute_success_writes_context(dataset_client, monkeypatch):
         asset = s.get(MediaAsset, asset_id)
         assert asset.video_uri and asset.video_uri.endswith(".mkv")
         assert asset.title == "Test Movie"
+        # 内容落在资产行上（不再只存 media_context），口径与更新时间同时写
+        assert asset.content_json is not None and asset.source == source_tag(True)
+        assert asset.updated_at is not None
+        stored = json.loads(asset.content_json)
+        first_scene = stored["content"]["scenes"][0]
+        # 场景行是物理切片：标题 {片名}_{scene_id}，不存内容
+        scene_row = s.get(MediaAsset, f"{asset_id}::{first_scene['scene_id']}")
+        assert scene_row is not None and scene_row.asset_type == "scene"
+        assert scene_row.title == f"Test Movie_{first_scene['scene_id']}"
+        assert scene_row.content_json is None and scene_row.source is None
         ctx = s.query(MediaContext).filter_by(asset_id=asset_id).one()
         # 库里存的是交付用的模板原文（description / start_ms），不是内部形态
         raw = json.loads(ctx.content_json)
@@ -183,6 +214,52 @@ def test_progress_page_renders(dataset_client):
 
     missing = dataset_client.get("/api/v1/media/build-tasks/build_nope/view")
     assert missing.status_code == 404
+def test_upload_infer_false_lands_on_task(dataset_client, monkeypatch):
+    """上传时选"只用数据集事实"：任务行记住 infer=false（执行时据此不调模型）。"""
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    body = dataset_client.post(
+        "/api/v1/media/upload",
+        files={"file": ("Test.Movie.1999.mkv", PAYLOAD,
+                        "application/octet-stream")},
+        data={"infer": "false"},
+    ).json()
+    with dataset_client.app.state.session_factory() as s:
+        task = s.get(AssetBuildTask, body["build_task_id"])
+        assert task is not None and task.infer is False
+
+
+def test_execute_facts_mode_skips_llm(dataset_client, monkeypatch):
+    """infer=false 的任务：一次模型都不调，内容口径落成 v5-facts。"""
+    calls: list[str] = []
+
+    class Counting(FakeClient):
+        def complete(self, messages, run_id):
+            calls.append(run_id)
+            return super().complete(messages, run_id)
+
+    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+                        lambda settings=None: Counting())
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    settings = dataset_client.app.state.settings.model_copy(update={
+        "asset_workers": 1, "asset_frames": 1})
+
+    body = dataset_client.post(
+        "/api/v1/media/upload",
+        files={"file": ("Test.Movie.1999.mkv", PAYLOAD,
+                        "application/octet-stream")},
+        data={"infer": "false"},
+    ).json()
+
+    asset_build.execute(body["build_task_id"], settings)
+
+    with dataset_client.app.state.session_factory() as s:
+        task = s.get(AssetBuildTask, body["build_task_id"])
+        assert task.status == "succeeded", task.error
+        ctx = s.query(MediaContext).filter_by(asset_id=body["asset_id"]).one()
+        assert ctx.source == source_tag(False)
+    assert calls == []
+
+
 def test_execute_unknown_task_is_noop(dataset_client):
     asset_build.execute("build_nope", dataset_client.app.state.settings)
 
@@ -213,10 +290,12 @@ def test_execute_rebuilds_stale_context(dataset_client, monkeypatch):
             MediaContext.asset_id.like(f"{asset_id}%")).all()
         sources = {r.source for r in rows}
         assert "video_understanding" not in sources
-        assert all(src.startswith("asset_builder:") for src in sources)
+        assert all(src.startswith("v5-") for src in sources)
         # 父资产只剩一份，不堆历史
         parents = [r for r in rows if r.asset_id == asset_id]
         assert len(parents) == 1
+        # 新内容里没有 s0：旧场景行被一并清掉，不留孤儿
+        assert s.get(MediaAsset, f"{asset_id}::s0") is None
 
 
 def test_purge_contexts_does_not_match_wildcards(dataset_client):
@@ -236,8 +315,8 @@ def test_purge_contexts_does_not_match_wildcards(dataset_client):
     assert remaining == {"ctx_b"}
 
 
-def test_execute_reuses_same_version(dataset_client, monkeypatch):
-    """同口径第二次上传：直接 succeeded，不再调模型。"""
+def test_execute_overwrites_instead_of_reusing(dataset_client, monkeypatch):
+    """第二次执行不再"秒回"：真跑一遍、内容覆盖，库里仍只有一份。"""
     calls: list[str] = []
 
     class Counting(FakeClient):
@@ -250,64 +329,23 @@ def test_execute_reuses_same_version(dataset_client, monkeypatch):
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
         "asset_workers": 1, "asset_frames": 1})
+
     first = _upload(dataset_client, "Test.Movie.1999.mkv").json()
     asset_build.execute(first["build_task_id"], settings)
     used = len(calls)
     assert used > 0
 
     second = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    assert second["asset_id"] == first["asset_id"]     # 资产不重复
     asset_build.execute(second["build_task_id"], settings)
-    assert len(calls) == used
+
+    assert len(calls) > used                            # 没有秒回，模型真调了
     with dataset_client.app.state.session_factory() as s:
         assert s.get(AssetBuildTask, second["build_task_id"]).status == "succeeded"
-
-
-def test_execute_force_rebuilds_same_version(dataset_client, monkeypatch):
-    """force=True：同口径也重跑模型，且旧内容被清掉（只留一份）。"""
-    calls: list[str] = []
-
-    class Counting(FakeClient):
-        def complete(self, messages, run_id):
-            calls.append(run_id)
-            return super().complete(messages, run_id)
-
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
-                        lambda settings=None: Counting())
-    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
-    settings = dataset_client.app.state.settings.model_copy(update={
-        "asset_workers": 1, "asset_frames": 1})
-    asset_id = _upload(dataset_client, "Test.Movie.1999.mkv").json()["asset_id"]
-    first = _upload(dataset_client, "Test.Movie.1999.mkv").json()
-    asset_build.execute(first["build_task_id"], settings)
-    used = len(calls)
-
-    second = _upload(dataset_client, "Test.Movie.1999.mkv").json()
-    asset_build.execute(second["build_task_id"], settings, force=True)
-
-    assert len(calls) > used
-    with dataset_client.app.state.session_factory() as s:
-        assert s.get(AssetBuildTask, second["build_task_id"]).status == "succeeded"
-        rows = s.query(MediaContext).filter_by(asset_id=asset_id).all()
-        assert len(rows) == 1
-
-
-def test_upload_passes_force_flag_to_executor(dataset_client, monkeypatch):
-    """表单 force=true 要透传到后台执行（前端"仍然重新生成"）。"""
-    seen: list[bool] = []
-
-    def fake_submit(task_id, settings=None, *, force=False):
-        seen.append(force)
-
-    monkeypatch.setattr(asset_build, "submit", fake_submit)
-    _upload(dataset_client, "Test.Movie.1999.mkv")
-    assert seen == [False]
-
-    dataset_client.post(
-        "/api/v1/media/upload",
-        files={"file": ("Test.Movie.1999.mkv", PAYLOAD, "application/octet-stream")},
-        data={"force": "true"},
-    )
-    assert seen == [False, True]
+        asset = s.get(MediaAsset, first["asset_id"])
+        assert asset.content_json is not None
+        # 一条资产只有一份内容（context 是过渡期双写，也只有一份）
+        assert s.query(MediaContext).filter_by(asset_id=first["asset_id"]).count() == 1
 
 
 # ---------- 选文件预检：/media/match ----------
@@ -324,56 +362,48 @@ def test_match_endpoint_unmatched(dataset_client):
 
 
 def test_match_endpoint_matched_without_content(dataset_client):
-    """命中影片但还没生成过资产：matched=true / has_content=false。"""
+    """命中影片但还没生成过资产：matched=true / has_content=false / 无 asset_id。"""
     body = dataset_client.get(
         "/api/v1/media/match",
         params={"filename": "Test.Movie.1999.1080p.mkv"}).json()
     assert body["matched"] is True
     assert body["movie_id"] == MOVIE_ID
     assert body["matched_title"] == "Test Movie"
-    assert body["asset_id"] == f"movie_{MOVIE_ID}"
+    assert body["asset_id"] is None       # 还没有资产行
     assert body["has_content"] is False
     assert body["scene_count"] == 0
 
 
 def test_match_endpoint_reports_built_content(dataset_client, monkeypatch):
-    """已生成过：has_content=true + 场景数 + 口径与时间（前端据此拦重复上传）。"""
+    """已生成过：has_content=true + 场景数 + 口径与更新时间（前端据此问重新生成）。"""
     monkeypatch.setattr("tagplatform.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
         "asset_workers": 1, "asset_frames": 1})
-    task_id = _upload(dataset_client, "Test.Movie.1999.mkv").json()["build_task_id"]
-    asset_build.execute(task_id, settings)
+    upload = _upload(dataset_client, "Test.Movie.1999.mkv").json()
+    asset_build.execute(upload["build_task_id"], settings)
 
     body = dataset_client.get(
         "/api/v1/media/match",
         params={"filename": "Test.Movie.1999.mkv"}).json()
     assert body["matched"] is True
+    assert body["asset_id"] == upload["asset_id"]
     assert body["has_content"] is True
     assert body["content_source"] == source_tag(True)
     assert body["scene_count"] == 1
     assert body["built_at"] is not None
 
 
-def test_match_endpoint_ignores_other_source(dataset_client):
-    """旧口径的内容不算可复用：has_content=false，但场景数仍可展示。"""
-    from tagplatform.db.models import MediaAsset, MediaContext
-
-    with dataset_client.app.state.session_factory() as s:
-        s.add(MediaAsset(asset_id=f"movie_{MOVIE_ID}", asset_type="movie",
-                         title="Test Movie"))
-        s.add(MediaContext(
-            context_id="ctx_old", asset_id=f"movie_{MOVIE_ID}",
-            content_json=json.dumps({"content": {"scenes": [{}, {}]}}),
-            source="asset_builder:v0-legacy", model_version=None,
-            recognition_status=None,
-        ))
-        s.commit()
+def test_match_endpoint_contentless_asset(dataset_client, monkeypatch):
+    """资产行在、内容为空（上传后未生成/生成失败）：按"没有内容"处理。"""
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
+    upload = _upload(dataset_client, "Test.Movie.1999.mkv").json()
 
     body = dataset_client.get(
         "/api/v1/media/match",
         params={"filename": "Test.Movie.1999.mkv"}).json()
+    assert body["asset_id"] == upload["asset_id"]
     assert body["has_content"] is False
-    assert body["content_source"] == "asset_builder:v0-legacy"
-    assert body["scene_count"] == 2
+    assert body["scene_count"] == 0
+    assert body["content_source"] is None

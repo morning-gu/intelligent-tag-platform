@@ -26,7 +26,9 @@ const DETAIL: AssetDetailData = {
   title: '星际穿越',
   duration_ms: 180_000,
   video_uri: 'movies/interstellar.mp4',
+  has_content: true,
   created_at: '2026-10-30T08:30:00',
+  updated_at: '2026-11-02T09:10:00',
   contexts: [
     {
       context_id: 'c1',

@@ -108,7 +108,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越',
     duration_ms: 10_800_000,
     video_uri: null,
+    has_content: true,
     created_at: null,
+    updated_at: null,
   },
   {
     asset_id: 'a-scene',
@@ -117,7 +119,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越-场景2',
     duration_ms: 65_000,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
 ]
 

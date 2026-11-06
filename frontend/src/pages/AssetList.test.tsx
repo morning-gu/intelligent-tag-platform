@@ -1,5 +1,5 @@
 // 内容资产列表测试：mock apiFetch 按路径分发，覆盖：
-// - 按类型分组、默认折叠、展开后渲染行（时长/视频/创建时间与 null 兜底）；
+// - 按类型分组、默认折叠、展开后渲染行（时长/视频/内容/更新时间与 null 兜底）；
 // - 场景描述在列表里截断预览，点行进入详情路由；
 // - 标题搜索传参（提交触发而非输入即触发）；
 // - 上传：未命中 → 占位登记提示；命中 → Modal 内轮询生成进度并刷新列表；
@@ -33,7 +33,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越',
     duration_ms: 10_800_000,
     video_uri: 'movies/interstellar.mp4',
+    has_content: true,
     created_at: '2026-10-30T08:30:00',
+    updated_at: '2026-11-02T09:10:00',
   },
   {
     asset_id: 'a-scene',
@@ -42,7 +44,9 @@ const ASSETS: AssetSummary[] = [
     title: LONG_SCENE_TITLE,
     duration_ms: 65_000,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
   {
     asset_id: 'a-series',
@@ -51,7 +55,9 @@ const ASSETS: AssetSummary[] = [
     title: '继承之战',
     duration_ms: null,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
 ]
 
@@ -106,7 +112,9 @@ const NEW_ASSET: AssetSummary = {
   title: '新片',
   duration_ms: null,
   video_uri: 'C:\\data\\media\\u.mkv',
+  has_content: false,
   created_at: '2026-11-01T10:00:00',
+  updated_at: '2026-11-01T10:00:00',
 }
 
 function renderAssetList() {
@@ -292,7 +300,7 @@ describe('AssetList 内容资产列表', () => {
     expect(assetsCallPaths()).toEqual(['/api/v1/assets'])
   })
 
-  it('展开电影分组：渲染时长/视频/创建时间与 null 兜底', async () => {
+  it('展开电影分组：渲染时长/视频/内容/更新时间与 null 兜底', async () => {
     renderAssetList()
     await expandGroup('电影')
 
@@ -300,7 +308,8 @@ describe('AssetList 内容资产列表', () => {
     // 10_800_000ms → 180:00（formatTimestamp 复用，分钟位不封顶）
     expect(row).toHaveTextContent('180:00')
     expect(row).toHaveTextContent('可播放')
-    expect(row).toHaveTextContent('2026-10-30 08:30:00')
+    expect(row).toHaveTextContent('已生成')
+    expect(row).toHaveTextContent('2026-11-02 09:10:00')
 
     await expandGroup('剧集')
     const rowB = (await screen.findByText('继承之战')).closest('tr')!
@@ -443,20 +452,22 @@ describe('上传视频与生成进度', () => {
     expect(await screen.findByText('已匹配影片《角斗士》')).toBeInTheDocument()
   })
 
-  it('已生成过的影片：选完文件就被拦住，点"仍然重新生成"才放行', async () => {
+  it('已生成过的影片：选完文件先问"是否重新生成"，确认后才放行', async () => {
     mockUploadApis({ match: MATCH_WITH_CONTENT })
     renderAssetList()
     await screen.findByText('电影')
 
     await openUploadAndSelectFile('角斗士.mp4')
 
-    // 预检命中且已有同口径内容 → 警告 + 确认按钮禁用
-    expect(await screen.findByText('该片已有资产，无需重新上传视频')).toBeInTheDocument()
-    expect(screen.getByText(/已生成\s*7 个场景/)).toBeInTheDocument()
+    // 预检命中且已有内容 → 提示是否重新生成 + 确认按钮禁用
+    expect(
+      await screen.findByText('该视频已有对应资产，是否重新生成？'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/7 个场景/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '开始上传' })).toBeDisabled()
 
-    // 选择"仍然重新生成" → 提示将覆盖 + 按钮可点
-    fireEvent.click(screen.getByRole('button', { name: '仍然重新生成（覆盖现有内容）' }))
+    // 选"重新生成" → 提示将覆盖 + 按钮可点
+    fireEvent.click(screen.getByRole('button', { name: '重新生成（覆盖现有内容）' }))
     expect(
       await screen.findByText('将清空该片现有的资产内容，重新跑一遍生成'),
     ).toBeInTheDocument()
@@ -465,7 +476,8 @@ describe('上传视频与生成进度', () => {
 
     fireEvent.click(ok)
     await waitFor(() => expect(activeXhr).not.toBeNull())
-    expect(lastUploadForm?.get('force')).toBe('true')
+    // 重新生成不再靠 force 开关：建了任务就一定真跑
+    expect(lastUploadForm?.get('force')).toBeNull()
   })
 
   it('上传失败（422 非白名单后缀）：透出后端 detail，Modal 保留可重试，列表不刷新', async () => {
@@ -513,5 +525,44 @@ describe('上传视频与生成进度', () => {
     expect(await screen.findByText('文件超过 2GB 上传上限')).toBeInTheDocument()
     expect(assetsCallCount()).toBe(1)
     expect(screen.getByText('选择视频文件')).toBeInTheDocument() // Modal 保留可重试
+  })
+
+  it('默认用大模型补字段：上传带 infer=true', async () => {
+    mockUploadApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.mp4')
+    const box = screen.getByRole('checkbox', { name: '使用大模型补充资产字段' })
+    expect(box).toBeChecked()
+    // 预检只问"有没有资产"，与口径无关
+    const calls = mockedApiFetch.mock.calls.map((call) => String(call[0]))
+    expect(calls.some((p) => p.includes('/media/match'))).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    expect(lastUploadForm?.get('infer')).toBe('true')
+  })
+
+  it('取消勾选：只切口径，不重跑预检；上传带 infer=false', async () => {
+    mockUploadApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.mp4')
+    const before = mockedApiFetch.mock.calls.length
+    const box = screen.getByRole('checkbox', { name: '使用大模型补充资产字段' })
+    fireEvent.click(box)
+
+    expect(
+      await screen.findByText('只填数据集已有的事实（场景描述、字幕、时间），不调用模型'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '使用大模型补充资产字段' })).not.toBeChecked()
+    // 口径不影响"有没有资产"，不该再查一次预检
+    expect(mockedApiFetch.mock.calls.length).toBe(before)
+
+    fireEvent.click(screen.getByRole('button', { name: '开始上传' }))
+    await waitFor(() => expect(activeXhr).not.toBeNull())
+    expect(lastUploadForm?.get('infer')).toBe('false')
   })
 })

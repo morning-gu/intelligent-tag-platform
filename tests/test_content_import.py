@@ -12,6 +12,8 @@
   相对路径 join video_root）。
 """
 
+import json
+
 import pytest
 
 from tagplatform.content_import import import_content, resolve_video_path
@@ -26,6 +28,59 @@ def test_import_creates_hierarchy_and_context(session, content_fixture):
     assert scene.parent_id == res.asset_id and scene.asset_type == "scene"
     ctx = session.get(MediaContext, res.context_id)
     assert ctx.asset_id == res.asset_id and ctx.embedding is None
+
+
+def test_content_lands_on_asset_row(session, content_fixture):
+    """内容写在 media_asset 行上：content_json / source / updated_at 齐全。"""
+    res = import_content(content_fixture, session, None)
+    movie = session.get(MediaAsset, res.asset_id)
+    assert movie.content_json is not None
+    assert movie.source == content_fixture.metadata.source
+    assert movie.updated_at is not None
+    stored = json.loads(movie.content_json)
+    assert stored["asset"]["asset_id"] == res.asset_id
+    # 场景行是物理切片：标题 {片名}_{scene_id}，不存内容
+    scene_id = stored["content"]["scenes"][0]["scene_id"]
+    scene = session.get(MediaAsset, f"{res.asset_id}::{scene_id}")
+    assert scene.title == f"{content_fixture.asset.title}_{scene_id}"
+    assert scene.content_json is None and scene.source is None
+
+
+def test_generated_asset_id_written_back(session, content_fixture):
+    """没给 asset_id：生成一个，并回写进 content_json，两边对得上。"""
+    content_fixture.asset.asset_id = None
+    res = import_content(content_fixture, session, None)
+    assert res.asset_id.startswith("asset_")
+    stored = json.loads(session.get(MediaAsset, res.asset_id).content_json)
+    assert stored["asset"]["asset_id"] == res.asset_id
+
+
+def test_scene_rows_pruned_when_gone(session, content_fixture):
+    """重新导入后不再出现的场景行被删掉，不留孤儿。"""
+    r1 = import_content(content_fixture, session, None)
+    content_fixture.content.scenes.clear()
+    import_content(content_fixture, session, None)
+    assert session.get(MediaAsset, r1.scene_asset_ids[0]) is None
+
+
+def test_prune_removes_tags_of_dropped_scene(session, content_fixture):
+    """删场景行前先删引用它的 asset_tag/review_record，否则外键会挡住。"""
+    from tagplatform.db.models import AssetTag, ReviewRecord
+
+    r1 = import_content(content_fixture, session, None)
+    session.add(AssetTag(id=7, asset_id=r1.scene_asset_ids[0], origin="generated",
+                         candidate_name="夜景", review_status="pending"))
+    session.flush()
+    session.add(ReviewRecord(record_id="r1", result_id=7, action="approve"))
+    session.commit()
+
+    content_fixture.content.scenes.clear()
+    import_content(content_fixture, session, None)
+
+    assert session.get(AssetTag, 7) is None
+    assert session.query(ReviewRecord).count() == 0
+    assert session.get(MediaAsset, r1.scene_asset_ids[0]) is None
+
 
 def test_reimport_new_context_upserts_assets(session, content_fixture):
     r1 = import_content(content_fixture, session, None)

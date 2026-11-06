@@ -28,8 +28,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
-from tagplatform.assets import source_tag
-from tagplatform.db.models import AssetBuildTask, MediaAsset, MediaContext
+from tagplatform.db.models import AssetBuildTask, MediaAsset
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
@@ -49,14 +48,14 @@ class MediaUploadResponse(BaseModel):
 
 
 class MediaMatchResponse(BaseModel):
-    """选完文件后的预检结果：命中哪部片、该片是否已有可直接复用的内容。"""
+    """选完文件后的预检结果：命中哪部片、这部片是否已有资产和内容。"""
 
     matched: bool
     movie_id: str | None = None
     matched_title: str | None = None
     match_how: str | None = None
     asset_id: str | None = None
-    # 已有**当前口径**的内容 → 不必再传视频；口径不符则仍会重建
+    # 已有内容（content_json 非空）→ 前端问用户"是否重新生成"
     has_content: bool = False
     content_source: str | None = None
     scene_count: int = 0
@@ -94,44 +93,39 @@ def match_media(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaMatchResponse:
-    """按文件名预检：命中的影片是否已生成过资产。
+    """按文件名预检：命中哪部片、这部片是否已有资产（有没有内容）。
 
-    只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**
-    判断"这部片已经有资产了，不用再传一遍视频"。
-
-    内容口径与后台 `execute` 的复用判断一致：只有 source 等于当前
-    asset_infer 口径的行才算"可直接复用"，口径不符时上传仍会重建。
+    只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**问用户
+    "该视频已有对应资产，是否重新生成"。判定只认 `media_asset`：资产行
+    存在且 `content_json` 非空，才算已有内容。
     """
     matched = asset_build.match_filename(filename, settings.dataset_root)
     if matched is None:
         return MediaMatchResponse(matched=False)
 
-    asset_id = f"movie_{matched.movie.movie_id}"
-    rows = (session.query(MediaContext)
-            .filter(MediaContext.asset_id == asset_id)
-            .order_by(MediaContext.created_at)
-            .all())
-    wanted = source_tag(settings.asset_infer)
-    usable = [row for row in rows if row.source == wanted]
-    latest = (usable or rows or [None])[-1]
-    scene_count = 0
-    if latest is not None:
-        try:
-            payload = json.loads(latest.content_json)
-            scene_count = len((payload.get("content") or {}).get("scenes") or [])
-        except (ValueError, AttributeError):
-            scene_count = 0
+    asset = asset_build.asset_for_movie(session, matched.movie.movie_id)
     return MediaMatchResponse(
         matched=True,
         movie_id=matched.movie.movie_id,
         matched_title=matched.movie.title,
         match_how=matched.how,
-        asset_id=asset_id,
-        has_content=bool(usable),
-        content_source=latest.source if latest is not None else None,
-        scene_count=scene_count,
-        built_at=latest.created_at if latest is not None else None,
+        asset_id=asset.asset_id if asset is not None else None,
+        has_content=bool(asset is not None and asset.content_json),
+        content_source=asset.source if asset is not None else None,
+        scene_count=_scene_count(asset),
+        built_at=asset.updated_at if asset is not None else None,
     )
+
+
+def _scene_count(asset: MediaAsset | None) -> int:
+    """资产内容里的场景数（内容损坏/为空时按 0 算）。"""
+    if asset is None or not asset.content_json:
+        return 0
+    try:
+        payload = json.loads(asset.content_json)
+        return len((payload.get("content") or {}).get("scenes") or [])
+    except (ValueError, AttributeError):
+        return 0
 
 
 @router.post("/media/upload", response_model=MediaUploadResponse)
@@ -140,7 +134,10 @@ def upload_media(
     file: UploadFile,
     asset_id: str | None = Form(None),
     auto_build: bool = Form(True),
-    force: bool = Form(False),
+    infer: bool = Form(
+        True,
+        description="是否用大模型补充资产字段（描述/氛围/事件/说话人）；"
+                    "false 时只填数据集已有的事实，不调用模型"),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaUploadResponse:
@@ -150,15 +147,19 @@ def upload_media(
     函数时 multipart 已由 FastAPI 收完解析（磁盘 spool，内存不上爆），
     先按 Content-Length 头早拒，再交核心层流式落盘与登记。
 
-    force=True：该片已有同口径内容也重新生成（前端"仍然重新生成"）。
+    同一部片重复上传**不产生新资产**：按 movie_id 找到已有资产，只把视频
+    地址换掉，内容由后台任务整块覆盖。是否重新生成由前端预检时问用户，
+    这里不再有 force 开关。
+
+    infer=False：只落数据集事实（场景描述/字幕/时间），氛围、事件、说话人
+    留空，一次模型调用都不发；口径随之变为 v5-facts。
     """
     enforce_upload_size_limit(request)
     filename = file.filename or ""
     asset_id = (asset_id or "").strip() or None
 
     # 客户端显式指定 asset_id 时只允许"预留主键"：已绑定视频的资产不能被
-    # 覆盖，否则任何登录用户都能把别人的视频换掉。自动匹配出的
-    # movie_<id> 不受此限——那代表同一部片的重复上传，覆盖是预期行为。
+    # 覆盖，否则任何登录用户都能把别人的视频换掉。
     if asset_id is not None:
         existing = session.get(MediaAsset, asset_id)
         if existing is not None and existing.video_uri:
@@ -166,16 +167,19 @@ def upload_media(
                 status_code=409,
                 detail="资产已绑定视频，不能通过上传覆盖") from None
 
-    # 先匹配再存盘：命中数据集时资产直接用 movie_<id> 作为主键，
-    # 重复上传同一部片不会产生一堆 asset_xxxx 孤儿行
+    # 先匹配：命中数据集时复用这部片已有的资产（asset_id 不变、内容覆盖），
+    # 没命中就是一条全新的占位资产
     matched = asset_build.match_filename(filename, settings.dataset_root)
     if matched is not None and asset_id is None:
-        asset_id = f"movie_{matched.movie.movie_id}"
+        current = asset_build.asset_for_movie(session, matched.movie.movie_id)
+        if current is not None:
+            asset_id = current.asset_id
 
     try:
         stored = media.save_upload(
             file.file, filename, session, settings.media_root,
-            asset_id=asset_id)
+            asset_id=asset_id,
+            title=matched.movie.title if matched is not None else None)
     except media.UnsupportedVideoFormat:
         raise HTTPException(
             status_code=422, detail="不支持的视频格式") from None
@@ -186,8 +190,8 @@ def upload_media(
     task = None
     if matched is not None and auto_build:
         task = asset_build.create_task(session, stored.asset_id,
-                                       matched.movie.movie_id)
-        asset_build.submit(task.task_id, settings, force=force)
+                                       matched.movie.movie_id, infer=infer)
+        asset_build.submit(task.task_id, settings)
 
     return MediaUploadResponse(
         asset_id=stored.asset_id,

@@ -49,7 +49,11 @@ class AssetOut(BaseModel):
     title: str
     duration_ms: int | None = None
     video_uri: str | None = None
+    # 是否已有内容（影片行 content_json 非空；场景行恒 False）
+    has_content: bool = False
     created_at: datetime | None = None
+    # 最近一次写入内容的时间（没内容时等于上传时间）
+    updated_at: datetime | None = None
 
 
 class ContextSummaryOut(BaseModel):
@@ -76,7 +80,9 @@ def _asset_out(asset: MediaAsset) -> AssetOut:
         title=asset.title,
         duration_ms=asset.duration_ms,
         video_uri=asset.video_uri,
+        has_content=asset.content_json is not None,
         created_at=asset.created_at,
+        updated_at=asset.updated_at,
     )
 
 
