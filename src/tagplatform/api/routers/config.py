@@ -24,7 +24,6 @@ class ConfigOut(BaseModel):
     llm_temperature: float
     recall_top_k_per_type: int
     open_match_threshold: float
-    semantic_similar_threshold: float
     generation_workers: int
     use_mock_llm: bool
     use_mock_embedder: bool
@@ -42,7 +41,6 @@ def get_config(
         llm_temperature=settings.llm_temperature,
         recall_top_k_per_type=settings.recall_top_k_per_type,
         open_match_threshold=settings.open_match_threshold,
-        semantic_similar_threshold=settings.semantic_similar_threshold,
         generation_workers=settings.generation_workers,
         use_mock_llm=settings.use_mock_llm,
         use_mock_embedder=settings.use_mock_embedder,

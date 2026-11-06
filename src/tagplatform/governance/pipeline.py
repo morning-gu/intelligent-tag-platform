@@ -29,14 +29,15 @@
 检查——父计划就绪后子行才判定，被拒父的批内子孙自动级联拦截，零静默
 搁浅；issue 最终按行序回排）；第二遍统一插入（目录链拓扑序 + 逐行
 flush——自引用外键无 relationship()，保证父行先落库）。判定序
-（v1 的 tag_type_invalid 随白名单校验退役而移除）：
-    duplicate_name → alias_conflict → semantic_similar → parent_not_found
+（v1 的 tag_type_invalid 随白名单校验退役而移除；semantic_similar
+随手动导入取消余弦相似控制而退役）：
+    duplicate_name → alias_conflict → parent_not_found
     （目录行另有 parent_cycle；标签行是叶子，无环可成）
 
-语义比对沿用 v1：对 define 文本、passage 角色批量预 embed（全批一次
-调用，判定与插入共用同一批向量）；候选排除同名——同名不同目录是
-( dir_id, tag_name ) 唯一键下的合法共存，同名同目录已被 duplicate_name
-前置拦截。
+向量编码仅用于入库存储（tag_define.embedding / tag_catalog.embedding
+语料侧持久化，供召回/归一检索）：passage 角色批量预 embed（全批一次
+调用，判定与插入共用同一批向量）。手动导入不再做语义相似拦截——
+疑似同义标签由人工经待处理列表甄别。
 
 审计：每个新建目录/标签行写 tag_change_log(action='import')，after_json
 带 task_id（revoke/export 反查键，替代 v1 的 batch_id 字段名）与 kind
@@ -59,8 +60,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.governance.excel import TagRow
-from tagplatform.settings import get_settings
-from tagplatform.vectors import decode_vector, encode_vector, search_similar
+from tagplatform.vectors import encode_vector
 
 # run_governance 无文件名入参，tag_import_task.file_name 记录写入来源；
 # API 层拿到 task_id 后回填真实上传文件名（与 parse_errors 同一回写）
@@ -85,7 +85,8 @@ _DEFAULT_TAG_TYPE = "val_fixed"
 
 @dataclass
 class Issue:
-    """单行治理问题；similar_to 仅 semantic_similar 记对端标签名。"""
+    """单行治理问题；similar_to 保留字段位（semantic_similar 退役后
+    现有 issue 码不再填充，历史序列化结果兼容）。"""
 
     tag_name: str
     code: str
@@ -106,13 +107,12 @@ class GovernanceResult:
 
 @dataclass
 class GovernanceConfig:
-    """治理显式配置。v2 仅保留相似阈值——v1 的 allowed_tag_types 白名单
-    校验随 tag_type 枚举化（tag_define.tag_type 缺省/非法归一 val_fixed，
-    val_fixed|val_generalized 之外不入库）退役；
-    run_governance(config=None) 时回退 get_settings().semantic_similar_threshold
-    （既有调用方与判定行为不变）。"""
+    """治理显式配置。v2 随手动导入取消余弦相似控制，semantic_similar
+    检查退役（similar_threshold / settings.semantic_similar_threshold
+    一并退役）；类保留为 run_governance 的 config 参数类型占位——
+    显式传参（如旧测试）被忽略，不再影响判定行为。"""
 
-    similar_threshold: float = 0.90
+    pass
 
 
 @dataclass(eq=False)
@@ -168,14 +168,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
     审计日志落库并提交。
 
-    config 为显式治理配置（GovernanceConfig，仅 similar_threshold）；
-    None 回退 get_settings()，既有调用方（API 路由等按三参调用）行为不变。
+    config 参数保留仅为既有调用方（tests、API 路由）签名兼容；
+    semantic_similar 检查退役后其阈值不再参与判定，配置对象被忽略。
     """
-    if config is not None:
-        threshold = config.similar_threshold
-    else:
-        threshold = get_settings().semantic_similar_threshold
-
     now = datetime.now(timezone.utc)
     task_id = f"task_{uuid.uuid4().hex[:8]}"
 
@@ -195,11 +190,6 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     db_defines = session.query(TagDefine).all()
     db_define_by_key = {(t.dir_id, t.tag_name): t for t in db_defines}
     db_define_names = {t.tag_name for t in db_defines if t.status != "deprecated"}
-    db_define_candidates = [
-        (t.tag_name, t.dir_id, decode_vector(t.embedding))
-        for t in db_defines
-        if t.status != "deprecated" and t.embedding is not None
-    ]
 
     # ---------- 批内分类：被引用名为目录行，其余为标签行 ----------
     referenced_names = {r.parent_tag for r in rows if r.parent_tag is not None}
@@ -407,27 +397,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
             continue
 
-        # 3) semantic_similar：与库内/批内已过检标签向量余弦 ≥ 阈值（含等
-        #    于）；候选排除同名（同名不同目录为合法共存——(dir_id, tag_name)
-        #    唯一键；同名同目录已由 duplicate_name 前置拦截）
-        candidates = db_define_candidates + [
-            (v.row.tag_name, v.dir_id, v.vec) for v in valid_tags
-        ]
-        hits = search_similar(
-            vec,
-            [(name, cand_vec) for name, cand_dir, cand_vec in candidates
-             if name != r.tag_name or cand_dir == target_dir_id],
-            top_k=1,
-        )
-        if hits and hits[0][1] >= threshold:
-            similar_name, score = hits[0]
-            issues.append((i, Issue(
-                r.tag_name, "semantic_similar",
-                f"与已有标签「{similar_name}」余弦相似度 {score:.3f} ≥ 阈值 {threshold}",
-                similar_to=similar_name)))
-            continue
-
-        # 4) parent_not_found：父名既不在批内目录行也不在库内目录
+        # 3) parent_not_found：父名既不在批内目录行也不在库内目录
+        #    （v2 semantic_similar 余弦拦截退役：疑似同义标签直接放行
+        #    入库，由人工经待处理列表甄别）
         if target_missing:
             issues.append((i, Issue(
                 r.tag_name, "parent_not_found",

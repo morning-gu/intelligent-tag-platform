@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-base"
     # True 时用确定性 MockEmbedder（测试专用，绝不触发模型下载）
     use_mock_embedder: bool = False
-    # 语义相似阈值，余弦相似度 >= 该值判为疑似同义（含等于）
-    semantic_similar_threshold: float = 0.90
     # 标签类型逗号分隔白名单；空 = 不校验
     allowed_tag_types: str = ""
 

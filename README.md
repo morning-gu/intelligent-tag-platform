@@ -83,7 +83,6 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_USE_MOCK_EMBEDDER` | `false` | true = 确定性 MockEmbedder（不下载模型） |
 | `TAGPLT_GENERATION_WORKERS` | `2` | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成） |
 | `TAGPLT_LLM_MODEL` | `qwen3.7-plus` | LLM 模型名 |
-| `TAGPLT_SEMANTIC_SIMILAR_THRESHOLD` | `0.90` | 语义相似阈值，余弦相似度 >= 该值判为疑似同义 |
 | `TAGPLT_RECALL_TOP_K_PER_TYPE` | `50` | 模式 A 每 tag_type 召回候选上限 |
 | `TAGPLT_OPEN_MATCH_THRESHOLD` | `0.85` | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog |
 | `TAGPLT_MEDIA_ROOT` | `data/media/` | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录） |

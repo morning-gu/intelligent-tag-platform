@@ -255,9 +255,6 @@ export default function ModelConfig() {
             <Descriptions.Item label="开放匹配阈值">
               {config.open_match_threshold}
             </Descriptions.Item>
-            <Descriptions.Item label="语义相似阈值">
-              {config.semantic_similar_threshold}
-            </Descriptions.Item>
             <Descriptions.Item label="生成并发数">{config.generation_workers}</Descriptions.Item>
             <Descriptions.Item label="Mock LLM">{renderBool(config.use_mock_llm)}</Descriptions.Item>
             <Descriptions.Item label="Mock Embedder">

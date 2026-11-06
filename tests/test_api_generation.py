@@ -23,7 +23,7 @@
 Mock 技巧（与 llm/mock.py 咬合，消 flake 构造同 v1）：closed 用
 policy.min_confidence=0.5（MockLLM confidence 值域 [0.5,1) 恒过线）+
 30 枚候选（零选中概率 0.6^30 ≈ 2e-7）；名称/描述逐枚不同，MockEmbedder
-规范化后近似正交，治理 semantic_similar（阈值 0.90）不会误拦。
+规范化后近似正交。治理 semantic_similar 拦截已退役，不存在误拦。
 
 审核域过渡：review 路由/服务属 Task 8 域尚未切换——approved 挂载由测试
 内直接置 pre 行终态并复制 asset_tag 行模拟（doc §6.2 的 approve 行操作），

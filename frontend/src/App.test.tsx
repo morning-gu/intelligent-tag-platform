@@ -112,7 +112,7 @@ function mockAdminApis() {
     if (path === '/api/v1/config') {
       return {
         llm_model: 'qwen3.7-plus', llm_temperature: 0.7, recall_top_k_per_type: 50,
-        open_match_threshold: 0.9, semantic_similar_threshold: 0.96,
+        open_match_threshold: 0.9,
         generation_workers: 2, use_mock_llm: false, use_mock_embedder: false,
         database_path: '/data/tagplatform.db',
       }
