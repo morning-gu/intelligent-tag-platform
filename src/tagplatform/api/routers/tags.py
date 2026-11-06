@@ -549,6 +549,10 @@ def delete_tag(tag_id: str, session: Session = Depends(get_session)) -> TagDelet
     session.flush()
 
     # 删除标签后，向上清理既无子目录也无挂载标签的空目录。
+    # 不变量：candidate_dir_id 持有行必指向 tag_id 所在目录（review/
+    # service.py 合入时保证）——该目录因上方 pre 引用 409 与本处 has_tag
+    # 空判定双检查永不可删；将来引入 unmount/rename 须先补
+    # PreAssetTag.candidate_dir_id 检查
     while parent is not None:
         has_dir_child = session.query(TagCatalog.dir_id).filter(
             TagCatalog.parent_id == parent.dir_id

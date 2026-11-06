@@ -283,20 +283,30 @@ def test_open_without_valid_evidence_dropped(session, content_fixture, mtg_setti
 
 def test_open_normalized_match_keeps_candidate_name(session, content_fixture,
                                                     mtg_settings):
-    """归一命中：标签定义里有同文本标签 → 命中行 origin=open 且带 tag_id，
-    candidate_name 保留候选原文（doc §6.2 可溯原则——并入既有也留原文），
+    """归一命中：候选名 ≠ 定义名但余弦 ≥ 阈值（Gram-Schmidt 混合向量构造，
+    手法同 test_open_match_threshold_boundary）→ 命中行 origin=open 且带
+    tag_id，candidate_name 保留候选原文（doc §6.2 可溯原则——并入既有也留
+    原文；候选原文与定义名不同，"原文保留"断言具区分性），
     candidate_description 不填（仅自由候选，doc §3.5）。"""
-    vec = MOCK_EMBEDDER.embed(["多线叙事"], role="query")[0]
-    _seed_define(session, "tag_cat_1", "多线叙事", "多线并进的叙事结构", vec)
+    q = MOCK_EMBEDDER.embed(["多线叙事"], role="query")[0]
+    anchor = MOCK_EMBEDDER.embed(["无关锚向量"], role="query")[0]
+    orthogonal = anchor - np.dot(anchor, q) * q
+    orthogonal /= np.linalg.norm(orthogonal)
+    coef = 0.95  # ≥ 默认阈值 0.85：不同名也命中
+    vec = coef * q + np.sqrt(1 - coef ** 2) * orthogonal
+    vec = vec / np.linalg.norm(vec)
+    _seed_define(session, "tag_cat_1", "多线索叙事", "多线并进的叙事结构", vec)
     spec = _build_spec(session, content_fixture, run_id="r6")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
     hits = [t for t in out if t.tag_id is not None]
     assert len(hits) == 1
     hit = hits[0]
     assert hit.origin == "open"  # v2 词表：命中行也是 open（catalog 词退役）
-    assert hit.tag_id == "tag_cat_1"
-    assert hit.tag_name == "多线叙事"  # 候选原文保留（落库即 candidate_name）
-    assert hit.relevance_score == pytest.approx(1.0)
+    assert hit.tag_id == "tag_cat_1"  # 指向定义（其名为「多线索叙事」）
+    assert hit.tag_name == "多线叙事"  # 候选原文保留，非定义名回显
+    assert session.get(TagDefine, "tag_cat_1").tag_name == "多线索叙事"
+    assert hit.tag_name != session.get(TagDefine, "tag_cat_1").tag_name
+    assert hit.relevance_score == pytest.approx(coef, abs=1e-4)
     assert hit.candidate_type is None and hit.candidate_description is None
     free = [t for t in out if t.tag_id is None]
     assert [t.tag_name for t in free] == ["情感张力", "视听风格"]

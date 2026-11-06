@@ -201,6 +201,10 @@ def revoke_import_task(task_id: str, session: Session = Depends(get_session)) ->
             synchronize_session=False,
         )
     if dir_ids:
+        # 不变量：candidate_dir_id 持有行必指向 tag_id 所在目录（review/
+        # service.py 合入时保证）——该目录因上方 define/子目录双检查（他批
+        # 标签挂本批目录即 409）永不可删；将来引入 unmount/rename 须先补
+        # PreAssetTag.candidate_dir_id 检查
         # 目录自引用外键：先置空父链再删（v1 手法，子目录任意删除顺序皆安全）
         session.query(TagCatalog).filter(TagCatalog.dir_id.in_(dir_ids)).update(
             {TagCatalog.parent_id: None},

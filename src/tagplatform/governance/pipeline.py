@@ -10,8 +10,9 @@
   `<level2 name="剧情"/>` 且其下无标签）会退化为标签行；层级 Excel 不受
   影响（标签列必填，层级行恒被本行标签引用）；
 - 标签行归属目录：parent_tag 命中批内目录行 > 库内同名目录（根目录
-  优先、同级按 dir_id 稳定）> parent_tag 为空时自动创建/复用根目录
-  「未分类」；三者皆不中报 parent_not_found；
+  优先、同级按 dir_id 稳定）> parent_tag 为空时落根目录「未分类」
+  （批内同名根目录计划 > 库内 > 自动创建，不重复建第二个同名根目录）；
+  三者皆不中报 parent_not_found；
 - 目录行幂等复用：同 (父目录, 目录名) 已存在（库内或批内已计划）则
   复用，不报 issue、不重复建、不写变更日志；
 - 状态字面量 v2 统一 "deprecated"：行 status 的 v1 取值 "deprecate"
@@ -216,6 +217,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     # 单次批量编码，无逐行调用）。向量与行按下标对齐，尾项向量单独取用。
     # role=passage：入库向量成为被检索语料（与召回/归一的 query 侧相对）。
     uncat_existing = db_dir_by_name.get(_UNCATEGORIZED_DIR_NAME)
+    # 「未分类」落点回退值（库内 > 新建）：批内层级根目录恰名「未分类」
+    # 时在 pass A 后改指批内计划（见 uncat_plan 回填）——扁平行复用该
+    # 批内目录，不重复建第二个同名根目录
     uncat_dir_id = (uncat_existing.dir_id if uncat_existing is not None
                     else f"dir_{uuid.uuid4().hex[:8]}")
     needs_uncat = any(
@@ -323,6 +327,13 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         issues.append((i, Issue(
             r.tag_name, "parent_cycle", f"批内父链成环（涉及「{r.parent_tag}」）")))
         checked_dir.add(i)
+
+    # 「未分类」解析回填：批内层级根目录恰名「未分类」时，扁平行复用该
+    # 批内目录计划（plan_by_key 根键），不自动新建第二个同名根目录；
+    # 批内无此计划（或该行被拒）时维持库内/新建回退值
+    uncat_plan = plan_by_key.get((None, _UNCATEGORIZED_DIR_NAME))
+    if uncat_plan is not None:
+        uncat_dir_id = uncat_plan.dir_id
 
     # ---------- 第一遍 B：标签行按行序检查，判定即停 ----------
     valid_tags: list[_ValidTag] = []
@@ -452,8 +463,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             created_at=now,
         ))
 
-    # 2) 「未分类」根目录：有扁平标签落点且库内没有时创建（幂等复用）
-    if needs_uncat and uncat_existing is None:
+    # 2) 「未分类」根目录：有扁平标签落点、批内无同名根目录计划且库内没有
+    #    时创建（幂等复用；批内计划已在 1) 按拓扑序落库）
+    if needs_uncat and uncat_existing is None and uncat_plan is None:
         session.add(TagCatalog(
             dir_id=uncat_dir_id,
             dir_name=_UNCATEGORIZED_DIR_NAME,

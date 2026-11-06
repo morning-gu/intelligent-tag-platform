@@ -5,7 +5,8 @@
   applicable_scope 缺省 content，幂等复用同名目录）；「标签」列 →
   tag_define（tag_type 一律 val_fixed）挂最近目录；
 - 扁平导入（parent_tag 为空）→ 自动创建根目录「未分类」（幂等复用，
-  不重复建）；纯层级导入不产生「未分类」；
+  不重复建）；纯层级导入不产生「未分类」；批内层级根目录恰名「未分类」
+  时扁平行复用该批内目录（不建第二个同名根目录）；
 - 重复 (dir, name)：库内与批内两路都 skipped + duplicate_name；
 - 别名冲突沿用：撞库内标签名 / 批内两行共享（两行均不插入）；
 - 语义相似 similar_to：确定性同向量替身构造"不同名同向量"命中
@@ -128,6 +129,24 @@ def test_flat_import_falls_back_to_uncategorized_idempotent(session):
     r2 = run_governance(rows, session, MOCK_EMBEDDER)
     assert r2.inserted == [] and r2.issues[0].code == "duplicate_name"
     assert session.query(TagCatalog).count() == 1  # 未分类复用，未重复建
+
+
+def test_batch_root_dir_named_uncategorized_reused_for_flat_rows(session):
+    # 批内层级根目录恰名「未分类」+ 扁平行：扁平行复用批内同名根目录，
+    # 不自动新建第二个同名根目录（review 复现缺陷——uncat 解析此前只查库）
+    res = run_governance([
+        _row("未分类", None, ""),           # 层级根目录（被下行引用 → 目录行）
+        _row("反转", "未分类", "情节反转"),  # 标签挂批内「未分类」
+        _row("悬疑", None, "以悬念为核心"),  # 扁平行 → 落同一个「未分类」
+    ], session, MOCK_EMBEDDER)
+    assert res.issues == [] and len(res.inserted) == 2
+    dirs = session.query(TagCatalog).all()
+    assert len(dirs) == 1  # 仍只有一个根目录，无第二个自动「未分类」
+    assert dirs[0].dir_name == "未分类" and dirs[0].parent_id is None
+    # 层级子行 + 扁平行都挂进该目录
+    defines = {t.tag_name: t for t in session.query(TagDefine).all()}
+    assert set(defines) == {"反转", "悬疑"}
+    assert {t.dir_id for t in defines.values()} == {dirs[0].dir_id}
 
 
 def test_batch_duplicate_same_dir_name_skipped(session):

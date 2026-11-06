@@ -9,8 +9,9 @@
 
 旧轮 pending/终态行按 v1 同款手法直接播种（模拟历史任务产出）；新任务
 真跑（MockLLM + 30 枚候选 + min_confidence=0.5 消采样 flake）。删除用
-synchronize_session=False 执行，会话内对象不同步——断言一律先
-expire_all 再重查，保证读到库内真值。
+synchronize_session="fetch" 执行（删除后同步驱逐会话内匹配对象的身份
+映射条目，防 SQLite rowid 复用撞陈旧身份）——断言仍先 expire_all 再
+重查，保证读到库内真值。
 """
 
 import json
