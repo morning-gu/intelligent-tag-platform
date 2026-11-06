@@ -9,15 +9,14 @@
   时扁平行复用该批内目录（不建第二个同名根目录）；
 - 重复 (dir, name)：库内与批内两路都 skipped + duplicate_name；
 - 别名冲突沿用：撞库内标签名 / 批内两行共享（两行均不插入）；
-- 语义相似 similar_to：确定性同向量替身构造"不同名同向量"命中
-  （MockEmbedder 同名才同向量，而同名同目录已被 duplicate_name 前置
-  拦截）；同名不同目录合法共存钉住候选排除语义；
+- 语义相似拦截退役：不同名同向量（余弦 1.0）不再被拦——疑似同义
+  直接放行入库，由人工甄别；同名不同目录合法共存钉住放行语义；
 - 父链：parent_not_found / 批内成环 parent_cycle / 兜底级联零静默搁浅；
 - tag_change_log action='import'：after_json 带 task_id（revoke/export
   反查键），kind 区分 dir/tag 行；
 - 复活：deprecated 同 (dir,name) 再导入恢复 active、保留原 tag_id；
-- 批量编码：全批一次 embed 调用；GovernanceConfig 仅 similar_threshold
-  （v1 allowed_tag_types 白名单校验随 tag_type 枚举化退役）。
+- 批量编码：全批一次 embed 调用；GovernanceConfig 随 semantic_similar
+  退役为空壳（v1 allowed_tag_types 白名单校验早已随 tag_type 枚举化退役）。
 
 状态字面量：v2 统一 "deprecated"（v1 "deprecate" 退役）。
 """
@@ -35,12 +34,9 @@ from tagplatform.governance.pipeline import GovernanceConfig
 
 
 class SameVecEmbedder:
-    """确定性常向量替身：任意文本同向量（余弦 1.0），构造跨名语义命中。
-
-    MockEmbedder 是 sha256 伪向量——同名才同向量，而 v2 的同名同目录已被
-    duplicate_name 前置拦截，语义比对永远轮不到同名候选；故语义路径测试
-    需要一个"不同名也同向量"的确定性替身。输出遵守 Embedder 契约（L2
-    归一化 float32），归一化后点积即余弦。
+    """确定性常向量替身：任意文本同向量（余弦 1.0）——语义拦截退役后
+    用于钉死"不同名同向量也放行入库"的新契约。输出遵守 Embedder 契约
+    （L2 归一化 float32），归一化后点积即余弦。
     """
 
     name, dim = "same-vec", 8
@@ -52,7 +48,7 @@ class SameVecEmbedder:
 
 
 def _row(name, parent=None, desc="d", aliases=None):
-    return TagRow(None, name, "genre", desc, parent, aliases or [], None, None)
+    return TagRow(None, name, "val_fixed", desc, parent, aliases or [], None, None)
 
 
 # ---------- 落位拆分（Review Focus 5） ----------
@@ -73,7 +69,8 @@ def test_hierarchical_split_and_flat_fallback(session):
     assert set(defines) == {"反转", "悬疑"}
     assert dirs["内容"].parent_id is None
     assert dirs["剧情"].parent_id == dirs["内容"].dir_id
-    assert all(d.dir_type == "dir_static" and d.applicable_scope == "content"
+    assert all(d.dir_type == "dir_dynamic"
+               and d.applicable_scope == "content,scene,character"
                for d in dirs.values())
     # (dir, name) 落位：反转挂剧情目录、悬疑挂「未分类」；一律 val_fixed
     assert defines["反转"].dir_id == dirs["剧情"].dir_id
@@ -122,7 +119,7 @@ def test_flat_import_falls_back_to_uncategorized_idempotent(session):
     assert len(dirs) == 1
     root = dirs[0]
     assert root.dir_name == "未分类" and root.parent_id is None
-    assert root.dir_type == "dir_static"
+    assert root.dir_type == "dir_dynamic"
     assert root.embedding is not None  # 目录入库即计算 embedding
     assert session.get(TagDefine, r1.inserted[0]).dir_id == root.dir_id
 
@@ -175,22 +172,23 @@ def test_alias_cross_conflict(session):
     assert all(i.code == "alias_conflict" for i in res2.issues)
 
 
-def test_semantic_similar_reports_similar_to(session):
-    # 不同名同向量 → 余弦 1.0 ≥ 0.90 → semantic_similar + similar_to
+def test_semantic_similar_retired_allows_insertion(session):
+    """语义拦截退役：不同名同向量（余弦 1.0）不再报 semantic_similar，
+    直接放行入库——疑似同义标签由人工经待处理列表甄别。"""
     run_governance([_row("推理", desc="以解谜推进")], session, SameVecEmbedder())
     res = run_governance([_row("侦探", desc="另一段描述")], session, SameVecEmbedder())
-    assert res.issues[0].code == "semantic_similar"
-    assert res.issues[0].similar_to == "推理"
-    assert res.inserted == []
-    # result_summary.issues 为明细列表：similar_to 进入序列化结果
-    # （导入任务详情端点 / 前端待处理列表的消费契约）
+    # 不再拦截：无 issue、两枚标签并存
+    assert res.issues == [] and len(res.inserted) == 1
+    defines = {t.tag_name for t in session.query(TagDefine).all()}
+    assert defines == {"推理", "侦探"}
+    # result_summary.issues 为空明细列表（导入任务详情端点消费契约）
     task = session.get(TagImportTask, res.task_id)
-    detail = json.loads(task.result_summary)["issues"][0]
-    assert detail["code"] == "semantic_similar" and detail["similar_to"] == "推理"
+    detail = json.loads(task.result_summary)
+    assert detail["issues"] == [] and detail["inserted"] == 1
 
 
 def test_same_name_different_dirs_coexists(session):
-    # 同名不同目录合法共存：语义比对排除同名候选（v1 scope 过滤语义沿用）
+    # 同名不同目录合法共存：即使描述相同（MockEmbedder 同形文本同向量）也放行
     run_governance([
         _row("内容", None, ""),
         _row("悬疑", "内容", "以悬念为核心"),
@@ -273,7 +271,7 @@ def test_deprecated_same_name_is_reactivated_on_import(session):
 def test_status_literal_normalized_to_deprecated(session):
     # v1 "deprecate" 行内取值归一为 v2 "deprecated"（CHECK 约束字面量）
     res = run_governance(
-        [TagRow(None, "旧词", "genre", "d", None, [], None, "deprecate")],
+        [TagRow(None, "旧词", "val_fixed", "d", None, [], None, "deprecate")],
         session, MOCK_EMBEDDER)
     assert res.issues == []
     assert session.get(TagDefine, res.inserted[0]).status == "deprecated"
@@ -309,23 +307,31 @@ def test_change_log_import_rows_carry_task_id(session):
 # ---------- 配置与批量编码 ----------
 
 def test_governance_config_threshold_only(session):
-    # GovernanceConfig 仅 similar_threshold：显式传参改变相似判定
-    assert "allowed_tag_types" not in {f.name for f in fields(GovernanceConfig)}
+    # GovernanceConfig 随 semantic_similar 退役为空壳：无字段，显式传参
+    # 不再影响判定（不同名同向量余弦 1.0 依旧放行）
+    assert not [f.name for f in fields(GovernanceConfig)]
     run_governance([_row("推理", desc="以解谜推进")], session, SameVecEmbedder())
-    # 阈值抬到 1.01：余弦 1.0 不再命中（含等于边界失效）→ 可插入
-    cfg = GovernanceConfig(similar_threshold=1.01)
+    cfg = GovernanceConfig()
     res = run_governance([_row("侦探", desc="另一段描述")], session,
                          SameVecEmbedder(), config=cfg)
     assert res.issues == [] and len(res.inserted) == 1
 
 
 def test_allowed_tag_types_check_retired(session):
-    # tag_type 白名单校验退役：行 tag_type 任意值不入库、一律写 val_fixed
+    # tag_type 白名单校验退役：行 tag_type 任意值归一——非法回退 val_fixed，
+    # val_fixed/val_generalized 之外不入库
     res = run_governance(
         [TagRow(None, "悬疑", "不存在的类型", "d", None, [], None, None)],
         session, MOCK_EMBEDDER)
     assert res.issues == [] and len(res.inserted) == 1
     assert session.get(TagDefine, res.inserted[0]).tag_type == "val_fixed"
+
+    res2 = run_governance(
+        [TagRow(None, "泛化悬疑", "val_generalized", "d", None, [], None, None)],
+        session, MOCK_EMBEDDER)
+    assert res2.issues == [] and len(res2.inserted) == 1
+    assert (session.get(TagDefine, res2.inserted[0]).tag_type
+            == "val_generalized")
 
 
 def test_governance_batch_embedding_calls(session):

@@ -8,6 +8,7 @@ from tagplatform.governance.models import (
     TagRow,
     build_tag_row,
     cell_text,
+    split_aliases,
 )
 
 _FIELDS = ("tag_id", "tag_name", "tag_type", "description", "parent_tag",
@@ -17,7 +18,13 @@ __all__ = ["parse_tag_xml"]
 
 
 def _xml_tag_row(element: ET.Element, parent_name: str | None) -> TagRow:
-    """将树节点转换为标签行；层级节点使用 name 属性，tag 使用文本。"""
+    """将树节点转换为标签行；层级节点使用 name 属性，tag 使用文本。
+
+    扩展属性（缺省语义由入库层归一）：dir_type（目录类型）、scope/
+    applicable_scope（适用范围）、tag_type（标签类型，缺省 val_fixed）、
+    aliases（| 或逗号分隔）；type 属性是生成方式（manual/ai），语义不同，
+    映射到 is_manual。
+    """
     node_name = _local_name(element.tag)
     if node_name == "tag":
         name = cell_text(element.text)
@@ -29,16 +36,25 @@ def _xml_tag_row(element: ET.Element, parent_name: str | None) -> TagRow:
         element.attrib.get("type") or element.attrib.get("标签生成方式"))
     description = cell_text(
         element.attrib.get("description") or element.attrib.get("标签描述")) or ""
+    tag_type = cell_text(
+        element.attrib.get("tag_type") or element.attrib.get("标签类型"))
     return TagRow(
         tag_id=cell_text(element.attrib.get("id")),
         tag_name=name,
-        tag_type="genre",
+        tag_type=tag_type or "val_fixed",
         description=description,
         parent_tag=parent_name,
-        aliases=[],
-        applicable_scope=None,
+        aliases=split_aliases(
+            cell_text(element.attrib.get("aliases")
+                      or element.attrib.get("别名"))),
+        applicable_scope=cell_text(
+            element.attrib.get("scope")
+            or element.attrib.get("applicable_scope")
+            or element.attrib.get("适用范围")),
         status=None,
         is_manual=generation_type is None or generation_type == "manual",
+        dir_type=cell_text(
+            element.attrib.get("dir_type") or element.attrib.get("目录类型")),
     )
 
 

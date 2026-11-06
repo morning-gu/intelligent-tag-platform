@@ -1,0 +1,591 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root>
+    <level1 name="内容特征标签" dir_type="dir_static" scope="content" description="描述影视内容本身的题材类型、风格基调等内在属性特征，是内容理解和分类的基础维度">
+        <level2 name="题材类型" dir_type="dir_static" scope="content" description="内容的主题题材分类体系，包含主类型、细分剧情母题、故事时代背景和IP改编来源">
+            <level3 name="主类型" dir_type="dir_static" scope="content" description="影视内容的主要类型分类，如剧情、喜剧、动作等，用于内容的一级归类">
+                <tag tag_type="val_fixed" description="以人物关系和情感发展为主线，展现生活百态与社会现实的故事类型">剧情</tag>
+                <tag tag_type="val_fixed" description="以幽默、滑稽、讽刺等手法引发观众笑声为主要目的的故事类型">喜剧</tag>
+                <tag tag_type="val_fixed" description="以恋爱关系和情感发展为核心叙事线索的故事类型">爱情</tag>
+                <tag tag_type="val_fixed" description="以打斗、追逐、特技等高强度身体动作场面为主要看点的故事类型">动作</tag>
+                <tag tag_type="val_fixed" description="以探索未知、历险旅程为核心叙事驱动的故事类型">冒险</tag>
+                <tag tag_type="val_fixed" description="围绕犯罪行为、犯罪心理或司法过程展开叙事的故事类型">犯罪</tag>
+                <tag tag_type="val_fixed" description="以悬念设置和解谜过程驱动叙事、引发观众好奇的故事类型">悬疑</tag>
+                <tag tag_type="val_fixed" description="以逻辑推理和线索分析为核心、强调解谜推理过程的故事类型">推理</tag>
+                <tag tag_type="val_fixed" description="以紧张、恐惧、不安等情绪氛围营造为主要特征的故事类型">惊悚</tag>
+                <tag tag_type="val_fixed" description="以超自然、血腥或心理恐怖元素引发观众恐惧感的故事类型">恐怖</tag>
+                <tag tag_type="val_fixed" description="以科学幻想设定为基础，探讨未来科技与人类关系的故事类型">科幻</tag>
+                <tag tag_type="val_fixed" description="以架空世界观、魔法或超自然力量为核心设定的故事类型">奇幻</tag>
+                <tag tag_type="val_fixed" description="以东方玄幻体系、修炼进阶等设定为核心的故事类型">玄幻</tag>
+                <tag tag_type="val_fixed" description="以中国传统武术、江湖恩义、侠客精神为核心的故事类型">武侠</tag>
+                <tag tag_type="val_fixed" description="以修仙飞升、仙侠世界观的冒险或恋爱为核心的故事类型">仙侠</tag>
+                <tag tag_type="val_fixed" description="以战争背景、军事行动和战场叙事为核心的故事类型">战争</tag>
+                <tag tag_type="val_fixed" description="以历史事件、历史人物或历史时期为背景的故事类型">历史</tag>
+                <tag tag_type="val_fixed" description="以真实人物生平事迹为基础进行叙事的故事类型">传记</tag>
+                <tag tag_type="val_fixed" description="以真实记录、纪实拍摄手法呈现现实内容的作品类型">纪录</tag>
+                <tag tag_type="val_fixed" description="以动画技术制作的影视内容，涵盖手绘、三维、定格等制作形式">动画</tag>
+                <tag tag_type="val_fixed" description="以家庭关系、家庭生活为核心主题的故事类型">家庭</tag>
+                <tag tag_type="val_fixed" description="面向低龄观众，内容简单健康、寓教于乐的故事类型">儿童</tag>
+                <tag tag_type="val_fixed" description="以青少年成长、校园生活、青春情感为核心的故事类型">青春</tag>
+                <tag tag_type="val_fixed" description="以学校环境和师生生活为主要场景的故事类型">校园</tag>
+                <tag tag_type="val_fixed" description="以工作职场环境和职业发展为核心叙事的故事类型">职场</tag>
+                <tag tag_type="val_fixed" description="以现代城市生活为背景的故事类型">都市</tag>
+                <tag tag_type="val_fixed" description="以农村乡镇生活和乡土文化为背景的故事类型">乡村</tag>
+                <tag tag_type="val_fixed" description="关注社会问题、反映现实民生状况的故事类型">社会现实</tag>
+                <tag tag_type="val_fixed" description="以旅途公路为叙事线、在行进中展开故事的故事类型">公路</tag>
+                <tag tag_type="val_fixed" description="以自然灾害或人为灾难事件为核心叙事的故事类型">灾难</tag>
+                <tag tag_type="val_fixed" description="以体育运动、竞技比赛为核心主题的故事类型">体育</tag>
+                <tag tag_type="val_fixed" description="以音乐创作、表演或音乐人为核心主题的故事类型">音乐</tag>
+                <tag tag_type="val_fixed" description="以歌曲和舞蹈表演穿插叙事的故事类型">歌舞</tag>
+                <tag tag_type="val_fixed" description="以烹饪、美食文化、餐饮行业为核心主题的故事类型">美食</tag>
+                <tag tag_type="val_fixed" description="以旅行体验、地域文化探索为核心主题的故事类型">旅行</tag>
+                <tag tag_type="val_fixed" description="以医疗行业、医患关系、诊疗过程为核心的故事类型">医疗</tag>
+                <tag tag_type="val_fixed" description="以法律案件、法庭辩论、司法制度为核心的故事类型">法律</tag>
+                <tag tag_type="val_fixed" description="以警察与犯罪分子对抗为核心叙事的故事类型">警匪</tag>
+                <tag tag_type="val_fixed" description="以间谍活动、情报博弈为核心叙事的故事类型">谍战</tag>
+                <tag tag_type="val_fixed" description="以军队生活、军事训练和军人精神为核心的故事类型">军旅</tag>
+                <tag tag_type="val_fixed" description="以政治权力斗争、政治制度运作或政治事件为核心的故事类型">政治</tag>
+                <tag tag_type="val_fixed" description="以宗教信仰、宗教文化或宗教冲突为核心主题的故事类型">宗教</tag>
+                <tag tag_type="val_fixed" description="以美国西部开拓时代为背景的经典故事类型">西部</tag>
+                <tag tag_type="val_fixed" description="以愤世嫉俗、道德模糊、阴暗氛围为特征的犯罪题材类型">黑色电影</tag>
+                <tag tag_type="val_fixed" description="以拥有超能力的英雄角色对抗邪恶为核心的故事类型">超级英雄</tag>
+                <tag tag_type="val_fixed" description="以巨型怪兽或异形生物为核心元素的故事类型">怪兽</tag>
+                <tag tag_type="val_fixed" description="以末日灾难后人类求生存为核心叙事的故事类型">末日求生</tag>
+                <tag tag_type="val_fixed" description="以真实人物参与、纪实拍摄、竞赛或互动为形式的综艺节目类型">真人秀</tag>
+                <tag tag_type="val_fixed" description="以选手竞技比拼为核心内容的综艺节目类型">竞技竞演</tag>
+                <tag tag_type="val_fixed" description="以答题、解谜、闯关等益智环节为核心的综艺节目类型">益智闯关</tag>
+                <tag tag_type="val_fixed" description="以观察记录、体验互动为核心的综艺节目类型">观察体验</tag>
+                <tag tag_type="val_fixed" description="以单口喜剧表演、访谈对话为核心的综艺节目类型">脱口秀</tag>
+                <tag tag_type="val_fixed" description="以人物深度访谈、对话交流为核心的节目类型">访谈</tag>
+                <tag tag_type="val_fixed" description="以时尚潮流、美容护肤为核心主题的内容类型">时尚美妆</tag>
+                <tag tag_type="val_fixed" description="以亲子互动、育儿教育为核心主题的内容类型">亲子</tag>
+                <tag tag_type="val_fixed" description="以宠物饲养、动物互动为核心主题的内容类型">宠物</tag>
+                <tag tag_type="val_fixed" description="以自然地理、生态环境、野生动植物为主题的纪实内容类型">自然生态</tag>
+                <tag tag_type="val_fixed" description="以科学技术知识普及、前沿科技探索为核心的内容类型">科技科普</tag>
+                <tag tag_type="val_fixed" description="不属于上述主类型的其他内容类型">其他</tag>
+            </level3>
+            <level3 name="细分题材/剧情母题" dir_type="dir_dynamic" scope="content" description="在主类型基础上的细分题材方向和常见剧情母题模式，用于内容的精细归类">
+                <tag tag_type="val_fixed" description="主角因遭受不公或伤害而展开复仇行动的剧情母题">复仇</tag>
+                <tag tag_type="val_fixed" description="主角追踪犯罪嫌疑人或真凶的剧情母题">追凶</tag>
+                <tag tag_type="val_fixed" description="围绕未破悬案展开调查推理的剧情母题">悬案调查</tag>
+                <tag tag_type="val_fixed" description="角色被困封闭空间需解谜逃生的剧情母题">密室逃脱</tag>
+                <tag tag_type="val_fixed" description="角色因身份混淆或互换引发冲突的剧情母题">身份错位</tag>
+                <tag tag_type="val_fixed" description="角色隐藏真实身份、秘密逐渐揭露的剧情母题">身份秘密</tag>
+                <tag tag_type="val_fixed" description="角色以卧底身份潜入对方阵营执行任务的剧情母题">卧底潜伏</tag>
+                <tag tag_type="val_fixed" description="以间谍情报交锋和多方博弈为核心的剧情母题">谍战博弈</tag>
+                <tag tag_type="val_fixed" description="围绕家族世代矛盾和利益纷争展开的剧情母题">家族恩怨</tag>
+                <tag tag_type="val_fixed" description="以权力争夺和政治谋略为核心的剧情母题">权谋斗争</tag>
+                <tag tag_type="val_fixed" description="以宫廷内部权力角逐和后妃争斗为核心的剧情母题">宫廷争斗</tag>
+                <tag tag_type="val_fixed" description="以商业领域竞争博弈为核心的剧情母题">商战竞争</tag>
+                <tag tag_type="val_fixed" description="主角在职场中从低谷崛起实现突破的剧情母题">职场逆袭</tag>
+                <tag tag_type="val_fixed" description="主角创业过程中克服困难追求事业成功的剧情母题">创业奋斗</tag>
+                <tag tag_type="val_fixed" description="主角经历磨难后实现性格或能力成长的剧情母题">成长蜕变</tag>
+                <tag tag_type="val_fixed" description="以青少年时期暗恋情感为核心的剧情母题">青春暗恋</tag>
+                <tag tag_type="val_fixed" description="角色先结婚后在相处中逐渐产生感情的剧情母题">先婚后爱</tag>
+                <tag tag_type="val_fixed" description="角色以契约形式建立恋爱关系后产生真感情的剧情母题">契约恋爱</tag>
+                <tag tag_type="val_fixed" description="两个对立角色从争吵到相爱的剧情母题">欢喜冤家</tag>
+                <tag tag_type="val_fixed" description="分手或离散的角色重新走到一起的剧情母题">破镜重圆</tag>
+                <tag tag_type="val_fixed" description="长期分离的角色再次相遇的剧情母题">久别重逢</tag>
+                <tag tag_type="val_fixed" description="三个角色之间形成感情纠葛的剧情母题">三角关系</tag>
+                <tag tag_type="val_fixed" description="角色间因社会规则或伦理限制而无法公开的恋情剧情母题">禁忌之恋</tag>
+                <tag tag_type="val_fixed" description="角色间经历痛苦和折磨的曲折恋情剧情母题">虐恋</tag>
+                <tag tag_type="val_fixed" description="以纯粹真挚、不掺杂利益的恋爱情感为核心的剧情母题">纯爱</tag>
+                <tag tag_type="val_fixed" description="双方共同努力走向彼此的恋爱剧情母题">双向奔赴</tag>
+                <tag tag_type="val_fixed" description="围绕夫妻婚姻生活中的矛盾与经营展开的剧情母题">婚姻关系</tag>
+                <tag tag_type="val_fixed" description="围绕父母与子女之间的关系和矛盾展开的剧情母题">亲子关系</tag>
+                <tag tag_type="val_fixed" description="不同代际之间因观念差异产生冲突的剧情母题">代际冲突</tag>
+                <tag tag_type="val_fixed" description="围绕友情建立与信任破裂展开的剧情母题">友情与背叛</tag>
+                <tag tag_type="val_fixed" description="以师傅与徒弟间的技艺传承和精神延续为核心的剧情母题">师徒传承</tag>
+                <tag tag_type="val_fixed" description="围绕教师与学生之间的关系和互动展开的剧情母题">师生关系</tag>
+                <tag tag_type="val_fixed" description="两名搭档合作侦破案件的剧情母题">搭档破案</tag>
+                <tag tag_type="val_fixed" description="以团队协作完成共同目标为核心的剧情母题">团队合作</tag>
+                <tag tag_type="val_fixed" description="角色在荒野环境中求生存的剧情母题">荒野求生</tag>
+                <tag tag_type="val_fixed" description="角色在末日灾变后极端环境中求生的剧情母题">末日生存</tag>
+                <tag tag_type="val_fixed" description="角色反复经历同一段时间段并寻求突破的剧情母题">时间循环</tag>
+                <tag tag_type="val_fixed" description="以平行世界或多重宇宙设定为核心的剧情母题">平行宇宙</tag>
+                <tag tag_type="val_fixed" description="以人工智能产生自我意识为核心的剧情母题">人工智能觉醒</tag>
+                <tag tag_type="val_fixed" description="以宇宙太空探索和星际旅行为核心的剧情母题">太空探索</tag>
+                <tag tag_type="val_fixed" description="以与外星生命接触或冲突为核心的剧情母题">外星文明</tag>
+                <tag tag_type="val_fixed" description="以巨型怪兽袭击人类为核心的剧情母题">怪兽袭击</tag>
+                <tag tag_type="val_fixed" description="讲述超级英雄获得能力并开始使命的剧情母题">超级英雄起源</tag>
+                <tag tag_type="val_fixed" description="角色发现或获得超能力并学习掌控的剧情母题">超能力觉醒</tag>
+                <tag tag_type="val_fixed" description="以校园内各类竞赛活动为核心的剧情母题">校园竞赛</tag>
+                <tag tag_type="val_fixed" description="以选秀比赛和艺人出道为核心的剧情母题">选秀出道</tag>
+                <tag tag_type="val_fixed" description="以体育比赛争夺冠军为核心的剧情母题">体育夺冠</tag>
+                <tag tag_type="val_fixed" description="以音乐创作和追求音乐梦想为核心的剧情母题">音乐追梦</tag>
+                <tag tag_type="val_fixed" description="以寻找和制作美食为核心的剧情母题">美食寻味</tag>
+                <tag tag_type="val_fixed" description="通过旅行经历实现心灵治愈的剧情母题">旅行治愈</tag>
+                <tag tag_type="val_fixed" description="以乡村发展和建设为核心的剧情母题">乡村振兴</tag>
+                <tag tag_type="val_fixed" description="围绕非物质文化遗产传承展开的剧情母题">非遗传承</tag>
+                <tag tag_type="val_fixed" description="以真实历史事件为基础再现的剧情母题">历史事件重现</tag>
+                <tag tag_type="val_fixed" description="以真实犯罪案件为原型改编的剧情母题">真实案件改编</tag>
+                <tag tag_type="val_fixed" description="以医疗急救和救援行动为核心的剧情母题">医疗救援</tag>
+                <tag tag_type="val_fixed" description="以法庭审判和司法程序为核心的剧情母题">法律审判</tag>
+                <tag tag_type="val_fixed" description="以灾难发生后的营救行动为核心的剧情母题">灾难营救</tag>
+                <tag tag_type="val_fixed" description="以寻找失散亲人并重逢为核心的剧情母题">寻亲/失散重逢</tag>
+                <tag tag_type="val_fixed" description="以普通人努力改变命运为核心的剧情母题">小人物奋斗</tag>
+                <tag tag_type="val_fixed" description="以社会阶层跨越和身份转变为核心的剧情母题">阶层流动</tag>
+                <tag tag_type="val_fixed" description="不属于上述细分题材的其他剧情母题">其他</tag>
+            </level3>
+            <level3 name="故事背景时代" dir_type="dir_static" scope="content" description="故事所设定的历史时代或时间背景，用于区分内容的世界观时间线">
+                <tag tag_type="val_fixed" description="故事设定在远古或史前文明时期">远古/史前</tag>
+                <tag tag_type="val_fixed" description="故事设定在先秦时期，涵盖夏商周及春秋战国">先秦</tag>
+                <tag tag_type="val_fixed" description="故事设定在秦朝或汉朝时期">秦汉</tag>
+                <tag tag_type="val_fixed" description="故事设定在魏晋南北朝历史时期">魏晋南北朝</tag>
+                <tag tag_type="val_fixed" description="故事设定在隋朝或唐朝时期">隋唐</tag>
+                <tag tag_type="val_fixed" description="故事设定在宋朝或元朝时期">宋元</tag>
+                <tag tag_type="val_fixed" description="故事设定在明朝时期">明代</tag>
+                <tag tag_type="val_fixed" description="故事设定在清朝时期">清代</tag>
+                <tag tag_type="val_fixed" description="故事设定在中国近现代历史时期，涵盖晚清至二十世纪中叶">中国近现代</tag>
+                <tag tag_type="val_fixed" description="故事设定在当下现实时代背景">当代现实</tag>
+                <tag tag_type="val_fixed" description="故事设定在距当前不远的未来时期">近未来</tag>
+                <tag tag_type="val_fixed" description="故事设定在遥远的未来时期">远未来</tag>
+                <tag tag_type="val_fixed" description="故事设定在虚构的古代世界观中，不对应真实朝代">架空古代</tag>
+                <tag tag_type="val_fixed" description="故事设定在虚构的现代社会中，不完全对应现实世界">架空现代</tag>
+                <tag tag_type="val_fixed" description="故事设定在与现实平行的架空世界中">平行世界</tag>
+                <tag tag_type="val_fixed" description="故事涉及多个时代或时空的交叉与穿越">跨时代/多时空</tag>
+                <tag tag_type="val_fixed" description="故事背景时代不明确或未明确交代">时代不明</tag>
+                <tag tag_type="val_fixed" description="该内容无明确时代背景设定，不适用时代标签">不适用</tag>
+            </level3>
+            <level3 name="IP/改编来源" dir_type="dir_static" scope="content" description="内容的原始IP来源或改编类型，标明内容创作的基础素材">
+                <tag tag_type="val_fixed" description="内容基于原创剧本创作，非改编自现有IP">原创剧本</tag>
+                <tag tag_type="val_fixed" description="内容改编自文学作品或小说">小说改编</tag>
+                <tag tag_type="val_fixed" description="内容改编自网络连载文学或网络小说">网络文学改编</tag>
+                <tag tag_type="val_fixed" description="内容改编自漫画或图像小说">漫画改编</tag>
+                <tag tag_type="val_fixed" description="内容改编自动画或动漫作品">动漫改编</tag>
+                <tag tag_type="val_fixed" description="内容改编自电子游戏或桌游">游戏改编</tag>
+                <tag tag_type="val_fixed" description="内容基于真实事件改编创作">真实事件改编</tag>
+                <tag tag_type="val_fixed" description="内容基于真实人物生平事迹改编">真实人物传记改编</tag>
+                <tag tag_type="val_fixed" description="内容基于历史文献或史料记载改编">历史文献/史料改编</tag>
+                <tag tag_type="val_fixed" description="内容改编自舞台剧或话剧作品">舞台剧改编</tag>
+                <tag tag_type="val_fixed" description="内容基于音乐作品或歌曲创意衍生创作">音乐/歌曲衍生</tag>
+                <tag tag_type="val_fixed" description="内容为已有经典影视作品的重新翻拍">经典作品翻拍</tag>
+                <tag tag_type="val_fixed" description="内容改编自海外影视作品">海外影视改编</tag>
+                <tag tag_type="val_fixed" description="内容为现有IP的续集、前传或外传作品">续集/前传/外传</tag>
+                <tag tag_type="val_fixed" description="内容为对现有IP的重新启动或再创作">重启/再创作</tag>
+                <tag tag_type="val_fixed" description="内容改编自公共领域的经典作品">公共领域作品改编</tag>
+                <tag tag_type="val_fixed" description="内容为引进海外综艺模式制作的节目">综艺模式引进</tag>
+                <tag tag_type="val_fixed" description="不属于上述来源的其他IP或改编类型">其他</tag>
+                <tag tag_type="val_fixed" description="内容的IP来源或改编类型未知">未知</tag>
+            </level3>
+        </level2>
+        <level2 name="风格基调" dir_type="dir_static" scope="content" description="内容整体呈现的情绪氛围基调与叙事风格复杂度特征">
+            <level3 name="整体情绪基调" dir_type="dir_dynamic" scope="content" description="内容整体传递的情绪氛围和基调倾向，如轻松愉快、紧张刺激等">
+                <tag tag_type="val_fixed" description="整体氛围轻松欢快，以愉悦观感为主">轻松愉快</tag>
+                <tag tag_type="val_fixed" description="整体氛围温暖柔和，具有心灵治愈感">温暖治愈</tag>
+                <tag tag_type="val_fixed" description="整体氛围浪漫温馨，以甜蜜情感为主调">浪漫甜蜜</tag>
+                <tag tag_type="val_fixed" description="整体氛围热血澎湃，激发观众激情与斗志">热血激昂</tag>
+                <tag tag_type="val_fixed" description="整体氛围紧张激烈，节奏快、悬念多">紧张刺激</tag>
+                <tag tag_type="val_fixed" description="整体氛围充满悬疑与压迫感，令人不安">悬疑压迫</tag>
+                <tag tag_type="val_fixed" description="整体氛围阴郁低沉，情绪基调偏重">阴郁沉重</tag>
+                <tag tag_type="val_fixed" description="整体氛围悲伤动情，以催泪为主要情绪体验">悲伤感人</tag>
+                <tag tag_type="val_fixed" description="整体氛围黑暗且残酷，展现人性或现实的阴暗面">黑暗残酷</tag>
+                <tag tag_type="val_fixed" description="整体氛围荒诞离奇，以怪诞风格为基调">荒诞怪诞</tag>
+                <tag tag_type="val_fixed" description="整体氛围冷静克制，情感表达内敛">冷峻克制</tag>
+                <tag tag_type="val_fixed" description="整体氛围富有诗意，以抒情表达为主调">诗意抒情</tag>
+                <tag tag_type="val_fixed" description="整体氛围幽默诙谐，以讽刺和嘲弄为特色">幽默讽刺</tag>
+                <tag tag_type="val_fixed" description="整体氛围积极向上，传递奋斗与正能量">积极励志</tag>
+                <tag tag_type="val_fixed" description="整体氛围充满怀旧感，营造复古时代气息">怀旧复古</tag>
+                <tag tag_type="val_fixed" description="整体氛围温馨平淡，聚焦日常生活的温暖细节">温馨日常</tag>
+                <tag tag_type="val_fixed" description="整体氛围宏大壮阔，具有史诗般的叙事格局">宏大史诗</tag>
+                <tag tag_type="val_fixed" description="整体氛围神秘莫测，充满未知和诡异感">神秘诡谲</tag>
+                <tag tag_type="val_fixed" description="整体氛围中性客观，无明显情绪倾向">中性客观</tag>
+                <tag tag_type="val_fixed" description="整体情绪基调多样混合，不单一主导">多基调混合</tag>
+            </level3>
+            <level3 name="叙事复杂度" dir_type="dir_static" scope="content" description="内容叙事结构的复杂程度、线索数量及观众理解门槛">
+                <tag tag_type="val_fixed" description="叙事线索单一，按时间顺序直线推进，易于理解">简单直叙</tag>
+                <tag tag_type="val_fixed" description="包含多条平行或交叉叙事线，结构较丰富">多线叙事</tag>
+                <tag tag_type="val_fixed" description="以多个角色视角平行展开叙事，无单一主角">人物群像</tag>
+                <tag tag_type="val_fixed" description="从不同角色视角交替叙述同一或关联事件">多重视角</tag>
+                <tag tag_type="val_fixed" description="时间线交错或非线性排列，需观众梳理理解">时间线复杂</tag>
+                <tag tag_type="val_fixed" description="以谜题和悬念为核心驱动力，需观众主动推理">谜题驱动</tag>
+                <tag tag_type="val_fixed" description="关键信息刻意隐藏，需观众自行发现和拼凑">信息隐藏较多</tag>
+                <tag tag_type="val_fixed" description="需具备特定领域或前作背景知识才能充分理解">需要背景知识</tag>
+                <tag tag_type="val_fixed" description="叙事简单明了，无需过多思考即可理解">轻松易懂</tag>
+                <tag tag_type="val_fixed" description="叙事复杂度高，需要较高理解力和专注力">高理解门槛</tag>
+                <tag tag_type="val_fixed" description="叙事复杂度尚未评估或无法判定">未知</tag>
+            </level3>
+        </level2>
+    </level1>
+    <level1 name="业务运营标签" dir_type="dir_static" scope="content" description="描述内容在市场运营全生命周期中的热度趋势、榜单奖项等业务维度的标签">
+        <level2 name="热度与周期" dir_type="dir_static" scope="content" description="内容在市场上的热度变化趋势及剧集类内容的更新排播状态">
+            <level3 name="热度趋势" dir_type="dir_static" scope="content" description="内容热度随时间的变化趋势走向，反映市场关注度动态">
+                <tag tag_type="val_fixed" description="热度在短期内快速攀升，增长势头强劲">快速上升</tag>
+                <tag tag_type="val_fixed" description="热度持续稳定增长，走势平稳向上">稳步上升</tag>
+                <tag tag_type="val_fixed" description="热度维持在较高水平且相对稳定">高位稳定</tag>
+                <tag tag_type="val_fixed" description="热度缓慢增长，上升幅度较小但持续">缓慢上升</tag>
+                <tag tag_type="val_fixed" description="热度在波动中整体呈上升趋势">波动上升</tag>
+                <tag tag_type="val_fixed" description="热度无明显变化，维持在相对稳定水平">基本持平</tag>
+                <tag tag_type="val_fixed" description="热度缓慢回落，下降幅度较小">缓慢下降</tag>
+                <tag tag_type="val_fixed" description="热度在短期内快速下滑，衰减明显">快速下降</tag>
+                <tag tag_type="val_fixed" description="热度在下降后再次出现上升，迎来第二波关注">二次走红</tag>
+                <tag tag_type="val_fixed" description="因特定事件触发导致热度突然大幅增加">事件驱动突增</tag>
+                <tag tag_type="val_fixed" description="热度数据不充分，无法判断趋势走向">数据不足</tag>
+            </level3>
+            <level3 name="剧集更新状态" dir_type="dir_static" scope="content" description="剧集类内容的更新进度和排播状态，反映内容生命周期阶段">
+                <tag tag_type="val_fixed" description="剧集尚未开始播出，处于待播状态">尚未开播</tag>
+                <tag tag_type="val_fixed" description="剧集按每日频率更新播出新集">每日更新</tag>
+                <tag tag_type="val_fixed" description="剧集按每周频率更新播出新集">每周更新</tag>
+                <tag tag_type="val_fixed" description="剧集每周更新多集，排播密度较高">周更多集</tag>
+                <tag tag_type="val_fixed" description="会员可提前观看后续剧集内容">会员抢先看</tag>
+                <tag tag_type="val_fixed" description="剧集全部集数一次性上线可供观看">全集上线</tag>
+                <tag tag_type="val_fixed" description="剧集正在持续更新播出中">更新中</tag>
+                <tag tag_type="val_fixed" description="剧集暂时停止更新，后续恢复时间待定">暂时停更</tag>
+                <tag tag_type="val_fixed" description="剧集全部集数已播出完毕">已完结</tag>
+                <tag tag_type="val_fixed" description="正篇已完结，特别篇或番外尚未上线">特别篇待上线</tag>
+                <tag tag_type="val_fixed" description="更新状态未知或不适用于该内容类型">未知/不适用</tag>
+            </level3>
+        </level2>
+        <level2 name="榜单与奖项" dir_type="dir_static" scope="content" description="内容获得的各类影视奖项荣誉信息及荣誉类别">
+            <level3 name="获奖信息" dir_type="dir_static" scope="content" description="内容获得的具体影视奖项名称，如奥斯卡金像奖、金鸡奖等">
+                <tag tag_type="val_fixed" description="美国电影艺术与科学学院颁发的奥斯卡金像奖">奥斯卡金像奖</tag>
+                <tag tag_type="val_fixed" description="好莱坞外国记者协会颁发的金球奖">金球奖</tag>
+                <tag tag_type="val_fixed" description="英国电影和电视艺术学院颁发的BAFTA奖">英国电影学院奖</tag>
+                <tag tag_type="val_fixed" description="法国电影学院颁发的凯撒电影奖">法国凯撒电影奖</tag>
+                <tag tag_type="val_fixed" description="美国演员工会颁发的表演类奖项">美国演员工会奖</tag>
+                <tag tag_type="val_fixed" description="美国导演工会颁发的导演类奖项">美国导演工会奖</tag>
+                <tag tag_type="val_fixed" description="美国制片人工会颁发的制片类奖项">美国制片人工会奖</tag>
+                <tag tag_type="val_fixed" description="欧洲电影学院颁发的欧洲电影奖">欧洲电影奖</tag>
+                <tag tag_type="val_fixed" description="国际动画协会颁发的动画领域奖项">安妮奖</tag>
+                <tag tag_type="val_fixed" description="表彰独立电影制作的独立精神奖">独立精神奖</tag>
+                <tag tag_type="val_fixed" description="中国电影家协会颁发的金鸡奖">中国电影金鸡奖</tag>
+                <tag tag_type="val_fixed" description="观众投票评选的大众电影百花奖">大众电影百花奖</tag>
+                <tag tag_type="val_fixed" description="香港电影金像奖协会颁发的金像奖">香港电影金像奖</tag>
+                <tag tag_type="val_fixed" description="台北金马影展执行委员会颁发的金马奖">台湾电影金马奖</tag>
+                <tag tag_type="val_fixed" description="中国政府颁发的优秀影片华表奖">华表奖</tag>
+                <tag tag_type="val_fixed" description="亚洲电影大奖协会颁发的亚洲电影大奖">亚洲电影大奖</tag>
+                <tag tag_type="val_fixed" description="韩国体育朝鲜报主办的青龙电影奖">韩国青龙电影奖</tag>
+                <tag tag_type="val_fixed" description="韩国百想艺术大赏颁发的综合艺术奖项">韩国百想艺术大奖</tag>
+                <tag tag_type="val_fixed" description="日本电影学院颁发的日本奥斯卡奖">日本电影学院奖</tag>
+            </level3>
+            <level3 name="荣誉类别" dir_type="dir_static" scope="content" description="内容所获奖项的荣誉类别，如最佳影片、最佳导演等">
+                <tag tag_type="val_generalized" description="表彰整体品质最优的影片或节目作品">最佳影片/节目</tag>
+                <tag tag_type="val_generalized" description="表彰导演在创作中的卓越贡献">最佳导演</tag>
+                <tag tag_type="val_generalized" description="表彰剧本创作的优秀质量">最佳编剧</tag>
+                <tag tag_type="val_generalized" description="表彰男性主演演员的出色表演">最佳男主角</tag>
+                <tag tag_type="val_generalized" description="表彰女性主演演员的出色表演">最佳女主角</tag>
+                <tag tag_type="val_generalized" description="表彰男性配角演员的出色表演">最佳男配角</tag>
+                <tag tag_type="val_generalized" description="表彰女性配角演员的出色表演">最佳女配角</tag>
+                <tag tag_type="val_generalized" description="表彰新晋演员或创作者的优秀表现">最佳新人</tag>
+                <tag tag_type="val_generalized" description="表彰动画类作品的优秀品质">最佳动画</tag>
+                <tag tag_type="val_generalized" description="表彰纪录片的优秀品质">最佳纪录片</tag>
+                <tag tag_type="val_generalized" description="表彰摄影在视觉呈现上的卓越贡献">最佳摄影</tag>
+                <tag tag_type="val_generalized" description="表彰剪辑在节奏和结构上的优秀表现">最佳剪辑</tag>
+                <tag tag_type="val_generalized" description="表彰音乐或歌曲创作的优秀质量">最佳音乐/歌曲</tag>
+                <tag tag_type="val_generalized" description="表彰视觉特效的卓越表现">最佳视觉效果</tag>
+                <tag tag_type="val_generalized" description="表彰美术设计、服装和化妆道具的优秀表现">最佳美术/服化道</tag>
+                <tag tag_type="val_generalized" description="表彰动作设计或武术指导的优秀表现">最佳动作设计</tag>
+                <tag tag_type="val_generalized" description="表彰综艺或真人秀节目的优秀品质">最佳综艺/真人秀</tag>
+                <tag tag_type="val_generalized" description="由观众投票评选产生的奖项类别">观众选择奖</tag>
+                <tag tag_type="val_generalized" description="由评审团评选产生的奖项类别">评审团奖</tag>
+                <tag tag_type="val_generalized" description="表彰技术层面贡献的奖项类别">技术类奖项</tag>
+                <tag tag_type="val_generalized" description="表彰对影视行业有特别贡献或终身成就的个人">特别贡献/终身成就</tag>
+                <tag tag_type="val_generalized" description="不属于上述类别的其他荣誉奖项">其他</tag>
+            </level3>
+        </level2>
+    </level1>
+    <level1 name="微观语义标签" dir_type="dir_static" scope="content" description="描述内容中具体情节事件、名场面片段、角色人设等微观语义层面的标签">
+        <level2 name="核心情节与热梗" dir_type="dir_static" scope="content" description="内容中的关键情节事件节点和具有传播价值的名场面片段">
+            <level3 name="核心情节事件" dir_type="dir_dynamic" scope="scene" description="内容中推动叙事发展的关键情节节点和转折事件">
+                <tag tag_type="val_fixed" description="主要角色之间的首次相遇，为后续关系发展奠基">初次相遇</tag>
+                <tag tag_type="val_fixed" description="角色间关系正式确立的关键节点">关系确立</tag>
+                <tag tag_type="val_fixed" description="角色间发生重大矛盾或对抗的情节事件">重大冲突</tag>
+                <tag tag_type="val_fixed" description="隐藏的秘密被揭露，引发情节转折">秘密曝光</tag>
+                <tag tag_type="val_fixed" description="角色真实身份公开或被发现的关键时刻">身份揭晓</tag>
+                <tag tag_type="val_fixed" description="因信息不对称或误解导致角色间产生误会的情节">误会产生</tag>
+                <tag tag_type="val_fixed" description="之前的误会得到澄清和化解的情节">误会解除</tag>
+                <tag tag_type="val_fixed" description="角色遭到信任之人背叛的情节事件">背叛发生</tag>
+                <tag tag_type="val_fixed" description="主角正式开始实施复仇计划的情节节点">复仇启动</tag>
+                <tag tag_type="val_fixed" description="调查中发现关键证据推动情节进展的事件">证据发现</tag>
+                <tag tag_type="val_fixed" description="案件调查完成、真相大白的情节节点">案件告破</tag>
+                <tag tag_type="val_fixed" description="已知真相被颠覆、出现重大反转的情节">真相反转</tag>
+                <tag tag_type="val_fixed" description="角色为大局或他人做出重大牺牲的情节">关键牺牲</tag>
+                <tag tag_type="val_fixed" description="围绕生死攸关的营救行动展开的情节事件">生死营救</tag>
+                <tag tag_type="val_fixed" description="失散的角色重新相聚的情节事件">失散重逢</tag>
+                <tag tag_type="val_fixed" description="角色表达爱意或求婚的关键情感场景">告白/求婚</tag>
+                <tag tag_type="val_fixed" description="角色关系破裂或决裂的情节事件">分手/决裂</tag>
+                <tag tag_type="val_fixed" description="矛盾双方达成和解或原谅对方的情节">和解/原谅</tag>
+                <tag tag_type="val_fixed" description="角色在比赛中取得胜利的关键时刻">比赛获胜</tag>
+                <tag tag_type="val_fixed" description="角色执行任务遭遇失败、陷入困境的情节">任务失败</tag>
+                <tag tag_type="val_fixed" description="重要角色死亡或牺牲自我的情节事件">角色牺牲</tag>
+                <tag tag_type="val_fixed" description="重大危机突然爆发的情节事件">危机爆发</tag>
+                <tag tag_type="val_fixed" description="危机被成功化解的情节节点">危机解除</tag>
+                <tag tag_type="val_fixed" description="角色实现性格或能力的重大成长突破">成长突破</tag>
+                <tag tag_type="val_fixed" description="主角与对手进行最终决战的情节高潮">最终对决</tag>
+                <tag tag_type="val_fixed" description="故事最终结局揭晓的情节节点">结局揭晓</tag>
+                <tag tag_type="val_fixed" description="不属于上述类型或尚待标注的核心情节事件">其他/待标注</tag>
+            </level3>
+            <level3 name="名场面类型" dir_type="dir_dynamic" scope="scene" description="内容中具有传播价值和讨论度的经典场面类型">
+                <tag tag_type="val_fixed" description="激烈精彩的打斗动作场面，具有高燃感染力">高燃打斗</tag>
+                <tag tag_type="val_fixed" description="出人意料的情节反转揭晓场面">反转揭晓</tag>
+                <tag tag_type="val_fixed" description="角色深情告白的情感高光场面">情感告白</tag>
+                <tag tag_type="val_fixed" description="令人感伤落泪的离别告别场面">催泪告别</tag>
+                <tag tag_type="val_fixed" description="广为流传的经典台词名场面">经典台词</tag>
+                <tag tag_type="val_fixed" description="笑点密集的喜剧表演高光场面">喜剧包袱</tag>
+                <tag tag_type="val_fixed" description="角色陷入尴尬或社死处境的搞笑场面">尴尬社死</tag>
+                <tag tag_type="val_fixed" description="角色间智力交锋和策略博弈的精彩场面">智斗/博弈</tag>
+                <tag tag_type="val_fixed" description="关键时刻化险为夷的精彩救场场面">高能救场</tag>
+                <tag tag_type="val_fixed" description="英雄角色霸气登场的标志性场面">英雄登场</tag>
+                <tag tag_type="val_fixed" description="角色转变为反派的黑化名场面">角色黑化</tag>
+                <tag tag_type="val_fixed" description="角色隐藏身份被发现暴露的名场面">身份掉马</tag>
+                <tag tag_type="val_fixed" description="角色极限逃脱险境的紧张场面">极限逃生</tag>
+                <tag tag_type="val_fixed" description="视觉特效震撼的大场面片段">震撼视效</tag>
+                <tag tag_type="val_fixed" description="精彩的音乐或舞蹈表演场面">音乐/舞蹈表演</tag>
+                <tag tag_type="val_fixed" description="团队集结合体的燃向名场面">团体合体</tag>
+                <tag tag_type="val_fixed" description="比赛中绝杀制胜的高燃时刻">竞技绝杀</tag>
+                <tag tag_type="val_fixed" description="温暖治愈的感人场面">温情治愈</tag>
+                <tag tag_type="val_fixed" description="令人惊恐的惊吓场面">惊悚惊吓</tag>
+                <tag tag_type="val_fixed" description="以悬念和留白引发期待的场面">悬念留白</tag>
+                <tag tag_type="val_fixed" description="多个经典场面混剪合成的片段">名场面混剪</tag>
+                <tag tag_type="val_fixed" description="不属于上述类型其他名场面">其他</tag>
+            </level3>
+        </level2>
+        <level2 name="角色与人设" dir_type="dir_static" scope="content" description="内容中角色的原型定位模板和性格特征维度分类">
+            <level3 name="角色原型/人设模板" dir_type="dir_dynamic" scope="character" description="角色在叙事结构中的原型定位和人设模板分类，如英雄、反派、导师等">
+                <tag tag_type="val_fixed" description="以拯救他人或世界为使命的英雄型角色原型">英雄/救世主</tag>
+                <tag tag_type="val_fixed" description="具有非传统英雄特质、道德模糊的主角原型">反英雄</tag>
+                <tag tag_type="val_fixed" description="在特定领域拥有超凡天赋的天才型角色">天才型</tag>
+                <tag tag_type="val_fixed" description="从平凡普通人逐步成长蜕变的角色原型">普通人成长型</tag>
+                <tag tag_type="val_fixed" description="指引和培养主角成长的导师型角色原型">导师/引路人</tag>
+                <tag tag_type="val_fixed" description="以守护特定人物或事物为使命的角色原型">守护者</tag>
+                <tag tag_type="val_fixed" description="以复仇为核心驱动力的角色原型">复仇者</tag>
+                <tag tag_type="val_fixed" description="以调查推理和解谜为核心能力的角色原型">侦探/解谜者</tag>
+                <tag tag_type="val_fixed" description="以策略谋划和智慧支持团队的角色原型">军师/智囊</tag>
+                <tag tag_type="val_fixed" description="具有领导力和号召力的统帅型角色原型">领袖/统帅</tag>
+                <tag tag_type="val_fixed" description="在幕后操控局势的核心反派角色原型">反派操盘手</tag>
+                <tag tag_type="val_fixed" description="负责制造笑点和调节气氛的喜剧型角色">喜剧担当</tag>
+                <tag tag_type="val_fixed" description="负责活跃气氛、提升团队活力的角色">气氛担当</tag>
+                <tag tag_type="val_fixed" description="团队中受人喜爱和保护的核心角色">团宠</tag>
+                <tag tag_type="val_fixed" description="实力强大但性格冷漠疏离的角色原型">高冷强者</tag>
+                <tag tag_type="val_fixed" description="表面冷漠但内心温暖的角色原型">外冷内热</tag>
+                <tag tag_type="val_fixed" description="言语强硬但内心善良柔软的角色原型">嘴硬心软</tag>
+                <tag tag_type="val_fixed" description="看似普通实则实力深藏不露的角色原型">隐藏高手</tag>
+                <tag tag_type="val_fixed" description="曾经显赫但遭遇变故陷入困境的角色原型">落难贵族</tag>
+                <tag tag_type="val_fixed" description="被命运选中承担特殊使命的角色原型">天选之子</tag>
+                <tag tag_type="val_fixed" description="从底层弱势逐步逆袭崛起的角色原型">灰姑娘/逆袭者</tag>
+                <tag tag_type="val_fixed" description="性格偏执疯狂但具危险吸引力的角色原型">疯批/危险魅力型</tag>
+                <tag tag_type="val_fixed" description="以治愈和安慰他人为核心能力的角色原型">治愈者</tag>
+                <tag tag_type="val_fixed" description="为他人或大局做出牺牲的角色原型">牺牲者</tag>
+                <tag tag_type="val_fixed" description="命运悲壮、结局令人惋惜的英雄角色原型">悲剧英雄</tag>
+                <tag tag_type="val_fixed" description="忠诚可靠、始终陪伴主角的搭档型角色">可靠搭档</tag>
+                <tag tag_type="val_fixed" description="不属于上述原型的其他角色人设模板">其他</tag>
+            </level3>
+            <level3 name="角色性格特征" dir_type="dir_dynamic" scope="character" description="角色的性格特点、个性倾向和行为模式维度">
+                <tag tag_type="val_fixed" description="面对危险和困难时表现出勇气和无畏">勇敢</tag>
+                <tag tag_type="val_fixed" description="行事小心谨慎，注重细节和风险评估">谨慎</tag>
+                <tag tag_type="val_fixed" description="思维敏捷、反应快速，善于随机应变">聪明机敏</tag>
+                <tag tag_type="val_fixed" description="以理性思维处事，情绪稳定不冲动">理性冷静</tag>
+                <tag tag_type="val_fixed" description="容易凭情绪行事，缺乏深思熟虑">冲动</tag>
+                <tag tag_type="val_fixed" description="性格温和细腻，善于关心和照顾他人">温柔体贴</tag>
+                <tag tag_type="val_fixed" description="性格开朗热情，善于社交和表达">热情外向</tag>
+                <tag tag_type="val_fixed" description="性格内敛，内心细腻敏感">内向敏感</tag>
+                <tag tag_type="val_fixed" description="言谈幽默，善于活跃气氛和逗乐他人">幽默风趣</tag>
+                <tag tag_type="val_fixed" description="言辞尖锐直接，不留情面但往往一针见血">毒舌犀利</tag>
+                <tag tag_type="val_fixed" description="表面骄傲倔强但内心在意对方的性格特征">傲娇</tag>
+                <tag tag_type="val_fixed" description="外表温和内心深沉、善于算计的性格特征">腹黑</tag>
+                <tag tag_type="val_fixed" description="追求理想和信念，注重精神价值的性格特征">理想主义</tag>
+                <tag tag_type="val_fixed" description="注重实际利益和现实考量，务实理性">现实主义</tag>
+                <tag tag_type="val_fixed" description="具有强烈的正义感和道德准则">正义感强</tag>
+                <tag tag_type="val_fixed" description="以自我利益和需求为优先的性格特征">自我中心</tag>
+                <tag tag_type="val_fixed" description="对信任之人或信念忠贞不渝、值得信赖">忠诚可靠</tag>
+                <tag tag_type="val_fixed" description="对他人缺乏信任，容易怀疑和猜忌">多疑</tag>
+                <tag tag_type="val_fixed" description="心地善良、想法简单纯粹的性格特征">善良单纯</tag>
+                <tag tag_type="val_fixed" description="有强烈的权力或成就欲望，追求向上">野心强</tag>
+                <tag tag_type="val_fixed" description="意志坚定，面对困难不轻易放弃">坚韧顽强</tag>
+                <tag tag_type="val_fixed" description="面对挑战容易退缩和逃避的性格特征">懦弱退缩</tag>
+                <tag tag_type="val_fixed" description="嘴上说的与内心想法不一致的性格特征">口是心非</tag>
+                <tag tag_type="val_fixed" description="情绪波动小，心态平稳沉着">情绪稳定</tag>
+                <tag tag_type="val_fixed" description="容易受情绪驱动，情绪波动较大">情绪化</tag>
+                <tag tag_type="val_fixed" description="性格难以捉摸，不轻易暴露真实想法">神秘难测</tag>
+                <tag tag_type="val_fixed" description="性格多面且充满内在矛盾，难以简单定义">复杂矛盾</tag>
+                <tag tag_type="val_fixed" description="性格在故事进程中发生显著变化和成长">成长型</tag>
+                <tag tag_type="val_fixed" description="不属于上述维度的其他角色性格特征">其他</tag>
+            </level3>
+        </level2>
+    </level1>
+    <level1 name="情感共鸣标签" dir_type="dir_static" scope="content" description="描述内容引发观众情绪体验、社交话题讨论及观影场景适配等情感共鸣维度的标签">
+        <level2 name="情绪价值" dir_type="dir_static" scope="content" description="内容为观众提供的情绪体验类型、爽感来源、共情主题及情绪风险提示">
+            <level3 name="观看后情绪" dir_type="dir_dynamic" scope="content" description="观众观看内容后的主要情绪反应和情感状态">
+                <tag tag_type="val_fixed" description="观看后感到愉悦和快乐">开心</tag>
+                <tag tag_type="val_fixed" description="观看后感到身心放松和舒缓">放松</tag>
+                <tag tag_type="val_fixed" description="观看后深受触动和感动">感动</tag>
+                <tag tag_type="val_fixed" description="观看后感到悲伤和难过">悲伤</tag>
+                <tag tag_type="val_fixed" description="观看后获得心灵治愈和慰藉">治愈</tag>
+                <tag tag_type="val_fixed" description="观看后感到精神振奋和受到鼓舞">振奋</tag>
+                <tag tag_type="val_fixed" description="观看后感到热血沸腾、充满激情">热血</tag>
+                <tag tag_type="val_fixed" description="观看后感到满足和充实">满足</tag>
+                <tag tag_type="val_fixed" description="观看后感到酣畅淋漓、情绪得到释放">痛快</tag>
+                <tag tag_type="val_fixed" description="观看后仍感到紧张和心跳加速">紧张</tag>
+                <tag tag_type="val_fixed" description="观看后对情节发展感到意外和惊讶">惊讶</tag>
+                <tag tag_type="val_fixed" description="观看后受到强烈的视觉或心灵震撼">震撼</tag>
+                <tag tag_type="val_fixed" description="观看后因情节或角色行为感到愤怒">愤怒</tag>
+                <tag tag_type="val_fixed" description="观看后感到情绪压抑和沉重">压抑</tag>
+                <tag tag_type="val_fixed" description="观看后对紧张恐怖情节感到后怕">后怕</tag>
+                <tag tag_type="val_fixed" description="观看后引发深入思考或自我反省">思考/反省</tag>
+                <tag tag_type="val_fixed" description="观看后唤起怀旧和回忆的情绪">怀旧</tag>
+                <tag tag_type="val_fixed" description="观看后感到空虚或怅然若失">空虚/怅然</tag>
+                <tag tag_type="val_fixed" description="观看后仍感到意犹未尽、期待更多">意犹未尽</tag>
+                <tag tag_type="val_fixed" description="观看后情绪复杂多元，难以单一归纳">情绪复杂</tag>
+                <tag tag_type="val_fixed" description="观看后情绪反应尚未评估或无法判定">未知</tag>
+            </level3>
+            <level3 name="爽感来源" dir_type="dir_dynamic" scope="content" description="内容为观众提供爽感体验的具体来源和触发方式">
+                <tag tag_type="val_fixed" description="主角从劣势翻盘逆转获得胜利带来的爽感">逆袭翻盘</tag>
+                <tag tag_type="val_fixed" description="正义最终得到伸张带来的满足感">正义得到伸张</tag>
+                <tag tag_type="val_fixed" description="反派角色受到应有惩罚带来的痛快">坏人受到惩罚</tag>
+                <tag tag_type="val_fixed" description="主角以压倒性实力碾压对手带来的爽感">实力碾压</tag>
+                <tag tag_type="val_fixed" description="主角在智力博弈中胜出带来的快感">智商博弈获胜</tag>
+                <tag tag_type="val_fixed" description="隐藏的秘密或真相被揭穿带来的爽感">秘密揭穿</tag>
+                <tag tag_type="val_fixed" description="长期误会终于化解带来的释然感">误会解除</tag>
+                <tag tag_type="val_fixed" description="主角复仇计划成功实现带来的快感">复仇成功</tag>
+                <tag tag_type="val_fixed" description="角色最终达成目标带来的成就感">目标达成</tag>
+                <tag tag_type="val_fixed" description="在竞技比赛中获胜带来的爽感">竞技获胜</tag>
+                <tag tag_type="val_fixed" description="角色付出情感终获回应带来的满足感">情感得到回应</tag>
+                <tag tag_type="val_fixed" description="团队协作完成任务带来的集体爽感">团体协作成功</tag>
+                <tag tag_type="val_fixed" description="角色身份发生意想不到的反转带来的爽感">身份反转</tag>
+                <tag tag_type="val_fixed" description="危机成功化解带来的如释重负感">危机化解</tag>
+                <tag tag_type="val_fixed" description="不属于上述来源的其他爽感或不适用">其他/不适用</tag>
+            </level3>
+            <level3 name="共情主题" dir_type="dir_dynamic" scope="content" description="内容引发观众情感共鸣的核心主题维度">
+                <tag tag_type="val_fixed" description="以家庭成员间的亲情纽带和情感为核心共鸣主题">亲情</tag>
+                <tag tag_type="val_fixed" description="以恋爱关系中的爱情情感为核心共鸣主题">爱情</tag>
+                <tag tag_type="val_fixed" description="以朋友间的友情和信任为核心共鸣主题">友情</tag>
+                <tag tag_type="val_fixed" description="以师生之间的情谊和影响为核心共鸣主题">师生情</tag>
+                <tag tag_type="val_fixed" description="以战友间共同经历生死的情谊为核心共鸣主题">战友情</tag>
+                <tag tag_type="val_fixed" description="以承担家庭责任和角色义务为核心共鸣主题">家庭责任</tag>
+                <tag tag_type="val_fixed" description="以孤独感受和陪伴需求为核心共鸣主题">孤独与陪伴</tag>
+                <tag tag_type="val_fixed" description="以成长过程中经历的痛苦和蜕变为核心共鸣主题">成长阵痛</tag>
+                <tag tag_type="val_fixed" description="以追求梦想和不懈坚持为核心共鸣主题">梦想与坚持</tag>
+                <tag tag_type="val_fixed" description="以面对失去和告别为核心共鸣主题">失去与告别</tag>
+                <tag tag_type="val_fixed" description="以人生遗憾与最终和解为核心共鸣主题">遗憾与和解</tag>
+                <tag tag_type="val_fixed" description="以自我身份认同和寻找归属为核心共鸣主题">身份认同</tag>
+                <tag tag_type="val_fixed" description="以职场中的压力和困境为核心共鸣主题">职场压力</tag>
+                <tag tag_type="val_fixed" description="以学业压力和教育焦虑为核心共鸣主题">学业压力</tag>
+                <tag tag_type="val_fixed" description="以代际之间的理解与冲突为核心共鸣主题">代际关系</tag>
+                <tag tag_type="val_fixed" description="以社会公平正义为核心共鸣主题">社会公平</tag>
+                <tag tag_type="val_fixed" description="以生命意义和面对死亡为核心共鸣主题">生命与死亡</tag>
+                <tag tag_type="val_fixed" description="以面对疾病和康复历程为核心共鸣主题">疾病与康复</tag>
+                <tag tag_type="val_fixed" description="以接受真实自我为核心共鸣主题">自我接纳</tag>
+                <tag tag_type="val_fixed" description="以善恶之间的道德抉择为核心共鸣主题">善恶抉择</tag>
+                <tag tag_type="val_fixed" description="不属于上述维度的其他共情主题">其他</tag>
+            </level3>
+            <level3 name="情绪风险/触发提示" dir_type="dir_dynamic" scope="content" description="内容中可能触发观众负面情绪或心理不适的敏感内容提示">
+                <tag tag_type="val_fixed" description="包含亲人离世或角色死亡的情节，可能触发丧亲相关情绪">丧亲/死亡</tag>
+                <tag tag_type="val_fixed" description="包含疾病诊疗或病痛描写，可能触发医疗相关不适">疾病/医疗</tag>
+                <tag tag_type="val_fixed" description="包含创伤性回忆或闪回，可能触发创伤后应激反应">创伤回忆</tag>
+                <tag tag_type="val_fixed" description="包含激烈家庭矛盾和冲突，可能触发家庭关系不适">家庭冲突</tag>
+                <tag tag_type="val_fixed" description="包含亲密关系中的暴力行为描写，可能触发相关不适">亲密关系暴力</tag>
+                <tag tag_type="val_fixed" description="包含校园霸凌情节，可能触发相关负面情绪">校园霸凌</tag>
+                <tag tag_type="val_fixed" description="包含战争或灾难场面，可能触发相关创伤反应">战争/灾难</tag>
+                <tag tag_type="val_fixed" description="涉及自伤或自杀相关内容，需特别注意观众心理安全">自伤/自杀议题</tag>
+                <tag tag_type="val_fixed" description="整体氛围孤独或压抑，可能加重抑郁情绪">孤独/抑郁氛围</tag>
+                <tag tag_type="val_fixed" description="包含宠物或动物离别死亡情节，可能触发情绪不适">宠物/动物离别</tag>
+                <tag tag_type="val_fixed" description="包含强烈惊吓元素，可能对敏感观众造成心理冲击">强烈惊吓</tag>
+                <tag tag_type="val_fixed" description="内容无明显敏感或触发元素，适宜广泛观看">无明显触发提示</tag>
+                <tag tag_type="val_fixed" description="情绪风险尚未评估，触发提示待定">待评估</tag>
+            </level3>
+        </level2>
+        <level2 name="社交与话题" dir_type="dir_static" scope="content" description="内容涉及的社会议题维度和可引发社交讨论的话题分类">
+            <level3 name="社会议题维度" dir_type="dir_dynamic" scope="content" description="内容涉及或反映的社会议题和话题维度，用于社交讨论引导">
+                <tag tag_type="val_fixed" description="涉及家庭结构变化和代际观念差异的社会议题">家庭与代际</tag>
+                <tag tag_type="val_fixed" description="涉及恋爱观念和婚姻制度变化的社会议题">爱情与婚姻</tag>
+                <tag tag_type="val_fixed" description="涉及性别平等和性别权利的社会议题">性别与平等</tag>
+                <tag tag_type="val_fixed" description="涉及教育体制和成长路径的社会议题">教育与成长</tag>
+                <tag tag_type="val_fixed" description="涉及就业环境和职场生态的社会议题">就业与职场</tag>
+                <tag tag_type="val_fixed" description="涉及社会阶层分化和资源分配的社会议题">阶层与资源</tag>
+                <tag tag_type="val_fixed" description="涉及城乡差距和区域发展不均衡的社会议题">城乡发展</tag>
+                <tag tag_type="val_fixed" description="涉及科技发展与伦理边界的社会议题">科技与伦理</tag>
+                <tag tag_type="val_fixed" description="涉及环境保护和生态可持续的社会议题">环境与生态</tag>
+                <tag tag_type="val_fixed" description="涉及法律制度和司法公正的社会议题">法律与正义</tag>
+                <tag tag_type="val_fixed" description="涉及公共安全保障和社会治安的社会议题">公共安全</tag>
+                <tag tag_type="val_fixed" description="涉及医疗保障和养老体系的社会议题">医疗与养老</tag>
+                <tag tag_type="val_fixed" description="涉及心理健康和社会心理服务的社会议题">心理健康</tag>
+                <tag tag_type="val_fixed" description="涉及文化认同和身份建构的社会议题">文化身份</tag>
+                <tag tag_type="val_fixed" description="涉及历史记忆和集体创伤的社会议题">历史记忆</tag>
+                <tag tag_type="val_fixed" description="涉及社会治理模式和公共参与的社会议题">社会治理</tag>
+                <tag tag_type="val_fixed" description="涉及消费文化和消费主义影响的社会议题">消费主义</tag>
+                <tag tag_type="val_fixed" description="涉及媒体生态和舆论引导的社会议题">媒体与舆论</tag>
+                <tag tag_type="val_fixed" description="涉及战争冲突和和平追求的社会议题">战争与和平</tag>
+                <tag tag_type="val_fixed" description="不属于上述维度或不涉及明显社会议题">其他/不适用</tag>
+            </level3>
+        </level2>
+        <level2 name="观影场景/心理" dir_type="dir_static" scope="content" description="内容适合的观影场景、观众心理需求、注意力投入要求及共看人群适配">
+            <level3 name="适用观影场景" dir_type="dir_dynamic" scope="content" description="内容适合的观影场景和观看方式，如独自观看、家庭共看等">
+                <tag tag_type="val_fixed" description="适合个人独自观看的观影场景">独自观看</tag>
+                <tag tag_type="val_fixed" description="适合情侣约会时共同观看的场景">情侣约会</tag>
+                <tag tag_type="val_fixed" description="适合朋友聚会时共同观看的场景">朋友聚会</tag>
+                <tag tag_type="val_fixed" description="适合家庭成员一起观看的场景">家庭共看</tag>
+                <tag tag_type="val_fixed" description="适合家长与孩子一起观看的场景">亲子共看</tag>
+                <tag tag_type="val_fixed" description="适合团队团建活动时观看的场景">多人团建</tag>
+                <tag tag_type="val_fixed" description="适合宿舍或同学一起观看的场景">宿舍/同学共看</tag>
+                <tag tag_type="val_fixed" description="适合通勤途中利用碎片时间观看的场景">通勤途中</tag>
+                <tag tag_type="val_fixed" description="适合午休或短碎片时间观看的场景">午休/碎片时间</tag>
+                <tag tag_type="val_fixed" description="适合睡前放松观看的场景">睡前观看</tag>
+                <tag tag_type="val_fixed" description="适合周末休闲时间观看的场景">周末休闲</tag>
+                <tag tag_type="val_fixed" description="适合节假日观看的场景">节假日观看</tag>
+                <tag tag_type="val_fixed" description="适合旅行途中观看的场景">旅行途中</tag>
+                <tag tag_type="val_fixed" description="适合在影院沉浸式观看的场景">影院沉浸观看</tag>
+                <tag tag_type="val_fixed" description="适合作为背景声画播放的场景">背景播放</tag>
+                <tag tag_type="val_fixed" description="适合以学习和获取知识为目的观看的场景">学习/知识获取</tag>
+                <tag tag_type="val_fixed" description="适合运动健身时作为陪伴播放的场景">运动/健身陪伴</tag>
+                <tag tag_type="val_fixed" description="适合派对或活动现场播放的场景">派对/活动播放</tag>
+                <tag tag_type="val_fixed" description="不属于上述场景的其他观影场景">其他</tag>
+            </level3>
+            <level3 name="观看心理需求" dir_type="dir_dynamic" scope="content" description="观众观看内容时的心理需求类型和动机">
+                <tag tag_type="val_fixed" description="以放松身心、获得休息为主要观看需求">放松休息</tag>
+                <tag tag_type="val_fixed" description="以消磨时间为主要观看需求">打发时间</tag>
+                <tag tag_type="val_fixed" description="以获取情感陪伴感为主要观看需求">寻求陪伴</tag>
+                <tag tag_type="val_fixed" description="以暂时逃离日常压力为主要观看需求">逃离日常压力</tag>
+                <tag tag_type="val_fixed" description="以获得情绪宣泄和释放为主要观看需求">获得情绪释放</tag>
+                <tag tag_type="val_fixed" description="以寻找情感共鸣和被理解感为主要观看需求">寻找情感共鸣</tag>
+                <tag tag_type="val_fixed" description="以获取知识和信息为主要观看需求">获取知识/信息</tag>
+                <tag tag_type="val_fixed" description="以满足推理挑战需求为主要观看动机">挑战推理能力</tag>
+                <tag tag_type="val_fixed" description="以体验刺激和冒险感为主要观看需求">体验刺激/冒险</tag>
+                <tag tag_type="val_fixed" description="以欣赏视觉美学和艺术表达为主要观看需求">欣赏美学</tag>
+                <tag tag_type="val_fixed" description="以追忆过往和怀旧情感为主要观看需求">怀旧</tag>
+                <tag tag_type="val_fixed" description="以获取社交谈资为主要观看需求">社交谈资</tag>
+                <tag tag_type="val_fixed" description="以陪伴孩子观看为主要需求">陪伴孩子</tag>
+                <tag tag_type="val_fixed" description="以获取与他人共同话题为主要观看需求">共同话题</tag>
+                <tag tag_type="val_fixed" description="以追踪热门潮流内容为主要观看需求">追踪热门内容</tag>
+                <tag tag_type="val_fixed" description="以支持喜爱的演员或IP为主要观看需求">支持喜爱演员/IP</tag>
+                <tag tag_type="val_fixed" description="不属于上述需求或观看动机不明确">其他/不明确</tag>
+            </level3>
+            <level3 name="注意力投入要求" dir_type="dir_dynamic" scope="content" description="观看内容所需的注意力投入程度和观看方式建议">
+                <tag tag_type="val_fixed" description="无需高度集中注意力，可轻松观看的内容">可轻松观看</tag>
+                <tag tag_type="val_fixed" description="适合作为背景播放、无需专注跟进的内容">适合背景播放</tag>
+                <tag tag_type="val_fixed" description="适合碎片化时间分段观看、无需连贯跟进的内容">碎片化观看友好</tag>
+                <tag tag_type="val_fixed" description="需要连续观看不宜中断、保持连贯体验的内容">需要连续观看</tag>
+                <tag tag_type="val_fixed" description="需要专注跟进情节和细节才能理解的内容">需要专注理解</tag>
+                <tag tag_type="val_fixed" description="单位时间内信息密度高、需高度集中注意力的内容">信息密度高</tag>
+                <tag tag_type="val_fixed" description="内容丰富适合反复观看、每次有新发现的内容">适合反复回看</tag>
+                <tag tag_type="val_fixed" description="适合边观看边讨论互动的内容">适合边看边讨论</tag>
+                <tag tag_type="val_fixed" description="可只观看精彩片段即可获得核心体验的内容">适合只看精彩片段</tag>
+                <tag tag_type="val_fixed" description="注意力投入要求尚未评估或无法判定">未知</tag>
+            </level3>
+            <level3 name="共看人群适配" dir_type="dir_dynamic" scope="content" description="内容适合的共看人群组合和社交观看适配度">
+                <tag tag_type="val_fixed" description="适合个人独自观看、不适合共看的内容">单人独享</tag>
+                <tag tag_type="val_fixed" description="适合情侣或伴侣共同观看的内容">情侣/伴侣</tag>
+                <tag tag_type="val_fixed" description="适合朋友同伴一起观看的内容">朋友同伴</tag>
+                <tag tag_type="val_fixed" description="适合亲子家庭共同观看的内容">亲子家庭</tag>
+                <tag tag_type="val_fixed" description="适合多代同堂家庭共同观看的内容">多代同堂家庭</tag>
+                <tag tag_type="val_fixed" description="适合青少年群体共同观看的内容">青少年群体</tag>
+                <tag tag_type="val_fixed" description="适合特定兴趣社群共同观看和讨论的内容">兴趣社群</tag>
+                <tag tag_type="val_fixed" description="适合同事或团队共同观看的内容">同事/团队</tag>
+                <tag tag_type="val_fixed" description="适合大众聚会场合共同观看的内容">大众聚会</tag>
+                <tag tag_type="val_fixed" description="内容涉及成人元素，更适合成人独自观看">更适合成人独看</tag>
+                <tag tag_type="val_fixed" description="是否适合未成年人观看需家长判断和引导">需家长判断</tag>
+                <tag tag_type="val_fixed" description="共看人群适配度不确定或尚未评估">不确定</tag>
+            </level3>
+            <level3 name="观影前置需求" dir_type="dir_dynamic" scope="content" description="观看内容前需要的前置条件、背景知识或前作了解建议">
+                <tag tag_type="val_fixed" description="无需任何前置背景知识即可观看的内容">无需背景知识</tag>
+                <tag tag_type="val_fixed" description="建议了解前作内容以获得更好观看体验">建议了解前作</tag>
+                <tag tag_type="val_fixed" description="建议按系列顺序观看以免影响理解的内容">建议按顺序观看</tag>
+                <tag tag_type="val_fixed" description="需要了解相关历史背景知识才能充分理解的内容">需要了解历史背景</tag>
+                <tag tag_type="val_fixed" description="需要熟悉相关IP世界观和设定才能充分理解的内容">需要熟悉IP设定</tag>
+                <tag tag_type="val_fixed" description="对系列作品而言适合新观众作为入门观看的内容">适合新观众入门</tag>
+                <tag tag_type="val_fixed" description="面向系列粉丝制作、需粉丝背景才能充分体验的内容">适合粉丝向观看</tag>
+                <tag tag_type="val_fixed" description="适合已观看过的观众回顾复习的内容">适合回顾复习</tag>
+                <tag tag_type="val_fixed" description="观看前需注意有被剧透风险的内容">有剧透风险</tag>
+                <tag tag_type="val_fixed" description="不属于上述类型的其他观影前置需求">其他</tag>
+            </level3>
+        </level2>
+    </level1>
+</root>

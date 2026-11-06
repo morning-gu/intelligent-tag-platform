@@ -37,17 +37,17 @@ def build_xlsx(rows: list[list]) -> bytes:
 def test_valid_template():
     r = parse_tag_excel(build_xlsx([
         ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
-        ["悬疑", "genre", "以悬念为核心", "剧情", "悬念,推理", "active"],
+        ["悬疑", "val_fixed", "以悬念为核心", "剧情", "悬念,推理", "active"],
     ]))
     assert r.rows[0].aliases == ["悬念", "推理"] and r.rows[0].parent_tag == "剧情"
 
 
 def test_excel_malformed_rows_reported():
     r = parse_tag_excel(build_xlsx(HEADERS + [
-        ["悬疑", "genre", "以悬念为核心"],              # 合法
-        [None, "genre", "缺名称"],                      # 行级 missing_field(tag_name)
-        ["数量", "genre"],                              # 描述为空时仍合法
-        ["风格", "genre", "d", "aliases列乱填数字", 123],  # bad_type→aliases 数字转字符串"123"
+        ["悬疑", "val_fixed", "以悬念为核心"],              # 合法
+        [None, "val_fixed", "缺名称"],                      # 行级 missing_field(tag_name)
+        ["数量", "val_fixed"],                              # 描述为空时仍合法
+        ["风格", "val_fixed", "d", "aliases列乱填数字", 123],  # bad_type→aliases 数字转字符串"123"
         [None, None, None],                             # 空行跳过
     ]))
     assert len(r.rows) == 3 and len(r.errors) == 1
@@ -66,8 +66,8 @@ def test_full_eight_column_template():
     r = parse_tag_excel(build_xlsx([
         ["tag_id", "tag_name", "tag_type", "description", "parent_tag",
          "aliases", "applicable_scope", "status"],
-        [42, "悬疑", "genre", "以悬念为核心", None, "悬念；推理，", "电影", "active"],
-        [None, "悬疑", "genre", "以悬念为核心"],  # 缺可选列单元格与可选列头 → 不报错
+        [42, "悬疑", "val_fixed", "以悬念为核心", None, "悬念；推理，", "电影", "active"],
+        [None, "悬疑", "val_fixed", "以悬念为核心"],  # 缺可选列单元格与可选列头 → 不报错
     ]))
     assert not r.errors and len(r.rows) == 2
     first = r.rows[0]
@@ -80,16 +80,16 @@ def test_full_eight_column_template():
 def test_hierarchy_template():
     r = parse_tag_excel(build_xlsx([
         ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
-        ["内容", "剧情", "悬疑", "反转", "结局出人意料", "genre"],
+        ["内容", "剧情", "悬疑", "反转", "结局出人意料", "val_fixed"],
         ["内容", "剧情", None, "喜剧", "带有喜剧元素", None],
     ]))
 
     assert not r.errors and len(r.rows) == 5
     assert [row.tag_name for row in r.rows] == ["内容", "剧情", "悬疑", "反转", "喜剧"]
-    assert r.rows[3].tag_type == "genre"
+    assert r.rows[3].tag_type == "val_fixed"
     assert not r.rows[3].is_manual
     assert r.rows[3].parent_tag == "悬疑"
-    assert r.rows[4].tag_type == "genre"
+    assert r.rows[4].tag_type == "val_fixed"
     assert r.rows[4].is_manual
     assert r.rows[4].parent_tag == "剧情"
 

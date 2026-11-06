@@ -1,7 +1,8 @@
 """GET /api/v1/config（admin，只读运行配置）端点测试。
 
-契约：9 个字段齐且不多不少；机密不外泄（无 session_secret/admin_password
+契约：8 个字段齐且不多不少；机密不外泄（无 session_secret/admin_password
 键，序列化结果中无默认密钥值）；reviewer 403、未登录 401。
+（semantic_similar_threshold 随手动导入取消余弦相似控制退役。）
 """
 
 import json
@@ -9,7 +10,7 @@ import json
 # 契约字段集合（精确相等断言：既不缺字段，也不得多余键——多余键可能泄密）
 EXPECTED_KEYS = {
     "llm_model", "llm_temperature", "recall_top_k_per_type",
-    "open_match_threshold", "semantic_similar_threshold",
+    "open_match_threshold",
     "generation_workers", "use_mock_llm", "use_mock_embedder",
     "database_path",
 }
@@ -26,7 +27,6 @@ def test_config_returns_all_fields(client):
     assert body["llm_temperature"] == 0.7
     assert body["recall_top_k_per_type"] == 50
     assert body["open_match_threshold"] == 0.85
-    assert body["semantic_similar_threshold"] == 0.90
     assert body["generation_workers"] == 0  # fixture 钉死同步执行
     assert body["use_mock_llm"] is True
     assert body["use_mock_embedder"] is True

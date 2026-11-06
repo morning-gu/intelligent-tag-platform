@@ -57,7 +57,6 @@ const CONFIG: RuntimeConfig = {
   llm_temperature: 0.2,
   recall_top_k_per_type: 20,
   open_match_threshold: 0.55,
-  semantic_similar_threshold: 0.82,
   generation_workers: 4,
   use_mock_llm: true,
   use_mock_embedder: false,
@@ -291,7 +290,7 @@ describe('ModelConfig 模型配置中心页', () => {
     expect(listCallCount('closed')).toBe(1)
   })
 
-  it('当前运行配置卡：九字段渲染，布尔以是/否 Tag 展示', async () => {
+  it('当前运行配置卡：八字段渲染，布尔以是/否 Tag 展示', async () => {
     mockApis()
     render(<ModelConfig />)
 
@@ -300,7 +299,6 @@ describe('ModelConfig 模型配置中心页', () => {
     expect(screen.getByText('LLM 温度')).toBeInTheDocument()
     expect(screen.getByText('每类型召回 Top-K')).toBeInTheDocument()
     expect(screen.getByText('开放匹配阈值')).toBeInTheDocument()
-    expect(screen.getByText('语义相似阈值')).toBeInTheDocument()
     expect(screen.getByText('生成并发数')).toBeInTheDocument()
     expect(screen.getByText('Mock LLM')).toBeInTheDocument()
     expect(screen.getByText('Mock Embedder')).toBeInTheDocument()
