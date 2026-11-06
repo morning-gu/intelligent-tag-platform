@@ -75,13 +75,13 @@ def test_upload_success(media_client, tmp_path):
     assert body["movie_id"] is None and body["build_task_id"] is None
     assert re.fullmatch(r"asset_[0-9a-f]{8}", body["asset_id"])
     assert body["title"] == "clip"
-    # 断言组二：文件真实落盘（绝对路径、uuid 存盘名、字节一致）
+    # 断言组二：文件真实落盘（绝对路径、按 asset_id 命名、字节一致）
     stored = Path(body["video_uri"])
     assert stored.is_absolute()
     assert stored.exists()
     assert stored.read_bytes() == PAYLOAD
     assert stored.parent == (tmp_path / "media").resolve()
-    assert re.fullmatch(r"[0-9a-f]{32}\.mp4", stored.name)
+    assert stored.name == f"{body['asset_id']}.mp4"
     # 断言组三：media_asset 行入库（占位字段 + 占位语义无 context）
     with media_client.app.state.session_factory() as s:
         row = s.get(MediaAsset, body["asset_id"])
@@ -104,8 +104,8 @@ def test_upload_suffix_case_insensitive(media_client):
     """白名单大小写不敏感：.MP4 放行，存盘名后缀归一小写。"""
     resp = _upload(media_client, name="movie.MP4")
     assert resp.status_code == 200
-    stored_name = Path(resp.json()["video_uri"]).name
-    assert re.fullmatch(r"[0-9a-f]{32}\.mp4", stored_name)
+    body = resp.json()
+    assert Path(body["video_uri"]).name == f"{body['asset_id']}.mp4"
 
 
 # ---------- 422 后缀白名单 ----------
@@ -169,20 +169,66 @@ def test_upload_413_streaming_early_reject(media_client, tmp_path, monkeypatch):
 
 
 def test_upload_traversal_and_chinese_name_immunity(media_client, tmp_path):
-    """穿越/中文名免疫：uuid 重命名，存盘名不含原名任何成分。"""
+    """穿越/中文名免疫：存盘名只用 asset_id，不含原名任何成分。"""
     for name in ("../../evil/危险影片.mp4", "..\\..\\evil\\电影.webm",
                  "影片 标签.mkv"):
         resp = _upload(media_client, name=name)
         assert resp.status_code == 200, f"{name!r} 应上传成功"
         body = resp.json()
         stored = Path(body["video_uri"])
-        # 存盘名 = 32位hex + 归一小写后缀，与原名零关联
-        assert re.fullmatch(r"[0-9a-f]{32}\.(mp4|webm|mkv)", stored.name), \
-            f"存盘名 {stored.name!r} 不合 uuid 命名契约"
+        suffix = Path(name).suffix.lower()
+        assert stored.name == f"{body['asset_id']}{suffix}"
         # 原名成分（穿越段/中文/空格名）一律不出现在存盘名
         for fragment in ("..", "evil", "危险", "电影", "影片", "标签"):
             assert fragment not in stored.name
         assert stored.exists()
+
+
+def test_reupload_same_asset_overwrites_one_file(media_client, tmp_path):
+    """重复上传同一资产：仍然只有一个文件，路径不变、内容被替换。"""
+    first = _upload(media_client, name="clip.mp4", content=b"old",
+                    data={"asset_id": "asset_00000001"})
+    assert first.status_code == 200
+    old_uri = first.json()["video_uri"]
+
+    second = _upload(media_client, name="clip.mp4", content=b"new-bytes",
+                     data={"asset_id": "asset_00000001"})
+    # 已绑定视频的资产走 409 保护，这里换一条"预留主键"的重复上传路径
+    assert second.status_code == 409
+
+    # 用同一 asset_id 但先清掉绑定，验证覆盖语义本身
+    with media_client.app.state.session_factory() as s:
+        s.get(MediaAsset, "asset_00000001").video_uri = None
+        s.commit()
+    third = _upload(media_client, name="clip.mp4", content=b"new-bytes",
+                    data={"asset_id": "asset_00000001"})
+    assert third.status_code == 200
+    assert Path(third.json()["video_uri"]).name == "asset_00000001.mp4"
+    files = [p.name for p in (tmp_path / "media").iterdir()]
+    assert files == ["asset_00000001.mp4"]
+    assert Path(third.json()["video_uri"]).read_bytes() == b"new-bytes"
+    assert old_uri == third.json()["video_uri"]
+
+
+def test_upload_413_keeps_previous_file_intact(media_client, tmp_path, monkeypatch):
+    """覆盖上传中途 413：旧文件必须完好（先写 .part 再原子替换）。"""
+    from tagplatform import media
+
+    ok = _upload(media_client, name="clip.mp4", content=b"original",
+                 data={"asset_id": "asset_00000002"})
+    assert ok.status_code == 200
+    path = Path(ok.json()["video_uri"])
+    with media_client.app.state.session_factory() as s:
+        s.get(MediaAsset, "asset_00000002").video_uri = None
+        s.commit()
+
+    monkeypatch.setattr(media, "MAX_UPLOAD_BYTES", 8)
+    bad = _upload(media_client, content=b"x" * 100,
+                  data={"asset_id": "asset_00000002"},
+                  headers={"content-length": "4"})
+    assert bad.status_code == 413
+    assert path.read_bytes() == b"original"          # 旧文件没被截断
+    assert [p.name for p in (tmp_path / "media").iterdir()] == [path.name]
 
 
 # ---------- 401 未登录 ----------
