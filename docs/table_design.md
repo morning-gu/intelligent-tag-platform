@@ -299,7 +299,7 @@ v1 `import_batch` 改名，结构不变（含 revoke/导出语义）。
 CREATE TABLE tag_change_log (
     log_id      INTEGER PRIMARY KEY,
     tag_id      TEXT NOT NULL,
-    action      TEXT NOT NULL CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import')),
+    action      TEXT NOT NULL CHECK (action IN ('create', 'update', 'merge', 'deprecate', 'import', 'delete')),
     before_json TEXT,
     after_json  TEXT,
     operator    TEXT,
@@ -479,7 +479,7 @@ v1 的审核动作映射为行操作（merge 保留 v1 的两支语义——并�
 |---|---|
 | approve | pre 行标 `approved` + reviewer/comment → 复制到 `asset_tag` |
 | reject | pre 行标 `rejected` + reviewer/comment |
-| modify（改候选后通过） | 更新 pre 行字段（candidate_name/description/dir）→ 走 approve 流程，comment 记录修改内容 |
+| modify（改候选后通过） | 更新 pre 行字段（candidate_name/description）→ 走 approve 流程，comment 记录修改内容 |
 | merge·并入既有（v1 merge） | 审核员认定候选 = 库内已有标签：pre 行赋 `tag_id`（candidate_name 原文保留可溯）→ 走 approve 流程，**不新建标签** |
 | merge·合入新建 | 库内确无对应：建 `tag_define` 行（change_log 记 `merge`）→ pre 行赋 `tag_id`/`candidate_dir_id` → 走 approve 流程 |
 

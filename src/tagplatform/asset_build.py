@@ -8,7 +8,9 @@
 3. `execute`：跑 `AssetBuilder` 逐场景生成 → 把结果以**上传那条资产**的
    asset_id 导入平台（`content_import` upsert），前端刷新即可看到内容。
 
-已生成过的资产再上传同一个片名：直接命中已有 context，秒回（不烧 token）。
+已生成过的资产再上传同一个片名：source 同口径即直接命中已有识别结果，
+秒回（不烧 token）；口径不同则重生成并直接覆盖 content_json（v2 合并
+语义，无清理步骤）。
 
 分层红线：本模块不 import fastapi；HTTP 映射在 api/routers/media.py。
 """
@@ -27,7 +29,7 @@ from tagplatform.adapters.vision import to_content_json
 from tagplatform.assets import AssetBuilder, MatchResult, build_index, match, source_tag
 from tagplatform.content_import import import_content
 from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import AssetBuildTask, MediaAsset, MediaContext
+from tagplatform.db.models import AssetBuildTask, MediaAsset
 from tagplatform.schemas.upstream import parse_upstream
 from tagplatform.settings import Settings, get_settings
 
@@ -94,25 +96,6 @@ def _asset_out_dir(settings: Settings) -> Path:
     return Path(settings.database_path).resolve().parent / "assets"
 
 
-def _purge_contexts(session: Session, asset_id: str) -> None:
-    """删掉该资产及其场景子资产（`<asset_id>::<scene>`）的旧 context。
-
-    重新生成时必须清：`content_import` 是「每次导入新建一行」，不清就会在
-    资产详情里堆出多份内容，审核/生成时也说不清依据的是哪一版。
-    """
-    from sqlalchemy import delete, or_
-
-    # LIKE 的 % 与 _ 是通配符：asset_id 里出现下划线（当前 id 规则就会有）
-    # 时必须转义，否则可能匹配到相邻前缀的 context
-    escaped = (asset_id.replace("\\", "\\\\")
-               .replace("%", "\\%").replace("_", "\\_"))
-    session.execute(delete(MediaContext).where(or_(
-        MediaContext.asset_id == asset_id,
-        MediaContext.asset_id.like(f"{escaped}::%", escape="\\"),
-    )))
-    session.commit()
-
-
 def execute(task_id: str, settings: Settings | None = None) -> None:
     """后台执行：生成 → 导入 → 更新任务状态。任何异常都落成 failed。"""
     settings = settings or get_settings()
@@ -127,19 +110,16 @@ def execute(task_id: str, settings: Settings | None = None) -> None:
         session.commit()
 
         wanted_source = source_tag(settings.asset_infer)
-        existing = (session.query(MediaContext)
-                    .filter(MediaContext.asset_id == task.asset_id).all())
-        if any(row.source == wanted_source for row in existing):
-            # 同一口径已生成过：秒回，不烧 token
+        asset = session.get(MediaAsset, task.asset_id)
+        if asset is not None and asset.source == wanted_source:
+            # 同一口径已生成过：秒回，不烧 token（v2：source 落 media_asset 行）
             task.status = "succeeded"
             task.done_scenes = task.total_scenes
             task.finished_at = _now()
             session.commit()
             return
-        if existing:
-            # 旧口径（早期精简资产 / 更早的生成版本）：先清掉父与场景子资产的
-            # context，避免资产详情里堆着多份互相矛盾的内容
-            _purge_contexts(session, task.asset_id)
+        # 口径不同（或从未生成）：直接重生成——import_content 覆盖资产行的
+        # content_json/source（v2 合并语义，重识别无清理步骤）
 
         def progress(done: int, total: int) -> None:
             # 独立 session：回调在生成线程里，避免与主 session 争用
@@ -178,7 +158,7 @@ def execute(task_id: str, settings: Settings | None = None) -> None:
         content = to_content_json(parse_upstream(payload))
         # 标记生成口径：下次上传同一部片据此判断「复用」还是「重生成」
         content.metadata.source = wanted_source
-        # 原样入库：媒体上下文里存的就是这份交付用模板 JSON
+        # 原样入库：媒体资产行里存的就是这份交付用模板 JSON
         import_content(content, session, None, raw=payload)
 
         task = session.get(AssetBuildTask, task_id)

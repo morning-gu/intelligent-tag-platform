@@ -21,7 +21,6 @@ const SUMMARY: MetricsSummary = {
     approved: { count: 12, ratio: 0.6 },
     rejected: { count: 5, ratio: 0.25 },
     merged: { count: 2, ratio: 0.1 },
-    modified: { count: 1, ratio: 0.05 },
   },
   generated_pass_rate: 0.8,
   evidence_coverage: 0.5,

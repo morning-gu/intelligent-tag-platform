@@ -1,9 +1,12 @@
-// 资产 API（Task 11）：/assets 列表与详情、/contexts 内容 JSON、
-// /assets/{id}/tags 资产标签的类型契约与取数函数。类型形状与后端
-// tagplatform/api/routers/content.py（AssetOut/AssetDetail/ContentJSON）、
-// generation.py（AssetTagOut）一致；未知资产 → 404（ApiError.status）。
+// 资产 API（v2 内容合并）：/assets 列表与详情（recognized 识别状态）、
+// /assets/{id}/content 完整内容 JSON、/assets/{id}/tags 正式挂载标签的
+// 类型契约与取数函数。类型形状与后端 tagplatform/api/routers/content.py
+// （AssetOut/AssetDetail/ContentJSON）、generation.py（AssetTagOut）一致；
+// 未知资产/未完成内容识别 → 404（ApiError.status）。v2 语义：content_json
+// 直写影片级 media_asset 行，context 概念退役——contexts 数组与 contexts
+// 端点随之移除。
 import { apiFetch } from './client'
-import type { ReviewEvidence } from './review'
+import type { TagOrigin } from './review'
 
 /** 资产列表项（与后端 AssetOut 一致，均非大字段）。 */
 export interface AssetSummary {
@@ -14,19 +17,6 @@ export interface AssetSummary {
   duration_ms: number | null
   video_uri: string | null
   created_at: string | null
-}
-
-/** 上下文摘要项（与后端 ContextSummaryOut 一致，不含 content_json 大字段）。 */
-export interface AssetContextSummary {
-  context_id: string
-  model_version: string | null
-  recognition_status: string | null
-  created_at: string | null
-}
-
-/** 资产详情：列表字段之上附其全部上下文摘要（按导入时间升序）。 */
-export interface AssetDetailData extends AssetSummary {
-  contexts: AssetContextSummary[]
 }
 
 /** 毫秒时间区间（与后端 TimeRange 一致）。 */
@@ -89,18 +79,20 @@ export interface ContentContext {
   }
 }
 
-/** 资产标签行（与后端 AssetTagOut 一致）：摘要形状 + 行主键 id +
- * tag_id（catalog 行）/ candidate_name（generated 行）原样。 */
-export interface AssetTagRow {
+/** 资产详情：列表字段之上附内容识别状态（content_json 非空 → true）。 */
+export interface AssetDetailData extends AssetSummary {
+  recognized: boolean
+}
+
+/** 资产正式挂载行（与后端 AssetTagOut 一致）：asset_tag 只收审核通过的
+ * 复制行，仅挂载关系与展示值——评分/证据/review_status 留在 pre 侧不出现；
+ * origin 经同键 pre 行解析，无对应 pre 行时为 null。 */
+export interface AssetMount {
   id: number
+  tag_id: string
   tag_name: string
-  origin: string
-  relevance_score: number | null
-  confidence: number | null
-  review_status: string
-  evidence: ReviewEvidence[]
-  tag_id: string | null
-  candidate_name: string | null
+  origin: TagOrigin | null
+  created_at: string | null
 }
 
 /** 资产列表查询参数：undefined 字段不拼入查询串。 */
@@ -121,17 +113,18 @@ export function fetchAssets(query: AssetListQuery = {}): Promise<AssetSummary[]>
   return apiFetch<AssetSummary[]>(`/api/v1/assets${search ? `?${search}` : ''}`)
 }
 
-/** 资产详情 + 全部上下文摘要；未知 asset_id → 404。 */
+/** 资产详情 + 内容识别状态；未知 asset_id → 404。 */
 export function fetchAssetDetail(assetId: string): Promise<AssetDetailData> {
   return apiFetch<AssetDetailData>(`/api/v1/assets/${assetId}`)
 }
 
-/** 单个上下文的完整内容 JSON（场景时间轴数据源）；上下文不属于该资产 → 404。 */
-export function fetchAssetContext(assetId: string, contextId: string): Promise<ContentContext> {
-  return apiFetch<ContentContext>(`/api/v1/assets/${assetId}/contexts/${contextId}`)
+/** 资产的完整内容 JSON（场景时间轴数据源）；未知资产或未完成内容识别
+ * （content_json 为空，如上传占位资产/场景子资产）→ 404。 */
+export function fetchAssetContent(assetId: string): Promise<ContentContext> {
+  return apiFetch<ContentContext>(`/api/v1/assets/${assetId}/content`)
 }
 
-/** 资产全部生成标签（跨任务，按入库行序）；未知资产 → 404。 */
-export function fetchAssetTags(assetId: string): Promise<AssetTagRow[]> {
-  return apiFetch<AssetTagRow[]>(`/api/v1/assets/${assetId}/tags`)
+/** 资产全部正式挂载标签（仅 approved，按入库行序）；未知资产 → 404。 */
+export function fetchAssetTags(assetId: string): Promise<AssetMount[]> {
+  return apiFetch<AssetMount[]>(`/api/v1/assets/${assetId}/tags`)
 }

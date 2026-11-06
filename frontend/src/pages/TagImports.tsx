@@ -1,12 +1,14 @@
-// 标签导入页（Task 13）：Excel/XML 标签库上传导入 + 批次历史。
+// 导入任务页（v2）：Excel/XML 标签库上传导入 + 导入任务历史。
 // - 上传（AntD Upload 手动模式）：beforeUpload 拦截改由 apiFetch 走
 //   POST /tags/import（multipart FormData，client 对 FormData 不强设
 //   Content-Type）；成功展示结果摘要（total/inserted/skipped 统计 +
 //   issues/parse_errors 折叠明细表），失败（422 坏文件/坏表头）透出后端
 //   detail。
-// - 批次历史 Table（GET /import/batches，created_at 降序由后端保证）：
-//   行"详情"按钮 → 批次详情 Drawer（GET /import/batches/{id}），摘要展示
-//   复用同一 SummaryView（result_summary 解析失败时后端为 null，降级提示）。
+// - 任务历史 Table（GET /import/tasks，created_at 降序由后端保证）：行
+//   "详情"按钮 → 任务详情 Drawer（GET /import/tasks/{id}），摘要展示复用
+//   同一 SummaryView（result_summary 解析失败时后端为 null，降级提示）。
+// - 撤销（仅 completed 可点）：导出并撤销/直接撤销双确认；批内行被挂载/
+//   候选引用 → 409，message.error 透出后端 detail。
 import {
   Alert,
   Button,
@@ -26,18 +28,18 @@ import {
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import {
-  fetchImportBatch,
-  fetchImportBatches,
-  downloadImportBatch,
+  fetchImportTask,
+  fetchImportTasks,
+  downloadImportTask,
   importTags,
-  revokeImportBatch,
-  type ImportBatchDetail,
-  type ImportBatchSummary,
-  type ImportResponse,
+  revokeImportTask,
   type ImportSummary,
+  type ImportResponse,
+  type ImportTaskDetail,
+  type ImportTaskSummary,
 } from '../api/imports'
 
-/** 批次状态中文展示与 Tag 颜色（键集与后端 ImportBatch.status 一致）。 */
+/** 任务状态中文展示与 Tag 颜色（键集与后端 ImportTask.status 一致）。 */
 const BATCH_STATUS_LABELS: Record<string, string> = {
   processing: '处理中',
   completed: '已完成',
@@ -56,7 +58,9 @@ function formatTime(v: string | null): string {
 }
 
 /** 结果摘要视图：total/inserted/skipped 统计 + 治理问题/解析失败折叠明细表。
- * 上传结果与批次详情两处复用；空明细的折叠面板不渲染（避免空表噪音）。 */
+ * 口径注记（后端 Ruling 10）：total 为传入治理行数（目录+标签行合计），
+ * inserted 仅计标签行（目录行落 tag_catalog 不计入），skipped = total - inserted。
+ * 上传结果与任务详情两处复用；空明细的折叠面板不渲染（避免空表噪音）。 */
 function SummaryView({ summary }: { summary: ImportSummary }) {
   // 折叠面板按需构建（空明细不渲染面板，children 惰性渲染进表格）
   const panels: { key: string; label: string; children: ReactElement }[] = []
@@ -129,8 +133,8 @@ function SummaryView({ summary }: { summary: ImportSummary }) {
 }
 
 export default function TagImports() {
-  // —— 批次历史 ——
-  const [batches, setBatches] = useState<ImportBatchSummary[]>([])
+  // —— 任务历史 ——
+  const [tasks, setTasks] = useState<ImportTaskSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -138,21 +142,21 @@ export default function TagImports() {
   const [uploading, setUploading] = useState(false)
   const [uploadResult, setUploadResult] = useState<ImportResponse | null>(null)
 
-  // —— 批次详情 Drawer ——
-  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null)
-  const [detail, setDetail] = useState<ImportBatchDetail | null>(null)
+  // —— 任务详情 Drawer ——
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const [detail, setDetail] = useState<ImportTaskDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [revoking, setRevoking] = useState(false)
 
-  const loadBatches = useCallback(async () => {
+  const loadTasks = useCallback(async () => {
     setLoading(true)
     try {
-      const rows = await fetchImportBatches()
-      setBatches(rows)
+      const rows = await fetchImportTasks()
+      setTasks(rows)
       setLoadError(null)
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : '批次历史加载失败')
+      setLoadError(err instanceof Error ? err.message : '任务历史加载失败')
     } finally {
       setLoading(false)
     }
@@ -163,27 +167,27 @@ export default function TagImports() {
     // state）；cancelled 丢弃卸载/依赖变更后的过期触发
     let cancelled = false
     queueMicrotask(() => {
-      if (!cancelled) void loadBatches()
+      if (!cancelled) void loadTasks()
     })
     return () => {
       cancelled = true
     }
-  }, [loadBatches])
+  }, [loadTasks])
 
-  /** 打开批次详情 Drawer：在事件内重置详情态（含上次残留）并记录批次号，
+  /** 打开任务详情 Drawer：在事件内重置详情态（含上次残留）并记录任务号，
    * 拉取交给下方 effect（effect 内不做同步 setState）。 */
-  function openBatch(batchId: string) {
+  function openTask(taskId: string) {
     setDetail(null)
     setDetailError(null)
     setDetailLoading(true)
-    setSelectedBatchId(batchId)
+    setSelectedTaskId(taskId)
   }
 
-  // selectedBatchId 变化即拉取批次详情（仅异步置 state）
+  // selectedTaskId 变化即拉取任务详情（仅异步置 state）
   useEffect(() => {
-    if (selectedBatchId === null) return
+    if (selectedTaskId === null) return
     let cancelled = false
-    fetchImportBatch(selectedBatchId).then(
+    fetchImportTask(selectedTaskId).then(
       (d) => {
         if (!cancelled) {
           setDetail(d)
@@ -192,7 +196,7 @@ export default function TagImports() {
       },
       (err) => {
         if (!cancelled) {
-          setDetailError(err instanceof Error ? err.message : '批次详情加载失败')
+          setDetailError(err instanceof Error ? err.message : '任务详情加载失败')
           setDetailLoading(false)
         }
       },
@@ -200,17 +204,17 @@ export default function TagImports() {
     return () => {
       cancelled = true
     }
-  }, [selectedBatchId])
+  }, [selectedTaskId])
 
   /** 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr，改经 apiFetch
-   * （统一会话 cookie 与 401 拦截）。成功展示摘要并刷新批次历史。 */
+   * （统一会话 cookie 与 401 拦截）。成功展示摘要并刷新任务历史。 */
   async function handleUpload(file: File) {
     setUploading(true)
     try {
       const res = await importTags(file)
       setUploadResult(res)
       message.success(`导入完成：新增 ${res.summary.inserted} 个标签`)
-      await loadBatches()
+      await loadTasks()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '导入失败')
     } finally {
@@ -227,23 +231,23 @@ export default function TagImports() {
       URL.revokeObjectURL(url)
     }
 
-  function confirmRevoke(batch: ImportBatchDetail) {
+  function confirmRevoke(task: ImportTaskDetail) {
       Modal.confirm({
-        title: '撤销导入批次',
-        content: '撤销后将删除本批次导入的标签，是否先导出 Excel 和 XML 文件？',
+        title: '撤销导入任务',
+        content: '撤销后将删除本任务导入的标签，是否先导出 Excel 和 XML 文件？',
         okText: '导出并撤销',
         cancelText: '取消',
         onOk: async () => {
           setRevoking(true)
           try {
-            const blob = await downloadImportBatch(batch.batch_id)
-            saveBlob(blob, `${batch.batch_id}-export.zip`)
-            await revokeImportBatch(batch.batch_id)
-            message.success('批次已撤销')
+            const blob = await downloadImportTask(task.task_id)
+            saveBlob(blob, `${task.task_id}-export.zip`)
+            await revokeImportTask(task.task_id)
+            message.success('任务已撤销')
             setDetail((current) => current ? { ...current, status: 'revoked' } : current)
-            await loadBatches()
+            await loadTasks()
           } catch (err) {
-            message.error(err instanceof Error ? err.message : '撤销批次失败')
+            message.error(err instanceof Error ? err.message : '撤销任务失败')
           } finally {
             setRevoking(false)
           }
@@ -256,18 +260,18 @@ export default function TagImports() {
                 Modal.destroyAll()
                 Modal.confirm({
                   title: '确认直接撤销',
-                  content: '确定不导出文件并撤销该批次吗？',
+                  content: '确定不导出文件并撤销该任务吗？',
                   okText: '直接撤销',
                   cancelText: '取消',
                   onOk: async () => {
                     setRevoking(true)
                     try {
-                      await revokeImportBatch(batch.batch_id)
-                      message.success('批次已撤销')
+                      await revokeImportTask(task.task_id)
+                      message.success('任务已撤销')
                       setDetail((current) => current ? { ...current, status: 'revoked' } : current)
-                      await loadBatches()
+                      await loadTasks()
                     } catch (err) {
-                      message.error(err instanceof Error ? err.message : '撤销批次失败')
+                      message.error(err instanceof Error ? err.message : '撤销任务失败')
                     } finally {
                       setRevoking(false)
                     }
@@ -283,8 +287,8 @@ export default function TagImports() {
       })
   }
 
-  const columns: TableProps<ImportBatchSummary>['columns'] = [
-    { title: '批次号', dataIndex: 'batch_id' },
+  const columns: TableProps<ImportTaskSummary>['columns'] = [
+    { title: '任务号', dataIndex: 'task_id' },
     { title: '文件名', dataIndex: 'file_name' },
     {
       title: '状态',
@@ -297,8 +301,8 @@ export default function TagImports() {
     {
       title: '操作',
       key: 'actions',
-      render: (_, batch) => (
-        <Button type="link" size="small" onClick={() => openBatch(batch.batch_id)}>
+      render: (_, task) => (
+        <Button type="link" size="small" onClick={() => openTask(task.task_id)}>
           详情
         </Button>
       ),
@@ -326,36 +330,36 @@ export default function TagImports() {
           {uploadResult !== null && (
             <div>
               <Typography.Title level={5} style={{ marginTop: 0 }}>
-                导入结果（批次 {uploadResult.batch_id}）
+                导入结果（任务 {uploadResult.task_id}）
               </Typography.Title>
               <SummaryView summary={uploadResult.summary} />
             </div>
           )}
         </div>
       </Card>
-      <Card title="批次历史">
+      <Card title="任务历史">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {loadError !== null && (
-            <Alert type="error" showIcon message="批次历史加载失败" description={loadError} />
+            <Alert type="error" showIcon message="任务历史加载失败" description={loadError} />
           )}
-          <Table<ImportBatchSummary>
-            rowKey="batch_id"
+          <Table<ImportTaskSummary>
+            rowKey="task_id"
             columns={columns}
-            dataSource={batches}
+            dataSource={tasks}
             loading={loading}
             pagination={{ showTotal: (t) => `共 ${t} 条` }}
           />
         </div>
       </Card>
       <Drawer
-        title={`批次详情：${selectedBatchId ?? ''}`}
-        open={selectedBatchId !== null}
+        title={`任务详情：${selectedTaskId ?? ''}`}
+        open={selectedTaskId !== null}
         width={640}
         destroyOnHidden
-        onClose={() => setSelectedBatchId(null)}
+        onClose={() => setSelectedTaskId(null)}
       >
         {detailError !== null && (
-          <Alert type="error" showIcon message="批次详情加载失败" description={detailError} />
+          <Alert type="error" showIcon message="任务详情加载失败" description={detailError} />
         )}
         {detailLoading && <Typography.Text type="secondary">详情加载中…</Typography.Text>}
         {detail !== null && (
@@ -364,7 +368,7 @@ export default function TagImports() {
               size="small"
               column={2}
               items={[
-                { key: 'batch', label: '批次号', children: detail.batch_id },
+                { key: 'task', label: '任务号', children: detail.task_id },
                 { key: 'file', label: '文件名', children: detail.file_name },
                 {
                   key: 'status',

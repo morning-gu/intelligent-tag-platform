@@ -9,9 +9,12 @@
   与 MovieTagGen 的"证据可追溯"要求对齐。
 
 保留的平台语义：
-- 空目录不报错（与 closed 相反），命中 `tag_catalog` 的候选仍标
-  origin=catalog（阈值 `open_match_threshold`），今天目录为空时全部 generated；
-- `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
+- 空库不报错（与 closed 相反），候选与 `tag_define` 标签向量归一匹配
+  （阈值 `open_match_threshold`，≥ 含等于才算命中）：命中行生成时即带
+  tag_id 且 candidate_name 保留候选原文（doc §6.2 可溯原则），origin
+  统一 open（v2 词表，v1 的 catalog/generated 退役，doc §3.5）；未命中
+  为自由候选（tag_id 空、candidate_name 原文）待审核；
+- `persist_tags` 的 INSERT OR IGNORE 与审核已定集跳过规则不变（runner 负责落库）。
 
 每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：三轮原始候选、合并簇、
 judge 判决、淘汰原因、tokens 与耗时——`generation_task` 表没有 usage 列，
@@ -27,7 +30,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagCatalog
+from tagplatform.db.models import TagDefine
 from tagplatform.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.generation.mtg import keyframes as keyframes_mod
 from tagplatform.generation.mtg.judge import judge_candidates
@@ -124,9 +127,14 @@ def _make_judge_client(settings: Settings, llm):
 
 def _catalog_hits(session: Session, embedder, names: list[str],
                   threshold: float) -> dict[str, tuple[str, float]]:
-    """候选名 → (tag_id, 相似度)：命中目录（>= 阈值）才算，空目录返回空。"""
-    rows = [row for row in session.query(TagCatalog).all()
-            if row.status != "deprecate" and row.embedding]
+    """候选名 → (tag_id, 相似度)：与标签定义（tag_define）向量余弦
+    >= 阈值（含等于）才算命中，空库返回空。
+
+    v2 查 tag_define（v1 单表 tag_catalog 退役，阈值语义不变）；
+    status=deprecated 的定义不入候选（沿 v1 排除已废弃的口径）。
+    """
+    rows = [row for row in session.query(TagDefine).all()
+            if row.status != "deprecated" and row.embedding]
     if not rows or not names:
         return {}
     vectors = embedder.embed(names, role="query")
@@ -270,7 +278,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             continue
         accepted.append((candidate, verdict, evidence))
 
-    # ---- 5. 排序、截断、目录匹配 ----
+    # ---- 5. 排序、截断、定义匹配（归一命中）----
     limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
     def _rank(item) -> tuple[int, float, int]:
@@ -297,16 +305,21 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         confidence = verdict["confidence"] if verdict else 0.8
         reason = (verdict or {}).get("reason") or candidate.reason
         if candidate.tag in hits:
+            # 归一命中行（doc §6.2）：生成时即带 tag_id，origin 仍是 open
+            # （v2 词表收敛，v1 的 catalog 词退役）；tag_name 即 candidate_name
+            # 原文保留可溯（并入既有时候选原文也留），candidate_description
+            # 不填（仅自由候选填写，doc §3.5）
             tag_id, similarity = hits[candidate.tag]
             tags.append(ProducedTag(
-                origin="catalog", tag_id=tag_id, tag_name=candidate.tag,
+                origin="open", tag_id=tag_id, tag_name=candidate.tag,
                 candidate_type=None, candidate_description=None,
                 relevance_score=similarity, confidence=confidence,
                 evidence=evidence,
             ))
         else:
+            # 自由候选（未命中标签定义）：tag_id 空，candidate_name 原文
             tags.append(ProducedTag(
-                origin="generated", tag_id=None, tag_name=candidate.tag,
+                origin="open", tag_id=None, tag_name=candidate.tag,
                 candidate_type=candidate.dimension,
                 candidate_description=reason or None,
                 relevance_score=None, confidence=confidence,

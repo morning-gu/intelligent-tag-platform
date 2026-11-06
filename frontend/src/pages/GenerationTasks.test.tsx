@@ -24,7 +24,7 @@ const mockedApiFetch = vi.mocked(apiFetch)
 // ---------- 夹具（与后端 GenerationTaskOut / GenerationTaskDetail 契约同形） ----------
 
 /** 四状态任务各一：succeeded（含版本与时间）、failed（含错误）、
- * queued（asset_id/时间 null 兜底）、running。 */
+ * queued（时间 null 兜底）、running（v2 asset_id 恒非空）。 */
 const TASKS: GenerationTaskSummary[] = [
   {
     task_id: 'task-1',
@@ -50,7 +50,7 @@ const TASKS: GenerationTaskSummary[] = [
   },
   {
     task_id: 'task-3',
-    asset_id: null,
+    asset_id: 'a3',
     mode: 'closed',
     status: 'queued',
     model_version: null,
@@ -72,14 +72,18 @@ const TASKS: GenerationTaskSummary[] = [
   },
 ]
 
-/** task-1 详情：generated 行（含置信度/证据）+ catalog 行（双 null 兜底）。 */
+/** task-1 详情：open 行（含置信度/证据）+ closed 行（双 null 兜底）。
+ * origin 词表 v2：open=开放候选（tag_id 空、candidate_name 有值）、
+ * closed=目录闭环（tag_id 指向目录定义）。 */
 const DETAIL: GenerationTaskDetail = {
   ...TASKS[0],
   results: [
     {
       id: 11,
       tag_name: '主角争执',
-      origin: 'generated',
+      tag_id: null,
+      candidate_name: '主角争执',
+      origin: 'open',
       relevance_score: 0.87,
       confidence: 0.92,
       review_status: 'pending',
@@ -90,7 +94,9 @@ const DETAIL: GenerationTaskDetail = {
     {
       id: 12,
       tag_name: '犯罪',
-      origin: 'catalog',
+      tag_id: 'tag-crime-1',
+      candidate_name: null,
+      origin: 'closed',
       relevance_score: null,
       confidence: null,
       review_status: 'approved',
@@ -215,7 +221,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(row2).toHaveTextContent('模型调用超时')
     const row3 = screen.getByText('task-3').closest('tr')!
     expect(row3).toHaveTextContent('排队中')
-    expect(row3).toHaveTextContent('—') // asset_id/created_at/finished_at/error null 兜底
+    expect(row3).toHaveTextContent('—') // created_at/finished_at/error null 兜底
     expect(screen.getByText('task-4').closest('tr')).toHaveTextContent('执行中')
 
     // 仅 failed 行有重试按钮
@@ -372,18 +378,20 @@ describe('GenerationTasks 生产任务页', () => {
         mockedApiFetch.mock.calls.some(([p]) => p === '/api/v1/generation/tasks/task-1'),
       ).toBe(true)
     })
-    // generated 行：标签名/来源/审核状态/置信度/相关度/证据描述与时间戳
+    // open 行：标签名/来源/审核状态/置信度/相关度/证据描述与时间戳
+    // （来源 Tag 词表与列表模式列同为"开放"，以结果行作用域定位避免歧义）
     expect(await screen.findByText('主角争执')).toBeInTheDocument()
-    expect(screen.getByText('生成')).toBeInTheDocument()
-    expect(screen.getByText('待审核')).toBeInTheDocument()
+    const openRow = screen.getByText('主角争执').closest('tr')!
+    expect(within(openRow).getByText('开放')).toBeInTheDocument()
+    expect(within(openRow).getByText('待审核')).toBeInTheDocument()
     expect(screen.getByText('0.92')).toBeInTheDocument()
     expect(screen.getByText('0.87')).toBeInTheDocument()
     expect(screen.getByText('主角争执推搡')).toBeInTheDocument()
     expect(screen.getByText('01:05 - 01:11')).toBeInTheDocument()
-    // catalog 行：目录/已通过，relevance/confidence 双 null 兜底
-    expect(screen.getByText('犯罪')).toBeInTheDocument()
-    expect(screen.getByText('目录')).toBeInTheDocument()
-    expect(screen.getByText('已通过')).toBeInTheDocument()
+    // closed 行：闭环/已通过，relevance/confidence 双 null 兜底
+    const closedRow = screen.getByText('犯罪').closest('tr')!
+    expect(within(closedRow).getByText('闭环')).toBeInTheDocument()
+    expect(within(closedRow).getByText('已通过')).toBeInTheDocument()
     expect(screen.getAllByText('暂无')).toHaveLength(2)
     // 详情头部：模型/Prompt 版本展示
     expect(screen.getByText('mock-vision-v1')).toBeInTheDocument()

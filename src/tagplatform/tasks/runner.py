@@ -1,24 +1,37 @@
-"""生成任务执行器：任务状态机、prompt 组装、线程池执行与孤儿清理（Task 8）。
+"""生成任务执行器：任务状态机、prompt 组装、线程池执行与孤儿清理（v2 Task 6）。
 
-把前序部件串成完整执行链（计划钉死的八步流程）：
+把前序部件串成完整执行链（v1 钉死的状态机形状，数据源与写入口换 v2）：
 状态机（queued → running → succeeded|failed，running 置位先落库防长任务
-重复提交）→ 内容解析 → producer 分发（get_producer，closed/open 注册于
-tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用，
-candidates 文本仅 closed、行序 = 召回结果行序）→ policy 解析 → produce →
-persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量 → 终态一次性
-commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
+重复提交）→ 资产内容解析（content_json 直落 media_asset，NULL = 未完成
+内容识别 → 显式 failed，Review Focus 4）→ producer 分发（get_producer，
+closed/open 注册于 tagplatform.generation 导入）→ prompt 组装渲染
+（content 文本两模式共用，candidates 文本仅 closed、行序 = 召回结果行序、
+第三字段 = 候选标签的父目录名）→ policy 解析 → produce → 重跑替换
+（_clear_pending：写结果前删该资产同 origin 的全部 pending 行——closed
+重跑不清 open 的待审行，doc §6.1）→ persist_tags（INSERT OR IGNORE，
+不 commit）→ 终态一次性 commit（生成结果与任务终态同事务落库）。
 
 事务语义：
-- 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist/回填的未提交
-  写入，保证零半截 asset_tag；任务置 failed 后返回、不 re-raise——调用方
+- 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist 的未提交
+  写入，保证零半截 pre 行；任务置 failed 后返回、不 re-raise——调用方
   （API 层/线程池）经状态与 error 字段感知失败；
-- 捕获范围取 Exception 而非仅 brief 列举的 ValueError/RuntimeError/
-  LLMParseError：这三类覆盖 produce 的预期失败，其余未预期异常（坏 mode、
-  坏 content_json、缺激活模板等配置错误）若外抛会把任务永久滞留 running，
-  任务级事务必须保证任何失败都落终态（进程崩溃除外，由孤儿重置兜底）。
+- 捕获范围取 Exception 而非仅 ValueError/RuntimeError/LLMParseError：
+  这三类覆盖 produce 的预期失败，其余未预期异常（坏 mode、坏
+  content_json、缺激活模板等配置错误）若外抛会把任务永久滞留 running，
+  任务级事务必须保证任何失败都落终态（进程崩溃除外，由孤儿重置兜底）；
+- 资产缺失/未完成内容识别在进入事务前显式落 failed（数据错误，专属
+  error 文案）。
+
+v2 与 v1 的差异：
+- 任务外键 asset_id 直连 media_asset（context 概念退役），content 取
+  asset.content_json；
+- 上下文摘要向量回填删除——内容向量在生成任务启动时实时计算、不落库
+  （doc §3.1/§5）；
+- 重跑替换从 v1 的 producer 声明（replaces_pending）门控改为两模式统一
+  按 origin 清 pending——v2 的 persist 不再覆盖更新，替换完全靠先删后插。
 
 TaskExecutor 为线程池封装：线程内独立 session（SQLite 文件库跨线程可见，
-:memory: 不可），异常吞并记日志；workers=0 同步执行（T9 钉死的测试模式）。
+:memory: 不可），异常吞并记日志；workers=0 同步执行（钉死的测试模式）。
 reset_orphan_running 供 create_app 启动时清理进程重启留下的 running 孤儿。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
@@ -32,35 +45,45 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, GenerationTask, MediaContext, TagCatalog
+from tagplatform.content_io import load_content
+from tagplatform.db.models import (
+    MediaAsset,
+    PreAssetTag,
+    TagCatalog,
+    TagDefine,
+    TagGenerationTask,
+)
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
-from tagplatform.generation.recall import embed_content_texts, recall_by_type
+from tagplatform.generation.recall import embed_content_texts, recall_by_dir
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
-from tagplatform.content_io import load_content
-from tagplatform.schemas import ContentJSON, parse_content
+from tagplatform.schemas import ContentJSON
 from tagplatform.settings import get_settings
-from tagplatform.vectors import encode_vector
 
 logger = logging.getLogger(__name__)
 
 
-def _clear_pending(session: Session, asset_id: str, mode: str) -> int:
-    """删除该资产"同模式生成任务产生的、尚未审核"的候选行（重跑替换）。
+def _clear_pending(session: Session, asset_id: str, origin: str) -> int:
+    """删除该资产同 origin 的全部 pending 候选行（重跑替换，doc §6.1）。
 
-    只删 pending：人工已定稿的行（approved/rejected/merged）不受影响；只删
-    同 mode 的任务行：closed 的待审候选不会被 open 重跑误清。返回删除行数。
+    调用时机：produce 之后、persist 之前（v1 位置）——persist 只做
+    INSERT OR IGNORE，重跑替换的"删旧"完全由本函数承担。只删 pending：
+    人工已定稿的行（approved/rejected）不受影响；只删同 origin 的行：
+    closed 的重跑不清 open 的待审行（Review Focus 1）。返回删除行数。
+
+    synchronize_session="fetch"：删除后同步驱逐会话内匹配对象的身份映射
+    条目——SQLite 复用被删行的 rowid，不驱逐会让重插的新行撞上陈旧身份
+    （SAWarning + 测试持有旧引用读到幽灵值）。
     """
-    task_ids = select(GenerationTask.task_id).where(GenerationTask.mode == mode)
     result = session.execute(
-        delete(AssetTag).where(
-            AssetTag.asset_id == asset_id,
-            AssetTag.review_status == "pending",
-            AssetTag.task_id.in_(task_ids),
-        ).execution_options(synchronize_session=False))
+        delete(PreAssetTag).where(
+            PreAssetTag.asset_id == asset_id,
+            PreAssetTag.origin == origin,
+            PreAssetTag.review_status == "pending",
+        ).execution_options(synchronize_session="fetch"))
     return result.rowcount or 0
 
 
@@ -123,7 +146,7 @@ def _render_scene_details(scene) -> list[str]:
 
 
 def _render_content_text(content: ContentJSON) -> str:
-    """内容 JSON → prompt 的 content 文本（两模式共用，格式计划钉死）。
+    """内容 JSON → prompt 的 content 文本（两模式共用，格式钉死）。
 
     首行《标题》与摘要行，其后每场景一行：
 
@@ -150,42 +173,55 @@ def _render_content_text(content: ContentJSON) -> str:
     return "\n".join(parts)
 
 
-def _render_candidates_text(candidates: list[TagCatalog]) -> str:
-    """召回候选 → prompt 的 candidates 文本（仅模式 A，行序 = 召回结果行序）。
+def _render_candidates_text(session: Session,
+                            candidates: list[TagDefine]) -> str:
+    """召回候选 → prompt 的 candidates 文本（仅 closed，行序 = 召回结果行序）。
 
-    每候选一行 `- {tag_id} | {tag_name} | {tag_type} | {description}`；
-    首行 "## 候选标签" 是模式 A 的标志节——MockLLM 按它识别模式 A 分支并
-    逐行解析候选（llm/mock.py _CLOSED_MARKER，与任务 5 测试的组装约定一致），
+    每候选一行 `- {tag_id} | {tag_name} | {父目录名} | {description}`——
+    4 字段格式逐字保留（closed 提示词模板冻结、MockLLM 逐行解析依赖，
+    llm/mock.py _CANDIDATE_LINE_RE）；第三字段由 v1 的 tag_type 换成候选
+    标签所属目录名（tag_id → TagDefine.dir_id → TagCatalog.dir_name，
+    目录名一次批量取全）。首行 "## 候选标签" 是 closed 的标志节——
+    MockLLM 按它识别 closed 分支并逐行解析候选（_CLOSED_MARKER），
     真模型下同样是有效的小节标题。
     """
+    dir_ids = {c.dir_id for c in candidates}
+    dir_names: dict[str, str] = {}
+    if dir_ids:
+        dir_names = {
+            d.dir_id: d.dir_name
+            for d in session.query(TagCatalog)
+            .filter(TagCatalog.dir_id.in_(dir_ids)).all()
+        }
     lines = [
-        f"- {c.tag_id} | {c.tag_name} | {c.tag_type} | {c.description}"
+        f"- {c.tag_id} | {c.tag_name} | {dir_names.get(c.dir_id, '')} | {c.description}"
         for c in candidates
     ]
     return "## 候选标签\n" + "\n".join(lines)
 
 
 def run_generation_task(task_id: str, session: Session, llm,
-                        embedder) -> GenerationTask:
+                        embedder) -> TagGenerationTask:
     """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
 
-    八步流程（计划钉死）：
+    八步流程（v1 形状，数据源换 v2）：
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
-    2. context 缺失 → failed + error、commit、返回 task；
-    3. parse_content(json.loads(context.content_json))；资产 id 取
-       content.asset.asset_id（缺省回落 context.asset_id）；
-    4. get_producer(task.mode)；closed 额外召回候选组装 candidates 文本，
-       render_prompt 渲染激活模板（open 模板无 candidates 占位符，只传 content）；
+    2. 资产缺失 / content_json 为空（未完成内容识别）→ failed + error、
+       commit、返回 task（Review Focus 4）；
+    3. load_content(asset.content_json)；asset_id = task.asset_id；
+    4. get_producer(task.mode)；closed 额外按目录召回候选组装 candidates
+       文本，render_prompt 渲染激活模板（open 自拼 prompt，不走模板）；
     5. policy_json 空 → 默认 GenerationPolicy，否则按 JSON 构造；
     6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
        写入后置 failed（error=str(e)、finished_at）、commit、返回 task
        （不 re-raise，调用方看状态）；
-    7. persist_tags（不 commit，随终态同事务落库）+ 模式 A 回填
-       context.embedding（摘要向量 runner 独立重算——计划定案，接口简单）；
+    7. 重跑替换：_clear_pending 删该资产同 origin 的全部 pending 行
+       （closed 不清 open 待审行），persist_tags 只 INSERT OR IGNORE；
     8. task.model_version = llm.model、prompt_version = 激活模板版本
-       （写入字符串）、succeeded、finished_at、一次性 commit、返回 task。
+       （写入字符串；自拼 prompt 的生产器写自己的口径版本，如 mtg-v1）、
+       succeeded、finished_at、一次性 commit、返回 task。
     """
-    task = session.get(GenerationTask, task_id)
+    task = session.get(TagGenerationTask, task_id)
     if task is None:
         raise ValueError(f"任务不存在: {task_id}")
     if task.status != "queued":
@@ -194,19 +230,25 @@ def run_generation_task(task_id: str, session: Session, llm,
     task.status = "running"
     session.commit()
 
-    # 2. 上下文缺失属数据错误：显式失败，不留 running 僵尸
-    context = session.get(MediaContext, task.context_id)
-    if context is None:
+    # 2. 资产缺失 / 未完成内容识别属数据错误：显式失败，不留 running 僵尸
+    asset = session.get(MediaAsset, task.asset_id)
+    if asset is None:
         task.status = "failed"
-        task.error = f"媒体上下文不存在: {task.context_id}"
+        task.error = f"资产不存在: {task.asset_id}"
+        task.finished_at = datetime.now(timezone.utc)
+        session.commit()
+        return task
+    if not asset.content_json:
+        task.status = "failed"
+        task.error = f"资产未完成内容识别: {task.asset_id}"
         task.finished_at = datetime.now(timezone.utc)
         session.commit()
         return task
 
     try:
-        # 3. 内容解析与资产归属
-        content = load_content(context.content_json)
-        asset_id = content.asset.asset_id or context.asset_id
+        # 3. 内容解析（content_json 直落 media_asset 列，v2 合并语义）
+        content = load_content(asset.content_json)
+        asset_id = task.asset_id
         # 4. producer 分发与 prompt 组装渲染
         #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
         #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板。
@@ -217,13 +259,13 @@ def run_generation_task(task_id: str, session: Session, llm,
             template = get_active_prompt(session, task.mode)
             fields: dict[str, str] = {"content": _render_content_text(content)}
             if task.mode == "closed":
-                candidates = recall_by_type(
+                candidates = recall_by_dir(
                     session,
                     embed_content_texts(content),
                     embedder,
                     get_settings().recall_top_k_per_type,
                 )
-                fields["candidates"] = _render_candidates_text(candidates)
+                fields["candidates"] = _render_candidates_text(session, candidates)
             prompt_text = render_prompt(template, **fields)
         # 5. 策略解析（空 policy_json → 默认）
         raw_policy = (task.policy_json or "").strip()
@@ -236,25 +278,20 @@ def run_generation_task(task_id: str, session: Session, llm,
             policy=policy, prompt_text=prompt_text, run_id=run_id,
         )
         tags = producer.produce(spec, session, llm, embedder)
-        # 6.5 重跑替换：自拼 prompt 的生产器（如 open/mtg）声明 replaces_pending
-        #     时，先清掉该资产"同模式、尚未审核"的旧候选，再落本次结果。
-        #     否则每重跑一次就在审核队列里叠一份近义标签（实测 3 次后
-        #     Memento 积到 29 条待审）。已定稿行（approved/rejected/merged）
-        #     不在此列，persist_tags 的"已定跳过"语义不变。
-        if getattr(producer, "replaces_pending", False):
-            cleared = _clear_pending(session, asset_id, task.mode)
-            if cleared:
-                logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
-                            asset_id, cleared)
-        # 7. 结果入库（不 commit）+ 模式 A 回填上下文摘要向量（与 prompt
-        #    组装同源的摘要文本）
+        # 7. 重跑替换（doc §6.1）：写结果前删该资产同 origin 的全部 pending
+        #    行（closed 重跑不清 open 的待审行）；persist 只 INSERT OR
+        #    IGNORE，替换语义完全由这步先删承担。v1 按 producer 的
+        #    replaces_pending 声明门控（closed 靠 persist 覆盖更新），v2
+        #    persist 不覆盖更新，两模式统一先删后插。
+        #    mode/origin 词表耦合注记：v2 mode 注册表恰为 closed|open ==
+        #    origin 词表，Task 7 open 流程落地后此耦合成立。
+        cleared = _clear_pending(session, asset_id, task.mode)
+        if cleared:
+            logger.info("重跑替换：资产 %s 清掉 origin=%s 的 %d 条未审核候选",
+                        asset_id, task.mode, cleared)
         persist_tags(session, asset_id, task.task_id, tags, run_id)
-        if task.mode == "closed":
-            # role=passage：内容侧文档向量（与被检索的目录语料相对）
-            context.embedding = encode_vector(
-                embedder.embed([content.content.summary],
-                               role="passage")[0])
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
+        #    （v2 删除上下文摘要向量回填：内容向量实时计算不落库，doc §3.1）
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
         # 自拼 prompt 的生产器写自己的口径版本（如 mtg-v1）
@@ -265,8 +302,8 @@ def run_generation_task(task_id: str, session: Session, llm,
         session.commit()
         return task
     except Exception as e:  # noqa: BLE001 —— 任务级事务：任何失败都落任务终态
-        # 先回滚丢弃 persist/回填的未提交写入（零半截 asset_tag），再落
-        # failed 终态；不 re-raise，调用方经状态与 error 感知失败
+        # 先回滚丢弃 persist 的未提交写入（零半截 pre 行），再落 failed
+        # 终态；不 re-raise，调用方经状态与 error 感知失败
         session.rollback()
         task.status = "failed"
         task.error = str(e)
@@ -279,7 +316,7 @@ class TaskExecutor:
     """生成任务线程池执行器：线程内独立 session 跑 run_generation_task。
 
     workers=0 时不建池、submit 即同步执行（Settings.generation_workers=0
-    的钉死语义，测试与单步调试用）；shutdown 供应用退出时关池（T9 lifespan）。
+    的钉死语义，测试与单步调试用）；shutdown 供应用退出时关池（lifespan）。
     """
 
     def __init__(self, session_factory, llm, embedder, workers: int = 2):
@@ -329,8 +366,8 @@ def reset_orphan_running(session: Session) -> int:
     启动时调用本函数一次性复位（error="进程重启中断"）。
     """
     orphans = (
-        session.query(GenerationTask)
-        .filter(GenerationTask.status == "running")
+        session.query(TagGenerationTask)
+        .filter(TagGenerationTask.status == "running")
         .all()
     )
     now = datetime.now(timezone.utc)

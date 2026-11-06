@@ -5,8 +5,9 @@
    `build_task_id`、任务行入库（queued）、进度端点可查、未命中不建任务、
    未知 task_id → 404（后台线程被 monkeypatch 掉，测试不烧 token）；
 2. 执行层：`asset_build.execute` 真跑一遍（假 LLM + 假数据集），断言任务从
-   running 走到 succeeded、media_context 落到**上传那条资产**上、上传的
-   video_uri 不被生成结果抹掉、台词进库。
+   running 走到 succeeded、content_json/source 落到**上传那条资产**的行上
+   （v2 合并语义：重生成直接覆盖，无清理步骤）、上传的 video_uri 不被生成
+   结果抹掉、台词进库。
 
 数据集构造与 `tests/test_assets_builder.py` 同构（meta + story + 帧 + 字幕 zip）。
 """
@@ -19,7 +20,7 @@ import pytest
 
 from tagplatform import asset_build
 from tagplatform.content_io import load_content
-from tagplatform.db.models import AssetBuildTask, MediaAsset, MediaContext
+from tagplatform.db.models import AssetBuildTask, MediaAsset
 from tagplatform.llm import LLMResponse
 
 MOVIE_ID = "tt0000001"
@@ -132,8 +133,8 @@ def test_upload_auto_build_off(dataset_client, monkeypatch):
     assert body["build_task_id"] is None     # 但不生成
 
 
-def test_execute_success_writes_context(dataset_client, monkeypatch):
-    """执行层：跑完生成 → 任务 succeeded、内容落到上传的资产上。"""
+def test_execute_success_writes_content(dataset_client, monkeypatch):
+    """执行层：跑完生成 → 任务 succeeded、内容落到上传的资产行上。"""
     monkeypatch.setattr("tagplatform.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
@@ -152,14 +153,14 @@ def test_execute_success_writes_context(dataset_client, monkeypatch):
         asset = s.get(MediaAsset, asset_id)
         assert asset.video_uri and asset.video_uri.endswith(".mkv")
         assert asset.title == "Test Movie"
-        ctx = s.query(MediaContext).filter_by(asset_id=asset_id).one()
+        assert asset.source.startswith("asset_builder:")
         # 库里存的是交付用的模板原文（description / start_ms），不是内部形态
-        raw = json.loads(ctx.content_json)
+        raw = json.loads(asset.content_json)
         assert raw["content"]["description"] == LONG_SUMMARY
         assert "summary" not in raw["content"]
         assert "start_ms" in raw["content"]["scenes"][0]
         # 读取时归一化回内部结构
-        content = load_content(ctx.content_json)
+        content = load_content(asset.content_json)
         assert content.content.summary == LONG_SUMMARY
         scene = content.content.scenes[0]
         assert scene.character_ids == ["character_001"]
@@ -186,8 +187,8 @@ def test_execute_unknown_task_is_noop(dataset_client):
     asset_build.execute("build_nope", dataset_client.app.state.settings)
 
 
-def test_execute_rebuilds_stale_context(dataset_client, monkeypatch):
-    """旧口径（无台词/无演员）的 context 会被清掉重生成，只留一份。"""
+def test_execute_overwrites_stale_content(dataset_client, monkeypatch):
+    """旧口径（source 不符）的识别结果会被重生成直接覆盖（v2：无清理步骤）。"""
     monkeypatch.setattr("tagplatform.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
@@ -197,42 +198,18 @@ def test_execute_rebuilds_stale_context(dataset_client, monkeypatch):
     asset_id = body["asset_id"]
 
     with dataset_client.app.state.session_factory() as s:
-        s.add(MediaAsset(asset_id=f"{asset_id}::s0", asset_type="scene",
-                         parent_id=asset_id, title="s0"))
-        s.add(MediaContext(context_id="ctx_old", asset_id=asset_id,
-                           content_json="{}", source="video_understanding"))
-        s.add(MediaContext(context_id="ctx_child", asset_id=f"{asset_id}::s0",
-                           content_json="{}", source="video_understanding"))
+        asset = s.get(MediaAsset, asset_id)   # 上传时已登记
+        asset.content_json = "{}"
+        asset.source = "video_understanding"  # 旧口径
         s.commit()
 
     asset_build.execute(body["build_task_id"], settings)
 
     with dataset_client.app.state.session_factory() as s:
-        rows = s.query(MediaContext).filter(
-            MediaContext.asset_id.like(f"{asset_id}%")).all()
-        sources = {r.source for r in rows}
-        assert "video_understanding" not in sources
-        assert all(src.startswith("asset_builder:") for src in sources)
-        # 父资产只剩一份，不堆历史
-        parents = [r for r in rows if r.asset_id == asset_id]
-        assert len(parents) == 1
-
-
-def test_purge_contexts_does_not_match_wildcards(dataset_client):
-    """LIKE 转义：清理 movie_a 不能连带 movieba（`_` 是单字符通配符）。"""
-    with dataset_client.app.state.session_factory() as s:
-        s.add(MediaAsset(asset_id="movie_a", asset_type="movie", title="A"))
-        s.add(MediaAsset(asset_id="movieba::s0", asset_type="scene", title="B"))
-        s.add(MediaContext(context_id="ctx_a", asset_id="movie_a",
-                           content_json="{}", source="video_understanding"))
-        s.add(MediaContext(context_id="ctx_b", asset_id="movieba::s0",
-                           content_json="{}", source="video_understanding"))
-        s.commit()
-
-        asset_build._purge_contexts(s, "movie_a")
-        remaining = {r.context_id for r in s.query(MediaContext).all()
-                     if r.context_id in {"ctx_a", "ctx_b"}}
-    assert remaining == {"ctx_b"}
+        asset = s.get(MediaAsset, asset_id)
+        # 覆盖为新口径，不堆历史（资产行只有一份 content_json）
+        assert asset.source.startswith("asset_builder:")
+        assert json.loads(asset.content_json)["content"]["description"] == LONG_SUMMARY
 
 
 def test_execute_reuses_same_version(dataset_client, monkeypatch):

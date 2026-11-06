@@ -69,11 +69,11 @@ from tagplatform.api.depends import get_current_user, require_admin  # noqa: E40
 
 from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
     auth,
-    batches,
     config,
     content,
     generation,
     health,
+    imports,
     media,
     metrics,
     prompts,
@@ -140,7 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_deps = [Depends(get_current_user)]
     app.include_router(health.router)
     app.include_router(tags.router, dependencies=protected_deps)
-    app.include_router(batches.router, dependencies=protected_deps)
+    app.include_router(imports.router, dependencies=protected_deps)
     app.include_router(content.router, dependencies=protected_deps)
     app.include_router(media.router, dependencies=protected_deps)
     app.include_router(generation.router, dependencies=protected_deps)

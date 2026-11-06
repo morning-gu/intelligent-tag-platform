@@ -45,13 +45,14 @@ class Evidence:
 class ProducedTag:
     """Producer 产出的一枚候选标签（审核前的中间态，不直接入库）。
 
-    - origin="catalog"：命中既有目录标签，tag_id 必填、candidate_* 为
-      None；
-    - origin="generated"：模型新造候选，tag_id 为 None、candidate_*
-      描述新标签候选（type/description）。
+    - origin="closed"：封闭式生成命中目录内既有定义（tag_define），
+      tag_id 必填、candidate_* 为 None；
+    - origin="open"：开放式生成（mtg）产出，tag_id 为 None 表示自由候选
+      （candidate_* 描述新标签），归一命中行带 tag_id（origin 仍为 open）。
+    candidate_type 仅作 mtg 审计信息，不入库（v2 pre_asset_tag 无此列）。
     """
 
-    origin: str  # "catalog" | "generated"
+    origin: str  # "closed" | "open"（v1 的 catalog|generated 词退役）
     tag_id: str | None
     tag_name: str
     candidate_type: str | None

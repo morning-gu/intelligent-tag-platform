@@ -75,7 +75,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '标签导入' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '导入任务' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '标签库' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '质量评估' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '用户管理' })).toBeInTheDocument()

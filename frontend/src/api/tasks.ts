@@ -1,16 +1,18 @@
-// 生产任务 API（Task 12）：/generation/tasks 列表/详情/创建/重试的类型契约
+// 生产任务 API（v2）：/generation/tasks 列表/详情/创建/重试的类型契约
 // 与取数函数。类型形状与后端 tagplatform/api/routers/generation.py 的
-// Pydantic 模型一致；列表按 created_at 降序、limit/offset 分页（后端默认
-// 100/0，前端一次拉默认页即可）；重试仅 failed 可用（422/404 经 client 的
-// ApiError.message 透出后端 detail）。
+// Pydantic 模型一致（v2 任务外键直连 media_asset，asset_id 恒非空；详情
+// results 取 pre_asset_tag 行——review_status 三态、origin 词表
+// closed|open）；列表按 created_at 降序、limit/offset 分页（后端默认
+// 100/0，前端一次拉默认页即可）；重试仅 failed 可用（422/404 经 client
+// 的 ApiError.message 透出后端 detail）。
 import { apiFetch } from './client'
-import type { ReviewEvidence } from './review'
+import type { ReviewEvidence, ReviewStatus, TagOrigin } from './review'
 
-/** 任务列表行（与后端 GenerationTaskOut 一致；asset_id 经 media_context
- * 关联解析，无上下文时为 null）。 */
+/** 任务列表行（与后端 GenerationTaskOut 一致；v2 任务外键直连
+ * media_asset，asset_id 恒非空）。 */
 export interface GenerationTaskSummary {
   task_id: string
-  asset_id: string | null
+  asset_id: string
   mode: string
   status: string
   model_version: string | null
@@ -20,15 +22,19 @@ export interface GenerationTaskSummary {
   finished_at: string | null
 }
 
-/** 任务结果行（与后端 GenerationResultOut 一致）：id 为 asset_tag 行主键
- * （审核中心行操作的定位键）；evidence 与审核列表证据同形，直接复用。 */
+/** 任务结果行（与后端 PreTagOut 一致）：id 为 pre_asset_tag 行主键（审核
+ * 中心行操作的定位键）；tag_name 解析 = candidate_name（open 候选/审核
+ * modify 落在行内的展示字段）优先，否则回退目录定义名；evidence 与审核
+ * 列表证据同形，直接复用。 */
 export interface GenerationTaskResult {
   id: number
   tag_name: string
-  origin: string
+  tag_id: string | null
+  candidate_name: string | null
+  origin: TagOrigin
   relevance_score: number | null
   confidence: number | null
-  review_status: string
+  review_status: ReviewStatus
   evidence: ReviewEvidence[]
 }
 
