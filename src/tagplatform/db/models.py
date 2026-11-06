@@ -96,9 +96,10 @@ class TagCatalog(Base):
     )
     # JSON 数组字符串（如 '["悬念"]'），由服务层序列化
     aliases: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 取值 content|scene|character（声明目录适用范围）
+    # 取值 content|scene|character 的组合（逗号分隔规范序，
+    # 如 'content,scene,character'；声明目录适用范围）
     applicable_scope: Mapped[str | None] = mapped_column(
-        Text, nullable=True, server_default="content"
+        Text, nullable=True, server_default="content,scene,character"
     )
     # 目录描述向量（open 候选归置/目录检索用）
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -107,7 +108,12 @@ class TagCatalog(Base):
 
     __table_args__ = (
         CheckConstraint("dir_type IN ('dir_static', 'dir_dynamic')"),
-        CheckConstraint("applicable_scope IN ('content', 'scene', 'character')"),
+        # 适用范围为三值的组合（7 种非空子集，逗号分隔规范序）
+        CheckConstraint(
+            "applicable_scope IN ('content', 'scene', 'character', "
+            "'content,scene', 'content,character', 'scene,character', "
+            "'content,scene,character')"
+        ),
         # 根目录（parent_id NULL）同名在 SQL 层不拦（UNIQUE 对 NULL 互不区分），
         # 由服务层校验——沿 v1 0006 口径（doc §3.2）
         UniqueConstraint("parent_id", "dir_name", name="ux_tag_catalog_parent_name"),

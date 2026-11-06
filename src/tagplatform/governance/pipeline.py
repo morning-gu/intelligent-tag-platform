@@ -2,11 +2,13 @@
 
 落位规则（计划契约速查，docs/table_design.md §2.1/§8）：
 - 行分类：名称被批内任一行的 parent_tag 引用 → **目录行**（tag_catalog，
-  一律 dir_static、applicable_scope 缺省 content）；其余 → **标签行**
-  （tag_define，tag_type 一律 val_fixed）。层级 Excel/XML 的一/二/三级
-  天然被下级行引用成目录链，「标签」列与扁平行不被引用即标签——分类
-  无需感知解析层模板形状。已知边界：解析层把层级节点摊平为 TagRow（不
-  保留"目录节点"标记），**无子引用的末级空目录**（如 XML 的
+  dir_type 取行值（树状 XML 目录属性），缺省/非法归一 dir_dynamic；
+  applicable_scope 为 content/scene/character 组合，缺省/非法归一三值
+  全选）；其余 → **标签行**（tag_define，tag_type 取行值，缺省/非法
+  归一 val_fixed，val_generalized 放行落库）。层级 Excel/XML 的一/二/
+  三级天然被下级行引用成目录链，「标签」列与扁平行不被引用即标签——
+  分类无需感知解析层模板形状。已知边界：解析层把层级节点摊平为
+  TagRow（不保留"目录节点"标记），**无子引用的末级空目录**（如 XML 的
   `<level2 name="剧情"/>` 且其下无标签）会退化为标签行；层级 Excel 不受
   影响（标签列必填，层级行恒被本行标签引用）；
 - 标签行归属目录：parent_tag 命中批内目录行 > 库内同名目录（根目录
@@ -47,6 +49,7 @@ flush——自引用外键无 relationship()，保证父行先落库）。判定
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -69,11 +72,15 @@ _UNCATEGORIZED_DIR_NAME = "未分类"
 # 审计日志操作者标识：本流水线产生的 import 动作统一记 governance
 _OPERATOR = "governance"
 
-# v2 落位常量：导入路径一律静态目录 + content 范围 + 固定值标签
-_DIR_TYPE_STATIC = "dir_static"
+# v2 落位常量：导入路径缺省值——动态目录 + 三范围全选 + 固定值标签
+# （行值优先，非法枚举归一回默认；dir_type=dir_static / val_generalized
+# 行值合法时按行落库）
+_DIR_TYPES = ("dir_static", "dir_dynamic")
+_DEFAULT_DIR_TYPE = "dir_dynamic"
 _SCOPES = ("content", "scene", "character")
-_DEFAULT_SCOPE = "content"
-_TAG_TYPE_FIXED = "val_fixed"
+_DEFAULT_SCOPE = "content,scene,character"
+_TAG_TYPES = ("val_fixed", "val_generalized")
+_DEFAULT_TAG_TYPE = "val_fixed"
 
 
 @dataclass
@@ -100,7 +107,8 @@ class GovernanceResult:
 @dataclass
 class GovernanceConfig:
     """治理显式配置。v2 仅保留相似阈值——v1 的 allowed_tag_types 白名单
-    校验随 tag_type 枚举化（tag_define.tag_type 一律 val_fixed）退役；
+    校验随 tag_type 枚举化（tag_define.tag_type 缺省/非法归一 val_fixed，
+    val_fixed|val_generalized 之外不入库）退役；
     run_governance(config=None) 时回退 get_settings().semantic_similar_threshold
     （既有调用方与判定行为不变）。"""
 
@@ -131,8 +139,23 @@ class _ValidTag:
 
 
 def _normalize_scope(raw: str | None) -> str:
-    """目录 applicable_scope 归一：非法取值回退 content（CHECK 兜底）。"""
-    return raw if raw in _SCOPES else _DEFAULT_SCOPE
+    """目录 applicable_scope 归一：content/scene/character 组合（逗号或
+    | 分隔、去重、规范序），空/全非法回退三值全选（CHECK 兜底）。"""
+    if not raw:
+        return _DEFAULT_SCOPE
+    tokens = {t.strip() for t in re.split(r"[,，;；|]", raw) if t.strip()}
+    valid = [s for s in _SCOPES if s in tokens]
+    return ",".join(valid) if valid else _DEFAULT_SCOPE
+
+
+def _normalize_dir_type(raw: str | None) -> str:
+    """目录 dir_type 归一：非法/缺省回退 dir_dynamic。"""
+    return raw if raw in _DIR_TYPES else _DEFAULT_DIR_TYPE
+
+
+def _normalize_tag_type(raw: str | None) -> str:
+    """标签 tag_type 归一：非法/缺省回退 val_fixed（val_generalized 放行）。"""
+    return raw if raw in _TAG_TYPES else _DEFAULT_TAG_TYPE
 
 
 def _normalize_status(raw: str | None) -> str:
@@ -436,7 +459,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         session.add(TagCatalog(
             dir_id=plan.dir_id,
             dir_name=plan.row.tag_name,
-            dir_type=_DIR_TYPE_STATIC,
+            dir_type=_normalize_dir_type(plan.row.dir_type),
             description=plan.row.description,
             parent_id=parent_id,
             aliases=(json.dumps(plan.row.aliases, ensure_ascii=False)
@@ -469,7 +492,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         session.add(TagCatalog(
             dir_id=uncat_dir_id,
             dir_name=_UNCATEGORIZED_DIR_NAME,
-            dir_type=_DIR_TYPE_STATIC,
+            dir_type=_DEFAULT_DIR_TYPE,
             description="",
             parent_id=None,
             aliases=None,
@@ -503,7 +526,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             session.add(TagDefine(
                 tag_id=v.tag_id,
                 tag_name=v.row.tag_name,
-                tag_type=_TAG_TYPE_FIXED,
+                tag_type=_normalize_tag_type(v.row.tag_type),
                 description=v.row.description,
                 dir_id=v.dir_id,
                 aliases=(json.dumps(v.row.aliases, ensure_ascii=False)
@@ -516,7 +539,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         else:
             before_json = json.dumps(
                 {"status": existing.status}, ensure_ascii=False)
-            existing.tag_type = _TAG_TYPE_FIXED
+            existing.tag_type = _normalize_tag_type(v.row.tag_type)
             existing.description = v.row.description
             existing.dir_id = v.dir_id
             existing.aliases = (

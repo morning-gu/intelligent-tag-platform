@@ -100,7 +100,9 @@ def make_log(**kw):
 CHECK_CASES = [
     (make_asset, "asset_type", ("movie", "series", "scene"), "episode"),
     (make_dir, "dir_type", ("dir_static", "dir_dynamic"), "static"),
-    (make_dir, "applicable_scope", ("content", "scene", "character"), "frame"),
+    (make_dir, "applicable_scope",
+     ("content", "scene", "character", "content,scene", "content,character",
+      "scene,character", "content,scene,character"), "frame"),
     (make_tag, "tag_type", ("val_fixed", "val_generalized"), "genre"),
     (make_tag, "status", ("active", "deprecated"), "deprecate"),
     (make_gen_task, "mode", ("closed", "open"), "hybrid"),
@@ -295,8 +297,8 @@ def test_media_asset_merged_columns(session):
 
 
 def test_server_default_columns(session):
-    """DDL DEFAULT 子句经 server_default 落库：目录适用范围、标签状态、
-    粒度与审核状态默认值（doc §3）。"""
+    """DDL DEFAULT 子句经 server_default 落库：目录适用范围（三值全选
+    组合）、标签状态、粒度与审核状态默认值（doc §3）。"""
     d = make_dir(dir_id="dir_mood", dir_name="整体情绪基调",
                  dir_type="dir_dynamic")
     t = make_tag(tag_id="tag_mood", tag_name="浪漫甜蜜", dir_id="dir_mood")
@@ -305,7 +307,8 @@ def test_server_default_columns(session):
     p = make_pre()
     session.add(p)
     session.commit()
-    assert session.get(TagCatalog, "dir_mood").applicable_scope == "content"
+    assert (session.get(TagCatalog, "dir_mood").applicable_scope
+            == "content,scene,character")
     assert session.get(TagDefine, "tag_mood").status == "active"
     assert session.get(PreAssetTag, p.id).target_type == "content"
     assert session.get(PreAssetTag, p.id).review_status == "pending"

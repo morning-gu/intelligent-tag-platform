@@ -52,7 +52,7 @@ class SameVecEmbedder:
 
 
 def _row(name, parent=None, desc="d", aliases=None):
-    return TagRow(None, name, "genre", desc, parent, aliases or [], None, None)
+    return TagRow(None, name, "val_fixed", desc, parent, aliases or [], None, None)
 
 
 # ---------- 落位拆分（Review Focus 5） ----------
@@ -73,7 +73,8 @@ def test_hierarchical_split_and_flat_fallback(session):
     assert set(defines) == {"反转", "悬疑"}
     assert dirs["内容"].parent_id is None
     assert dirs["剧情"].parent_id == dirs["内容"].dir_id
-    assert all(d.dir_type == "dir_static" and d.applicable_scope == "content"
+    assert all(d.dir_type == "dir_dynamic"
+               and d.applicable_scope == "content,scene,character"
                for d in dirs.values())
     # (dir, name) 落位：反转挂剧情目录、悬疑挂「未分类」；一律 val_fixed
     assert defines["反转"].dir_id == dirs["剧情"].dir_id
@@ -122,7 +123,7 @@ def test_flat_import_falls_back_to_uncategorized_idempotent(session):
     assert len(dirs) == 1
     root = dirs[0]
     assert root.dir_name == "未分类" and root.parent_id is None
-    assert root.dir_type == "dir_static"
+    assert root.dir_type == "dir_dynamic"
     assert root.embedding is not None  # 目录入库即计算 embedding
     assert session.get(TagDefine, r1.inserted[0]).dir_id == root.dir_id
 
@@ -273,7 +274,7 @@ def test_deprecated_same_name_is_reactivated_on_import(session):
 def test_status_literal_normalized_to_deprecated(session):
     # v1 "deprecate" 行内取值归一为 v2 "deprecated"（CHECK 约束字面量）
     res = run_governance(
-        [TagRow(None, "旧词", "genre", "d", None, [], None, "deprecate")],
+        [TagRow(None, "旧词", "val_fixed", "d", None, [], None, "deprecate")],
         session, MOCK_EMBEDDER)
     assert res.issues == []
     assert session.get(TagDefine, res.inserted[0]).status == "deprecated"
@@ -320,12 +321,20 @@ def test_governance_config_threshold_only(session):
 
 
 def test_allowed_tag_types_check_retired(session):
-    # tag_type 白名单校验退役：行 tag_type 任意值不入库、一律写 val_fixed
+    # tag_type 白名单校验退役：行 tag_type 任意值归一——非法回退 val_fixed，
+    # val_fixed/val_generalized 之外不入库
     res = run_governance(
         [TagRow(None, "悬疑", "不存在的类型", "d", None, [], None, None)],
         session, MOCK_EMBEDDER)
     assert res.issues == [] and len(res.inserted) == 1
     assert session.get(TagDefine, res.inserted[0]).tag_type == "val_fixed"
+
+    res2 = run_governance(
+        [TagRow(None, "泛化悬疑", "val_generalized", "d", None, [], None, None)],
+        session, MOCK_EMBEDDER)
+    assert res2.issues == [] and len(res2.inserted) == 1
+    assert (session.get(TagDefine, res2.inserted[0]).tag_type
+            == "val_generalized")
 
 
 def test_governance_batch_embedding_calls(session):

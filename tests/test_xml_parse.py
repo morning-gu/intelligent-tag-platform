@@ -25,9 +25,9 @@ def test_xml_matches_excel_result_shape():
 
 def test_xml_supports_attributes_and_reports_row_errors():
     result = parse_tag_xml("""<tags>
-      <tag tag_name="悬疑" tag_type="genre" description="描述"
+      <tag tag_name="悬疑" tag_type="val_fixed" description="描述"
            aliases="悬念, 推理"/>
-      <tag tag_name="缺描述" tag_type="genre"/>
+      <tag tag_name="缺描述" tag_type="val_fixed"/>
     </tags>""".encode())
 
     assert len(result.rows) == 1

@@ -16,5 +16,5 @@ def test_parse_nested_xml_imports_hierarchy_nodes():
     assert not result.errors
     assert [row.tag_name for row in result.rows] == ["内容", "剧情", "喜剧"]
     assert [row.parent_tag for row in result.rows] == [None, "内容", "剧情"]
-    assert all(row.tag_type == "genre" for row in result.rows)
+    assert all(row.tag_type == "val_fixed" for row in result.rows)
     assert result.rows[2].is_manual

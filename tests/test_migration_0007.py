@@ -86,7 +86,7 @@ EXPECTED_COLUMNS = {
         ("description", "TEXT", 1, None),
         ("parent_id", "TEXT", 0, None),
         ("aliases", "TEXT", 0, None),
-        ("applicable_scope", "TEXT", 0, "'content'"),
+        ("applicable_scope", "TEXT", 0, "'content,scene,character'"),
         ("embedding", "BLOB", 0, None),
         ("created_at", "DATETIME", 0, None),
         ("updated_at", "DATETIME", 0, None),
@@ -170,7 +170,9 @@ EXPECTED_CHECK_FRAGMENTS = {
     ],
     "tag_catalog": [
         "CHECK (dir_type IN ('dir_static', 'dir_dynamic'))",
-        "CHECK (applicable_scope IN ('content', 'scene', 'character'))",
+        "CHECK (applicable_scope IN ('content', 'scene', 'character', "
+        "'content,scene', 'content,character', 'scene,character', "
+        "'content,scene,character'))",
         "CONSTRAINT ux_tag_catalog_parent_name UNIQUE (parent_id, dir_name)",
     ],
     "tag_define": [
