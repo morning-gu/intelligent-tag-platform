@@ -1,7 +1,6 @@
-// 生产任务 API 契约测试（v2）：mock apiFetch 模块，断言任务列表查询串
+// 生产任务 API 契约测试（Task 12）：mock apiFetch 模块，断言任务列表查询串
 // 组装、详情/创建/重试端点的路径与方法形状。类型形状与后端
-// tagplatform/api/routers/generation.py 契约对齐（v2 任务直连 asset_id，
-// 详情 results 为 pre 行三态 review_status 形状）。
+// tagplatform/api/routers/generation.py 契约对齐。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiFetch } from './client'
 import {
@@ -76,17 +75,6 @@ describe('详情/创建/重试端点契约', () => {
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/generation/tasks', {
       method: 'POST',
       body: JSON.stringify(payload),
-    })
-  })
-
-  it('createGenerationTasks：policy 缺省时载荷不含该键（后端回退默认策略）', async () => {
-    mockedApiFetch.mockResolvedValue({ tasks: [] } as never)
-
-    await createGenerationTasks({ asset_ids: ['a1'], mode: 'closed' })
-
-    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/generation/tasks', {
-      method: 'POST',
-      body: JSON.stringify({ asset_ids: ['a1'], mode: 'closed' }),
     })
   })
 

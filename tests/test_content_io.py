@@ -1,14 +1,11 @@
-﻿"""内容 JSON 存储形态测试（2026-11：库里存原文，读时归一化）。
+"""内容 JSON 存储形态测试（2026-11：库里存完整上游模板，读时归一化）。
 
 覆盖：
-- 上游模板形态入库后，`media_asset.content_json` 原文与提交的一致
-  （键不改名、不裁剪）；
-- 读取时 `load_content` 能还原成平台内部 ContentJSON（API 响应形状不变）；
-- 历史内部形态（summary/time_range）继续可读，不需要迁移；
+- 上游模板形态入库后，`content_json` 是按模板补全后的形态（字段全量、
+  缺值 null / 空列表 []，键名不变）；
+- 读端点同样返回模板形态（description / start_ms / emotion[{name,code}]）；
+- 历史内部形态（summary/time_range）入库即归一为模板，读取仍可还原；
 - 判别函数对两种形态与空场景的判定。
-
-v2：存储位置从 media_context.content_json 换成影片级 media_asset.content_json，
-完整 JSON 经 `GET /assets/{asset_id}/content` 取回。
 """
 
 import json
@@ -43,8 +40,8 @@ TEMPLATE = {
 }
 
 
-def test_template_is_stored_verbatim(client):
-    """经 /content/import 提交的模板 JSON，影片资产行逐字保存（含键名与空值）。"""
+def test_template_is_stored_as_template(client):
+    """经 /content/import 提交的模板 JSON，库里按模板全量保存（键名不变）。"""
     resp = client.post("/api/v1/content/import",
                        json={"kind": "vision", "data": TEMPLATE})
     assert resp.status_code == 200, resp.text
@@ -60,23 +57,25 @@ def test_template_is_stored_verbatim(client):
     assert "time_range" not in stored["content"]["scenes"][0]
 
 
-def test_api_reads_back_internal_shape(client):
-    """读端点仍返回平台内部形状（前端 dist 不改也能用）。"""
+def test_api_reads_back_template_shape(client):
+    """读端点返回上游模板形态（description / start_ms / emotion[{name,code}]）。"""
     resp = client.post("/api/v1/content/import",
                        json={"kind": "vision", "data": TEMPLATE})
     asset_id = resp.json()["asset_id"]
     detail = client.get(f"/api/v1/assets/{asset_id}/content")
     assert detail.status_code == 200
     body = detail.json()
-    assert body["content"]["summary"] == "整片剧情"
+    assert body["content"]["description"] == "整片剧情"
+    assert "summary" not in body["content"]
     scene = body["content"]["scenes"][0]
-    assert scene["time_range"] == {"start_ms": 0, "end_ms": 1000}
-    assert scene["emotions"] == ["紧张压迫"]
+    assert (scene["start_ms"], scene["end_ms"]) == (0, 1000)
+    assert scene["emotion"] == [{"name": "紧张压迫", "code": "TENSE_OPPRESSIVE"}]
     assert scene["dialogues"][0]["speaker_name"] == "张三"
+    assert "time_range" not in scene
 
 
-def test_legacy_internal_shape_still_readable(client):
-    """2026-11 之前入库的内部形态继续可读（自动判别，不需迁移）。"""
+def test_legacy_internal_shape_read_as_template(client):
+    """2026-11 之前入库的内部形态：入库即归一为模板，读端点也按模板返回。"""
     legacy = {
         "schema_version": "1.0",
         "asset": {"asset_id": "movie_old", "asset_type": "movie", "title": "旧片"},
@@ -91,9 +90,40 @@ def test_legacy_internal_shape_still_readable(client):
     asset_id = resp.json()["asset_id"]
     with client.app.state.session_factory() as session:
         row = session.get(MediaAsset, asset_id)
-        # 平台格式：库内存的就是内部形态（原样）
-        assert json.loads(row.content_json) == legacy
+        stored = json.loads(row.content_json)
+        # 平台格式：库里也归一成模板形态（description / start_ms）
+        assert stored["content"]["description"] == "旧摘要"
+        assert "summary" not in stored["content"]
+        assert stored["content"]["scenes"][0]["start_ms"] == 0
+        # 内部读取路径不受影响
         assert load_content(row.content_json).content.summary == "旧摘要"
+    detail = client.get(f"/api/v1/assets/{asset_id}/content").json()
+    assert detail["content"]["description"] == "旧摘要"
+
+
+def test_stored_template_fills_every_field(client):
+    """模板字段全量：缺值 null、空列表 []（新建资产的最小上游 JSON）。"""
+    minimal = {
+        "schema_version": "1.0",
+        "asset": {"asset_id": "movie_min", "asset_type": "movie", "title": "最小片"},
+        "content": {"description": "只有一句话", "scenes": [
+            {"scene_id": "s1", "start_ms": 0, "end_ms": 10}]},
+    }
+    resp = client.post("/api/v1/content/import",
+                       json={"kind": "vision", "data": minimal})
+    assert resp.status_code == 200, resp.text
+    asset_id = resp.json()["asset_id"]
+    with client.app.state.session_factory() as app_ctx:
+        row = app_ctx.get(MediaAsset, asset_id)
+        stored = json.loads(row.content_json)
+    assert stored["asset"]["language"] is None
+    assert stored["asset"]["video_uri"] is None
+    assert stored["content"]["characters"] == []
+    scene = stored["content"]["scenes"][0]
+    assert scene["virtual_time"] is None and scene["location"] is None
+    assert scene["character_ids"] == [] and scene["events"] == []
+    assert scene["emotion"] == [] and scene["dialogues"] == []
+    assert scene["audio_events"] == []
 
 
 def test_shape_detection():

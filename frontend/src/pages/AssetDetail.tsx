@@ -1,58 +1,78 @@
-// 内容资产详情（v2）：上半视频播放器 + 场景时间轴，下半正式挂载标签表。
-// - 数据三路并取（Task 12 契约）：资产详情（含 recognized 识别状态）、正式
-//   挂载标签（仅审核通过的复制行）、完整内容 JSON（/assets/{id}/content，
-//   场景时间轴数据源）。content 404 = 未完成内容识别（上传占位资产/场景子
-//   资产），非致命降级——警示提示，播放器与挂载表照常；其他加载失败同样
-//   非致命（警示透出错误文案）。context 概念退役，contexts 行删除。
-// - 挂载表只保留挂载关系与展示值：标签名/来源（closed 闭环 / open 开放，
-//   历史挂载无对应 pre 行时 origin 为 null → "—"）/创建时间。评分/证据/
-//   审核状态留在 pre 侧不出现——证据查看走审核中心与任务详情页。
-// - 播放器不依赖详情加载（src 只需 assetId），挂载即可被 URL query 定位：
-//   ?scene={scene_id}&t={start_ms}（审核中心证据卡跳入）解析并 seek + 选中
-//   场景；场景点击 → 播放器 seek 到场景起始毫秒并选中高亮。
-import { Alert, Card, Spin, Table, Tag, Typography } from 'antd'
+// 内容资产详情（Task 11，承诺二核心）：审核员不看代码即可回答"模型为什么
+// 打了这个标签"。
+// - 上半：视频播放器（原生 video，src 走视频流端点）+ 场景时间轴。场景
+//   点击 → 播放器 seek 到场景起始毫秒并选中高亮；播放器不依赖详情加载
+//   （src 只需 assetId），挂载即可被 URL query 定位。
+// - 下半：该资产全部生成标签（GET /assets/{id}/tags），行展开证据卡；
+//   点击证据 → 播放器 seek 到证据 start_ms + 选中对应场景（EvidenceCard
+//   的 onEvidenceClick 原位消费，不跳转）。所有标签证据涉及的场景集合
+//   以金色反向高亮常驻时间轴（承诺二①）。
+// - URL query ?scene={scene_id}&t={start_ms}：审核中心证据卡跳入定位——
+//   挂载/参数变更时解析并 seek + 选中场景。
+import { Alert, Card, Progress, Spin, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import {
   fetchAssetContent,
   fetchAssetDetail,
   fetchAssetTags,
   type AssetDetailData,
-  type AssetMount,
   type AssetScene,
+  type AssetTagRow,
   type ContentContext,
 } from '../api/assets'
-import { ApiError } from '../api/client'
-import { formatTimestamp } from '../api/review'
+import { formatTimestamp, type ReviewEvidence } from '../api/review'
+import EvidenceCard from '../components/EvidenceCard'
 import SceneTimeline from '../components/SceneTimeline'
 import VideoPlayer, { type VideoPlayerHandle } from '../components/VideoPlayer'
 
-/** 来源中文展示（origin 词表 closed|open，与审核中心同规）。 */
-const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
+/** 审核状态中文展示（键集与后端契约固定枚举一致，与审核中心相同）。 */
+const STATUS_LABELS: Record<string, string> = {
+  pending: '待审核',
+  approved: '已通过',
+  rejected: '已拒绝',
+  merged: '已合并',
+}
 
-/** 来源 Tag 颜色（沿审核中心配色：闭环蓝 / 开放紫）。 */
-const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
+/** 审核状态 Tag 颜色。 */
+const STATUS_COLORS: Record<string, string> = {
+  pending: 'gold',
+  approved: 'green',
+  rejected: 'red',
+  merged: 'purple',
+}
 
-/** 内容加载的非致命失败标记：404 = 未完成内容识别（空态降级），
- * 其他 = 加载失败（警示透出错误文案）。 */
-type ContentIssue = { kind: 'unrecognized' } | { kind: 'error'; message: string }
+/** 来源中文展示（origin 为数据模型固定取值 generated/catalog）。 */
+const ORIGIN_LABELS: Record<string, string> = { generated: '生成', catalog: '目录' }
+
+/** 标签层级中文展示与颜色（level 为生成契约固定枚举 film/scene）。 */
+const LEVEL_LABELS: Record<string, string> = { film: '影片', scene: '场景' }
+const LEVEL_COLORS: Record<string, string> = { film: 'blue', scene: 'cyan' }
+
+/** 场景描述在卡片标题里的预览长度（全文在下方描述块展示）。 */
+const TITLE_PREVIEW = 40
+
+/** 超长文本截断（场景描述预览用）。 */
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
 
 export default function AssetDetail() {
   const { assetId = '' } = useParams()
   const [searchParams] = useSearchParams()
   const playerRef = useRef<VideoPlayerHandle>(null)
 
-  // —— 页面级数据：详情 + 挂载标签（任一失败整页报错）——
+  // —— 页面级数据：详情 + 标签（任一失败整页报错）——
   const [detail, setDetail] = useState<AssetDetailData | null>(null)
-  const [tags, setTags] = useState<AssetMount[]>([])
+  const [tags, setTags] = useState<AssetTagRow[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  // —— 时间轴数据：完整内容 JSON（非致命：404 未识别走空态降级，其他失败
-  //    仅时间轴不可用，标签列表与播放器 seek 定位仍可用）——
-  const [content, setContent] = useState<ContentContext | null>(null)
-  const [contentIssue, setContentIssue] = useState<ContentIssue | null>(null)
-  // —— 交互态：当前选中场景（场景点击/URL 定位写入）。记录写入时的
+  // —— 时间轴数据：首个上下文的内容 JSON（非致命：失败仅时间轴不可用，
+  //    标签列表与播放器 seek 定位仍可用）——
+  const [context, setContext] = useState<ContentContext | null>(null)
+  const [contextError, setContextError] = useState<string | null>(null)
+  // —— 交互态：当前选中场景（场景点击/证据定位写入）。记录写入时的
   //    assetId 与 searchParams 引用，渲染期派生有效选中：资产切换或 URL
   //    参数变更（审核中心再次跳入）后旧点击态自动失效，回退到 query 场景
   //    ——免重置 effect（set-state-in-effect 级联渲染反模式）。
@@ -73,34 +93,24 @@ export default function AssetDetail() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      // 三路并取：content 失败（404 未识别/其他错误）就地转降级标记，
-      // 不让 Promise.all 整页炸掉
-      const contentResult = fetchAssetContent(assetId).then(
-        (value) => ({ ok: true as const, value }),
-        (error: unknown) => ({ ok: false as const, error }),
-      )
-      const [detailData, tagRows, contentRes] = await Promise.all([
+      const [detailData, tagRows] = await Promise.all([
         fetchAssetDetail(assetId),
         fetchAssetTags(assetId),
-        contentResult,
       ])
       setDetail(detailData)
       setTags(tagRows)
       setLoadError(null)
-      if (contentRes.ok) {
-        setContent(contentRes.value)
-        setContentIssue(null)
-      } else {
-        setContent(null)
-        const err = contentRes.error
-        setContentIssue(
-          err instanceof ApiError && err.status === 404
-            ? { kind: 'unrecognized' }
-            : {
-                kind: 'error',
-                message: err instanceof Error ? err.message : '场景数据加载失败',
-              },
-        )
+      // 内容只有一份：media_asset.content_json（media_context 已并入并删表）
+      try {
+        if (detailData.has_content) {
+          setContext(await fetchAssetContent(assetId))
+        } else {
+          setContext(null)
+        }
+        setContextError(null)
+      } catch (err) {
+        setContext(null)
+        setContextError(err instanceof Error ? err.message : '场景数据加载失败')
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : '资产详情加载失败')
@@ -138,33 +148,61 @@ export default function AssetDetail() {
   /** 场景分段点击：seek 到场景起始毫秒 + 选中高亮。 */
   function handleSceneClick(scene: AssetScene) {
     setSelected({ assetId, sceneId: scene.scene_id, params: searchParams })
-    playerRef.current?.seek(scene.time_range.start_ms)
+    playerRef.current?.seek(scene.start_ms)
   }
+
+  /** 证据点击（标签卡原位定位）：seek 到证据 start_ms + 选中对应场景。 */
+  function handleEvidenceClick(ev: ReviewEvidence) {
+    setSelected({ assetId, sceneId: ev.scene_id, params: searchParams })
+    playerRef.current?.seek(ev.start_ms)
+  }
+
+  // 全部标签证据涉及的场景集合（时间轴金色反向高亮，常驻不随选中变化）
+  const evidenceSceneIds = useMemo(
+    () => [...new Set(tags.flatMap((t) => t.evidence.map((e) => e.scene_id)))],
+    [tags],
+  )
 
   // 时间轴宽度基准：优先资产 duration_ms；缺失时回落到场景最大结束毫秒
   const maxSceneEnd =
-    content === null
+    context === null
       ? 0
-      : content.content.scenes.reduce((m, s) => Math.max(m, s.time_range.end_ms), 0)
+      : context.content.scenes.reduce((m, s) => Math.max(m, s.end_ms), 0)
   const durationMs = detail?.duration_ms ?? maxSceneEnd
 
-  // 挂载表（v2）：仅挂载关系与展示值，评分/证据/审核状态留在 pre 侧
-  const mountColumns: TableProps<AssetMount>['columns'] = [
+  const tagColumns: TableProps<AssetTagRow>['columns'] = [
     { title: '标签名', dataIndex: 'tag_name' },
+    {
+      title: '标签层级',
+      dataIndex: 'level',
+      render: (v: string) => (
+        <Tag color={LEVEL_COLORS[v] ?? 'default'}>{LEVEL_LABELS[v] ?? v}</Tag>
+      ),
+    },
     {
       title: '来源',
       dataIndex: 'origin',
-      render: (v: string | null) =>
-        v === null ? (
-          '—'
-        ) : (
-          <Tag color={ORIGIN_COLORS[v] ?? 'default'}>{ORIGIN_LABELS[v] ?? v}</Tag>
-        ),
+      render: (v: string) => (
+        <Tag color={v === 'generated' ? 'blue' : 'green'}>{ORIGIN_LABELS[v] ?? v}</Tag>
+      ),
     },
     {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      render: (v: string | null) => (v === null ? '—' : v.replace('T', ' ').slice(0, 19)),
+      title: '置信度',
+      dataIndex: 'confidence',
+      render: (v: number | null) =>
+        v === null ? '暂无' : <Progress percent={Math.round(v * 100)} size="small" />,
+    },
+    {
+      title: '相关度',
+      dataIndex: 'relevance_score',
+      render: (v: number | null) => (v === null ? '暂无' : v.toFixed(2)),
+    },
+    {
+      title: '状态',
+      dataIndex: 'review_status',
+      render: (v: string) => (
+        <Tag color={STATUS_COLORS[v] ?? 'default'}>{STATUS_LABELS[v] ?? v}</Tag>
+      ),
     },
   ]
 
@@ -174,7 +212,15 @@ export default function AssetDetail() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Card title={detail === null ? '视频与场景' : detail.title}>
+      <Card
+        title={
+          detail === null
+            ? '视频与场景'
+            : detail.asset_type === 'scene'
+              ? truncate(detail.title, TITLE_PREVIEW)
+              : detail.title
+        }
+      >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <VideoPlayer ref={playerRef} assetId={assetId} />
           {detail !== null && (
@@ -184,51 +230,57 @@ export default function AssetDetail() {
                 <Typography.Text type="secondary">
                   {`时长 ${detail.duration_ms === null ? '未知' : formatTimestamp(detail.duration_ms)}`}
                 </Typography.Text>
-                <Tag color={detail.recognized ? 'green' : 'default'} style={{ marginInlineStart: 12 }}>
-                  {detail.recognized ? '识别完成' : '未识别'}
-                </Tag>
               </div>
-              {content !== null && (
+              {/* 场景资产：标题即完整场景描述，列表页只给截断预览，这里
+                  展示全文（pre-wrap 保留换行）。 */}
+              {detail.asset_type === 'scene' && (
+                <Typography.Paragraph
+                  data-testid="asset-description"
+                  style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
+                >
+                  {detail.title}
+                </Typography.Paragraph>
+              )}
+              {context !== null && (
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  {content.content.summary}
+                  {context.content.description ?? '（无剧情描述）'}
                 </Typography.Paragraph>
               )}
             </>
           )}
-          {content !== null ? (
+          {context !== null ? (
             <SceneTimeline
-              scenes={content.content.scenes}
+              scenes={context.content.scenes}
               durationMs={durationMs}
               selectedSceneId={selectedSceneId}
+              highlightSceneIds={evidenceSceneIds}
               onSceneClick={handleSceneClick}
             />
           ) : loading ? (
             <Spin />
-          ) : contentIssue !== null ? (
-            contentIssue.kind === 'unrecognized' ? (
-              <Alert
-                type="warning"
-                showIcon
-                message="未完成内容识别"
-                description="该资产尚未导入识别 JSON 或未完成识别，场景时间轴暂不可用。"
-              />
-            ) : (
-              <Alert
-                type="warning"
-                showIcon
-                message="场景数据加载失败"
-                description={contentIssue.message}
-              />
-            )
-          ) : null}
+          ) : contextError !== null ? (
+            <Alert type="warning" showIcon message="场景数据加载失败" description={contextError} />
+          ) : (
+            <Typography.Text type="secondary">暂无识别内容</Typography.Text>
+          )}
         </div>
       </Card>
       <Card title="标签列表">
-        <Table<AssetMount>
+        <Table<AssetTagRow>
           rowKey="id"
-          columns={mountColumns}
+          columns={tagColumns}
           dataSource={tags}
           loading={loading}
+          expandable={{
+            expandedRowRender: (row) => (
+              <EvidenceCard
+                assetId={assetId}
+                evidence={row.evidence}
+                onEvidenceClick={handleEvidenceClick}
+              />
+            ),
+            rowExpandable: (row) => row.evidence.length > 0,
+          }}
           pagination={false}
         />
       </Card>

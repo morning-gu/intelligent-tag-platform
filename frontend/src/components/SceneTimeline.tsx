@@ -37,7 +37,7 @@ export default function SceneTimeline({
   return (
     <div className="scene-timeline" data-testid="scene-timeline">
       {scenes.map((scene) => {
-        const span = scene.time_range.end_ms - scene.time_range.start_ms
+        const span = scene.end_ms - scene.start_ms
         const pct = durationMs > 0 ? (span / durationMs) * 100 : fallbackPct
         const isSelected = scene.scene_id === selectedSceneId
         // 选中态优先于证据高亮（一个分段只呈现一种主色）
@@ -47,7 +47,7 @@ export default function SceneTimeline({
             ? 'scene-timeline-segment scene-timeline-highlighted'
             : 'scene-timeline-segment'
         return (
-          <Tooltip key={scene.scene_id} title={`${scene.scene_id}：${scene.description}`}>
+          <Tooltip key={scene.scene_id} title={`${scene.scene_id}：${scene.description ?? ''}`}>
             <button
               type="button"
               className={className}

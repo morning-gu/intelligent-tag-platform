@@ -2,17 +2,10 @@
 
 这条链路是「视频理解部门给资产 → 平台出标签 → 人工审核」的最小闭环，
 用 mock LLM/Embedder 固定行为（零网络），断言四件事：
-1. 上游格式经 vision 适配器可直接导入：影片/场景资产行落库，识别内容
-   content_json 直写影片行（v2 合并语义：media_context 退役）；
-2. 生成任务（mode=open，任务行 tag_generation_task 直连 asset_id）在导入
-   的资产上跑通；
-3. 产出全部是 pre_asset_tag 中 `review_status="pending"` 的待审核行
-   （可审核状态），origin=open 自由候选（tag_id 空、候选名原文——审核
-   merge 归置时才赋 tag_id）；
+1. 上游格式经 vision 适配器可直接导入，资产/上下文/场景三级行落库；
+2. 生成任务（mode=open）在导入的上下文上跑通；
+3. 产出全部是 `review_status="pending"` 的待审核行（可审核状态）；
 4. 证据锚定到上游场景（scene_id + 毫秒区间）——不是空证据。
-
-v1→v2 映射：GenerationTask→TagGenerationTask（context_id→asset_id）、
-AssetTag 待审行→PreAssetTag、origin "generated"→"open"（词表退役）。
 """
 
 import json
@@ -78,15 +71,14 @@ def test_upstream_to_pending_tags(session):
     result = import_content(content, session, None)
     assert result.asset_id == "movie_e2e_001"
     assert len(result.scene_asset_ids) == 2
-    asset = session.get(MediaAsset, "movie_e2e_001")
-    assert asset is not None
-    # v2 合并语义：识别内容直落影片行 content_json（media_context 退役）
-    assert asset.content_json is not None
+    assert session.get(MediaAsset, "movie_e2e_001") is not None
+    assert session.get(MediaAsset, "movie_e2e_001").content_json is not None
 
     # 2. 建任务并执行（mock 模式 B：固定三候选；min_confidence 降到 0.5
     #    使三条全部过线——mock 的 confidence 落在 [0.5,1)，默认 0.7 会随机丢）
+    #    v2：任务直绑资产，内容来自 media_asset.content_json
     task = TagGenerationTask(
-        task_id="task_e2e_001", asset_id=result.asset_id, mode="open",
+        task_id="task_e2e_001", asset_id="movie_e2e_001", mode="open",
         policy_json='{"min_confidence": 0.5}',
         status="queued", created_at=datetime.now(timezone.utc))
     session.add(task)
@@ -95,16 +87,18 @@ def test_upstream_to_pending_tags(session):
     run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     session.refresh(task)
     assert task.status == "succeeded", task.error
-    assert task.prompt_version == "mtg-v1"
+    assert task.prompt_version == "mtg-v2"
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
-    rows = (session.query(PreAssetTag)
-            .filter(PreAssetTag.asset_id == "movie_e2e_001").all())
+    rows = session.query(PreAssetTag).filter(
+        PreAssetTag.asset_id == "movie_e2e_001").all()
     assert len(rows) == 3
     assert {r.review_status for r in rows} == {"pending"}
-    assert {r.origin for r in rows} == {"open"}  # v2 词表（generated 退役）
-    # 开放生成落自由候选：tag_id 空、候选名原文（审核 merge 归置时才赋 tag_id）
-    assert all(r.tag_id is None and r.candidate_name for r in rows)
+    assert {r.origin for r in rows} == {"open"}  # 无同名 → 全部新候选
+    # 挂载粒度由候选目录的 applicable_scope 决定（默认库含 content/scene/
+    # character 三类动态目录，所以允许混合，但每行都必须有合法挂载点）
+    assert {r.target_type for r in rows} <= {"content", "scene", "character"}
+    assert all(r.target_id for r in rows)
 
     # 4. 证据锚定在上游场景的时间区间内
     scene_ranges = {(s.time_range.start_ms, s.time_range.end_ms) for s in content.content.scenes}

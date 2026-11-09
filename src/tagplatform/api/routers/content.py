@@ -3,12 +3,9 @@
 薄路由层：适配（get_adapter().adapt）→ 导入（import_content）→ 响应模型，
 业务规则全部在 tagplatform.adapters / content_import 与 DB 层，router 只做
 协议转换与错误映射（未知 kind / 内容 JSON 校验失败 / video_root 非法 →
-422；未知资产/未完成内容识别 → 404）。
-
-v2 合并语义（doc §3.1）：content_json 直写影片级 media_asset 行，context
-概念退役——完整 JSON 经 `GET /assets/{asset_id}/content` 取回（解析后的
-平台内部 ContentJSON）；资产详情带 recognized 布尔（content_json 非空），
-不再有 contexts 数组与 contexts 端点。
+422；未知资产 → 404）。内容只有一份：`media_asset.content_json`，完整 JSON
+走 `GET /assets/{asset_id}/content`；v1 的 contexts 数组与 contexts 端点已
+随 media_context 表退役，不再保留兼容路由。
 """
 
 from datetime import datetime
@@ -20,9 +17,8 @@ from sqlalchemy.orm import Session
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
 from tagplatform.content_import import import_content as import_content_svc
-from tagplatform.content_io import load_content
+from tagplatform.content_template import template_from_stored
 from tagplatform.db.models import MediaAsset
-from tagplatform.schemas import ContentJSON
 
 router = APIRouter(prefix="/api/v1")
 
@@ -53,13 +49,21 @@ class AssetOut(BaseModel):
     title: str
     duration_ms: int | None = None
     video_uri: str | None = None
+    # 是否已有内容（影片行 content_json 非空；场景行恒 False）
+    has_content: bool = False
     created_at: datetime | None = None
+    # 最近一次写入内容的时间（没内容时等于上传时间）
+    updated_at: datetime | None = None
 
 
 class AssetDetail(AssetOut):
-    """资产详情：列表字段之上附内容识别状态（content_json 大字段不出详情）。"""
+    """资产详情：列表字段 + 内容状态（content_json 大字段不出详情）。
 
-    recognized: bool
+    `recognized` 是 main 分支同名字段的兼容别名（等价于 `has_content`）：
+    两边前端都读详情判断"有没有内容"，保留双名字段避免任一侧 404/KeyError。
+    """
+
+    recognized: bool = False
 
 
 def _asset_out(asset: MediaAsset) -> AssetOut:
@@ -71,7 +75,9 @@ def _asset_out(asset: MediaAsset) -> AssetOut:
         title=asset.title,
         duration_ms=asset.duration_ms,
         video_uri=asset.video_uri,
+        has_content=asset.content_json is not None,
         created_at=asset.created_at,
+        updated_at=asset.updated_at,
     )
 
 
@@ -134,32 +140,27 @@ def list_assets(
 
 @router.get("/assets/{asset_id}", response_model=AssetDetail)
 def get_asset(asset_id: str, session: Session = Depends(get_session)) -> AssetDetail:
-    """资产详情 + 识别状态（recognized = content_json 非空）；未知 asset_id → 404。"""
+    """资产详情（不含 content_json）；未知 asset_id → 404。"""
     asset = session.get(MediaAsset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
-    return AssetDetail(
-        **_asset_out(asset).model_dump(),
-        recognized=bool(asset.content_json),
-    )
+    return AssetDetail(**_asset_out(asset).model_dump(),
+                       recognized=asset.content_json is not None)
 
 
-@router.get("/assets/{asset_id}/content", response_model=ContentJSON)
-def get_asset_content(
-    asset_id: str, session: Session = Depends(get_session)
-) -> ContentJSON:
-    """资产的完整内容 JSON（解析 content_json 返回平台内部 ContentJSON）。
+@router.get("/assets/{asset_id}/content")
+def get_asset_content(asset_id: str, session: Session = Depends(get_session)) -> dict:
+    """资产主内容 JSON（`media_asset.content_json`，上游模板形态）。
 
-    资产不存在 → 404（"资产不存在"）；content_json 为空（未完成内容
-    识别，如上传占位资产/场景子资产）→ 404（"未完成内容识别"）。
+    这是 v2 的内容唯一数据源：生成任务与资产详情页都读这里（v1 的
+    media_context 已并入本表）。资产不存在 → 404；资产无内容 → 404。
     """
     asset = session.get(MediaAsset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
     if not asset.content_json:
-        raise HTTPException(
-            status_code=404, detail=f"资产未完成内容识别：{asset_id}")
-    return load_content(asset.content_json)
+        raise HTTPException(status_code=404, detail=f"资产无识别内容：{asset_id}")
+    return template_from_stored(asset.content_json)
 
 
 @router.get("/adapters", response_model=list[str])

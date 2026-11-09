@@ -6,11 +6,13 @@
 - UploadTooLarge：流式累计超上限 → 路由层转 413。
 
 占位语义（阶段 4 任务 4）：上传即建资产——asset_type 固定 "movie"、
-duration_ms 置空、不建 media_context，识别内容后续由导入/生成流水线
+duration_ms 置空、content_json 留空，识别内容后续由导入/生成流水线
 补齐（前端资产列表可见、内容详情提示"未导入识别内容"）。
 
-安全设计：存盘名一律 uuid4().hex + 归一小写后缀，与原始文件名零关联
-——`../` 穿越与中文等任意原名成分天然免疫（测试断言存盘名不含原名）。
+存盘命名：`{asset_id}{归一小写后缀}`，一资产一个文件。同一部片重新上传
+覆盖同名文件（先写 `.part` 再原子替换，失败不毁旧文件），不会像按 uuid
+命名那样每传一次就在磁盘上多留一份孤儿。与原始文件名仍零关联——`../`
+穿越与中文等任意原名成分天然免疫（测试断言存盘名不含原名）。
 
 大文件内存安全：流式落盘（固定 1 MiB 块）逐块累计字节数，超限即中止
 并清理半成品文件，绝不整读进内存。
@@ -18,6 +20,7 @@ duration_ms 置空、不建 media_context，识别内容后续由导入/生成�
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,16 +58,23 @@ class StoredUpload:
     video_uri: str
 
 
-def stored_filename(original_name: str) -> str:
-    """校验后缀白名单并生成存盘名：uuid4().hex + 归一小写后缀。
+def stored_filename(asset_id: str, original_name: str) -> str:
+    """校验后缀白名单并生成存盘名：`{asset_id}` + 归一小写后缀。
 
-    非白名单后缀抛 UnsupportedVideoFormat。存盘名与原名零关联（uuid
-    重命名），穿越/中文/特殊字符等原名成分天然免疫。
+    非白名单后缀抛 UnsupportedVideoFormat。存盘名只用资产主键，与原名
+    零关联：穿越段/中文/特殊字符等原名成分天然免疫。
     """
     suffix = Path(original_name).suffix.lower()
     if suffix not in ALLOWED_VIDEO_SUFFIXES:
         raise UnsupportedVideoFormat(f"不支持的视频格式: {original_name}")
-    return f"{uuid.uuid4().hex}{suffix}"
+    return f"{asset_id}{suffix}"
+
+
+def _remove_stale_variants(root: Path, asset_id: str, keep: Path) -> None:
+    """删掉同一资产换后缀后残留的旧文件（如从 .mp4 改传 .mkv）。"""
+    for path in root.glob(f"{asset_id}.*"):
+        if path != keep and path.is_file():
+            path.unlink(missing_ok=True)
 
 
 def save_upload(
@@ -73,6 +83,7 @@ def save_upload(
     session: Session,
     media_root: str,
     asset_id: str | None = None,
+    title: str | None = None,
 ) -> StoredUpload:
     """占位上传：校验后缀 → 流式落盘（超限中止清理）→ 登记资产并提交。
 
@@ -80,23 +91,31 @@ def save_upload(
     中止读取并删除半成品；两者均不产生数据库行。上限经 MAX_UPLOAD_BYTES
     模块全局调用期读取（测试可 monkeypatch 收紧以触发流式兜底路径）。
 
-    asset_id（2026-11 上游对接）：可选的资产绑定键。
-    - 指向已存在资产 → 只更新 video_uri（不新建行、不改标题/父级）——
-      数据集/识别服务先给了资产标识、后补视频的典型顺序；
+    asset_id：可选的资产绑定键。
+    - 指向已存在资产 → 只更新 video_uri（不新建行、不改父级）——同一部片
+      重复上传走的正是这条：资产行不重复，内容是后面覆盖的；
     - 指向不存在的资产 → 以该标识新建（上传先于识别时预留主键）；
-    - 缺省 → 沿用旧的 `asset_` + uuid 生成逻辑，行为与阶段 4 一致。
+    - 缺省 → 生成 `asset_` + uuid 的新主键。
+
+    title：显示标题。缺省用文件名去后缀；命中数据集时由路由层传片名。
+
+    重复上传同一资产：存盘名固定为 `{asset_id}{后缀}`，新内容先写
+    `.part` 再 `os.replace` 原子替换——上传中途失败（413/断连）时旧文件
+    仍是完整的，不会出现"传了一半把原视频覆盖坏"。
     """
     # 先校验后缀（失败零副作用：目录未建、文件未写、行未入）
-    name = stored_filename(original_name)
-    title = Path(original_name).stem  # 文件名去后缀作资产标题
+    new_id = asset_id or f"asset_{uuid.uuid4().hex[:8]}"
+    name = stored_filename(new_id, original_name)
+    title = title or Path(original_name).stem
     root = Path(media_root)
     root.mkdir(parents=True, exist_ok=True)  # 上传时确保目录存在
     dest = root / name
+    part = root / f".{name}.part"
 
     limit = MAX_UPLOAD_BYTES
     written = 0
     try:
-        with dest.open("wb") as out:
+        with part.open("wb") as out:
             while True:
                 chunk = stream.read(_CHUNK_SIZE)
                 if not chunk:
@@ -106,11 +125,16 @@ def save_upload(
                     raise UploadTooLarge(
                         f"上传大小 {written} 字节超出上限 {limit} 字节")
                 out.write(chunk)
+        os.replace(part, dest)  # 原子替换：旧文件在新文件就绪前一直有效
     except UploadTooLarge:
         # with 已关闭句柄（Windows 上打开句柄不可删），半成品清理后重抛
-        dest.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        part.unlink(missing_ok=True)
         raise
 
+    _remove_stale_variants(root, new_id, dest)
     video_uri = str(dest.resolve())
 
     # 绑定已有资产：只补视频地址，不新建行（识别服务/数据集已登记资产的情形）
@@ -122,7 +146,6 @@ def save_upload(
             return StoredUpload(asset_id=existing.asset_id, title=existing.title,
                                 video_uri=video_uri)
 
-    new_id = asset_id or f"asset_{uuid.uuid4().hex[:8]}"
     session.add(MediaAsset(
         asset_id=new_id,
         asset_type="movie",
@@ -130,6 +153,7 @@ def save_upload(
         duration_ms=None,  # 占位：时长未知，识别流水线后续补齐
         video_uri=video_uri,  # 存盘绝对路径
         created_at=datetime.now(timezone.utc),  # 时间戳列无默认值，显式赋 UTC now
+        updated_at=datetime.now(timezone.utc),
     ))
     session.commit()
     return StoredUpload(asset_id=new_id, title=title, video_uri=video_uri)

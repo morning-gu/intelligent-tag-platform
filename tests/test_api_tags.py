@@ -35,6 +35,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import openpyxl
+import pytest
 
 from tagplatform.db.models import (
     AssetTag,
@@ -44,6 +45,9 @@ from tagplatform.db.models import (
     TagChangeLog,
     TagDefine,
 )
+
+# 本模块断言标签库端点的**精确命中行数**：测试夹具不得预置标签库默认行
+pytestmark = pytest.mark.empty_library
 
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 

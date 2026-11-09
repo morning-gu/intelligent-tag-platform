@@ -33,8 +33,39 @@ MOCK_EMBEDDER = make_embedder("mock", mock=True)
 MOCK_LLM = MockLLMClient()
 
 
+@pytest.fixture(autouse=True)
+def tag_library(tmp_path):
+    """每个测试一份临时标签库（JSON 夹具 + 一个"无 session/client 时"的兜底库）。
+
+    不请求 `session` / `client` 的用例（如纯召回/对齐单测）直接
+    `try_load_library()`，读的就是这里绑定的临时库；`session` / `client`
+    fixture 之后会再绑它们自己的引擎并灌默认行（那一步受
+    `@pytest.mark.empty_library` 控制，避免污染"空库"用例）。
+    """
+    from tagplatform import library as library_mod
+    from tagplatform.db import create_engine_for
+    from tagplatform.db.models import Base
+    from tests.library_fixture import bind_engine, unbind_engine, write_library
+
+    engine = create_engine_for(str(tmp_path / "taglibrary.db"))
+    Base.metadata.create_all(engine)
+    bind_engine(engine)
+
+    root = write_library(tmp_path / "taglibrary")
+
+    library_mod._CACHE.clear()
+    library_mod._INDEX_CACHE.clear()
+    library_mod._DIR_VECTOR_CACHE.clear()
+    yield root
+    unbind_engine(engine)
+    engine.dispose()
+    library_mod._CACHE.clear()
+    library_mod._INDEX_CACHE.clear()
+    library_mod._DIR_VECTOR_CACHE.clear()
+
+
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, request):
     """进程内同步测试客户端：真 app + 临时文件 DB + mock 嵌入器 + mock LLM。
 
     API 层（Task 10/11）的导入/批次/标签/生成路由需要文件库与嵌入器/LLM：
@@ -70,6 +101,13 @@ def client(tmp_path):
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎
 
     app = create_app(settings)
+    # 标签库两表是 pre_asset_tag 的外键父表：把 app 引擎绑定到测试库，
+    # 非「空库」用例再灌一遍默认库（测试中途 write_library 会自动同步）
+    from tests.library_fixture import bind_engine, seed_database, unbind_engine
+
+    bind_engine(app.state.engine)
+    if not request.node.get_closest_marker("empty_library"):
+        seed_database(app.state.engine)
     with TestClient(app) as http_client:
         login = http_client.post("/api/v1/auth/login", json={
             "username": "admin",
@@ -77,6 +115,7 @@ def client(tmp_path):
         })
         assert login.status_code == 200, f"client fixture 登录失败：{login.text}"
         yield http_client
+    unbind_engine(app.state.engine)
     app.state.engine.dispose()  # 释放 app 级连接（Windows 文件句柄）
 
 
@@ -98,19 +137,28 @@ def content_fixture():
 
 
 @pytest.fixture
-def session():
+def session(tag_library, request):
     """函数级隔离的内存库 ORM 会话（每测试重建库与表）。
 
     models 延迟 import：models.py 属 Task 3 产物，若放在模块顶部，
     其未就位时整个测试套件的收集都会失败；放进 fixture 体内只影响
     使用 session 的测试。
+
+    引擎绑成标签库"当前数据源"，并灌一遍默认库（目录 + 标签），这样
+    `pre_asset_tag` 的外键父行、以及“库内已有标签”的用例都不必各自造数据。
+    断言"空库"行数的模块用 `@pytest.mark.empty_library` 关掉这次预置。
     """
     from tagplatform.db import create_engine_for, make_session_factory
     from tagplatform.db.models import Base
+    from tests.library_fixture import bind_engine, seed_database, unbind_engine
 
     engine = create_engine_for(":memory:")
     Base.metadata.create_all(engine)
+    bind_engine(engine)
+    if not request.node.get_closest_marker("empty_library"):
+        seed_database(engine)
     factory = make_session_factory(engine)
     with factory() as orm_session:
         yield orm_session
+    unbind_engine(engine)
     engine.dispose()

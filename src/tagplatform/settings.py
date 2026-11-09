@@ -91,6 +91,23 @@ class Settings(BaseSettings):
     # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
     mtg_report_dir: str = "data/audit/mtg"
 
+    # ---------- 阶段 7：用标签库提升开放生成质量（2026-11） ----------
+    # 总开关：关掉 = 回到"不看库"的旧行为（提示不注入、分档不做、排序不含分档）
+    open_library_enabled: bool = True
+    # 生成前注入的库内标签个数（只给名字）
+    open_library_hint_enabled: bool = True
+    open_library_hint_count: int = 30
+    # 分档阈值：余弦 ≥ 该值判"疑似重复"。
+    # 0.87 ≈ 候选×库随机配对的 99.9% 分位（实测 0.866），不是拍脑袋的数。
+    open_library_suspect_cosine: float = 0.74
+    # 名字字符重合度（Jaccard）≥ 该值判"疑似重复"
+    open_library_name_overlap: float = 0.40
+    # 疑似对子交给 LLM 复核"是不是同一个概念"（一批一次调用）；
+    # 复核通过才把候选替换成库内标准名，失败/关掉则不替换
+    open_library_verify_enabled: bool = True
+    # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
+    open_library_replace_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

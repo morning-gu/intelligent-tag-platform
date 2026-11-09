@@ -21,9 +21,11 @@ import {
   Radio,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Tooltip,
+  TreeSelect,
   Typography,
   message,
 } from 'antd'
@@ -41,6 +43,7 @@ import {
   type GenerationTaskResult,
   type GenerationTaskSummary,
 } from '../api/tasks'
+import { fetchLibraryTree, toDirSelectNodes, type DirSelectNode } from '../api/library'
 import EvidenceCard from '../components/EvidenceCard'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
@@ -63,22 +66,18 @@ const TASK_STATUS_COLORS: Record<string, string> = {
 const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
 const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
-/** 结果行的来源中文展示与 Tag 颜色（origin 词表 closed|open，与审核中心
- * 同规：闭环蓝 / 开放紫；v1 generated/catalog 词表退役）。 */
-const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
-
-/** 结果行的审核状态中文展示与 Tag 颜色（三态，与审核中心一致；
- * merged 随"修改即通过"语义退役）。 */
+/** 结果行的审核状态中文展示与 Tag 颜色（键集与审核中心一致）。 */
 const REVIEW_STATUS_LABELS: Record<string, string> = {
   pending: '待审核',
   approved: '已通过',
   rejected: '已拒绝',
+  merged: '已合并',
 }
 const REVIEW_STATUS_COLORS: Record<string, string> = {
   pending: 'gold',
   approved: 'green',
   rejected: 'red',
+  merged: 'purple',
 }
 
 /** 创建弹窗表单值：资产非空多选 + mode（默认闭环）+ 可选策略两项。 */
@@ -87,6 +86,19 @@ interface CreateFormValues {
   mode: string
   max_tags?: number
   min_confidence?: number
+  /** 目录范围（空 = 全库）；只列 dir_dynamic 目录，静态目录不产新词 */
+  dir_ids?: string[]
+  /** 是否允许产出库外新词（关掉 = 只挑命中库内的标签） */
+  allow_new_tags?: boolean
+  /** 单目录产出上限（0/未填 = 不限） */
+  max_tags_per_dir?: number
+}
+
+/** 挂载粒度中文展示（目录 applicable_scope 的落库结果）。 */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  content: '影片级',
+  scene: '场景级',
+  character: '角色级',
 }
 
 /** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
@@ -134,10 +146,26 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
   const resultColumns: TableProps<GenerationTaskResult>['columns'] = [
     { title: '标签名', dataIndex: 'tag_name' },
     {
+      title: '目录',
+      dataIndex: 'dir_name',
+      render: (v: string | null) => v ?? '未归属',
+    },
+    {
+      title: '粒度',
+      dataIndex: 'target_type',
+      render: (v: string) => (
+        <Tag color={v === 'content' ? 'default' : 'cyan'}>
+          {TARGET_TYPE_LABELS[v] ?? v}
+        </Tag>
+      ),
+    },
+    {
       title: '来源',
       dataIndex: 'origin',
       render: (v: string) => (
-        <Tag color={ORIGIN_COLORS[v] ?? 'default'}>{ORIGIN_LABELS[v] ?? v}</Tag>
+        <Tag color={v === 'closed' ? 'green' : 'blue'}>
+          {v === 'closed' ? '目录召回' : '开放生成'}
+        </Tag>
       ),
     },
     {
@@ -161,7 +189,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
       title: '证据',
       dataIndex: 'evidence',
       render: (v: ReviewEvidence[]) => (
-        <ResultEvidence assetId={detail.asset_id} evidence={v} />
+        <ResultEvidence assetId={detail.asset_id ?? ''} evidence={v} />
       ),
     },
   ]
@@ -202,6 +230,7 @@ export default function GenerationTasks() {
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createForm] = Form.useForm<CreateFormValues>()
+  const [dirNodes, setDirNodes] = useState<DirSelectNode[]>([])
 
   const loadTasks = useCallback(async () => {
     setLoading(true)
@@ -247,6 +276,10 @@ export default function GenerationTasks() {
       .then((rows) => setAssets(rows))
       .catch((err) => message.error(err instanceof Error ? err.message : '资产列表加载失败'))
       .finally(() => setAssetsLoading(false))
+    // 目录树只用于"限定范围"：可扩展目录才可选（静态目录不产新词）
+    fetchLibraryTree()
+      .then((body) => setDirNodes(toDirSelectNodes(body.dirs)))
+      .catch((err) => message.error(err instanceof Error ? err.message : '标签库目录加载失败'))
     setCreateOpen(true)
   }
 
@@ -261,6 +294,14 @@ export default function GenerationTasks() {
     const policy: GenerationPolicyPayload = {}
     if (values.max_tags !== undefined) policy.max_tags = values.max_tags
     if (values.min_confidence !== undefined) policy.min_confidence = values.min_confidence
+    if (values.dir_ids !== undefined && values.dir_ids.length > 0) {
+      policy.dir_ids = values.dir_ids
+    }
+    // 默认 true 与后端缺省一致：只在显式关掉时携带 false，其余不写进 policy
+    if (values.allow_new_tags === false) policy.allow_new_tags = false
+    if (values.max_tags_per_dir !== undefined && values.max_tags_per_dir > 0) {
+      policy.max_tags_per_dir = values.max_tags_per_dir
+    }
     setCreating(true)
     try {
       const res = await createGenerationTasks({
@@ -409,6 +450,38 @@ export default function GenerationTasks() {
                 { value: 'open', label: '开放' },
               ]}
             />
+          </Form.Item>
+          <Form.Item
+            name="dir_ids"
+            label="目录范围"
+            extra="留空 = 全库；只列可扩展（dir_dynamic）目录，静态目录不产新词"
+          >
+            <TreeSelect
+              aria-label="目录范围"
+              treeData={dirNodes}
+              multiple
+              treeCheckable
+              showCheckedStrategy={TreeSelect.SHOW_PARENT}
+              treeDefaultExpandAll
+              placeholder="不限定目录"
+              allowClear
+            />
+          </Form.Item>
+          <Form.Item
+            name="allow_new_tags"
+            label="允许产出新词"
+            valuePropName="checked"
+            initialValue={true}
+            extra="关闭后只挑命中标签库的标签；新词进审核队列，通过后写入入库预览"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="max_tags_per_dir"
+            label="单目录上限"
+            extra="0 或留空 = 不限；限制同一目录最多产出几条新词"
+          >
+            <InputNumber min={0} placeholder="默认不限" style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="max_tags" label="最大标签数">
             <InputNumber min={1} placeholder="默认 30" style={{ width: '100%' }} />

@@ -36,6 +36,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # 该模块的用例断言「空库」行数（治理导入、重嵌入、迁移链），测试夹具
+    # 不得预置标签库默认行——见 tests/conftest.py 的 session/client fixture
+    "empty_library: 不为该用例预置标签库默认目录/标签",
+]
 filterwarnings = [
     # starlette 1.10 弃用提示（其 testclient 的 httpx 集成建议迁移 httpx2），
     # 由 fastapi 自身 import 触发，与本项目代码无关，待 fastapi 官方跟进后再处理

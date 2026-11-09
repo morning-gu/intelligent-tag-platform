@@ -1,21 +1,18 @@
-// 审核中心测试（v2 行即日志）：mock apiFetch 按路径/方法分发（未命中即抛
-// 错），覆盖：列表渲染与默认筛选参数（status=pending、page_size=50）、
-// 目录/来源/置信度/状态筛选传参（dir/origin 替代 v1 tag_type/mode）、分页
-// 传参、候选行（无 tag_id）只出 拒绝+合并、单条通过载荷、409 冲突提示与
-// 自动刷新（Review Focus 1）、非冲突错误透出、修改弹窗载荷（提交即通过）、
-// 合并弹窗两支载荷（并入既有 merge_to_tag_id / 合入新建 new_tag_name+
-// new_dir_id）、批量操作载荷与失败汇总、行展开证据卡、加载失败。
+// 审核中心测试（Task 10）：mock apiFetch 按路径/方法分发（未命中即抛错），
+// 覆盖：列表渲染与默认筛选参数、筛选变更传参（置信度区间/状态下拉）、
+// 分页传参、单条通过载荷、409 冲突提示与自动刷新（Review Focus 1）、
+// 非冲突错误透出、修改/合并弹窗载荷、批量操作载荷与失败汇总、行展开证据卡。
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ReviewCenter from './ReviewCenter'
 import { ApiError, apiFetch } from '../api/client'
-import type { TagNode } from '../api/catalog'
 import type {
   BatchReviewItemResult,
   ReviewFilters,
   ReviewItem,
   ReviewItemsResponse,
+  TagOption,
 } from '../api/review'
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -28,72 +25,100 @@ const mockedApiFetch = vi.mocked(apiFetch)
 // ---------- 夹具（与后端 ReviewItemOut / ReviewFiltersOut 契约同形） ----------
 
 const FILTERS: ReviewFilters = {
-  statuses: ['pending', 'approved', 'rejected'],
-  origins: ['closed', 'open'],
-  dirs: ['情感', '动作'],
+  tag_types: ['mood', 'genre'],
+  statuses: ['pending', 'approved', 'rejected', 'merged'],
+  modes: ['closed', 'open'],
+  dirs: [
+    {
+      dir_id: 'dir_theme',
+      dir_name: '细分题材',
+      path: '内容特征标签/细分题材',
+      dir_type: 'dir_dynamic',
+      applicable_scope: 'content',
+    },
+    {
+      dir_id: 'dir_scene',
+      dir_name: '微观语义标签',
+      path: '微观语义标签',
+      dir_type: 'dir_dynamic',
+      applicable_scope: 'scene',
+    },
+  ],
 }
 
-/** fetchTags（kind=tag）返回的标准标签节点（混合树 TagNode 形状）。 */
-const TAG_NODES: TagNode[] = [
-  {
-    id: 'tag-crime', name: '犯罪', kind: 'tag', dir_type: null, description: '犯罪题材',
-    parent_id: 'dir-crime', status: 'active', has_children: false, aliases: [],
-  },
-  {
-    id: 'tag-romance', name: '爱情', kind: 'tag', dir_type: null, description: '爱情题材',
-    parent_id: 'dir-crime', status: 'active', has_children: false, aliases: [],
-  },
+const TAGS: TagOption[] = [
+  { tag_id: 'tag-crime', tag_name: '犯罪', tag_type: 'genre', description: '犯罪题材' },
+  { tag_id: 'tag-romance', tag_name: '爱情', tag_type: 'genre', description: '爱情题材' },
 ]
 
-/** fetchTagCatalog（kind=dir）返回的目录节点（合并弹窗"合入新建"数据源）。 */
-const DIR_NODES: TagNode[] = [
-  {
-    id: 'dir-emotion', name: '情感', kind: 'dir', dir_type: 'dir_static', description: '',
-    parent_id: null, status: null, has_children: true, aliases: [],
-  },
-  {
-    id: 'dir-action', name: '动作', kind: 'dir', dir_type: 'dir_static', description: '',
-    parent_id: null, status: null, has_children: true, aliases: [],
-  },
-]
-
-/** closed 行：有 tag_id（四动作全出），有置信度有证据（可展开）。 */
+/** generated 行：有置信度有证据（可展开）。 */
 const ROW_A: ReviewItem = {
   id: 1,
   asset_id: 'a1',
   asset_title: '星际穿越',
-  tag_name: '犯罪',
-  tag_id: 'tag-crime',
-  candidate_name: null,
-  origin: 'closed',
-  dir_name: '情感',
+  tag_name: '主角争执',
+  origin: 'open',
+  mode: 'open',
+  tag_type: 'mood',
   confidence: 0.42,
   relevance: 0.77,
   review_status: 'pending',
+  target_type: 'content',
+  dir_id: 'dir_theme',
+  dir_name: '细分题材',
+  dir_path: '内容特征标签/细分题材',
   evidence: [{ scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' }],
   task_id: 'task-1',
+  reviewer_id: null,
+  review_comment: null,
 }
 
-/** open 自由候选行：tag_id null、candidate_name 非空——approve/modify 后端
- * 422，页面只出 拒绝+合并；dir_name/置信度/相关度均 null（兜底"—"/"暂无"）。 */
-const ROW_CANDIDATE: ReviewItem = {
+/** catalog 行：置信度/相关度为 null（兜底"暂无"）、无证据（不可展开）。 */
+const ROW_B: ReviewItem = {
   id: 2,
   asset_id: 'a2',
   asset_title: '盗梦空间',
-  tag_name: '主角争执',
-  tag_id: null,
-  candidate_name: '主角争执',
-  origin: 'open',
-  dir_name: null,
+  tag_name: '枪战',
+  origin: 'closed',
+  mode: 'closed',
+  tag_type: 'genre',
   confidence: null,
   relevance: null,
   review_status: 'pending',
+  target_type: 'content',
+  dir_id: 'dir_scene',
+  dir_name: '微观语义标签',
+  dir_path: '微观语义标签',
   evidence: [],
-  task_id: 'task-1',
+  task_id: null,
+  reviewer_id: null,
+  review_comment: null,
+}
+
+/** 新词行：tag_type 为 null（库内无类型），类型列兜底"—"。 */
+const ROW_NULL_MODE: ReviewItem = {
+  id: 3,
+  asset_id: 'a3',
+  asset_title: '无模式资产',
+  tag_name: '慢镜头',
+  origin: 'closed',
+  mode: null,
+  tag_type: null,
+  confidence: 0.8,
+  relevance: 0.8,
+  review_status: 'pending',
+  target_type: 'content',
+  dir_id: 'dir_scene',
+  dir_name: '微观语义标签',
+  dir_path: '微观语义标签',
+  evidence: [],
+  task_id: null,
+  reviewer_id: null,
+  review_comment: null,
 }
 
 /** total=60 > page_size=50：分页器出现第二页按钮。 */
-const PAGE_ONE: ReviewItemsResponse = { items: [ROW_A, ROW_CANDIDATE], total: 60, page: 1 }
+const PAGE_ONE: ReviewItemsResponse = { items: [ROW_A, ROW_B], total: 60, page: 1 }
 
 // ---------- mock 装配与查询辅助 ----------
 
@@ -112,17 +137,12 @@ function mockApis(options: MockOptions = {}) {
     if (path.startsWith('/api/v1/review/items')) return options.items ?? PAGE_ONE
     if (method === 'POST' && /^\/api\/v1\/asset-tags\/\d+\/review$/.test(path)) {
       if (options.reviewError) throw options.reviewError
-      return { id: 1, tag_name: '犯罪' }
+      return { id: 1, tag_name: '主角争执' }
     }
     if (method === 'POST' && path === '/api/v1/asset-tags/batch-review') {
       return { results: options.batchResults ?? [] }
     }
-    // 混合树列表端点按 kind 分流：dir 只取目录（合入新建下拉），其余为
-    // 标签搜索（合并目标）
-    if (path.startsWith('/api/v1/tags') && path.includes('kind=dir')) {
-      return { items: DIR_NODES }
-    }
-    if (path.startsWith('/api/v1/tags')) return { items: TAG_NODES }
+    if (path.startsWith('/api/v1/tags')) return { items: TAGS }
     throw new Error(`未预期的请求：${method} ${path}`)
   })
 }
@@ -140,6 +160,17 @@ function postedBody(path: string): string | undefined {
     ([p, init]) => p === path && (init as RequestInit | undefined)?.method === 'POST',
   )
   return call === undefined ? undefined : String((call[1] as RequestInit).body)
+}
+
+/** 审核中心默认全部折叠：逐一点击分组头展开，露出标签行与行内操作。 */
+async function expandAllGroups() {
+  const headers = [...document.querySelectorAll('.ant-collapse-header')]
+  for (const header of headers) fireEvent.click(header)
+  await waitFor(() =>
+    expect(document.querySelectorAll('.ant-collapse-item-active')).toHaveLength(
+      headers.length,
+    ),
+  )
 }
 
 function renderReviewCenter() {
@@ -163,58 +194,45 @@ afterEach(() => {
 // ---------- 用例 ----------
 
 describe('ReviewCenter 审核中心', () => {
-  it('渲染列表行与默认筛选参数（status=pending、page_size=50）', async () => {
+  it('按影片分组渲染（默认全部折叠）+ 默认筛选参数（status=pending、page_size=500）', async () => {
     mockApis()
     renderReviewCenter()
 
+    // 分组头：影片标题 + 条数；默认折叠，标签行不渲染
     expect(await screen.findByText('星际穿越')).toBeInTheDocument()
-    const rowA = screen.getByText('星际穿越').closest('tr')!
-    const rowC = screen.getByText('盗梦空间').closest('tr')!
-    // 行内容：标签名 / 目录列 / 来源 Tag（closed 闭环 / open 开放，mode 列
-    // 已删）/ 状态 Tag / 置信度进度条 / null 兜底（目录"—"、分数"暂无"）
-    expect(rowA).toHaveTextContent('犯罪')
-    expect(rowA).toHaveTextContent('情感')
-    expect(rowA).toHaveTextContent('闭环')
+    expect(screen.getByText('盗梦空间')).toBeInTheDocument()
+    expect(screen.queryByText('主角争执')).not.toBeInTheDocument()
+    expect(screen.queryByText('枪战')).not.toBeInTheDocument()
+    expect(document.querySelectorAll('.ant-collapse-item-active')).toHaveLength(0)
+
+    fireEvent.click(screen.getByText('星际穿越'))
+    const rowA = (await screen.findByText('主角争执')).closest('tr')!
+    fireEvent.click(screen.getByText('盗梦空间'))
+    const rowB = (await screen.findByText('枪战')).closest('tr')!
+    // 行内容：标签名 / 类型 / 来源 Tag / 状态 Tag / 置信度进度条
+    expect(rowA).toHaveTextContent('主角争执')
+    expect(rowA).toHaveTextContent('开放生成')
     expect(rowA).toHaveTextContent('待审核')
     expect(rowA).toHaveTextContent('42%')
-    expect(rowC).toHaveTextContent('主角争执')
-    expect(rowC).toHaveTextContent('开放')
-    expect(within(rowC).getByText('—')).toBeInTheDocument()
-    expect(within(rowC).getAllByText('暂无')).toHaveLength(2)
+    expect(screen.getByText('目录召回')).toBeInTheDocument()
+    expect(within(rowB).getAllByText('暂无')).toHaveLength(2)
 
-    // 默认拉待审核，分页参数走列表 API
+    // 默认拉待审核，分组视图一次取回全部匹配行
     const paths = itemsCallPaths()
     expect(paths).toHaveLength(1)
     expect(paths[0]).toContain('status=pending')
     expect(paths[0]).toContain('page=1')
-    expect(paths[0]).toContain('page_size=50')
+    expect(paths[0]).toContain('page_size=500')
   })
 
-  it('目录筛选：选择目录后携带 dir= 重新拉取', async () => {
-    mockApis()
+  it('库外新词行：无库内类型时类型列兜底显示"—"', async () => {
+    mockApis({ items: { items: [ROW_NULL_MODE], total: 1, page: 1 } })
     renderReviewCenter()
-    await screen.findByText('星际穿越')
 
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: '目录筛选' }))
-    // antd v6 下拉存在隐藏的无障碍克隆（role=option、无点击处理器），
-    // 真实可点选项带 title 属性——以 title 定位点击
-    fireEvent.click(await screen.findByTitle('情感'))
-
-    await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
-    expect(itemsCallPaths()[1]).toContain(`dir=${encodeURIComponent('情感')}`)
-    expect(itemsCallPaths()[1]).toContain('page=1')
-  })
-
-  it('来源筛选：选择开放后携带 origin=open 重新拉取', async () => {
-    mockApis()
-    renderReviewCenter()
-    await screen.findByText('星际穿越')
-
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: '来源筛选' }))
-    fireEvent.click(await screen.findByTitle('开放'))
-
-    await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
-    expect(itemsCallPaths()[1]).toContain('origin=open')
+    await screen.findByText('无模式资产')
+    await expandAllGroups()
+    const row = (await screen.findByText('慢镜头')).closest('tr')!
+    expect(within(row).getByText('—')).toBeInTheDocument()
   })
 
   it('修改置信度下限筛选：携带 confidence_min 重新拉取', async () => {
@@ -235,48 +253,35 @@ describe('ReviewCenter 审核中心', () => {
     await screen.findByText('星际穿越')
 
     fireEvent.mouseDown(screen.getByRole('combobox', { name: '状态筛选' }))
+    // antd v6 下拉存在隐藏的无障碍克隆（role=option、无点击处理器），
+    // 真实可点选项带 title 属性——以 title 定位点击
     fireEvent.click(await screen.findByTitle('已通过'))
 
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
     expect(itemsCallPaths()[1]).toContain('status=approved')
   })
 
-  it('点击第二页：携带 page=2 重新拉取', async () => {
+  it('影片分组默认折叠：点击分组头展开，再点收起', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
 
-    fireEvent.click(screen.getByText('2'))
+    const panel = screen.getByText('星际穿越').closest('.ant-collapse-item')!
+    expect(panel).not.toHaveClass('ant-collapse-item-active')
 
-    await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
-    expect(itemsCallPaths()[1]).toContain('page=2')
-  })
+    fireEvent.click(screen.getByText('星际穿越'))
+    await waitFor(() => expect(panel).toHaveClass('ant-collapse-item-active'))
+    expect(await screen.findByText('主角争执')).toBeInTheDocument()
 
-  it('行动作按形态分支：tag_id 行四动作全出，候选行只出 拒绝+合并', async () => {
-    mockApis()
-    renderReviewCenter()
-    await screen.findByText('星际穿越')
-
-    const rowA = screen.getByText('星际穿越').closest('tr')!
-    const rowC = screen.getByText('盗梦空间').closest('tr')!
-
-    // tag_id 行（closed 行 / open 归一命中行）：四动作全出
-    expect(within(rowA).getByRole('button', { name: /^通\s*过$/ })).toBeInTheDocument()
-    expect(within(rowA).getByRole('button', { name: /^拒\s*绝$/ })).toBeInTheDocument()
-    expect(within(rowA).getByRole('button', { name: /^修\s*改$/ })).toBeInTheDocument()
-    expect(within(rowA).getByRole('button', { name: /^合\s*并$/ })).toBeInTheDocument()
-
-    // open 自由候选行（tag_id null）：approve/modify 后端 422——不出口
-    expect(within(rowC).queryByRole('button', { name: /^通\s*过$/ })).not.toBeInTheDocument()
-    expect(within(rowC).queryByRole('button', { name: /^修\s*改$/ })).not.toBeInTheDocument()
-    expect(within(rowC).getByRole('button', { name: /^拒\s*绝$/ })).toBeInTheDocument()
-    expect(within(rowC).getByRole('button', { name: /^合\s*并$/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByText('星际穿越'))
+    await waitFor(() => expect(panel).not.toHaveClass('ant-collapse-item-active'))
   })
 
   it('单条通过：Popconfirm 确认后 POST approve 载荷并自动刷新', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -293,6 +298,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ reviewError: new ApiError(409, '该标签已被处理') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -303,102 +309,60 @@ describe('ReviewCenter 审核中心', () => {
   })
 
   it('非冲突错误：透出后端 detail 文案且不刷新列表', async () => {
-    mockApis({ reviewError: new ApiError(422, '该候选行未关联标签定义（open 自由候选须先合并入库 merge）') })
+    mockApis({ reviewError: new ApiError(422, 'merge 动作必须提供 merge_to_tag_id') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^拒\s*绝$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
-    expect(await screen.findByText('该候选行未关联标签定义（open 自由候选须先合并入库 merge）')).toBeInTheDocument()
+    expect(await screen.findByText('merge 动作必须提供 merge_to_tag_id')).toBeInTheDocument()
     expect(itemsCallPaths()).toHaveLength(1)
   })
 
-  it('修改弹窗：预填候选名，提交 modify 载荷（提交即通过）并刷新', async () => {
+  it('修改弹窗：预填当前行，提交 POST modify 载荷', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^修\s*改$/ })[0])
-    const nameInput = await screen.findByLabelText('候选名')
-    // closed 行 candidate_name 为空——预填回退展示名（定义名）
-    expect(nameInput).toHaveValue('犯罪')
-    fireEvent.change(nameInput, { target: { value: '犯罪题材' } })
-    fireEvent.change(screen.getByLabelText('候选描述'), { target: { value: '涉及犯罪情节' } })
-    fireEvent.change(screen.getByLabelText('备注'), { target: { value: '修正措辞' } })
+    const nameInput = await screen.findByLabelText('标签名')
+    expect(nameInput).toHaveValue('主角争执')
+    fireEvent.change(nameInput, { target: { value: '主角冲突' } })
     fireEvent.click(screen.getByRole('button', { name: /确\s*定/ }))
 
     await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
       action: 'modify',
-      payload: {
-        candidate_name: '犯罪题材',
-        candidate_description: '涉及犯罪情节',
-        comment: '修正措辞',
-      },
+      payload: { tag_name: '主角冲突' },
     })
-    // 提交即通过（后端 modify=更新后 approve）：成功提示 + 自动刷新列表
-    expect(await screen.findByText('已修改并通过')).toBeInTheDocument()
+    // 成功后关弹窗并刷新列表
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
   })
 
-  it('合并弹窗·并入既有：搜索选择目标标签，提交 merge_to_tag_id+comment 载荷', async () => {
+  it('合并弹窗：搜索选择目标标签，提交 POST merge 载荷', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^合\s*并$/ })[0])
-    // 打开弹窗即预载候选标签（kind=tag 只搜标签，不混入目录）
+    // 打开弹窗即预载候选标签（空关键词）
     await waitFor(() => {
-      expect(mockedApiFetch.mock.calls.some(
-        ([p]) => p === '/api/v1/tags?kind=tag&limit=20',
-      )).toBe(true)
+      expect(mockedApiFetch.mock.calls.some(([p]) => p === '/api/v1/tags?limit=20')).toBe(true)
     })
 
     fireEvent.mouseDown(screen.getByRole('combobox', { name: '搜索标准标签' }))
-    // 同下拉筛选：点击真实选项（title 定位，避开隐藏无障碍克隆）
-    fireEvent.click(await screen.findByTitle('犯罪'))
+    // 同状态筛选：点击真实选项（title 定位，避开隐藏无障碍克隆）
+    fireEvent.click(await screen.findByTitle('犯罪（genre）'))
 
-    fireEvent.change(screen.getByLabelText('备注'), { target: { value: '并入既有目标' } })
     fireEvent.click(screen.getByRole('button', { name: /确\s*定/ }))
     await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
       action: 'merge',
-      payload: { merge_to_tag_id: 'tag-crime', comment: '并入既有目标' },
-    })
-  })
-
-  it('合并弹窗·合入新建：目录下拉懒加载，提交 new_tag_name/new_dir_id 载荷', async () => {
-    mockApis()
-    renderReviewCenter()
-    await screen.findByText('星际穿越')
-
-    fireEvent.click(screen.getAllByRole('button', { name: /^合\s*并$/ })[0])
-    // 支二目录下拉 lazily：切到合入新建才拉 kind=dir
-    fireEvent.click(screen.getByRole('radio', { name: /合入新建/ }))
-    await waitFor(() => {
-      expect(mockedApiFetch.mock.calls.some(
-        ([p]) => typeof p === 'string' && p.includes('kind=dir'),
-      )).toBe(true)
-    })
-
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: '目标目录' }))
-    fireEvent.click(await screen.findByTitle('情感'))
-
-    fireEvent.change(screen.getByLabelText('新标签名'), { target: { value: '亲情' } })
-    fireEvent.change(screen.getByLabelText('新标签描述'), { target: { value: '亲情题材' } })
-    fireEvent.change(screen.getByLabelText('备注'), { target: { value: '自由候选归置' } })
-    fireEvent.click(screen.getByRole('button', { name: /确\s*定/ }))
-
-    await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
-    expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
-      action: 'merge',
-      payload: {
-        new_tag_name: '亲情',
-        new_dir_id: 'dir-emotion',
-        new_description: '亲情题材',
-        comment: '自由候选归置',
-      },
+      payload: { merge_to_tag_id: 'tag-crime' },
     })
   })
 
@@ -408,10 +372,11 @@ describe('ReviewCenter 审核中心', () => {
     })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
     const checkboxes = screen.getAllByRole('checkbox')
-    fireEvent.click(checkboxes[1]) // 第一行（0 为表头全选）
-    fireEvent.click(checkboxes[2]) // 第二行
+    fireEvent.click(checkboxes[1]) // 影片一的行
+    fireEvent.click(checkboxes[3]) // 影片二的行
     fireEvent.click(screen.getByRole('button', { name: /^批量通过$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -429,8 +394,10 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ batchResults: [{ id: 1, ok: true }, { id: 2, ok: true }] })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
-    fireEvent.click(screen.getAllByRole('checkbox')[0]) // 表头全选
+    fireEvent.click(screen.getAllByRole('checkbox')[0]) // 影片一表头全选
+    fireEvent.click(screen.getAllByRole('checkbox')[2]) // 影片二表头全选
     fireEvent.click(screen.getByRole('button', { name: /^批量拒绝$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -446,8 +413,9 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandAllGroups()
 
-    // 仅 ROW_A 有证据可展开（ROW_C rowExpandable=false）
+    // 仅 ROW_A 有证据可展开（ROW_B rowExpandable=false）
     const expandIcon = document.querySelector('.ant-table-row-expand-icon')
     expect(expandIcon).not.toBeNull()
     fireEvent.click(expandIcon as Element)

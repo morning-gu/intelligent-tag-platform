@@ -1,15 +1,12 @@
 """模式 B（开放式生成）测试：MovieTagGen 移植版流水线。
 
-覆盖契约（2026-11 替换后；Task 7 v2 词表切换）：
+覆盖契约（2026-11 替换后）：
 - 多轮生成 → 跨轮归一/语义合并 → judge 过滤 → 证据校验 → ProducedTag；
 - 只有 judge 判 supported 且置信度过线的候选才产出；
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
-- 空库不报错（全部 open 自由候选）；归一命中（相似度 ≥ 阈值，含等于）行
-  origin=open 且带 tag_id——v2 词表下命中行不再标 catalog（doc §6.2），
-  candidate_name 保留候选原文；阈值边界（≥ 命中 / < 不命中）用 MockEmbedder
-  构造可控相似度钉死；
+- 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v1`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v2`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部判 supported、confidence=0.9；`MOCK_EMBEDDER`
@@ -20,19 +17,18 @@ Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙�
 import json
 import re
 
-import numpy as np
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import TagCatalog, TagDefine
 from tagplatform.generation import GenerationPolicy, GenerationSpec
 from tagplatform.generation.mtg import keyframes as keyframes_mod
 from tagplatform.generation.mtg import pipeline as mtg_pipeline
 from tagplatform.generation.mtg.merge import merge_candidates
 from tagplatform.generation.open_gen import OpenTagProducer
 from tagplatform.llm.client import LLMResponse
+from tagplatform.library import try_load_library
 from tagplatform.settings import Settings
-from tagplatform.vectors import decode_vector, encode_vector, search_similar
+from tests.library_fixture import add_tags
 
 
 def _build_spec(session, content_fixture, run_id: str, policy=None) -> GenerationSpec:
@@ -40,24 +36,8 @@ def _build_spec(session, content_fixture, run_id: str, policy=None) -> Generatio
     return GenerationSpec(
         task_id=f"t-{run_id}", asset_id=content_fixture.asset.asset_id,
         content=content_fixture, policy=policy or GenerationPolicy(),
-        prompt_text="", run_id=run_id,
+        prompt_text="", run_id=run_id, library=try_load_library(),
     )
-
-
-def _seed_define(session, tag_id: str, tag_name: str, description: str,
-                 vec, dir_id: str = "dir_open") -> None:
-    """播种一条带向量的标签定义（v2 双表：目录行先 flush 再插定义，外键
-    父行先行；同一 dir_id 只建一次目录）。"""
-    if session.get(TagCatalog, dir_id) is None:
-        session.add(TagCatalog(dir_id=dir_id, dir_name="开放生成目录",
-                               dir_type="dir_static",
-                               description="open 归一命中的标签定义目录"))
-        session.flush()
-    session.add(TagDefine(tag_id=tag_id, tag_name=tag_name,
-                          tag_type="val_fixed", description=description,
-                          dir_id=dir_id, status="active",
-                          embedding=encode_vector(vec)))
-    session.commit()
 
 
 @pytest.fixture
@@ -150,17 +130,16 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v1"
+    assert producer.prompt_version == "mtg-v2"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
-    """三轮同名候选 → 合并成 3 条 → judge 全过 → 3 条 open 自由候选带证据。"""
+    """三轮同名候选 → 合并成 3 条 → judge 全过 → 3 条 generated 带证据。"""
     spec = _build_spec(session, content_fixture, run_id="r1")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
     assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
-    # 空库（无标签定义）不命中：全部 open 自由候选（tag_id 空，v2 词表）
-    assert all(t.origin == "open" and t.tag_id is None for t in out)
+    assert all(t.origin == "generated" and t.tag_id is None for t in out)
     assert all(t.confidence == 0.9 for t in out)
     assert all(t.candidate_type and t.candidate_description for t in out)
     assert all(t.evidence for t in out)
@@ -169,7 +148,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 审计报告：三轮、合并 runs=3、judge 判决齐全
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v1"
+    assert report["version"] == "mtg-v2"
     assert len(report["runs"]) == 3
     assert {m["runs"] for m in report["merged"]} == {3}
     assert len(report["accepted"]) == 3
@@ -262,7 +241,8 @@ def test_open_evidence_prefers_judge_scenes(session, content_fixture, mtg_settin
         "scenes": ["tt0000003_story_000"], "reason": "生成侧"}])
     spec = GenerationSpec(task_id="t-r12", asset_id=content.asset.asset_id,
                           content=content, policy=GenerationPolicy(),
-                          prompt_text="", run_id="r12")
+                          prompt_text="", run_id="r12",
+                          library=try_load_library())
     out = OpenTagProducer().produce(
         spec, session, generated, MOCK_EMBEDDER,
         judge_client=_JudgeClient(scenes=["tt0000003_story_001"]))
@@ -281,89 +261,19 @@ def test_open_without_valid_evidence_dropped(session, content_fixture, mtg_setti
     assert out == []
 
 
-def test_open_normalized_match_keeps_candidate_name(session, content_fixture,
-                                                    mtg_settings):
-    """归一命中：候选名 ≠ 定义名但余弦 ≥ 阈值（Gram-Schmidt 混合向量构造，
-    手法同 test_open_match_threshold_boundary）→ 命中行 origin=open 且带
-    tag_id，candidate_name 保留候选原文（doc §6.2 可溯原则——并入既有也留
-    原文；候选原文与定义名不同，"原文保留"断言具区分性），
-    candidate_description 不填（仅自由候选，doc §3.5）。"""
-    q = MOCK_EMBEDDER.embed(["多线叙事"], role="query")[0]
-    anchor = MOCK_EMBEDDER.embed(["无关锚向量"], role="query")[0]
-    orthogonal = anchor - np.dot(anchor, q) * q
-    orthogonal /= np.linalg.norm(orthogonal)
-    coef = 0.95  # ≥ 默认阈值 0.85：不同名也命中
-    vec = coef * q + np.sqrt(1 - coef ** 2) * orthogonal
-    vec = vec / np.linalg.norm(vec)
-    _seed_define(session, "tag_cat_1", "多线索叙事", "多线并进的叙事结构", vec)
+def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_settings):
+    """目录里有同文本标签 → 命中（相似度 1.0）落 origin=catalog。"""
+    add_tags([{"tag_id": "tag_cat_1", "dir_id": "dir_theme",
+               "tag_name": "多线叙事", "tag_type": "val_fixed",
+               "description": "多线叙事", "status": "active"}])
     spec = _build_spec(session, content_fixture, run_id="r6")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-    hits = [t for t in out if t.tag_id is not None]
+    hits = [t for t in out if t.origin == "catalog"]
     assert len(hits) == 1
-    hit = hits[0]
-    assert hit.origin == "open"  # v2 词表：命中行也是 open（catalog 词退役）
-    assert hit.tag_id == "tag_cat_1"  # 指向定义（其名为「多线索叙事」）
-    assert hit.tag_name == "多线叙事"  # 候选原文保留，非定义名回显
-    assert session.get(TagDefine, "tag_cat_1").tag_name == "多线索叙事"
-    assert hit.tag_name != session.get(TagDefine, "tag_cat_1").tag_name
-    assert hit.relevance_score == pytest.approx(coef, abs=1e-4)
-    assert hit.candidate_type is None and hit.candidate_description is None
-    free = [t for t in out if t.tag_id is None]
-    assert [t.tag_name for t in free] == ["情感张力", "视听风格"]
-    assert all(t.origin == "open" and t.candidate_description for t in free)
-
-
-def test_open_match_threshold_boundary(session, content_fixture, tmp_path,
-                                       monkeypatch):
-    """阈值边界（≥ 含等于命中 / < 不命中）：库内定义向量 = a·候选查询向量 +
-    b·正交方向的归一化混合（Gram-Schmidt 造正交基），与对应候选的余弦即
-    混合系数 a——命中候选构到 0.9、落选候选构到 0.8；阈值取命中侧的精确
-    相似度（search_similar 与流水线同路径复算，逐位一致）→ 命中侧恰以
-    等号过线（钉死 ≥ 含等于），落选侧（0.8）严格低于阈值不命中。"""
-    q_hit = MOCK_EMBEDDER.embed(["可证伪结构"], role="query")[0]
-    q_miss = MOCK_EMBEDDER.embed(["光谱化调度"], role="query")[0]
-    anchor = MOCK_EMBEDDER.embed(["无关锚向量"], role="query")[0]
-
-    def _blend(query, coefficient):
-        """与 query 余弦恰为 coefficient 的归一化混合向量。"""
-        orthogonal = anchor - np.dot(anchor, query) * query
-        orthogonal /= np.linalg.norm(orthogonal)
-        vec = coefficient * query + np.sqrt(1 - coefficient ** 2) * orthogonal
-        return vec / np.linalg.norm(vec)
-
-    hit_vec = _blend(q_hit, 0.9)
-    miss_vec = _blend(q_miss, 0.8)
-    _seed_define(session, "tag_hit", "可证伪结构", "叙事结构可证伪", hit_vec)
-    _seed_define(session, "tag_miss", "光谱化调度", "以色彩光谱调度情绪",
-                 miss_vec)
-
-    # 阈值 = 命中侧相似度的精确值（与流水线同一 search_similar 复算）
-    stored = [("tag_hit", decode_vector(encode_vector(hit_vec))),
-              ("tag_miss", decode_vector(encode_vector(miss_vec)))]
-    threshold = search_similar(q_hit, stored, top_k=1)[0][1]
-    settings = Settings(use_mock_llm=True,
-                        dataset_root=str(tmp_path / "movienet"),
-                        mtg_report_dir=str(tmp_path / "audit"),
-                        open_match_threshold=threshold)
-    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
-
-    llm = _FixedGenLLM([
-        {"tag": "可证伪结构", "dimension": "叙事",
-         "scenes": ["scene_001"], "reason": "双层叙事互为镜像"},
-        {"tag": "光谱化调度", "dimension": "风格",
-         "scenes": ["scene_001"], "reason": "色彩随情绪推移"},
-    ])
-    spec = _build_spec(session, content_fixture, run_id="rb")
-    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER,
-                                    judge_client=_JudgeClient())
-
-    by_name = {t.tag_name: t for t in out}
-    hit = by_name["可证伪结构"]
-    assert hit.origin == "open" and hit.tag_id == "tag_hit"  # ≥ 含等于 → 命中
-    assert hit.relevance_score == threshold  # 同路径复算：逐位一致
-    miss = by_name["光谱化调度"]
-    assert miss.origin == "open"
-    assert miss.tag_id is None and miss.relevance_score is None  # < 阈值不命中
+    assert hits[0].tag_id == "tag_cat_1"
+    assert hits[0].relevance_score == pytest.approx(1.0)
+    assert hits[0].candidate_type is None and hits[0].candidate_description is None
+    assert [t.tag_name for t in out if t.origin == "generated"] == ["情感张力", "视听风格"]
 
 
 def test_open_respects_max_final_tags(session, content_fixture, mtg_settings):
@@ -374,11 +284,12 @@ def test_open_respects_max_final_tags(session, content_fixture, mtg_settings):
     assert len(out) == 1
 
 
-# ---- 层级约束（内部把关，不落库） ----
+# ---- 层级约束（内部把关 + 层级落库） ----
 
 
 def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings):
-    """全片级但只有单场支撑 → 淘汰；场景级单场支撑 → 保留。"""
+    """全片级但只有单场支撑 → 淘汰；场景级单场支撑 → 保留，且层级随
+    产出带出（film/scene 落库到 asset_tag.level）。"""
     content = _scene_content(content_fixture, "tt0000009", 2)
     spec = _build_spec(session, content, run_id="rf")
     llm = _FixedGenLLM([
@@ -394,6 +305,8 @@ def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings
                                     judge_client=_JudgeClient())
     names = {tag.tag_name for tag in out}
     assert names == {"开场旁白", "家族权力更迭"}
+    levels = {tag.tag_name: tag.level for tag in out}
+    assert levels == {"开场旁白": "scene", "家族权力更迭": "film"}
 
 
 # ---- 队列治理：judge 引用原文 + 重要度排序 ----

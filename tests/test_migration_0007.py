@@ -78,6 +78,7 @@ EXPECTED_COLUMNS = {
         ("content_json", "TEXT", 0, None),
         ("source", "TEXT", 0, None),
         ("created_at", "DATETIME", 0, None),
+        ("updated_at", "DATETIME", 0, None),
     ],
     "tag_catalog": [
         ("dir_id", "TEXT", 1, None),
@@ -134,6 +135,9 @@ EXPECTED_COLUMNS = {
         ("review_comment", "TEXT", 0, None),
         ("created_at", "DATETIME", 0, None),
         ("updated_at", "DATETIME", 0, None),
+        # 0009 补列：SQLite ADD COLUMN 追加在表尾（模型里它排在
+        # candidate_description 之后，物理顺序不影响读写）
+        ("candidate_alias", "TEXT", 0, None),
     ],
     "asset_tag": [
         ("id", "INTEGER", 1, None),
@@ -212,6 +216,8 @@ EXPECTED_INDEXES = {
     "idx_tag_define_dir",
     "idx_gen_task_asset",
     "idx_gen_task_status",
+    "idx_build_task_asset",
+    "idx_build_task_status",
     "ux_pre_tag_catalog",
     "ux_pre_tag_candidate",
     "idx_pre_tag_asset",

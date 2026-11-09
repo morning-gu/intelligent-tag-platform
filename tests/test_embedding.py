@@ -74,13 +74,45 @@ def test_local_prefixes_texts_per_role(monkeypatch):
     fake_st.SentenceTransformer = _FakeModel
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
 
-    e = LocalEmbedder("m", device="cpu")
+    e = LocalEmbedder("intfloat/multilingual-e5-base", device="cpu")
     v = e.embed(["雨夜", "追凶"], role="query")
     assert encoded == [["query: 雨夜", "query: 追凶"]]
     assert v.shape == (2, 1)
     assert np.isclose(np.linalg.norm(v[0]), 1.0)
     assert e.dim == 1
 
-    e2 = LocalEmbedder("m")
+    e2 = LocalEmbedder("intfloat/multilingual-e5-base")
     e2.embed(["黎明"], role="passage")
     assert encoded[-1] == ["passage: 黎明"]
+
+
+def test_local_plain_models_get_no_prefix(monkeypatch):
+    """非 e5 模型（BGE-M3）吃纯文本：前缀会被当正文，实测拉低分辨力。"""
+    import sys
+    import types
+
+    import numpy as np
+
+    from tagplatform.embed.embedding import LocalEmbedder
+
+    encoded: list[list[str]] = []
+
+    class _FakeModel:
+        def __init__(self, name, device="cpu"):
+            self.name = name
+
+        def encode(self, texts, convert_to_numpy=True,
+                   normalize_embeddings=True, show_progress_bar=False):
+            encoded.append(list(texts))
+            mat = np.array([[float(len(t))] for t in texts], dtype=np.float32)
+            return mat / np.clip(
+                np.linalg.norm(mat, axis=1, keepdims=True), 1e-12, None)
+
+    fake_st = types.ModuleType("sentence_transformers")
+    fake_st.SentenceTransformer = _FakeModel
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
+
+    e = LocalEmbedder("BAAI/bge-m3")
+    assert e.prefix_style == "plain"
+    e.embed(["雨夜"], role="query")
+    assert encoded == [["雨夜"]]

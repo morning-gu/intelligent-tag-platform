@@ -29,7 +29,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越',
     duration_ms: 10_800_000,
     video_uri: 'movies/interstellar.mp4',
+    has_content: true,
     created_at: '2026-10-30T08:30:00',
+    updated_at: '2026-10-30T08:30:00',
   },
   {
     asset_id: 'a-scene',
@@ -38,7 +40,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越-场景2',
     duration_ms: 65_000,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
 ]
 
@@ -60,7 +64,9 @@ const NEW_ASSET: AssetSummary = {
   title: '新片',
   duration_ms: null,
   video_uri: 'C:\\data\\media\\u.mkv',
+  has_content: false,
   created_at: '2026-11-01T10:00:00',
+  updated_at: '2026-11-01T10:00:00',
 }
 
 function renderAssetList() {
