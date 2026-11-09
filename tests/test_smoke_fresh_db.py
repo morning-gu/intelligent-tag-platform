@@ -8,7 +8,8 @@ fixture：登录是冒烟链路的第 1 步，须由用例自己断言，而非 
 链路（真 app、真文件 DB、Mock 嵌入器/LLM 零网络）：
 1. 登录 admin → 200 + HttpOnly 会话 cookie + me 可用；
 2. POST /api/v1/tags/import 层级 Excel（openpyxl 内存造三级行）→
-   {task_id, summary}，inserted == 30（目录行不计入）；
+   {task_id, summary}，total/inserted 均 == 30（v2 口径仅计标签行，
+   目录行不进任何计数）；
 3. POST /api/v1/content/import（platform 适配器形状 JSON）→ asset_id，
    详情 recognized=True；
 4. POST /api/v1/generation/tasks mode="closed"（MockLLM/MockEmbedder 经
@@ -120,7 +121,8 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert me.status_code == 200 and me.json()["username"] == "admin"
 
     # 2. 导入层级标签 Excel → {task_id, summary}；inserted 仅计标签行
-    #    （4 个目录行 + 30 个标签行进治理：total=34、inserted=30、skipped=4）
+    #    （4 个目录行 + 30 个标签行进治理：v2 口径 total 仅计标签行 = 30、
+    #    inserted=30、skipped=0，目录行不进任何计数）
     resp = client.post("/api/v1/tags/import",
                        files={"file": ("tags.xlsx", _hierarchy_xlsx())})
     assert resp.status_code == 200, resp.text
@@ -128,7 +130,7 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert body["task_id"]
     summary = body["summary"]
     assert summary["inserted"] == 30 > 0
-    assert summary["total"] == 34 and summary["skipped"] == 4
+    assert summary["total"] == 30 and summary["skipped"] == 0
     assert summary["issues"] == [] and summary["parse_errors"] == []
     task_detail = client.get(f"/api/v1/import/tasks/{body['task_id']}")
     assert task_detail.status_code == 200

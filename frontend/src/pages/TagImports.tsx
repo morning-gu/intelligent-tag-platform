@@ -58,8 +58,8 @@ function formatTime(v: string | null): string {
 }
 
 /** 结果摘要视图：total/inserted/skipped 统计 + 治理问题/解析失败折叠明细表。
- * 口径注记（后端 Ruling 10）：total 为传入治理行数（目录+标签行合计），
- * inserted 仅计标签行（目录行落 tag_catalog 不计入），skipped = total - inserted。
+ * 口径注记（v2）：total 仅计标签定义行（目录行落 tag_catalog 不进计数），
+ * inserted 为其中新入库数，skipped = total - inserted。
  * 上传结果与任务详情两处复用；空明细的折叠面板不渲染（避免空表噪音）。 */
 function SummaryView({ summary }: { summary: ImportSummary }) {
   // 折叠面板按需构建（空明细不渲染面板，children 惰性渲染进表格）
@@ -117,7 +117,7 @@ function SummaryView({ summary }: { summary: ImportSummary }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <Card size="small">
         <Space size="large">
-          <Statistic title="传入治理行数" value={summary.total} />
+          <Statistic title="传入标签行数" value={summary.total} />
           <Statistic title="新增入库" value={summary.inserted} />
           <Statistic title="跳过" value={summary.skipped} />
         </Space>

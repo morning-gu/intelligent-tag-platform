@@ -205,9 +205,9 @@ describe('TagImports 导入任务页（v2）', () => {
     expect(body).toBeInstanceOf(FormData)
     expect(body.get('file')).toBe(file)
 
-    // 摘要统计卡：total/inserted/skipped（口径：total=目录+标签行合计，inserted 仅标签）
+    // 摘要统计卡：total/inserted/skipped（口径：total 仅计标签定义行，inserted 为其中入库数）
     expect(await screen.findByText('导入结果（任务 t-new）')).toBeInTheDocument()
-    expectStatistic('传入治理行数', '10')
+    expectStatistic('传入标签行数', '10')
     expectStatistic('新增入库', '8')
     expectStatistic('跳过', '2')
     // 有明细的面板默认展开：issues/parse_errors 明细行可见
@@ -255,7 +255,7 @@ describe('TagImports 导入任务页（v2）', () => {
     const descriptions = document.querySelector('.ant-drawer .ant-descriptions') as HTMLElement
     const fileItem = within(descriptions).getByText('文件名').closest('.ant-descriptions-item')!
     expect(fileItem).toHaveTextContent('标签库-v1.xlsx')
-    expectStatistic('传入治理行数', '6')
+    expectStatistic('传入标签行数', '6')
     expectStatistic('新增入库', '5')
     expectStatistic('跳过', '1')
     expect(screen.getByText('本批无治理问题与解析失败')).toBeInTheDocument()
