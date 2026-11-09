@@ -22,9 +22,9 @@ export interface ImportParseError {
   detail: string
 }
 
-/** 导入结果摘要（与后端 ImportSummary 一致）：total 为传入治理的行数
- * （目录行与标签行合计；行级解析错误的行不计入），inserted 仅计标签行
- * （目录行落 tag_catalog 不计入），skipped = total - inserted。 */
+/** 导入结果摘要（与后端 ImportSummary 一致）：total 为传入治理的标签
+ * 定义行数（目录行落 tag_catalog 不计入；行级解析错误的行不计入），
+ * skipped = total - inserted。 */
 export interface ImportSummary {
   total: number
   inserted: number

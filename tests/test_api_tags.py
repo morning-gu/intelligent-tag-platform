@@ -2,7 +2,8 @@
 
 覆盖契约：
 - POST /api/v1/tags/import：响应 {task_id, summary}（v1 batch_id 退役），
-  inserted 仅计标签行（目录行落 tag_catalog 不计入）；重复导入 skipped==1
+  total/inserted 均仅计标签行（目录行落 tag_catalog 不计入任何计数）；
+  重复导入 skipped==1
   且 200（Review Focus 2：重复导入不 5xx）；层级模板同名标签挂不同目录
   合法共存；坏表头 422 {"detail": header_error}；损坏 xlsx 字节（openpyxl
   抛异常）由 API 层映射 422；行级解析错误进响应 parse_errors 并回写任务
@@ -152,8 +153,8 @@ def test_import_xml_via_api(client):
 
     assert resp.status_code == 200
     body = resp.json()
-    # v2 inserted 仅计标签行：2 个目录（内容/剧情）+ 1 个标签（喜剧）
-    assert body["summary"]["total"] == 3
+    # v2 total/inserted 均仅计标签行：2 个目录（内容/剧情）+ 1 个标签（喜剧）
+    assert body["summary"]["total"] == 1
     assert body["summary"]["inserted"] == 1
 
 
@@ -164,8 +165,9 @@ def test_import_xml_detected_by_content(client):
     assert resp.status_code == 200
     # 无扩展名文件按内容嗅探走 XML 解析。注意：解析层把层级节点摊平为
     # TagRow（不保留"目录节点"标记），末级空目录无子引用时按标签行落位
-    # （内容→目录、剧情→内容目录下的标签），inserted 仅计标签行 == 1
-    assert resp.json()["summary"]["total"] == 2
+    # （内容→目录、剧情→内容目录下的标签）。v2 口径：仅 1 个标签行进
+    # total（目录行「内容」不计入）
+    assert resp.json()["summary"]["total"] == 1
     assert resp.json()["summary"]["inserted"] == 1
 
 
@@ -202,8 +204,8 @@ def test_import_dual_sheet_template_via_api(client):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # 2 目录 + 2 标签 → total 4；inserted 仅计标签行 == 2
-    assert body["summary"]["total"] == 4
+    # v2 口径：2 目录行不计入 → total 2（= 2 个标签行）；inserted == 2
+    assert body["summary"]["total"] == 2
     assert body["summary"]["inserted"] == 2
     assert body["summary"]["issues"] == []
     assert body["summary"]["parse_errors"] == []
@@ -253,7 +255,7 @@ def test_corrupt_xlsx_422(client):
 
 def test_import_parse_errors_in_response_and_batch(client):
     """行级解析错误不再整条丢弃——响应 parse_errors 明细 + 回写任务
-    result_summary（total 语义维持"进入治理的行数"，坏行不计入）。
+    result_summary（total 语义维持"进入治理的标签行数"，坏行不计入）。
     """
     mixed = build_xlsx([
         ["tag_name", "tag_type", "description", "parent_tag"],

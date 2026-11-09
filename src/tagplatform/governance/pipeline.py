@@ -98,7 +98,11 @@ class Issue:
 class GovernanceResult:
     """治理结果：本批 task_id、入库标签 tag_id 列表（目录行不计入——
     inserted 语义沿 v1 为"标签入库数"，目录创建属结构落位）、问题列表
-    （与插入行不相交；目录复用行既不在 inserted 也无 issue）。"""
+    （与插入行不相交；目录复用行既不在 inserted 也无 issue）。
+
+    v2 计数口径统一为标签行：result_summary 的 total（= 标签行数）/
+    inserted / skipped（= total - inserted）三键同口径；目录行与
+    parse_errors 不进任何计数。"""
 
     task_id: str
     inserted: list[str]
@@ -543,7 +547,10 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         inserted.append(v.tag_id)
 
     # ---------- 导入任务摘要落库并提交 ----------
-    total = len(rows)
+    # total 仅计标签定义行（目录行不计）：同 inserted/skipped 的标签行
+    # 口径——目录创建属结构落位，不进计数（如 37 目录 + 514 标签的模板
+    # 文件 total=514 而非 551）
+    total = len(rows) - len(dir_items)
     session.add(TagImportTask(
         task_id=task_id,
         file_name=_TASK_FILE_NAME,
