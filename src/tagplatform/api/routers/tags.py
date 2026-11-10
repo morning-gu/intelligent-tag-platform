@@ -69,9 +69,9 @@ class ImportSummary(BaseModel):
     """导入结果摘要：total/inserted/skipped 计数 + issues/parse_errors 明细列表。
 
     语义与 tag_import_task.result_summary（治理流水线写入）一致：total 为
-    传入治理的行数（目录行与标签行合计；行级解析错误的行不进 rows，不计
-    入），inserted 仅计标签行（目录行落 tag_catalog 不计入），skipped =
-    total - inserted，issues 为治理问题明细（与入库行不相交）；
+    传入治理的**标签定义行**数（目录行落 tag_catalog 不计入；行级解析错误
+    的行不进 rows，不计入），inserted 仅计标签行，skipped = total -
+    inserted，issues 为治理问题明细（与入库行不相交）；
     parse_errors 为行级解析错误明细（治理流水线不感知解析层 errors，
     由本路由层与 file_name 回填同一模式并入 result_summary），计数以
     列表长度为准（前端阶段 3 直接消费明细）。
@@ -184,6 +184,13 @@ def import_tags(
 
     result = run_governance(parsed.rows, session, embedder)
 
+    # 标签行计数：批内被引用名为目录行（run_governance 同规则），其余为
+    # 标签定义行——total 口径只计后者（目录行落 tag_catalog 不进计数）
+    referenced_names = {r.parent_tag for r in parsed.rows
+                        if r.parent_tag is not None}
+    summary_total = sum(1 for r in parsed.rows
+                        if r.tag_name not in referenced_names)
+
     # 回填真实上传文件名（治理流水线写入的是占位 "governance"），并把
     # 行级解析错误明细并入 result_summary——治理流水线不感知 parsed.errors，
     # 与 file_name 回填同一模式：本路由层更新已提交的任务行
@@ -199,9 +206,12 @@ def import_tags(
     return ImportResponse(
         task_id=result.task_id,
         summary=ImportSummary(
-            total=len(parsed.rows),
+            # total 仅计标签定义行（目录行不计）：与治理流水线写入
+            # result_summary 的 v2 口径一致；行级解析错误的行不进 rows
+            # 不计数，parse_errors 以明细列表另行透出
+            total=summary_total,
             inserted=len(result.inserted),
-            skipped=len(parsed.rows) - len(result.inserted),
+            skipped=summary_total - len(result.inserted),
             issues=[IssueOut(**asdict(issue)) for issue in result.issues],
             parse_errors=parse_errors,
         ),
