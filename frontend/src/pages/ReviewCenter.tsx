@@ -1,20 +1,24 @@
-// 审核中心（v2 行即日志）：标签行的筛选列表与四动作审核。
+// 审核中心（v2 行即日志）：按影片分组的标签行审核。
 // - 顶部筛选栏：状态/目录/置信度区间/来源（statuses/modes 为契约固定
 //   枚举，dirs 动态取自 /review/filters，按 dir_id 精确过滤）；默认拉
-//   status=pending，后端 confidence 升序返回（低分先审）；分页走列表 API。
-// - 表格列：资产标题/标签名/目录（dir_name，null 兜底"—"）/来源
-//   （closed→Tag 闭环 / open→Tag 开放）/置信度/相关度/状态（三态 Tag）。
-// - 行内动作：通过/拒绝（所有行）；修改（仅库内命中行 tag_id 非空 或本期
-//   候选行——后端 modify 会写回候选字段并直接通过）；合并（把候选名记成
-//   库内标签的别名，后端仅此一支，新建标签走"通过入库"）。
+//   status=pending，后端 confidence 升序返回（低分先审）；一次取回
+//   GROUPED_PAGE_SIZE 行供分组，不分页。
+// - 列表按影片分组（Collapse）：组头是片名 + 条数，默认全部折叠，逐部
+//   展开审核；排序沿用后端顺序（低置信度优先，片内同序）。
+// - 表格列：标签名/目录（dir_name，null 兜底"—"）/来源（closed→Tag 闭环 /
+//   open→Tag 开放）/置信度/相关度/状态（三态 Tag）。
+// - 行内动作：通过/拒绝/修改/合并（通过=按候选目录入库；合并=候选名记成
+//   库内标签别名，后端仅此一支，新建标签走"通过入库"）。
 // - 相关度 = 与库内最相近标签的余弦（后端对齐 top-1）：判成新词也有值，
 //   是"离库里的东西最近有多近"的信号。
 // - 行展开 EvidenceCard 展示证据明细，点击跳内容详情并定位场景。
-// - 勾选行批量通过/拒绝（逐条独立端点）；冲突处理：审核操作 409 → 统一
-//   提示"该标签已被他人处理"并自动刷新列表；批量失败项去重后汇总提示。
+// - 勾选行批量通过/拒绝（逐条独立端点，跨影片共享选择）；冲突处理：审核
+//   操作 409 → 统一提示"该标签已被他人处理"并自动刷新列表。
 import {
   Alert,
   Button,
+  Collapse,
+  Empty,
   Form,
   Input,
   InputNumber,
@@ -25,10 +29,11 @@ import {
   Space,
   Table,
   Tag,
+  Typography,
   message,
 } from 'antd'
 import type { TableProps } from 'antd'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError } from '../api/client'
 import { fetchTagCatalog, type TagNode } from '../api/catalog'
 import {
@@ -41,6 +46,10 @@ import {
   type ReviewItem,
 } from '../api/review'
 import EvidenceCard from '../components/EvidenceCard'
+
+/** 一次拉取上限：审核队列按影片分组展示，分组需要完整行集，故用大
+ * page_size 一次取回；超出时页面提示收窄筛选。 */
+const GROUPED_PAGE_SIZE = 500
 
 /** 审核状态中文展示（键集与后端契约固定枚举一致；merged 已退役）。 */
 const STATUS_LABELS: Record<string, string> = {
@@ -82,11 +91,11 @@ interface MergeFormValues {
 }
 
 export default function ReviewCenter() {
-  // —— 列表数据与分页 ——
+  // —— 列表数据：按影片分组展示，一次取回全部匹配行 ——
   const [items, setItems] = useState<ReviewItem[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(50)
+  // 展开的影片分组：默认全部折叠（先看影片与待审条数，逐部展开审核）
+  const [openKeys, setOpenKeys] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -117,8 +126,8 @@ export default function ReviewCenter() {
         confidence_max: confidenceMax,
         dir_id: dirId,
         origin,
-        page,
-        page_size: pageSize,
+        page: 1,
+        page_size: GROUPED_PAGE_SIZE,
       })
       setItems(res.items)
       setTotal(res.total)
@@ -128,7 +137,25 @@ export default function ReviewCenter() {
     } finally {
       setLoading(false)
     }
-  }, [status, dirId, confidenceMin, confidenceMax, origin, page, pageSize])
+  }, [status, dirId, confidenceMin, confidenceMax, origin])
+
+  /** 按影片分组（保持后端返回顺序：低置信度优先，影片内同样低分在前）。 */
+  const groups = useMemo(() => {
+    const map = new Map<
+      string,
+      { assetId: string; title: string; rows: ReviewItem[] }
+    >()
+    for (const item of items) {
+      const group = map.get(item.asset_id) ?? {
+        assetId: item.asset_id,
+        title: item.asset_title ?? item.asset_id,
+        rows: [],
+      }
+      group.rows.push(item)
+      map.set(item.asset_id, group)
+    }
+    return [...map.values()]
+  }, [items])
 
   useEffect(() => {
     // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
@@ -300,7 +327,6 @@ export default function ReviewCenter() {
   }))
 
   const columns: TableProps<ReviewItem>['columns'] = [
-    { title: '资产标题', dataIndex: 'asset_title', render: (v: string | null) => v ?? '—' },
     { title: '标签名', dataIndex: 'tag_name' },
     {
       title: '目录',
@@ -369,7 +395,7 @@ export default function ReviewCenter() {
         <Select
           aria-label="状态筛选"
           value={status}
-          onChange={(v) => { setPage(1); setStatus(v) }}
+          onChange={(v) => { setStatus(v) }}
           options={statusOptions}
           allowClear
           placeholder="状态"
@@ -378,7 +404,7 @@ export default function ReviewCenter() {
         <Select
           aria-label="目录筛选"
           value={dirId}
-          onChange={(v) => { setPage(1); setDirId(v) }}
+          onChange={(v) => { setDirId(v) }}
           options={dirOptions}
           allowClear
           showSearch
@@ -392,7 +418,7 @@ export default function ReviewCenter() {
           max={1}
           step={0.1}
           value={confidenceMin}
-          onChange={(v) => { setPage(1); setConfidenceMin(v ?? undefined) }}
+          onChange={(v) => { setConfidenceMin(v ?? undefined) }}
           style={{ width: 130 }}
         />
         <InputNumber
@@ -401,13 +427,13 @@ export default function ReviewCenter() {
           max={1}
           step={0.1}
           value={confidenceMax}
-          onChange={(v) => { setPage(1); setConfidenceMax(v ?? undefined) }}
+          onChange={(v) => { setConfidenceMax(v ?? undefined) }}
           style={{ width: 130 }}
         />
         <Select
           aria-label="来源筛选"
           value={origin}
-          onChange={(v) => { setPage(1); setOrigin(v) }}
+          onChange={(v) => { setOrigin(v) }}
           options={originOptions}
           allowClear
           placeholder="来源"
@@ -435,30 +461,55 @@ export default function ReviewCenter() {
       {loadError !== null && (
         <Alert type="error" showIcon message="审核列表加载失败" description={loadError} />
       )}
-      <Table<ReviewItem>
-        rowKey="id"
-        columns={columns}
-        dataSource={items}
-        loading={loading}
-        rowSelection={{
-          selectedRowKeys: selectedIds,
-          onChange: (keys) => setSelectedIds(keys.map(Number)),
-        }}
-        expandable={{
-          expandedRowRender: (item) => (
-            <EvidenceCard assetId={item.asset_id} evidence={item.evidence} />
-          ),
-          rowExpandable: (item) => item.evidence.length > 0,
-        }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps) },
-        }}
-      />
+      <Typography.Text type="secondary">
+        {`共 ${total} 条 · 涉及 ${groups.length} 部影片`}
+        {total > GROUPED_PAGE_SIZE
+          ? `（仅展示前 ${GROUPED_PAGE_SIZE} 条，请用筛选收窄范围）`
+          : ''}
+      </Typography.Text>
+      {groups.length === 0 ? (
+        loading ? null : <Empty description="当前筛选下没有标签" />
+      ) : (
+        <Collapse
+          activeKey={openKeys}
+          onChange={(keys) => setOpenKeys(keys as string[])}
+          items={groups.map((group) => ({
+            key: group.assetId,
+            label: (
+              <Space>
+                <Typography.Text strong>{group.title}</Typography.Text>
+                <Tag>{`${group.rows.length} 条`}</Tag>
+              </Space>
+            ),
+            children: (
+              <Table<ReviewItem>
+                rowKey="id"
+                columns={columns}
+                dataSource={group.rows}
+                loading={loading}
+                rowSelection={{
+                  selectedRowKeys: selectedIds,
+                  // 每部影片一张表，跨表共享选择：只替换本表范围内的选择，
+                  // 保留其他影片已勾选的行（批量操作按全集提交）
+                  onChange: (keys) => {
+                    const groupIds = new Set(group.rows.map((row) => row.id))
+                    const kept = selectedIds.filter((id) => !groupIds.has(id))
+                    setSelectedIds([...kept, ...keys.map(Number)])
+                  },
+                }}
+                expandable={{
+                  expandedRowRender: (item) => (
+                    <EvidenceCard assetId={item.asset_id} evidence={item.evidence} />
+                  ),
+                  rowExpandable: (item) => item.evidence.length > 0,
+                }}
+                pagination={false}
+                size="small"
+              />
+            ),
+          }))}
+        />
+      )}
       <Modal
         title={`修改标签：${editing?.tag_name ?? ''}`}
         open={editing !== null}

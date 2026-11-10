@@ -1,9 +1,9 @@
-// 审核中心测试（v2 行即日志）：mock apiFetch 按路径/方法分发（未命中即抛
-// 错），覆盖：列表渲染与默认筛选参数（status=pending、page_size=50）、
-// 目录（dir_id）/来源（origin）/置信度/状态筛选传参、分页传参、四动作行内
-// 按钮、单条通过载荷、409 冲突提示与自动刷新、非冲突错误透出、修改弹窗
-// 载荷（提交即通过）、合并弹窗载荷（merge_to_tag_id 单支）、批量操作载荷
-// 与失败汇总、行展开证据卡、相关度列（库内最高相似度）、加载失败。
+// 审核中心测试（v2 行即日志，按影片分组）：mock apiFetch 按路径/方法分发
+// （未命中即抛错），覆盖：按影片分组（组头片名+条数、默认折叠、展开见行）、
+// 一次取回 page_size=500、目录（dir_id）/来源（origin）/置信度/状态筛选传参、
+// 四动作行内按钮、单条通过载荷、409 冲突提示与自动刷新、非冲突错误透出、
+// 修改弹窗载荷（提交即通过）、合并弹窗载荷（merge_to_tag_id 单支）、批量
+// 操作载荷与失败汇总、行展开证据卡、相关度列（库内最高相似度）、加载失败。
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -98,7 +98,7 @@ const ROW_CANDIDATE: ReviewItem = {
   review_comment: null,
 }
 
-/** total=60 > page_size=50：分页器出现第二页按钮。 */
+/** total=60 > 2 部影片：组头条数按行数算，总数走页脚文案。 */
 const PAGE_ONE: ReviewItemsResponse = { items: [ROW_A, ROW_CANDIDATE], total: 60, page: 1 }
 
 // ---------- mock 装配与查询辅助 ----------
@@ -154,6 +154,13 @@ function renderReviewCenter() {
   )
 }
 
+/** 展开所有影片分组（组头默认折叠，逐部点开才能看到标签行）。 */
+async function expandGroups() {
+  fireEvent.click(screen.getByText('星际穿越'))
+  fireEvent.click(screen.getByText('盗梦空间'))
+  await screen.findByText('主角争执')
+}
+
 beforeEach(() => {
   mockedApiFetch.mockReset()
 })
@@ -165,32 +172,35 @@ afterEach(() => {
 // ---------- 用例 ----------
 
 describe('ReviewCenter 审核中心', () => {
-  it('渲染列表行与默认筛选参数（status=pending、page_size=50）', async () => {
+  it('按影片分组展示：组头是片名+条数，默认折叠，展开后见该片标签行', async () => {
     mockApis()
     renderReviewCenter()
 
+    // 组头：两部影片各自一条 Collapse 面板，默认全部折叠（行不渲染）
     expect(await screen.findByText('星际穿越')).toBeInTheDocument()
-    const rowA = screen.getByText('星际穿越').closest('tr')!
-    const rowC = screen.getByText('盗梦空间').closest('tr')!
-    // 行内容：标签名 / 目录列 / 来源 Tag / 状态 Tag / 置信度进度条 / 相关度
-    expect(rowA).toHaveTextContent('犯罪')
-    expect(rowA).toHaveTextContent('情感')
-    expect(rowA).toHaveTextContent('闭环')
-    expect(rowA).toHaveTextContent('待审核')
-    expect(rowA).toHaveTextContent('42%')
-    // 相关度 = 库内最高相似度（后端对齐 top-1 余弦），两位小数
-    expect(rowA).toHaveTextContent('0.77')
-    expect(rowC).toHaveTextContent('主角争执')
-    expect(rowC).toHaveTextContent('开放')
+    expect(screen.getByText('盗梦空间')).toBeInTheDocument()
+    expect(screen.getByText('共 60 条 · 涉及 2 部影片')).toBeInTheDocument()
+    expect(screen.getAllByText('1 条')).toHaveLength(2)
+    expect(screen.queryByText('犯罪')).not.toBeInTheDocument()
+    // 分组要完整行集：一次取回 500 行，不分页
+    expect(itemsCallPaths()[0]).toContain('status=pending')
+    expect(itemsCallPaths()[0]).toContain('page_size=500')
+
+    // 展开第一部：只出现该片的行
+    fireEvent.click(screen.getByText('星际穿越'))
+    const tr = (await screen.findByText('犯罪')).closest('tr')!
+    expect(tr).toHaveTextContent('情感')
+    expect(tr).toHaveTextContent('闭环')
+    expect(tr).toHaveTextContent('42%')
+    expect(tr).toHaveTextContent('0.77') // 相关度 = 库内最高相似度，两位小数
+    expect(screen.queryByText('主角争执')).not.toBeInTheDocument()
+
+    // 再展开第二部：候选行出现，null 兜底"—"/"暂无"
+    fireEvent.click(screen.getByText('盗梦空间'))
+    const rowC = (await screen.findByText('主角争执')).closest('tr')!
     expect(within(rowC).getByText('—')).toBeInTheDocument()
     expect(within(rowC).getAllByText('暂无')).toHaveLength(2)
-
-    // 默认拉待审核，分页参数走列表 API
-    const paths = itemsCallPaths()
-    expect(paths).toHaveLength(1)
-    expect(paths[0]).toContain('status=pending')
-    expect(paths[0]).toContain('page=1')
-    expect(paths[0]).toContain('page_size=50')
+    expect(rowC).toHaveTextContent('开放')
   })
 
   it('目录筛选：选择目录后携带 dir_id= 重新拉取', async () => {
@@ -205,7 +215,6 @@ describe('ReviewCenter 审核中心', () => {
 
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
     expect(itemsCallPaths()[1]).toContain('dir_id=dir-emotion')
-    expect(itemsCallPaths()[1]).toContain('page=1')
   })
 
   it('来源筛选：选择开放后携带 origin=open 重新拉取', async () => {
@@ -229,7 +238,6 @@ describe('ReviewCenter 审核中心', () => {
 
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
     expect(itemsCallPaths()[1]).toContain('confidence_min=0.2')
-    expect(itemsCallPaths()[1]).toContain('page=1')
   })
 
   it('切换状态下拉为已通过：携带 status=approved 重新拉取', async () => {
@@ -244,24 +252,14 @@ describe('ReviewCenter 审核中心', () => {
     expect(itemsCallPaths()[1]).toContain('status=approved')
   })
 
-  it('点击第二页：携带 page=2 重新拉取', async () => {
-    mockApis()
-    renderReviewCenter()
-    await screen.findByText('星际穿越')
-
-    fireEvent.click(screen.getByText('2'))
-
-    await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
-    expect(itemsCallPaths()[1]).toContain('page=2')
-  })
-
   it('行内四动作：通过/拒绝/修改/合并对新词候选行同样可用', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
-    const rowA = screen.getByText('星际穿越').closest('tr')!
-    const rowC = screen.getByText('盗梦空间').closest('tr')!
+    const rowA = screen.getByText('犯罪').closest('tr')!
+    const rowC = screen.getByText('主角争执').closest('tr')!
 
     for (const row of [rowA, rowC]) {
       expect(within(row).getByRole('button', { name: /^通\s*过$/ })).toBeInTheDocument()
@@ -275,6 +273,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -291,6 +290,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ reviewError: new ApiError(409, '该标签已被处理') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -303,6 +303,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis({ reviewError: new ApiError(422, '目录「主类型」是静态目录（dir_static），不允许扩充新标签') })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^通\s*过$/ })[0])
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
@@ -316,6 +317,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^修\s*改$/ })[0])
     const nameInput = await screen.findByLabelText('候选名')
@@ -343,6 +345,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     fireEvent.click(screen.getAllByRole('button', { name: /^合\s*并$/ })[0])
     // 打开弹窗即预载候选标签（kind=tag 只搜标签，不混入目录）
@@ -368,16 +371,17 @@ describe('ReviewCenter 审核中心', () => {
     })
   })
 
-  it('批量通过：POST 批量载荷，失败项汇总提示并刷新', async () => {
+  it('批量通过：跨影片勾选后 POST 批量载荷，失败项汇总提示并刷新', async () => {
     mockApis({
       batchResults: [{ id: 1, ok: true }, { id: 2, ok: false, detail: '该标签已被处理' }],
     })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
-    const checkboxes = screen.getAllByRole('checkbox')
-    fireEvent.click(checkboxes[1]) // 第一行（0 为表头全选）
-    fireEvent.click(checkboxes[2]) // 第二行
+    // 每部影片一张表，各自表头有全选；勾行用行内 checkbox
+    fireEvent.click(within(screen.getByText('犯罪').closest('tr')!).getByRole('checkbox'))
+    fireEvent.click(within(screen.getByText('主角争执').closest('tr')!).getByRole('checkbox'))
     fireEvent.click(screen.getByRole('button', { name: /^批量通过$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -390,12 +394,14 @@ describe('ReviewCenter 审核中心', () => {
     await waitFor(() => expect(itemsCallPaths()).toHaveLength(2))
   })
 
-  it('批量拒绝：全选后批量操作，全部成功时提示成功计数', async () => {
+  it('批量拒绝：勾选后批量操作，全部成功时提示成功计数', async () => {
     mockApis({ batchResults: [{ id: 1, ok: true }, { id: 2, ok: true }] })
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
-    fireEvent.click(screen.getAllByRole('checkbox')[0]) // 表头全选
+    fireEvent.click(within(screen.getByText('犯罪').closest('tr')!).getByRole('checkbox'))
+    fireEvent.click(within(screen.getByText('主角争执').closest('tr')!).getByRole('checkbox'))
     fireEvent.click(screen.getByRole('button', { name: /^批量拒绝$/ }))
     fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
 
@@ -411,6 +417,7 @@ describe('ReviewCenter 审核中心', () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
+    await expandGroups()
 
     // 仅 ROW_A 有证据可展开（ROW_C rowExpandable=false）
     const expandIcon = document.querySelector('.ant-table-row-expand-icon')
