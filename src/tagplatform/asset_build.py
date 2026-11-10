@@ -18,6 +18,7 @@ asset_id，重新生成就是覆盖旧内容。是否"已有资产、要不要�
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -74,6 +75,81 @@ def asset_for_movie(session: Session, movie_id: str) -> MediaAsset | None:
                       AssetBuildTask.task_id.desc())
             .first())
     return session.get(MediaAsset, task.asset_id) if task is not None else None
+
+
+# 文件名里的发布组噪音：这些词不参与片名比对（`Memento.1080p.BluRay.x264`
+# 与资产标题 `Memento` 是同一部片）。
+_NOISE_TOKENS = frozenset({
+    "1080p", "720p", "2160p", "480p", "4k", "8k", "uhd",
+    "bluray", "blu", "ray", "brrip", "bdrip", "webrip", "web", "dl", "webdl",
+    "hdrip", "dvdrip", "hdtv", "remux", "hdr", "sdr", "10bit", "8bit",
+    "x264", "x265", "h264", "h265", "hevc", "avc", "aac", "ac3", "eac3",
+    "dts", "ddp", "dd", "atmos", "truehd", "flac", "mp3",
+    "proper", "repack", "extended", "unrated", "imax", "directors", "cut",
+    "multi", "dual", "chs", "cht", "eng", "jpn", "kor", "国语", "粤语",
+    "中字", "字幕", "双语", "高清", "蓝光",
+})
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+# 音轨写法（DDP5.1 会被切开成 ddp5 + 1）：按前缀词根整体丢掉
+_CODEC_RE = re.compile(r"^(ddp|dd|dts|aac|ac3|eac3|truehd|atmos|mp3|flac|opus)\d*$")
+
+
+def name_tokens(name: str) -> str:
+    """片名/文件名 → 可比较的词序列（丢掉年份、分辨率、编码等噪音）。
+
+    `Pride.and.Prejudice.2005.mp4` 与资产标题 `Pride & Prejudice` 归一化后
+    都是 `pride and prejudice`；`&` 统一成 `and` 是为了两种写法能对上。
+    """
+    stem = Path(name or "").stem.lower()
+    stem = stem.replace("&", " and ")
+    # 去掉 [1080p]、(2005) 这类括注：里面通常是发布信息而不是片名
+    stem = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", stem)
+    stem = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", stem)
+    words = [word for word in stem.split()
+             if word
+             and word not in _NOISE_TOKENS
+             and not _YEAR_RE.match(word)
+             and not _CODEC_RE.match(word)
+             and not word.isdigit()]
+    return " ".join(words)
+
+
+def match_asset_title(session: Session, filename: str) -> MediaAsset | None:
+    """文件名 → 既有资产（按标题兜底，供数据集索引命中不到时使用）。
+
+    为什么需要这层兜底：`/media/match` 原先只认数据集索引，文件名一旦不含
+    英文片名/IMDb id（中文名、改名、或数据集目录不可读），命中不到就等于
+    "没这部片"，于是重复上传静默通过。这里改成再按**我们自己的**
+    `media_asset.title` 比一遍——"已有资产"的事实本来就只在我们库里。
+
+    比对规则（`name_tokens` 归一化后）：
+    - 完全相等优先；
+    - 否则片名词序列被文件名包含（片名 ≥5 字符，避免 "It" 这类误命中）；
+    - 多命中时优先有内容、其次更新时间最新的那行。
+    """
+    target = name_tokens(filename)
+    if not target:
+        return None
+    rows = (session.query(MediaAsset)
+            .filter(MediaAsset.asset_type == "movie")
+            .all())
+    exact: list[MediaAsset] = []
+    partial: list[MediaAsset] = []
+    for asset in rows:
+        title = name_tokens(asset.title)
+        if not title:
+            continue
+        if title == target:
+            exact.append(asset)
+        elif len(title) >= 5 and title in target:
+            partial.append(asset)
+    pool = exact or partial
+    if not pool:
+        return None
+    pool.sort(key=lambda a: (bool(a.content_json),
+                             a.updated_at or datetime(1970, 1, 1)),
+              reverse=True)
+    return pool[0]
 
 
 def create_task(session: Session, asset_id: str, movie_id: str) -> AssetBuildTask:

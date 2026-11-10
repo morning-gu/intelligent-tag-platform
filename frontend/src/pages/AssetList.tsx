@@ -97,6 +97,8 @@ export default function AssetList() {
   // 选文件预检：命中影片且已有内容时，先问"是否重新生成"
   const [preflight, setPreflight] = useState<MediaMatchResult | null>(null)
   const [checkingFile, setCheckingFile] = useState(false)
+  // 预检本身失败时的提示（不再静默，否则"没跳提示"分不清是没重复还是没查）
+  const [preflightError, setPreflightError] = useState<string | null>(null)
   // 用户在提示上确认要重新生成（覆盖旧内容）
   const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   // 浏览器 → 服务器的传输进度（0-100）；100 之后还有服务端落盘，见文案
@@ -171,6 +173,7 @@ export default function AssetList() {
     setBuildTask(null)
     setMatchedTitle(null)
     setPreflight(null)
+    setPreflightError(null)
     setConfirmRegenerate(false)
     setUploadPct(0)
     setUseLlm(true)
@@ -185,6 +188,7 @@ export default function AssetList() {
     setBuildTask(null)
     setMatchedTitle(null)
     setPreflight(null)
+    setPreflightError(null)
     setConfirmRegenerate(false)
     setUploadPct(0)
     setUseLlm(true)
@@ -192,13 +196,16 @@ export default function AssetList() {
 
   /** 选完文件先预检：命中影片且已有资产 → 提示"是否重新生成"。
    *
-   * 预检失败不挡上传（比如老后端没有这个接口），直接按原流程走。 */
+   * 预检失败不挡上传（比如老后端没有这个接口），但要把失败显式说出来：
+   * 静默吞掉会让"重复上传没提示"看起来像功能不存在。 */
   async function runPreflight(file: File) {
     setCheckingFile(true)
+    setPreflightError(null)
     try {
       setPreflight(await matchMedia(file.name))
     } catch {
       setPreflight(null)
+      setPreflightError('重复检查失败：识别文件名时出错了，仍可继续上传')
     } finally {
       setCheckingFile(false)
     }
@@ -207,6 +214,7 @@ export default function AssetList() {
   async function checkMediaFile(file: File) {
     setUploadFile(file)
     setPreflight(null)
+    setPreflightError(null)
     setConfirmRegenerate(false)
     setUploadPct(0)
     await runPreflight(file)
@@ -299,8 +307,11 @@ export default function AssetList() {
         : 'active'
 
   // 已有资产、且用户还没确认重新生成：挡在上传之前（避免白传一遍视频）
-  const blockedByExisting =
-    preflight !== null && preflight.matched && preflight.has_content && !confirmRegenerate
+  const duplicateHit =
+    preflight !== null && preflight.matched && preflight.has_content
+  // 文件名认不出影片（按资产标题兜底命中）时没法重建：只能提示改名
+  const canRebuild = preflight === null || preflight.can_rebuild !== false
+  const blockedByExisting = duplicateHit && !confirmRegenerate
 
   return (
     <Card
@@ -429,7 +440,11 @@ export default function AssetList() {
               <Alert
                 type="warning"
                 showIcon
-                message="该视频已有对应资产，是否重新生成？"
+                message={
+                  canRebuild
+                    ? '该视频已有对应资产，是否重新生成？'
+                    : '该视频已有对应资产（重复上传会被拒绝）'
+                }
                 description={
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <span>
@@ -438,14 +453,33 @@ export default function AssetList() {
                       {preflight.built_at !== null
                         ? `，更新于 ${formatBuiltAt(preflight.built_at)}`
                         : ''}
-                      。重新生成会覆盖现有内容；不重新生成就直接打开资产详情查看。
+                      {canRebuild
+                        ? '。重新生成会覆盖现有内容；不重新生成就直接打开资产详情查看。'
+                        : '。文件名没能识别出是哪部片（需要含 IMDb ID 或英文片名），所以没法在这里重新生成——改名后再选一次，或直接打开资产详情查看。'}
                     </span>
-                    <Button size="small" danger onClick={() => setConfirmRegenerate(true)}>
-                      重新生成（覆盖现有内容）
-                    </Button>
+                    {canRebuild ? (
+                      <Button size="small" danger onClick={() => setConfirmRegenerate(true)}>
+                        重新生成（覆盖现有内容）
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        onClick={() => {
+                          if (preflight.asset_id !== null) {
+                            navigate(`/assets/${preflight.asset_id}`)
+                          }
+                          closeUpload()
+                        }}
+                      >
+                        打开已有资产
+                      </Button>
+                    )}
                   </div>
                 }
               />
+            )}
+            {preflightError !== null && (
+              <Alert type="info" showIcon message={preflightError} />
             )}
             {confirmRegenerate && (
               <Alert

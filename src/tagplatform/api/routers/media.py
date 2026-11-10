@@ -60,6 +60,10 @@ class MediaMatchResponse(BaseModel):
     content_source: str | None = None
     scene_count: int = 0
     built_at: datetime | None = None
+    # 能否直接重新生成：只有经数据集索引命中（拿到 movie_id）才行；
+    # 按资产标题兜底命中（match_how="asset_title"，中文名/改名/数据集不可读）
+    # 只能提醒"已有同名资产"，重建得先把文件名改成含 IMDb id 或英文片名。
+    can_rebuild: bool = True
 
 
 class BuildTaskOut(BaseModel):
@@ -98,12 +102,33 @@ def match_media(
     只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**问用户
     "该视频已有对应资产，是否重新生成"。判定只认 `media_asset`：资产行
     存在且 `content_json` 非空，才算已有内容。
+
+    两级匹配：先查数据集索引（能拿到 movie_id，可直接重建）；索引没命中
+    时按**资产标题**兜底（`match_how="asset_title"`，`can_rebuild=false`
+    ——只能提醒，重建需要文件名带 IMDb id 或英文片名）。没有这层兜底，
+    中文名/改过名的文件重复上传时会静默通过。
     """
     matched = asset_build.match_filename(filename, settings.dataset_root)
     if matched is None:
-        return MediaMatchResponse(matched=False)
+        asset = asset_build.match_asset_title(session, filename)
+        if asset is None:
+            return MediaMatchResponse(matched=False)
+        return MediaMatchResponse(
+            matched=True,
+            matched_title=asset.title,
+            match_how="asset_title",
+            asset_id=asset.asset_id,
+            has_content=bool(asset.content_json),
+            content_source=asset.source,
+            scene_count=_scene_count(asset),
+            built_at=asset.updated_at,
+            can_rebuild=False,
+        )
 
     asset = asset_build.asset_for_movie(session, matched.movie.movie_id)
+    if asset is None:
+        # 数据集命中但还没建过任务（例如内容是从 JSON 导入的）
+        asset = asset_build.match_asset_title(session, filename)
     return MediaMatchResponse(
         matched=True,
         movie_id=matched.movie.movie_id,
@@ -177,6 +202,19 @@ def upload_media(
         current = asset_build.asset_for_movie(session, matched.movie.movie_id)
         if current is not None:
             asset_id = current.asset_id
+
+    # 兜底护栏：数据集没命中、但库里已有同名资产 → 拒绝静默重复入库。
+    # 这条只会挡"同一部片、文件名认不出"的情况（中文名/改名）；换个带
+    # IMDb id 或英文片名的文件名上传即可。前端预检也会提示，这里是不
+    # 依赖前端状态的第二道闸。
+    if matched is None and asset_id is None:
+        duplicate = asset_build.match_asset_title(session, filename)
+        if duplicate is not None and duplicate.content_json:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"已有同名资产《{duplicate.title}》，不能重复上传；"
+                        "要重新生成请把文件名改成含 IMDb id（如 tt0068646）"
+                        "或英文片名再传")) from None
 
     try:
         stored = media.save_upload(

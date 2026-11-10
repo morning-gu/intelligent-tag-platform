@@ -142,6 +142,7 @@ const NO_MATCH: MediaMatchResult = {
   content_source: null,
   scene_count: 0,
   built_at: null,
+  can_rebuild: true,
 }
 
 /** 已生成过的影片：选完文件就该被拦在上传之前。 */
@@ -155,6 +156,7 @@ const MATCH_WITH_CONTENT: MediaMatchResult = {
   content_source: 'asset_builder:v5-infer',
   scene_count: 7,
   built_at: '2026-11-04T02:30:00',
+  can_rebuild: true,
 }
 
 /** 上传成功后列表该多一行（finishUpload 触发）。 */
@@ -478,6 +480,49 @@ describe('上传视频与生成进度', () => {
     await waitFor(() => expect(activeXhr).not.toBeNull())
     // 重新生成不再靠 force 开关：建了任务就一定真跑
     expect(lastUploadForm?.get('force')).toBeNull()
+  })
+
+  it('文件名认不出影片、但库里已有同名资产：照样提示，且不给"重新生成"', async () => {
+    mockUploadApis({
+      match: {
+        ...MATCH_WITH_CONTENT,
+        movie_id: null,
+        match_how: 'asset_title',
+        can_rebuild: false,
+      },
+    })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('角斗士.1080p.mp4')
+
+    expect(
+      await screen.findByText('该视频已有对应资产（重复上传会被拒绝）'),
+    ).toBeInTheDocument()
+    // 认不出是哪部片 → 只能去已有资产看，不能在这里重建
+    expect(
+      screen.queryByRole('button', { name: '重新生成（覆盖现有内容）' }),
+    ).toBeNull()
+    expect(screen.getByRole('button', { name: '打开已有资产' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '开始上传' })).toBeDisabled()
+  })
+
+  it('预检本身失败：显式提示，不静默放行', async () => {
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/media/match')) {
+        throw new Error('boom')
+      }
+      if (path.startsWith('/api/v1/assets')) return ASSETS
+      return []
+    })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    await openUploadAndSelectFile('新片.mkv')
+
+    expect(
+      await screen.findByText('重复检查失败：识别文件名时出错了，仍可继续上传'),
+    ).toBeInTheDocument()
   })
 
   it('上传失败（422 非白名单后缀）：透出后端 detail，Modal 保留可重试，列表不刷新', async () => {

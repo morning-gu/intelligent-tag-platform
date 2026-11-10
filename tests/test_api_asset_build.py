@@ -398,3 +398,73 @@ def test_match_endpoint_contentless_asset(dataset_client, monkeypatch):
     assert body["has_content"] is False
     assert body["scene_count"] == 0
     assert body["content_source"] is None
+
+
+# ---------- 数据集认不出时的标题兜底（中文名/改名不该静默重复） ----------
+#
+# 事故背景：预检只查数据集索引，文件名一旦认不出（中文名、改名、数据集目录
+# 不可读）就等于"没这部片"，重复上传静默通过、还多出一条占位资产。
+
+
+def _seed_titled_asset(client, *, title: str, asset_id: str = "asset_dupe01",
+                       content: bool = True) -> str:
+    with client.app.state.session_factory() as s:
+        s.add(MediaAsset(
+            asset_id=asset_id, asset_type="movie", title=title,
+            content_json=json.dumps(
+                {"schema_version": 1,
+                 "content": {"scenes": [{"scene_id": "s1"}]}},
+                ensure_ascii=False) if content else None,
+            source="v5-infer" if content else None))
+        s.commit()
+    return asset_id
+
+
+def test_match_endpoint_falls_back_to_asset_title(dataset_client):
+    """数据集认不出，但库里已有同名资产 → 仍然提示"已有资产"（不可重建）。"""
+    asset_id = _seed_titled_asset(dataset_client, title="沉默的羔羊")
+
+    body = dataset_client.get(
+        "/api/v1/media/match",
+        params={"filename": "沉默的羔羊.1080p.mp4"}).json()
+
+    assert body["matched"] is True
+    assert body["match_how"] == "asset_title"
+    assert body["asset_id"] == asset_id
+    assert body["has_content"] is True and body["scene_count"] == 1
+    assert body["can_rebuild"] is False      # 没 movie_id，重建要改文件名
+    assert body["movie_id"] is None
+
+
+def test_match_endpoint_dataset_hit_can_rebuild(dataset_client):
+    """数据集命中时 can_rebuild=true（前端才允许"重新生成"）。"""
+    body = dataset_client.get(
+        "/api/v1/media/match",
+        params={"filename": "Test.Movie.1999.mkv"}).json()
+
+    assert body["matched"] is True and body["can_rebuild"] is True
+
+
+def test_upload_duplicate_title_without_dataset_match_conflicts(dataset_client):
+    """认不出片名又已有同名资产 → 409，不再静默多建一条占位资产。"""
+    _seed_titled_asset(dataset_client, title="沉默的羔羊")
+
+    resp = _upload(dataset_client, "沉默的羔羊.1080p.mp4")
+
+    assert resp.status_code == 409
+    assert "已有同名资产" in resp.json()["detail"]
+    with dataset_client.app.state.session_factory() as s:
+        assert s.query(MediaAsset).filter(
+            MediaAsset.asset_type == "movie").count() == 1
+
+
+def test_name_tokens_strips_release_noise():
+    """归一化：年份/分辨率/编码/`&`→and 都不参与片名比对。"""
+    cases = {
+        "Pride.and.Prejudice.2005.1080p.mkv": "pride and prejudice",
+        "Pride & Prejudice (2005).mp4": "pride and prejudice",
+        "The.Godfather.1972.BluRay.x264.mp4": "the godfather",
+        "Memento [2160p] WEB-DL DDP5.1.mkv": "memento",
+    }
+    for name, expected in cases.items():
+        assert asset_build.name_tokens(name) == expected

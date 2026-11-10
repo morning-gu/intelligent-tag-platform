@@ -33,6 +33,9 @@ export interface MediaMatchResult {
   content_source: string | null
   scene_count: number
   built_at: string | null
+  /** 能否直接重新生成：按资产标题兜底命中（match_how="asset_title"）时为
+   *  false——文件名认不出是哪部片，得先改名才能重建 */
+  can_rebuild: boolean
 }
 
 /** 资产生成任务进度（与后端 BuildTaskOut 一致）。 */
