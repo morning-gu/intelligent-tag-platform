@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # 上传视频落盘根目录（TAGPLT_MEDIA_ROOT 可覆盖）；上传时按需创建目录
     media_root: str = "data/media/"
 
+    # ---------- 日志 ----------
+
+    # 根日志级别（TAGPLT_LOG_LEVEL 可覆盖）。生成流水线与过滤责任链的
+    # 逐环节日志走 INFO；排查"标签怎么被丢的"时设 DEBUG 可看到传入明细
+    log_level: str = "INFO"
+
     # ---------- 阶段 5：上传即生成资产（2026-11） ----------
 
     # 数据集根目录（MovieNet）；上传文件名命中后从这里取标注与关键帧
