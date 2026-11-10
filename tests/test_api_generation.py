@@ -1,4 +1,4 @@
-﻿"""生成任务 API 测试（Task 9）。
+"""生成任务 API 测试（Task 9）。
 
 覆盖契约（错误映射约定见 brief）：
 - POST /api/v1/generation/tasks：端到端同步执行（conftest client fixture
@@ -39,7 +39,7 @@ CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 # （id 为 pre_asset_tag 行主键，审核操作路由的定位键）
 RESULT_KEYS = {"id", "tag_name", "tag_id", "candidate_name", "origin",
                "relevance_score", "confidence", "review_status", "target_type",
-               "dir_id", "dir_name", "evidence"}
+               "dir_id", "dir_name", "dir_path", "evidence"}
 ASSET_TAG_KEYS = RESULT_KEYS | {"created_at"}
 # 任务列表项键集（brief 钉死九字段）
 TASK_KEYS = {"task_id", "asset_id", "mode", "status", "model_version",

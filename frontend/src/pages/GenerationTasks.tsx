@@ -29,6 +29,7 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
 import type { ReviewEvidence } from '../api/review'
 import {
@@ -67,6 +68,13 @@ const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
  * 同规：闭环蓝 / 开放紫；v1 generated/catalog 词表退役）。 */
 const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
 const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
+
+/** 挂载粒度中文展示（目录 applicable_scope 的落库结果，与审核中心同表）。 */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  content: '整片',
+  scene: '单场景',
+  character: '人物',
+}
 
 /** 结果行的审核状态中文展示与 Tag 颜色（三态，与审核中心一致；
  * merged 随"修改即通过"语义退役）。 */
@@ -107,6 +115,7 @@ function ResultEvidence({ assetId, evidence }: { assetId: string; evidence: Revi
 function TaskDetailPanel({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     // StrictMode 会双调 effect：以 cancelled 丢弃过期请求结果
@@ -132,7 +141,43 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
   }
 
   const resultColumns: TableProps<GenerationTaskResult>['columns'] = [
-    { title: '标签名', dataIndex: 'tag_name' },
+    {
+      title: '标签名',
+      dataIndex: 'tag_name',
+      // 点标签名跳资产详情并定位到这条标签的首个证据场景（与证据卡同一落点：
+      // 审核要在内容里看依据，不能只给一个标签字符串）。
+      render: (v: string, record) => {
+        const first = record.evidence[0]
+        if (detail.asset_id === null || first === undefined) {
+          return v
+        }
+        return (
+          <Typography.Link
+            onClick={() => {
+              navigate(
+                `/assets/${detail.asset_id}?scene=${first.scene_id}&t=${first.start_ms}`,
+              )
+            }}
+          >
+            {v}
+          </Typography.Link>
+        )
+      },
+    },
+    {
+      title: '目录',
+      dataIndex: 'dir_path',
+      render: (v: string | null, record) => v ?? record.dir_name ?? '未归属',
+    },
+    {
+      title: '粒度',
+      dataIndex: 'target_type',
+      render: (v: string) => (
+        <Tag color={v === 'content' ? 'default' : 'cyan'}>
+          {TARGET_TYPE_LABELS[v] ?? v}
+        </Tag>
+      ),
+    },
     {
       title: '来源',
       dataIndex: 'origin',

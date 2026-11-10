@@ -109,6 +109,8 @@ class GenerationResultOut(BaseModel):
     # 所属目录（JSON 标签库）：新词必填，catalog 行取标签自身目录
     dir_id: str | None = None
     dir_name: str | None = None
+    # 目录全路径（L1/…/末级）；审核中心同样展示这一列，两边口径一致
+    dir_path: str | None = None
     evidence: list[EvidenceOut] = []
 
 
@@ -190,9 +192,12 @@ def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
     dir_id = row.candidate_dir_id or definition.get("dir_id")
     library = try_load_library()
     dir_name = definition.get("dir_name")
-    if dir_name is None and library is not None and dir_id:
-        directory = library.directory(dir_id)
-        dir_name = directory.dir_name if directory else None
+    path: list[str] = []
+    if library is not None and dir_id:
+        path = library.path_of(dir_id)
+        if dir_name is None:
+            directory = library.directory(dir_id)
+            dir_name = directory.dir_name if directory else None
     return GenerationResultOut(
         id=row.id,
         tag_name=tag_name,
@@ -205,6 +210,7 @@ def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
         target_type=row.target_type,
         dir_id=dir_id,
         dir_name=dir_name,
+        dir_path="/".join(path) if path else None,
         evidence=_parse_evidence(row.evidence_json),
     )
 

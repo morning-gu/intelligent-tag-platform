@@ -74,6 +74,13 @@ const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放'
 /** 来源 Tag 颜色（沿 v1 模式列配色：闭环蓝 / 开放紫）。 */
 const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
+/** 挂载粒度中文展示（目录 applicable_scope 的落库结果）。 */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  content: '整片',
+  scene: '单场景',
+  character: '人物',
+}
+
 /** 来源下拉兜底（origins 为契约固定枚举，filters 失败时仍可筛）。 */
 const ORIGIN_FALLBACK = ['closed', 'open']
 
@@ -335,6 +342,17 @@ export default function ReviewCenter() {
       // 回退，两者都没有（新词候选未定目录）才是"—"
       render: (_: string | null, item) =>
         item.dir_path ?? item.dir_name ?? '—',
+    },
+    {
+      title: '粒度',
+      dataIndex: 'target_type',
+      // 这条标签挂在哪一级（目录 applicable_scope 的落库结果）：整片/单场景/人物。
+      // 审核时要判断"这条标签该不该挂在这一级"，缺了这列只能靠猜。
+      render: (v: string) => (
+        <Tag color={v === 'content' ? 'default' : 'cyan'}>
+          {TARGET_TYPE_LABELS[v] ?? v}
+        </Tag>
+      ),
     },
     {
       title: '来源',

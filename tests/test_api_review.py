@@ -28,7 +28,7 @@ _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 # 行摘要键集契约（与 generation.py 的 AssetTagOut 同形）
 ASSET_TAG_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
                   "review_status", "target_type", "dir_id", "dir_name",
-                  "evidence", "tag_id", "candidate_name", "created_at"}
+                  "dir_path", "evidence", "tag_id", "candidate_name", "created_at"}
 
 REVIEW_ITEM_KEYS = {"id", "asset_id", "asset_title", "tag_name", "origin",
                     "mode", "tag_type", "confidence", "relevance",

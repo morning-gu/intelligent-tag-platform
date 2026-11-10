@@ -35,6 +35,12 @@ export interface GenerationTaskResult {
   relevance_score: number | null
   confidence: number | null
   review_status: ReviewStatus
+  /** 挂载粒度（目录 applicable_scope 的落库结果） */
+  target_type: string
+  /** 所属目录：dir_path 给全层级，dir_name 只有末级（历史行兜底） */
+  dir_id: string | null
+  dir_name: string | null
+  dir_path: string | null
   evidence: ReviewEvidence[]
 }
 
