@@ -106,7 +106,6 @@ export default function ReviewCenter() {
 
   // —— 筛选状态（默认拉待审核）——
   const [status, setStatus] = useState<string | undefined>('pending')
-  const [tagType, setTagType] = useState<string | undefined>()
   const [confidenceMin, setConfidenceMin] = useState<number | undefined>()
   const [confidenceMax, setConfidenceMax] = useState<number | undefined>()
   const [origin, setOrigin] = useState<string | undefined>()
@@ -130,7 +129,6 @@ export default function ReviewCenter() {
         status,
         confidence_min: confidenceMin,
         confidence_max: confidenceMax,
-        tag_type: tagType,
         origin,
         dir_id: dirId,
         page: 1,
@@ -144,7 +142,7 @@ export default function ReviewCenter() {
     } finally {
       setLoading(false)
     }
-  }, [status, confidenceMin, confidenceMax, tagType, origin, dirId])
+  }, [status, confidenceMin, confidenceMax, origin, dirId])
 
   /** 按影片分组（保持后端返回顺序：低置信度优先，影片内同样低分在前）。 */
   const groups = useMemo(() => {
@@ -329,7 +327,6 @@ export default function ReviewCenter() {
         </Tag>
       ),
     },
-    { title: '类型', dataIndex: 'tag_type', render: (v: string | null) => v ?? '—' },
     {
       title: '来源',
       dataIndex: 'origin',
@@ -396,15 +393,6 @@ export default function ReviewCenter() {
           allowClear
           placeholder="状态"
           style={{ width: 140 }}
-        />
-        <Select
-          aria-label="标签类型筛选"
-          value={tagType}
-          onChange={(v) => setTagType(v)}
-          options={(filters?.tag_types ?? []).map((t) => ({ value: t, label: t }))}
-          allowClear
-          placeholder="标签类型"
-          style={{ width: 160 }}
         />
         <InputNumber
           placeholder="最低置信度"

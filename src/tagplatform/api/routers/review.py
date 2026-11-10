@@ -46,6 +46,7 @@ from tagplatform.api.routers.generation import (
 )
 from tagplatform.db.models import MediaAsset, PreAssetTag, UserAccount
 from tagplatform.library import try_load_library
+from tagplatform.results import SYSTEM_REVIEWER
 from tagplatform.review import ConflictError, apply_review
 
 router = APIRouter(prefix="/api/v1")
@@ -226,6 +227,14 @@ def list_review_items(
         session.query(PreAssetTag, MediaAsset.title)
         .outerjoin(MediaAsset, PreAssetTag.asset_id == MediaAsset.asset_id)
     )
+    # 审核中心只放"人要看"的行：库内命中（同名 / 疑似重复被判重）由后端自动
+    # 判定——同名的直接忽略，判重的把模型原词记成库内标签别名——这两类都不
+    # 该出现在这里（它们不是待审候选，也没有可审的标签属性）。留在表里是因为
+    # `GET /assets/{id}/tags` 的"已通过标签"要读这些行。
+    query = query.filter(or_(
+        PreAssetTag.reviewer_id.is_(None),
+        PreAssetTag.reviewer_id != SYSTEM_REVIEWER,
+    ))
     if status is not None:
         query = query.filter(PreAssetTag.review_status == status)
     if confidence_min is not None:

@@ -604,3 +604,30 @@ def test_review_list_and_filters_require_login(client):
     with TestClient(client.app) as fresh:
         assert fresh.get("/api/v1/review/items").status_code == 401
         assert fresh.get("/api/v1/review/filters").status_code == 401
+
+
+def test_review_items_hides_system_auto_rows(client):
+    """库内命中（同名/判重）是后端自动处理，不进审核中心列表。
+
+    这两类行仍留在 pre_asset_tag 里供 `GET /assets/{id}/tags` 展示"已通过标签"，
+    但审核列表按 reviewer_id='system' 排除——它们没有可审的东西（审核表也没有
+    标签属性字段，类型无从显示）。
+    """
+    _seed_list_scene(client)
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(PreAssetTag(
+            asset_id="a1", target_type="content", target_id="a1",
+            tag_id="tag_revenge", candidate_name=None, candidate_dir_id=None,
+            candidate_alias="报仇", origin="open",
+            relevance_score=0.9, confidence=0.99, evidence_json="[]",
+            review_status="approved", reviewer_id="system",
+            review_comment="系统自动并入库内标签「复仇」，原名「报仇」记为别名候选",
+            created_at=_NOW, updated_at=_NOW))
+        s.commit()
+
+    body = client.get("/api/v1/review/items?status=approved").json()
+    assert [it["reviewer_id"] for it in body["items"]] == [None]
+    assert body["total"] == 1
+    # 全量列表同样不含系统行（5 行种子 + 1 行系统行 → 仍是 5）
+    assert client.get("/api/v1/review/items?page_size=50").json()["total"] == 5

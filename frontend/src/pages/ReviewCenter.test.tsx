@@ -95,7 +95,7 @@ const ROW_B: ReviewItem = {
   review_comment: null,
 }
 
-/** 新词行：tag_type 为 null（库内无类型），类型列兜底"—"。 */
+/** 新词行：closed 模式、无任务归属（分组与兜底用）。 */
 const ROW_NULL_MODE: ReviewItem = {
   id: 3,
   asset_id: 'a3',
@@ -209,7 +209,7 @@ describe('ReviewCenter 审核中心', () => {
     const rowA = (await screen.findByText('主角争执')).closest('tr')!
     fireEvent.click(screen.getByText('盗梦空间'))
     const rowB = (await screen.findByText('枪战')).closest('tr')!
-    // 行内容：标签名 / 类型 / 来源 Tag / 状态 Tag / 置信度进度条
+    // 行内容：标签名 / 来源 Tag / 状态 Tag / 置信度进度条
     expect(rowA).toHaveTextContent('主角争执')
     expect(rowA).toHaveTextContent('开放生成')
     expect(rowA).toHaveTextContent('待审核')
@@ -225,14 +225,14 @@ describe('ReviewCenter 审核中心', () => {
     expect(paths[0]).toContain('page_size=500')
   })
 
-  it('库外新词行：无库内类型时类型列兜底显示"—"', async () => {
+  it('审核表不出现「类型」列：审核表没有标签属性字段，新词入库前的类型无从谈起', async () => {
     mockApis({ items: { items: [ROW_NULL_MODE], total: 1, page: 1 } })
     renderReviewCenter()
 
     await screen.findByText('无模式资产')
     await expandAllGroups()
-    const row = (await screen.findByText('慢镜头')).closest('tr')!
-    expect(within(row).getByText('—')).toBeInTheDocument()
+    expect(screen.queryByText('类型')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('标签类型筛选')).not.toBeInTheDocument()
   })
 
   it('修改置信度下限筛选：携带 confidence_min 重新拉取', async () => {

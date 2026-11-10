@@ -72,8 +72,23 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
         raise ValueError(
             f"新标签「{row.candidate_name}」没有归属目录，无法入库——"
             "请先用 modify 指定 dir_id")
-    if library.directory(row.candidate_dir_id) is None:
+    directory = library.directory(row.candidate_dir_id)
+    if directory is None:
         raise ValueError(f"目录不存在于标签库：{row.candidate_dir_id}")
+    # 目录校验（生成侧建候选时已挡过一遍，入库侧再挡一次：目录可能在两轮之间
+    # 被改成静态目录，或人工 modify 换了目录）。两条规则：
+    # 1) 只有动态目录允许审核后扩充新标签，静态目录的取值是固定的；
+    # 2) 候选行的挂载粒度必须落在目录的 applicable_scope 里（目录可能挂多个
+    #    粒度，逗号分隔），否则入的是挂不上资产的标签。
+    if not directory.allows_new_tags:
+        raise ValueError(
+            f"目录「{directory.dir_name}」是静态目录（dir_static），不允许扩充新标签")
+    scope = library.scope_of(row.candidate_dir_id)
+    allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
+    if row.target_type not in allowed:
+        raise ValueError(
+            f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
+            f"与候选行的 {row.target_type} 不一致")
     source = {
         "asset_id": row.asset_id,
         "pre_asset_tag_id": row.id,
@@ -152,8 +167,24 @@ def apply_review(session: Session, row_id: int, action: str,
             raise ValueError(
                 f"新标签「{final_name}」没有归属目录，无法入库——"
                 "请先用 modify 指定 dir_id")
-        if final_dir and library.directory(final_dir) is None:
-            raise ValueError(f"目录不存在于标签库：{final_dir}")
+        if final_dir and final_name:
+            directory = library.directory(final_dir)
+            if directory is None:
+                raise ValueError(f"目录不存在于标签库：{final_dir}")
+            # 目录校验（与生成侧同口径，入库前再挡一次：目录可能在这两轮之间
+            # 被改成静态，或人工 modify 换了目录/粒度）：
+            # 1) 只有动态目录能扩充新标签，静态目录取值固定；
+            # 2) 候选行的挂载粒度必须在目录的 applicable_scope 里。
+            if not directory.allows_new_tags:
+                raise ValueError(
+                    f"目录「{directory.dir_name}」是静态目录（dir_static），"
+                    "不允许扩充新标签")
+            scope = library.scope_of(final_dir)
+            allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
+            if row.target_type not in allowed:
+                raise ValueError(
+                    f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
+                    f"与候选行的 {row.target_type} 不一致")
 
     # ---- 执行动作（前置已全部通过）----
     now = datetime.now(timezone.utc)

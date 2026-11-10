@@ -241,11 +241,22 @@ def test_approve_new_word_writes_tag_define(session):
     assert f'"pre_asset_tag_id": {row.id}' in (log.after_json or "")
 
 
-def test_approve_new_word_without_dir_raises(session):
-    row = _seed_row(session, candidate_name="无目录新词")
-    row.candidate_dir_id = None
+def test_approve_new_word_in_static_dir_raises(session):
+    """静态目录的取值是固定的，审核通过也不能往里塞新标签。"""
+    row = _seed_row(session, candidate_name="静态目录新词")
+    row.candidate_dir_id = "dir_genre"          # dir_static
     session.commit()
-    with pytest.raises(ValueError, match="没有归属目录"):
+    with pytest.raises(ValueError, match="静态目录"):
+        apply_review(session, row.id, "approve", "alice", None)
+
+
+def test_approve_new_word_scope_mismatch_raises(session):
+    """挂载粒度必须落在目录的 applicable_scope 里（dir_scene 只能挂 scene）。"""
+    row = _seed_row(session, candidate_name="粒度不符新词")
+    row.candidate_dir_id = "dir_scene"          # dir_dynamic，scope=scene
+    row.target_type = "content"
+    session.commit()
+    with pytest.raises(ValueError, match="挂载粒度"):
         apply_review(session, row.id, "approve", "alice", None)
 
 
@@ -260,11 +271,3 @@ def test_merge_appends_alias_to_tag_define(session):
     assert "报仇" in (target.aliases or "")
     # 并入是幂等的：同一别名不会重复追加
     assert target.aliases.count("报仇") == 1
-
-
-def test_approve_new_word_without_dir_raises(session):
-    row = _seed_row(session, candidate_name="无目录新词")
-    row.candidate_dir_id = None
-    session.commit()
-    with pytest.raises(ValueError, match="没有归属目录"):
-        apply_review(session, row.id, "approve", "alice", None)
