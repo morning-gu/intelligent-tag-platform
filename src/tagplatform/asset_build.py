@@ -126,6 +126,11 @@ def match_asset_title(session: Session, filename: str) -> MediaAsset | None:
     - 完全相等优先；
     - 否则片名词序列被文件名包含（片名 ≥5 字符，避免 "It" 这类误命中）；
     - 多命中时优先有内容、其次更新时间最新的那行。
+
+    已知取舍：包含匹配会把 "The Godfather Part II" 这类续集也算成
+    "The Godfather"（归一化后前者包含后者）。这里刻意接受——这类片数据集里
+    本来也建不出来（没有 IMDb id 就无法重建），宁可提示"已有同名资产"让人
+    改名带上 IMDb id，也不要静默多建一条永远生成不了内容的占位资产。
     """
     target = name_tokens(filename)
     if not target:
