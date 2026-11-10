@@ -306,12 +306,21 @@ describe('GenerationTasks 生产任务页', () => {
       expect(mockedApiFetch.mock.calls.some(([p]) => p === '/api/v1/assets')).toBe(true)
     })
 
-    // 选项仅在下拉展开后渲染：先 mouseDown 再按 title 定位点击
+    // 选项仅在下拉展开后渲染：先 mouseDown 再按 title 定位点击。
+    // 选中一项后下拉自动收起（避免弹层挡住下面字段），加选需再点开一次。
     fireEvent.mouseDown(screen.getByRole('combobox', { name: '资产多选' }))
     fireEvent.click(await screen.findByTitle('星际穿越（a-movie）'))
+    // 选中即收起（antd 关闭后下拉节点仍挂在 DOM 上：动画中是 leave 类，
+    // 动画结束后换成 hidden 类，两者都算已收起）
+    await waitFor(() => {
+      const cls = document.querySelector('.ant-select-dropdown')?.className ?? ''
+      expect(cls).toMatch(/ant-select-dropdown-hidden|ant-slide-up-leave/)
+    })
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: '资产多选' }))
     fireEvent.click(await screen.findByTitle('星际穿越-场景2（a-scene）'))
-    // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
+    // 模式默认就是开放，这里再点一次确认幂等（不改变提交值）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
+    // 最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.change(screen.getByPlaceholderText('默认 30'), { target: { value: '20' } })
 
     // 弹窗确定按钮为两字"创建"（antd 渲染为"创 建"），与触发按钮区分
@@ -328,7 +337,7 @@ describe('GenerationTasks 生产任务页', () => {
     await waitFor(() => expect(listCallPaths()).toHaveLength(2))
   })
 
-  it('创建弹窗：未填策略时不携带 policy 字段（mode 默认闭环）', async () => {
+  it('创建弹窗：未填策略时不携带 policy 字段（mode 默认开放）', async () => {
     mockApis()
     renderGenerationTasks()
     await screen.findByText('task-1')
@@ -341,7 +350,7 @@ describe('GenerationTasks 生产任务页', () => {
     await waitFor(() => expect(postedBody('/api/v1/generation/tasks')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie'],
-      mode: 'closed',
+      mode: 'open',
     })
   })
 

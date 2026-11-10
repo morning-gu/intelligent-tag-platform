@@ -7,9 +7,9 @@
 //   版本（Prompt 内容管理属阶段 4，此处仅展示版本号）。
 // - failed 行"重试"：POST retry → 成功提示 + 刷新列表；422（非 failed）/
 //   404 透出后端 detail。
-// - 创建任务 Modal：资产多选（GET /assets）+ mode 单选（默认闭环）+ 可选
-//   策略两个数字输入 → POST tasks → 成功提示 + 刷新；策略仅在填写时携带，
-//   未填字段交由后端默认值（30 / 0.7）。
+// - 创建任务 Modal：资产多选（GET /assets，选完即收起下拉）+ mode 单选
+//   （默认开放）+ 可选策略两个数字输入 → POST tasks → 成功提示 + 刷新；
+//   策略仅在填写时携带，未填字段交由后端默认值（30 / 0.7）。
 import {
   Alert,
   Button,
@@ -80,7 +80,7 @@ const REVIEW_STATUS_COLORS: Record<string, string> = {
   merged: 'purple',
 }
 
-/** 创建弹窗表单值：资产非空多选 + mode（默认闭环）+ 可选策略两项。 */
+/** 创建弹窗表单值：资产非空多选 + mode（默认开放）+ 可选策略两项。 */
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
@@ -231,6 +231,9 @@ export default function GenerationTasks() {
   const [creating, setCreating] = useState(false)
   const [createForm] = Form.useForm<CreateFormValues>()
   const [dirNodes, setDirNodes] = useState<DirSelectNode[]>([])
+  // 资产多选下拉的开合由我们接管：antd 多选默认选中后不收起，弹层会一直挂在
+  // 弹窗上挡住下面的字段，这里每选一次就收起（再点输入框可继续加选）。
+  const [assetOpen, setAssetOpen] = useState(false)
 
   const loadTasks = useCallback(async () => {
     setLoading(true)
@@ -435,6 +438,9 @@ export default function GenerationTasks() {
             <Select
               aria-label="资产多选"
               mode="multiple"
+              open={assetOpen}
+              onDropdownVisibleChange={setAssetOpen}
+              onChange={() => setAssetOpen(false)}
               loading={assetsLoading}
               options={assets.map((a) => ({
                 value: a.asset_id,
@@ -443,11 +449,11 @@ export default function GenerationTasks() {
               placeholder="选择要生成标签的资产"
             />
           </Form.Item>
-          <Form.Item name="mode" label="模式" initialValue="closed">
+          <Form.Item name="mode" label="模式" initialValue="open">
             <Radio.Group
               options={[
-                { value: 'closed', label: '闭环' },
                 { value: 'open', label: '开放' },
+                { value: 'closed', label: '闭环' },
               ]}
             />
           </Form.Item>
