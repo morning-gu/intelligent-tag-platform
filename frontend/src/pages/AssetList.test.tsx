@@ -611,3 +611,161 @@ describe('上传视频与生成进度', () => {
     expect(lastUploadForm?.get('infer')).toBe('false')
   })
 })
+
+describe('从目录导入资产', () => {
+  const SCAN_ITEMS = [
+    {
+      dir_name: 'Rear Window--tt0047396',
+      title: 'Rear Window',
+      imdb_id: 'tt0047396',
+      asset_id: 'movie_tt0047396',
+      scenes: 9,
+      frames: 27,
+      duration_ms: 6_000_000,
+      size_bytes: 2_400_000,
+      exists: false,
+      has_content: false,
+      has_video: false,
+      error: null,
+    },
+    {
+      dir_name: 'Taxi Driver--tt0075314',
+      title: 'Taxi Driver',
+      imdb_id: 'tt0075314',
+      asset_id: 'movie_tt0075314',
+      scenes: 8,
+      frames: 24,
+      duration_ms: 6_800_000,
+      size_bytes: 2_100_000,
+      exists: true,
+      has_content: true,
+      has_video: false,
+      error: null,
+    },
+    {
+      dir_name: 'Broken--tt0000000',
+      title: 'Broken',
+      imdb_id: 'tt0000000',
+      asset_id: null,
+      scenes: 0,
+      frames: 0,
+      duration_ms: null,
+      size_bytes: 0,
+      exists: false,
+      has_content: false,
+      has_video: false,
+      error: '缺少 content.json',
+    },
+  ]
+
+  /** 扫描 + 导入的 apiFetch 桩；导入后列表多一部片。 */
+  function mockDirApis(
+    options: { scanError?: Error; bulk?: Record<string, unknown> } = {},
+  ) {
+    let imported = false
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/content/import/movie-scan')) {
+        if (options.scanError) throw options.scanError
+        return { root: '/cache/h50065879/movie_asset/movie_asset', total: 3, items: SCAN_ITEMS }
+      }
+      if (path === '/api/v1/content/import/movie-bulk') {
+        imported = true
+        return (
+          options.bulk ?? {
+            imported: 1,
+            skipped: 0,
+            failed: 0,
+            items: [
+              {
+                dir_name: 'Rear Window--tt0047396',
+                status: 'imported',
+                asset_id: 'movie_tt0047396',
+                title: 'Rear Window',
+                scenes: 9,
+                frames: 27,
+                reason: null,
+              },
+            ],
+          }
+        )
+      }
+      if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) {
+        return imported
+          ? [
+              ...ASSETS,
+              {
+                asset_id: 'movie_tt0047396',
+                asset_type: 'movie',
+                parent_id: null,
+                title: 'Rear Window',
+                duration_ms: 6_000_000,
+                video_uri: null,
+                has_content: true,
+                created_at: '2026-11-11T10:00:00',
+                updated_at: '2026-11-11T10:00:00',
+              },
+            ]
+          : ASSETS
+      }
+      throw new Error(`未预期的请求：${path}`)
+    })
+  }
+
+  it('扫描后列出目录：可导入的默认勾选，已导入/坏目录不可选', async () => {
+    mockDirApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+
+    expect(await screen.findByText('Rear Window')).toBeInTheDocument()
+    expect(screen.getByText('Taxi Driver')).toBeInTheDocument()
+    // 只有可导入的那部被默认勾选
+    expect(screen.getByRole('button', { name: '导入所选（1）' })).toBeInTheDocument()
+    // 状态标签：可导入 / 已导入 / 无法导入
+    expect(screen.getByText('可导入')).toBeInTheDocument()
+    expect(screen.getByText('已导入')).toBeInTheDocument()
+    expect(screen.getByText('无法导入')).toBeInTheDocument()
+  })
+
+  it('确认导入：POST 选中目录，成功提示 + 刷新列表', async () => {
+    mockDirApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+    await screen.findByText('Rear Window')
+
+    fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
+
+    await waitFor(() =>
+      expect(
+        mockedApiFetch.mock.calls.some(
+          (call) => call[0] === '/api/v1/content/import/movie-bulk',
+        ),
+      ).toBe(true),
+    )
+    expect(await screen.findByText(/导入完成：成功 1 · 跳过 0 · 失败 0/)).toBeInTheDocument()
+
+    const bulkCall = mockedApiFetch.mock.calls.find(
+      (call) => call[0] === '/api/v1/content/import/movie-bulk',
+    )
+    const body = JSON.parse(String((bulkCall?.[1] as RequestInit).body))
+    expect(body.dir_names).toEqual(['Rear Window--tt0047396'])
+    expect(body.overwrite).toBe(false)
+
+    // 导入成功后重新拉列表
+    await waitFor(() => expect(assetsCallPaths().length).toBeGreaterThanOrEqual(2))
+  })
+
+  it('扫描失败：Modal 内显式报错，不静默', async () => {
+    mockDirApis({ scanError: new Error('影片资产目录不存在: /nope') })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+
+    expect(await screen.findByText('目录导入失败')).toBeInTheDocument()
+    expect(screen.getByText('影片资产目录不存在: /nope')).toBeInTheDocument()
+  })
+})

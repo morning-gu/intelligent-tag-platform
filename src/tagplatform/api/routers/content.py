@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
+import tagplatform.movie_import as movie_import
 from tagplatform.content_import import import_content as import_content_svc
 from tagplatform.content_template import template_from_stored
 from tagplatform.db.models import MediaAsset
@@ -167,3 +168,104 @@ def get_asset_content(asset_id: str, session: Session = Depends(get_session)) ->
 def list_adapters_api() -> list[str]:
     """已注册内容格式适配器 kind 列表（前端导入表单 kind 下拉数据源）。"""
     return list_adapters()
+
+
+# ---------- 目录导入：把已备好的影片资产目录直接注册成资产 ----------
+
+class MovieDirOut(BaseModel):
+    """扫描到的一部影片目录（前端列表一行）。"""
+
+    dir_name: str
+    title: str
+    imdb_id: str | None = None
+    asset_id: str | None = None
+    scenes: int = 0
+    frames: int = 0
+    duration_ms: int | None = None
+    size_bytes: int = 0
+    # 库里已有同 asset_id 的资产（前端置灰用）
+    exists: bool = False
+    has_content: bool = False
+    has_video: bool = False
+    # content.json 读不了时的原因（该行不可导入）
+    error: str | None = None
+
+
+class MovieScanResponse(BaseModel):
+    root: str
+    total: int
+    items: list[MovieDirOut]
+
+
+class MovieImportRequest(BaseModel):
+    """目录导入请求：不传 dir_names 表示全部；overwrite 覆盖已有内容。"""
+
+    dir_names: list[str] | None = None
+    overwrite: bool = False
+    root: str | None = None
+
+
+class MovieImportItem(BaseModel):
+    dir_name: str
+    status: str          # imported | skipped | failed
+    asset_id: str | None = None
+    title: str | None = None
+    scenes: int = 0
+    frames: int = 0
+    reason: str | None = None
+
+
+class MovieImportResponse(BaseModel):
+    imported: int
+    skipped: int
+    failed: int
+    items: list[MovieImportItem]
+
+
+@router.get("/content/import/movie-scan", response_model=MovieScanResponse)
+def scan_movie_asset_dirs(
+    root: str | None = Query(None, description="影片资产目录根，缺省用配置值"),
+    session: Session = Depends(get_session),
+) -> MovieScanResponse:
+    """扫描影片资产目录：每部片一条（标题/场景数/帧数/库里是否已有）。"""
+    try:
+        base = movie_import.resolve_root(root)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    items: list[MovieDirOut] = []
+    for item in movie_import.scan_movie_dirs(base):
+        existing = (session.get(MediaAsset, item.asset_id)
+                    if item.asset_id else None)
+        items.append(MovieDirOut(
+            dir_name=item.dir_name, title=item.title, imdb_id=item.imdb_id,
+            asset_id=item.asset_id, scenes=item.scenes, frames=item.frames,
+            duration_ms=item.duration_ms, size_bytes=item.size_bytes,
+            exists=existing is not None,
+            has_content=bool(existing is not None and existing.content_json),
+            has_video=bool(existing is not None and existing.video_uri),
+            error=item.error))
+    return MovieScanResponse(root=str(base), total=len(items), items=items)
+
+
+@router.post("/content/import/movie-bulk", response_model=MovieImportResponse)
+def import_movie_asset_dirs(
+    body: MovieImportRequest,
+    session: Session = Depends(get_session),
+) -> MovieImportResponse:
+    """把选中的影片目录注册成资产（不经过上传视频；已存在的按 overwrite 处理）。"""
+    try:
+        base = movie_import.resolve_root(body.root)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    outcome = movie_import.import_many(
+        session, base, body.dir_names, overwrite=body.overwrite)
+    counts = outcome.counts
+    rows = [MovieImportItem(
+        dir_name=o.dir_name, status=o.status, asset_id=o.asset_id,
+        title=o.title, scenes=o.scenes, frames=o.frames, reason=o.reason)
+        for o in (*outcome.imported, *outcome.skipped, *outcome.failed)]
+    return MovieImportResponse(imported=counts["imported"],
+                               skipped=counts["skipped"],
+                               failed=counts["failed"], items=rows)

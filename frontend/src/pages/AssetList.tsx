@@ -38,6 +38,12 @@ import {
   type MediaUploadResult,
 } from '../api/media'
 import { formatTimestamp } from '../api/review'
+import {
+  bulkImportMovieDirs,
+  scanMovieDirs,
+  type MovieDirItem,
+  type MovieImportResult,
+} from '../api/movieImport'
 
 /** 资产类型中文展示（取值域与内容 JSON 契约的 Literal 一致）。 */
 const ASSET_TYPE_LABELS: Record<string, string> = {
@@ -106,6 +112,20 @@ export default function AssetList() {
   // 是否让大模型补充资产字段（描述/氛围/事件/说话人），默认打开。
   // 关掉时只落数据集已有的事实：不调模型、快，但氛围/事件/说话人为空。
   const [useLlm, setUseLlm] = useState(true)
+
+  // —— 目录导入：把服务器上已备好的 content.json + frames 直接注册成资产 ——
+  // 与上传那条路并行：上传是"视频 → 现场生成内容"，这条是"内容已就绪 → 只登记"。
+  const [dirOpen, setDirOpen] = useState(false)
+  const [dirLoading, setDirLoading] = useState(false)
+  const [dirItems, setDirItems] = useState<MovieDirItem[]>([])
+  const [dirRoot, setDirRoot] = useState<string>('')
+  const [dirError, setDirError] = useState<string | null>(null)
+  // 勾选的目录名（默认全选可导入且库里还没有的）
+  const [dirPicked, setDirPicked] = useState<string[]>([])
+  // 覆盖已存在资产的内容（默认不覆盖，避免冲掉上传那条路产出的内容）
+  const [dirOverwrite, setDirOverwrite] = useState(false)
+  const [dirImporting, setDirImporting] = useState(false)
+  const [dirResult, setDirResult] = useState<MovieImportResult | null>(null)
 
   const loadAssets = useCallback(async () => {
     setLoading(true)
@@ -247,6 +267,56 @@ export default function AssetList() {
     }
   }
 
+  /** 打开目录导入 Modal：扫描服务器上已备好的影片资产目录。
+   *
+   * 这条入口不传视频、不跑生成：content.json 已经是补全好的内容，扫描后
+   * 直接登记。默认勾选"可导入且库里还没有"的那些。 */
+  async function openDirImport() {
+    setDirOpen(true)
+    setDirLoading(true)
+    setDirError(null)
+    setDirResult(null)
+    setDirItems([])
+    setDirPicked([])
+    setDirOverwrite(false)
+    try {
+      const scan = await scanMovieDirs()
+      setDirRoot(scan.root)
+      setDirItems(scan.items)
+      setDirPicked(
+        scan.items
+          .filter((item) => item.error === null && !item.exists)
+          .map((item) => item.dir_name),
+      )
+    } catch (err) {
+      setDirError(err instanceof Error ? err.message : '影片资产目录扫描失败')
+    } finally {
+      setDirLoading(false)
+    }
+  }
+
+  /** 执行导入：只提交勾选的目录；结果按 imported/skipped/failed 汇总。 */
+  async function handleDirImport() {
+    if (dirPicked.length === 0) return
+    setDirImporting(true)
+    setDirError(null)
+    try {
+      const result = await bulkImportMovieDirs({
+        dirNames: dirPicked,
+        overwrite: dirOverwrite,
+      })
+      setDirResult(result)
+      if (result.imported > 0) {
+        message.success(`已注册 ${result.imported} 部影片资产`)
+        await loadAssets()
+      }
+    } catch (err) {
+      setDirError(err instanceof Error ? err.message : '目录导入失败')
+    } finally {
+      setDirImporting(false)
+    }
+  }
+
   /** 按类型分组（固定顺序，未知类型殿后）。 */
   const groups: { type: string; rows: AssetSummary[] }[] = []
   for (const type of ASSET_TYPE_ORDER) {
@@ -324,6 +394,7 @@ export default function AssetList() {
           <Button type="primary" onClick={openUpload}>
             上传视频
           </Button>
+          <Button onClick={() => void openDirImport()}>从目录导入</Button>
         </Space>
       }
     >
@@ -520,6 +591,137 @@ export default function AssetList() {
             )}
           </div>
         )}
+      </Modal>
+      <Modal
+        title="从目录导入资产"
+        open={dirOpen}
+        width={820}
+        okText={`导入所选（${dirPicked.length}）`}
+        cancelText="关闭"
+        okButtonProps={{ disabled: dirPicked.length === 0 || dirImporting }}
+        confirmLoading={dirImporting}
+        onOk={() => void handleDirImport()}
+        onCancel={() => setDirOpen(false)}
+        destroyOnHidden
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Typography.Text type="secondary">
+            读取服务器上每部影片目录里的 content.json，直接注册为资产（不走上传视频、
+            不跑生成）。关键帧留在原目录，生成阶段按场景直接取用。
+            {dirRoot !== '' ? `当前目录：${dirRoot}` : ''}
+          </Typography.Text>
+          {dirError !== null && <Alert type="error" showIcon message="目录导入失败" description={dirError} />}
+          {dirLoading ? (
+            <div data-testid="dir-scan-loading">
+              <Progress percent={100} status="active" showInfo={false} />
+              <Typography.Text type="secondary">正在扫描目录…</Typography.Text>
+            </div>
+          ) : (
+            <>
+              <Table<MovieDirItem>
+                size="small"
+                rowKey="dir_name"
+                pagination={{ pageSize: 10, showSizeChanger: false }}
+                dataSource={dirItems}
+                rowSelection={{
+                  selectedRowKeys: dirPicked,
+                  onChange: (keys) => setDirPicked(keys as string[]),
+                  getCheckboxProps: (row) => ({
+                    disabled: row.error !== null || (row.exists && !dirOverwrite),
+                  }),
+                }}
+                columns={[
+                  {
+                    title: '影片',
+                    dataIndex: 'title',
+                    render: (_, row) => (
+                      <div>
+                        <div>{row.title}</div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {row.dir_name}
+                        </Typography.Text>
+                      </div>
+                    ),
+                  },
+                  { title: '场景', dataIndex: 'scenes', width: 70 },
+                  { title: '关键帧', dataIndex: 'frames', width: 80 },
+                  {
+                    title: '状态',
+                    width: 150,
+                    render: (_, row) =>
+                      row.error !== null ? (
+                        <Tag color="red">无法导入</Tag>
+                      ) : row.has_video ? (
+                        <Tag color="orange">已有上传视频</Tag>
+                      ) : row.exists ? (
+                        <Tag color="blue">已导入</Tag>
+                      ) : (
+                        <Tag color="green">可导入</Tag>
+                      ),
+                  },
+                ]}
+                expandable={{
+                  expandedRowRender: (row) =>
+                    row.error !== null ? (
+                      <Typography.Text type="danger">{row.error}</Typography.Text>
+                    ) : (
+                      <Typography.Text type="secondary">
+                        {row.asset_id ?? '无 asset_id'} · {row.scenes} 个场景 ·{' '}
+                        {row.frames} 张关键帧 · {formatSize(row.size_bytes)}
+                      </Typography.Text>
+                    ),
+                }}
+              />
+              <Space wrap>
+                <Checkbox
+                  checked={dirOverwrite}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    setDirOverwrite(next)
+                    if (!next) {
+                      // 取消覆盖时，把"已存在"的行从勾选里剔除
+                      setDirPicked((picked) =>
+                        picked.filter((name) => {
+                          const item = dirItems.find((i) => i.dir_name === name)
+                          return item !== undefined && !item.exists
+                        }),
+                      )
+                    }
+                  }}
+                >
+                  覆盖已导入资产的内容
+                </Checkbox>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  已导入的行默认不可选；勾选此项可重导（会覆盖内容，但不动上传的视频地址）
+                </Typography.Text>
+              </Space>
+              {dirResult !== null && (
+                <Alert
+                  type={dirResult.failed > 0 ? 'warning' : 'success'}
+                  showIcon
+                  message={`导入完成：成功 ${dirResult.imported} · 跳过 ${dirResult.skipped} · 失败 ${dirResult.failed}`}
+                  description={
+                    dirResult.failed > 0 ? (
+                      <div>
+                        {dirResult.items
+                          .filter((item) => item.status === 'failed')
+                          .slice(0, 5)
+                          .map((item) => (
+                            <div key={item.dir_name}>
+                              {item.dir_name}：{item.reason ?? '未知原因'}
+                            </div>
+                          ))}
+                      </div>
+                    ) : undefined
+                  }
+                />
+              )}
+              {dirResult === null && !dirLoading && dirItems.length === 0 && (
+                <Empty description="目录里没有可导入的影片" />
+              )}
+            </>
+          )}
+        </div>
       </Modal>
     </Card>
   )

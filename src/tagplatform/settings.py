@@ -68,6 +68,11 @@ class Settings(BaseSettings):
 
     # 数据集根目录（MovieNet）；上传文件名命中后从这里取标注与关键帧
     dataset_root: str = "/cache/MovieNet"
+    # 已备好的"影片资产目录"根：每部片一个子目录，内含 content.json 与
+    # frames/（scene_XXX_frame_N.jpg）。这是"直接注册资产"入口的来源，
+    # 与上传视频那条路并行存在（TAGPLT_MOVIE_ASSET_ROOT 可覆盖）。
+    # 说明：目录布局按 2026-11 的现有布局写死，改布局只需改这里。
+    movie_asset_root: str = "/cache/h50065879/movie_asset/movie_asset"
     # 每场景抽几张关键帧喂多模态模型
     asset_frames: int = 3
     # 场景级并发（生成资产的模型调用）

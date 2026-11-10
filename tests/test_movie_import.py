@@ -1,0 +1,211 @@
+"""影片资产目录导入（内容已备好，直接注册资产；与上传视频并行）。
+
+覆盖点：
+1. 扫描：目录名→imdb、缺 content.json 记错误、`_` 开头与非目录跳过；
+2. 单部导入：建影片行 + 场景行、content_json 落库、asset_id 沿用 content.json；
+3. 幂等：内容一致 → skipped；overwrite=True 才重写；已绑视频 → 默认跳过；
+4. 批量：未知名过滤、坏目录跳过并如实报告；
+5. 帧：`plan_scene_frames` 优先用资产目录里的帧（scene_XXX_frame_N 排序）；
+6. HTTP：movie-scan / movie-bulk 两个端点（临时根目录，不碰真实路径）。
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tagplatform import movie_import
+from tagplatform.adapters.vision import to_content_json
+from tagplatform.db.models import MediaAsset
+from tagplatform.generation.mtg import keyframes
+from tagplatform.schemas.upstream import parse_upstream
+
+PAYLOAD = {
+    "asset": {
+        "asset_id": "movie_tt1234567",
+        "asset_type": "movie",
+        "title": "Rear Window",
+        "duration_ms": 6_000_000,
+        "video_uri": None,
+    },
+    "content": {
+        "description": "一名摄影记者因腿伤被困家中，靠观察邻居打发时间。",
+        "characters": [
+            {"character_id": "character_001", "name": "Jeff", "description": "记者"}
+        ],
+        "scenes": [
+            {"scene_id": "scene_001", "start_ms": 0, "end_ms": 120_000,
+             "description": "开场，窗帘拉开，院子全景。",
+             "character_ids": ["character_001"], "frames": ["scene_001_frame_1.jpg"]},
+            {"scene_id": "scene_002", "start_ms": 120_000, "end_ms": 240_000,
+             "description": "邻居浇花，主角在窗后观察。",
+             "character_ids": ["character_001"], "frames": []},
+        ],
+    },
+}
+
+
+@pytest.fixture
+def movies(tmp_path):
+    """影片目录根单独一层：tmp_path 里还有 conftest 写的标签库夹具。"""
+    root = tmp_path / "movies"
+    root.mkdir()
+    return root
+
+
+def _write_movie(root: Path, dir_name: str, payload: dict | None = None,
+                 frames: int = 3) -> Path:
+    movie = root / dir_name
+    movie.mkdir(parents=True)
+    if payload is not None:
+        (movie / "content.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    if frames:
+        frame_dir = movie / "frames"
+        frame_dir.mkdir()
+        for scene in ("scene_001", "scene_002"):
+            for index in range(1, frames + 1):
+                (frame_dir / f"{scene}_frame_{index}.jpg").write_bytes(b"jpeg")
+    return movie
+
+
+def test_imdb_of_dir():
+    assert movie_import.imdb_of_dir("Rear Window--tt0047396") == "tt0047396"
+    assert movie_import.imdb_of_dir("12 Years a Slave--tt2024544") == "tt2024544"
+    assert movie_import.imdb_of_dir("没有 imdb 的目录") is None
+
+
+def test_scene_frames_sorted_and_scoped(movies):
+    movie = _write_movie(movies, "Rear Window--tt0047396", PAYLOAD, frames=3)
+    # 乱序文件名也要按序号返回
+    (movie / "frames" / "scene_001_frame_9.jpg").write_bytes(b"jpeg")
+    frames = movie_import.scene_frames(movies, "tt0047396", "scene_001")
+    assert [f.name for f in frames] == [
+        "scene_001_frame_1.jpg", "scene_001_frame_2.jpg",
+        "scene_001_frame_3.jpg", "scene_001_frame_9.jpg"]
+    assert movie_import.scene_frames(movies, "tt0000000", "scene_001") == ()
+
+
+def test_scan_movie_dirs(movies):
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+    _write_movie(movies, "Broken--tt0000002", {"asset": {}}, frames=0)
+    _write_movie(movies, "NoJson--tt0000003", None, frames=1)
+    (movies / "_raw").mkdir()
+    (movies / "not_a_dir.txt").write_text("x", encoding="utf-8")
+
+    items = {item.dir_name: item for item in movie_import.scan_movie_dirs(movies)}
+    assert set(items) == {"Rear Window--tt0047396", "Broken--tt0000002",
+                          "NoJson--tt0000003"}
+    good = items["Rear Window--tt0047396"]
+    assert good.title == "Rear Window"
+    assert good.asset_id == "movie_tt1234567"
+    assert good.scenes == 2 and good.frames == 6
+    assert good.imdb_id == "tt0047396" and good.error is None
+    assert items["NoJson--tt0000003"].error == "缺少 content.json"
+    assert items["Broken--tt0000002"].error is not None
+
+
+def test_import_creates_asset_and_is_idempotent(session, movies):
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+    first = movie_import.import_movie_dir(session, movies, "Rear Window--tt0047396")
+    assert first.status == "imported"
+    assert first.asset_id == "movie_tt1234567"
+    assert first.scenes == 2
+
+    movie = session.get(MediaAsset, "movie_tt1234567")
+    assert movie is not None and movie.content_json
+    stored = json.loads(movie.content_json)
+    assert stored["asset"]["title"] == "Rear Window"
+    assert len(stored["content"]["scenes"]) == 2
+    scenes = session.query(MediaAsset).filter_by(asset_type="scene").all()
+    assert {row.asset_id for row in scenes} == {
+        "movie_tt1234567::scene_001", "movie_tt1234567::scene_002"}
+
+    again = movie_import.import_movie_dir(session, movies, "Rear Window--tt0047396")
+    assert again.status == "skipped"
+    assert "一致" in (again.reason or "")
+
+    forced = movie_import.import_movie_dir(
+        session, movies, "Rear Window--tt0047396", overwrite=True)
+    assert forced.status == "imported"
+
+
+def test_import_skips_asset_with_uploaded_video(session, movies):
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+    session.add(MediaAsset(asset_id="movie_tt1234567", asset_type="movie",
+                           title="Rear Window", video_uri="/tmp/x.mp4"))
+    session.commit()
+
+    skipped = movie_import.import_movie_dir(session, movies, "Rear Window--tt0047396")
+    assert skipped.status == "skipped"
+    assert "视频" in (skipped.reason or "")
+
+    forced = movie_import.import_movie_dir(
+        session, movies, "Rear Window--tt0047396", overwrite=True)
+    assert forced.status == "imported"
+    # 覆盖内容但不动视频地址（上传那条路的产物不能被目录导入抹掉）
+    assert session.get(MediaAsset, "movie_tt1234567").video_uri == "/tmp/x.mp4"
+
+
+def test_import_many_filters_unknown_and_reports_failures(session, movies):
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+    _write_movie(movies, "Broken--tt0000002", {"asset": {}}, frames=0)
+
+    outcome = movie_import.import_many(
+        session, movies, ["Rear Window--tt0047396", "不存在的目录"])
+    assert outcome.counts == {"imported": 1, "skipped": 0, "failed": 0}
+
+    # 全量再跑：好目录内容一致被跳过；坏目录在扫描阶段就没有 asset_id，
+    # 批量入口不选它（前端也拿不到它的 asset_id）
+    all_outcome = movie_import.import_many(session, movies, None)
+    assert all_outcome.counts == {"imported": 0, "skipped": 1, "failed": 0}
+
+    bad = movie_import.import_movie_dir(session, movies, "Broken--tt0000002")
+    assert bad.status == "failed"
+
+
+def test_plan_scene_frames_uses_local_frames(movies):
+    content = to_content_json(parse_upstream(PAYLOAD))
+    _write_movie(movies, "Rear Window--tt1234567", PAYLOAD, frames=2)
+    frames = keyframes.plan_scene_frames(
+        content, str(movies / "no_dataset"), per_scene=2,
+        movie_asset_root=str(movies))
+    assert set(frames) == {"scene_001", "scene_002"}
+    assert [p.name for p in frames["scene_001"]] == [
+        "scene_001_frame_1.jpg", "scene_001_frame_2.jpg"]
+
+
+def test_plan_scene_frames_without_local_root_falls_back(movies):
+    content = to_content_json(parse_upstream(PAYLOAD))
+    # 既无本地帧、也没有数据集 → 空字典（退化为纯文本 prompt，不报错）
+    assert keyframes.plan_scene_frames(
+        content, str(movies / "no_dataset"), movie_asset_root=None) == {}
+
+
+def test_api_scan_and_bulk(client, movies):
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+
+    scan = client.get("/api/v1/content/import/movie-scan",
+                      params={"root": str(movies)})
+    assert scan.status_code == 200, scan.text
+    body = scan.json()
+    assert body["total"] == 1
+    row = body["items"][0]
+    assert row["title"] == "Rear Window" and row["exists"] is False
+    assert row["scenes"] == 2 and row["frames"] == 6
+
+    imported = client.post("/api/v1/content/import/movie-bulk",
+                           json={"root": str(movies), "dir_names": None})
+    assert imported.status_code == 200, imported.text
+    summary = imported.json()
+    assert summary["imported"] == 1 and summary["failed"] == 0
+
+    again = client.get("/api/v1/content/import/movie-scan",
+                       params={"root": str(movies)})
+    assert again.json()["items"][0]["exists"] is True
+
+
+def test_api_scan_missing_root(client):
+    response = client.get("/api/v1/content/import/movie-scan",
+                          params={"root": "/nonexistent/movie_asset"})
+    assert response.status_code == 422

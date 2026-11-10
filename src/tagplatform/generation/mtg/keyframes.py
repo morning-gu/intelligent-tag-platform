@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from tagplatform.assets.builder import pick_keyframes
+from tagplatform.movie_import import scene_frames as imported_scene_frames
 from tagplatform.schemas import ContentJSON
 
 _STORY_SUFFIX_RE = re.compile(r"_story_(\d+)$")
@@ -113,28 +114,51 @@ def _cap_frames(plans: list[SceneFrames], max_frames: int) -> list[SceneFrames]:
 
 
 def plan_scene_frames(content: ContentJSON, dataset_root: str,
-                      per_scene: int = 2, max_frames: int = 24
+                      per_scene: int = 2, max_frames: int = 24,
+                      movie_asset_root: str | None = None
                       ) -> dict[str, tuple[Path, ...]]:
-    """资产场景 → 每场景若干帧；返回 {scene_id: (Path, ...)}（顺序同资产）。"""
+    """资产场景 → 每场景若干帧；返回 {scene_id: (Path, ...)}（顺序同资产）。
+
+    帧来源两处，**目录导入的资产优先**：
+    ① `movie_asset_root/<片名>--<imdb>/frames/` 里已挑好的帧
+       （命名 `scene_XXX_frame_N.jpg`，与场景 id 对齐，最贴内容本身）；
+    ② MovieNet 数据集按 story 段现取（上传视频那条路一直走的就是它）。
+    两处都没有就退化为纯文本 prompt。
+    """
     movie_id = movie_id_of(content)
     if not movie_id:
         return {}
+    local_root = _local_root(movie_asset_root)
     annotation = _load_annotation(dataset_root, movie_id)
-    if not annotation:
-        return {}
-    story = annotation.get("story") or []
-    if not story:
-        return {}
+    story = (annotation or {}).get("story") or []
     frames_dir = Path(dataset_root) / "frames" / "frames" / movie_id
 
     plans: list[SceneFrames] = []
     for scene in content.content.scenes:
-        index = _story_index(scene.scene_id, scene.time_range.start_ms, story)
         frames: tuple[Path, ...] = ()
-        if index is not None:
-            seg = story[index]
-            frames = tuple(pick_keyframes(frames_dir, seg.get("shot") or [],
-                                          per_scene))
+        if local_root is not None:
+            local = imported_scene_frames(local_root, movie_id, scene.scene_id)
+            if local:
+                frames = local[:per_scene]
+        if not frames and story:
+            index = _story_index(scene.scene_id, scene.time_range.start_ms, story)
+            if index is not None:
+                seg = story[index]
+                frames = tuple(pick_keyframes(frames_dir, seg.get("shot") or [],
+                                              per_scene))
         plans.append(SceneFrames(scene.scene_id, scene.time_range.start_ms,
                                  scene.time_range.end_ms, frames))
-    return {p.scene_id: p.frames for p in _cap_frames(plans, max_frames)}
+    planned = {p.scene_id: p.frames for p in _cap_frames(plans, max_frames)}
+    # 一帧都没取到就按"没有帧"处理（与旧行为一致：退化纯文本，不返回空壳）
+    return planned if any(planned.values()) else {}
+
+
+def _local_root(movie_asset_root: str | None) -> Path | None:
+    """目录导入的帧根（不存在就当没有，绝不让它拖挂整条生成）。"""
+    if not movie_asset_root:
+        return None
+    try:
+        path = Path(movie_asset_root)
+        return path if path.is_dir() else None
+    except OSError:
+        return None
