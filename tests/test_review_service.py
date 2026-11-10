@@ -271,3 +271,89 @@ def test_merge_appends_alias_to_tag_define(session):
     assert "报仇" in (target.aliases or "")
     # 并入是幂等的：同一别名不会重复追加
     assert target.aliases.count("报仇") == 1
+
+
+# ---------- 正式挂载（写 asset_tag） ----------
+#
+# 事故背景：`asset_tag` 是"审核通过后的正式挂载表"，资产详情/标签库的挂载
+# 都读它。这段写在合并 main 时整块丢了，于是审核一直在通过、`asset_tag`
+# 却永远是 0 行——界面上看着正常（详情页读的是 pre_asset_tag），但正式挂载
+# 关系一条都没有。下面三条钉住写入、幂等与冗余名刷新。
+
+
+def test_approve_new_word_mounts_asset_tag(session):
+    """新词通过 → 除 tag_define 外还要写一行 asset_tag 挂载。"""
+    from tagplatform.db.models import AssetTag, TagDefine
+
+    row = _seed_row(session, candidate_name="时间循环")
+    apply_review(session, row.id, "approve", "alice", None)
+    created = (session.query(TagDefine)
+               .filter_by(dir_id="dir_theme", tag_name="时间循环").one())
+    mount = session.query(AssetTag).one()
+    assert (mount.asset_id, mount.target_type, mount.target_id) == ("a1", "content", "a1")
+    assert mount.tag_id == created.tag_id
+    assert mount.tag_name == "时间循环"          # 冗余拷贝取 define 现值
+    assert mount.created_at is not None
+
+
+def test_approve_catalog_row_mounts_and_records_alias(session):
+    """命中库内标签的候选（judge 判重替换/人工改成库内名）：
+    原候选名落成别名，同时写正式挂载行。"""
+    from tagplatform.db.models import AssetTag, TagDefine
+
+    row = _seed_row(session, origin="closed", tag_id="tag_revenge")
+    row.candidate_alias = "报仇雪恨"
+    session.commit()
+    apply_review(session, row.id, "approve", "alice", None)
+    target = session.get(TagDefine, "tag_revenge")
+    assert "报仇雪恨" in (target.aliases or "")
+    mount = session.query(AssetTag).one()
+    assert mount.tag_id == "tag_revenge"
+    assert mount.tag_name == target.tag_name
+
+
+def test_reject_writes_no_mount(session):
+    """驳回不挂载：asset_tag 保持为空。"""
+    from tagplatform.db.models import AssetTag
+
+    row = _seed_row(session)
+    apply_review(session, row.id, "reject", "bob", {"comment": "证据不足"})
+    assert session.query(AssetTag).count() == 0
+
+
+def test_mount_is_idempotent(session):
+    """同一资产同一标签重复挂载不会多插行（重复审核/同片多候选）。"""
+    from tagplatform.review.service import _mount_asset_tag
+    from tagplatform.db.models import AssetTag
+
+    row = _seed_row(session)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    assert _mount_asset_tag(session, row, tag_id="tag_revenge",
+                            tag_name="复仇", now=now) is True
+    session.commit()
+    assert _mount_asset_tag(session, row, tag_id="tag_revenge",
+                            tag_name="复仇", now=now) is False
+    assert session.query(AssetTag).count() == 1
+
+
+def test_refresh_mounted_tag_names_syncs_redundant_copy(session):
+    """定义侧改名后，挂载行的 tag_name 冗余拷贝要被刷新（doc §6.3）。"""
+    from tagplatform.db.models import AssetTag, TagDefine
+    from tagplatform.review import refresh_mounted_tag_names
+
+    row = _seed_row(session)
+    apply_review(session, row.id, "approve", "alice", None)
+    define = session.get(TagDefine, session.query(AssetTag).one().tag_id)
+    define.tag_name = "时间循环（正式名）"
+    session.commit()
+
+    assert refresh_mounted_tag_names(session, define.tag_id) == 1
+    assert session.query(AssetTag).one().tag_name == "时间循环（正式名）"
+
+
+def test_refresh_unknown_tag_raises(session):
+    from tagplatform.review import refresh_mounted_tag_names
+
+    with pytest.raises(ValueError, match="标签定义不存在"):
+        refresh_mounted_tag_names(session, "tag_ghost")

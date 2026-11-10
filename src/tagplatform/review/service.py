@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import PreAssetTag
+from tagplatform.db.models import AssetTag, PreAssetTag, TagDefine
 from tagplatform.ingest import record_alias, record_tag_definition
 from tagplatform.library import TagLibrary, try_load_library
 
@@ -105,6 +105,37 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
         aliases=[row.candidate_alias] if row.candidate_alias else [],
         source=source,
     )
+
+
+def _mount_asset_tag(session: Session, row: PreAssetTag, *,
+                     tag_id: str, tag_name: str, now: datetime) -> bool:
+    """审核通过后写正式挂载行 `asset_tag`（已挂则跳过，返回是否新写）。
+
+    这是"审核生效 → 正式挂载"的第二步：`pre_asset_tag` 留候选与证据，
+    `asset_tag` 才是资产详情/标签库读的挂载关系。同资产同标签已存在时
+    幂等跳过（重复审核、或同片两条候选指向同一库内标签）。
+    """
+    if not tag_id:
+        raise ValueError("挂载需要 tag_id")
+    exists = (session.query(AssetTag.id)
+              .filter(AssetTag.asset_id == row.asset_id,
+                      AssetTag.target_type == row.target_type,
+                      AssetTag.target_id == row.target_id,
+                      AssetTag.tag_id == tag_id)
+              .first())
+    if exists is not None:
+        return False
+    session.add(AssetTag(
+        asset_id=row.asset_id,
+        target_type=row.target_type,
+        target_id=row.target_id,
+        tag_id=tag_id,
+        # 冗余拷贝取 define 现值（doc §3.6/§6.3——candidate_* 不参与）
+        tag_name=tag_name,
+        created_at=now,
+        updated_at=now,
+    ))
+    return True
 
 
 def apply_review(session: Session, row_id: int, action: str,
@@ -228,8 +259,27 @@ def apply_review(session: Session, row_id: int, action: str,
         if merged_alias and merge_to:
             record_alias(session, tag_id=merge_to, alias=merged_alias,
                          source=source)
+            define = session.get(TagDefine, merge_to)
+            if define is not None:
+                _mount_asset_tag(session, row, tag_id=define.tag_id,
+                                 tag_name=define.tag_name, now=now)
         elif row.review_status == "approved" and not row.tag_id:
-            _ingest_new_tag(session, row, library, reviewer)
+            ingested = _ingest_new_tag(session, row, library, reviewer)
+            if ingested:
+                _mount_asset_tag(session, row, tag_id=str(ingested["tag_id"]),
+                                 tag_name=str(ingested["tag_name"]), now=now)
+        elif row.review_status == "approved" and row.tag_id:
+            # 命中库内标签的候选（judge 判重后替换成库内名 / 人工 modify 到库内名）：
+            # 原候选名作为别名落进 `tag_define.aliases`，再写正式挂载行。
+            define = session.get(TagDefine, row.tag_id)
+            if define is None:
+                raise ValueError(f"标签定义不存在：{row.tag_id}")
+            alias = (row.candidate_alias or "").strip()
+            if alias and alias != define.tag_name:
+                record_alias(session, tag_id=define.tag_id, alias=alias,
+                             source=source)
+            _mount_asset_tag(session, row, tag_id=define.tag_id,
+                             tag_name=define.tag_name, now=now)
         else:
             return row
         session.commit()
@@ -237,3 +287,28 @@ def apply_review(session: Session, row_id: int, action: str,
         session.rollback()
         logger.warning("入库写入失败（审核已生效）：%s", exc)
     return row
+
+
+# ---------- tag_name 冗余拷贝刷新（doc §6.3 契约助手） ----------
+
+def refresh_mounted_tag_names(session: Session, tag_id: str) -> int:
+    """把某标签定义的最新 tag_name 同步到其全部 `asset_tag` 挂载行。
+
+    doc §6.3：`asset_tag.tag_name` 是 `tag_define.tag_name` 的冗余拷贝
+    （val_fixed），定义侧改名/合并后调用本助手消除两处漂移。调用方先改
+    `TagDefine.tag_name`（自行写 tag_change_log 留证）并提交；本助手只做
+    挂载侧批量 UPDATE，flush 不 commit，与调用方同事务原子落库。
+    定义不存在 → ValueError（API 层映射 422）。
+    """
+    define = session.get(TagDefine, tag_id)
+    if define is None:
+        raise ValueError(f"标签定义不存在：{tag_id}")
+    rowcount = session.query(AssetTag).filter(AssetTag.tag_id == tag_id).update(
+        {
+            AssetTag.tag_name: define.tag_name,
+            AssetTag.updated_at: datetime.now(timezone.utc),
+        },
+        synchronize_session=False,
+    )
+    session.flush()
+    return rowcount
