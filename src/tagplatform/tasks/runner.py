@@ -237,17 +237,20 @@ def run_generation_task(task_id: str, session: Session, llm,
         if summary.cleared:
             logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
                         asset_id, summary.cleared)
-        # 相似并入的行把模型原词登记成别名预览（写 JSON；失败不影响任务）
-        if library is not None:
-            for tag in tags:
-                if tag.origin == "catalog" and tag.alias_name and tag.tag_id:
-                    try:
-                        record_alias(
-                            library, tag_id=tag.tag_id, alias=tag.alias_name,
-                            source={"asset_id": asset_id, "task_id": task.task_id,
-                                    "origin": task.mode, "auto": True})
-                    except (OSError, ValueError) as exc:
-                        logger.warning("别名预览写入失败：%s", exc)
+        # 相似并入的行把模型原词登记成别名（写 tag_define.aliases + 变更日志；
+        # 失败不影响任务）。注意 record_alias 的第一个参数是 session——合 main 后
+        # 别名从 JSON 库搬进了 tag_define 表，签名从 (library, ...) 改成
+        # (session, ...)，这里曾漏改，导致 open 生成一走到 catalog 命中就
+        # AttributeError: 'TagLibrary' object has no attribute 'get'。
+        for tag in tags:
+            if tag.origin == "catalog" and tag.alias_name and tag.tag_id:
+                try:
+                    record_alias(
+                        session, tag_id=tag.tag_id, alias=tag.alias_name,
+                        source={"asset_id": asset_id, "task_id": task.task_id,
+                                "origin": task.mode, "auto": True})
+                except (OSError, ValueError) as exc:
+                    logger.warning("别名预览写入失败：%s", exc)
 
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         task.model_version = llm.model
