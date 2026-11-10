@@ -1,4 +1,4 @@
-﻿// 内容资产列表（Task 11）：按资产类型分组展示（电影/剧集/场景），分组
+// 内容资产列表（Task 11）：按资产类型分组展示（电影/剧集/场景），分组
 // 可折叠且默认折叠；标题搜索（回车/按钮触发），行点击进入详情页
 // /assets/{asset_id}。数据来自 GET /assets（q 标题子串匹配）。
 // 场景行标题就是场景描述（很长），列表里截断预览，点进详情再看全文
@@ -659,7 +659,10 @@ export default function AssetList() {
               </Typography.Text>
               <Table<DirEntry>
                 size="small"
-                rowKey="path"
+                // 行键必须是"目录名"：勾选列表与导入请求里的 dir_names 都是这个名字。
+                // 用 path 当行键时，用户点行勾选拿回的是路径，后端按名字找不到 →
+                // 静默 0 导入（页面还显示"导入完成"）。
+                rowKey="name"
                 pagination={{ pageSize: 10, showSizeChanger: false }}
                 dataSource={dirEntries}
                 rowSelection={{
@@ -767,9 +770,19 @@ export default function AssetList() {
               </Space>
               {dirResult !== null && (
                 <Alert
-                  type={dirResult.failed > 0 ? 'warning' : 'success'}
+                  type={
+                    dirResult.failed > 0
+                      ? 'warning'
+                      : dirResult.imported === 0 && dirResult.skipped === 0
+                        ? 'warning'
+                        : 'success'
+                  }
                   showIcon
-                  message={`导入完成：成功 ${dirResult.imported} · 跳过 ${dirResult.skipped} · 失败 ${dirResult.failed}`}
+                  message={
+                    dirResult.imported === 0 && dirResult.skipped === 0 && dirResult.failed === 0
+                      ? '没有执行任何导入：请确认勾选的行属于"当前目录"'
+                      : `导入完成：成功 ${dirResult.imported} · 跳过 ${dirResult.skipped} · 失败 ${dirResult.failed}`
+                  }
                   description={
                     dirResult.failed > 0 ? (
                       <div>
@@ -779,6 +792,17 @@ export default function AssetList() {
                           .map((item) => (
                             <div key={item.dir_name}>
                               {item.dir_name}：{item.reason ?? '未知原因'}
+                            </div>
+                          ))}
+                      </div>
+                    ) : dirResult.imported === 0 && dirResult.skipped > 0 ? (
+                      <div>
+                        {dirResult.items
+                          .filter((item) => item.status === 'skipped')
+                          .slice(0, 5)
+                          .map((item) => (
+                            <div key={item.dir_name}>
+                              {item.dir_name}：{item.reason ?? '已在库内'}
                             </div>
                           ))}
                       </div>

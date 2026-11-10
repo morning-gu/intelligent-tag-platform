@@ -153,7 +153,9 @@ def test_import_many_filters_unknown_and_reports_failures(session, movies):
 
     outcome = movie_import.import_many(
         session, movies, ["Rear Window--tt0047396", "不存在的目录"])
-    assert outcome.counts == {"imported": 1, "skipped": 0, "failed": 0}
+    # 存在的照常导入，对不上的如实报失败（早前这种情形被静默丢掉）
+    assert outcome.counts == {"imported": 1, "skipped": 0, "failed": 1}
+    assert "没有名为" in (outcome.failed[0].reason or "")
 
     # 全量再跑：好目录内容一致被跳过；坏目录在扫描阶段就没有 asset_id，
     # 批量入口不选它（前端也拿不到它的 asset_id）
@@ -350,3 +352,21 @@ def test_api_browse_reports_matched_by_asset_id(client, movies):
     assert row["exists"] is True
     assert row["matched_by"] == "asset_id"
     assert row["existing_asset_id"] == row["asset_id"] == "movie_tt1234567"
+
+
+def test_import_many_reports_unknown_names(session, movies):
+    """名字对不上（例如前端误传路径）必须报失败，不能静默 0 成功。"""
+    _write_movie(movies, "Rear Window--tt1234567", PAYLOAD)
+    outcome = movie_import.import_many(
+        session, movies, [str(movies / "Rear Window--tt1234567")])
+    assert outcome.imported == [] and outcome.skipped == []
+    assert len(outcome.failed) == 1
+    assert "没有名为" in (outcome.failed[0].reason or "")
+
+
+def test_import_many_unknown_root_level_name(session, tmp_path, movies):
+    """在上一层选片（名字不在这一层）同样要报失败而不是 0 条。"""
+    _write_movie(movies, "Rear Window--tt1234567", PAYLOAD)
+    outcome = movie_import.import_many(
+        session, tmp_path, ["Rear Window--tt1234567"])
+    assert len(outcome.failed) == 1 and not outcome.imported

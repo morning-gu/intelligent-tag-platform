@@ -4,7 +4,7 @@
 // - 标题搜索传参（提交触发而非输入即触发）；
 // - 上传：未命中 → 占位登记提示；命中 → Modal 内轮询生成进度并刷新列表；
 // - 422/413 失败透出后端 detail 且不刷新列表（nginx HTML 413 特判）。
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetList from './AssetList'
@@ -830,5 +830,63 @@ describe('从目录导入资产', () => {
 
     expect(await screen.findByText('目录读取失败')).toBeInTheDocument()
     expect(screen.getByText('影片资产目录不存在: /nope')).toBeInTheDocument()
+  })
+
+  it('勾选与表格行一致：默认勾中的行显示已勾，手动勾选后仍按目录名提交', async () => {
+    mockDirApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+    await screen.findByText(ROOT_PATH)
+    fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
+    await screen.findByText('Rear Window--tt0047396')
+
+    // 回归点：行键曾是 path，勾选列表存的是目录名 → 默认勾中却显示未勾
+    const newRow = screen.getByText('Rear Window--tt0047396').closest('tr') as HTMLElement
+    const newBox = within(newRow).getByRole('checkbox')
+    expect(newBox).toBeChecked()
+
+    // 已导入的行默认不可勾
+    const doneRow = screen.getByText('Taxi Driver--tt0075314').closest('tr') as HTMLElement
+    const doneBox = within(doneRow).getByRole('checkbox')
+    expect(doneBox).not.toBeChecked()
+    expect(doneBox).toBeDisabled()
+
+    // 手动取消再勾上：onChange 回传的必须是目录名（不是路径）
+    fireEvent.click(newBox)
+    expect(newBox).not.toBeChecked()
+    fireEvent.click(newBox)
+    expect(newBox).toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
+    await waitFor(() =>
+      expect(
+        mockedApiFetch.mock.calls.some(
+          (call) => call[0] === '/api/v1/content/import/movie-bulk',
+        ),
+      ).toBe(true),
+    )
+    const bulkCall = mockedApiFetch.mock.calls.find(
+      (call) => call[0] === '/api/v1/content/import/movie-bulk',
+    )
+    const body = JSON.parse(String((bulkCall?.[1] as RequestInit).body))
+    expect(body.dir_names).toEqual(['Rear Window--tt0047396'])
+  })
+
+  it('后端一条都没执行时报"没有执行任何导入"，不说成功', async () => {
+    mockDirApis({ bulk: { imported: 0, skipped: 0, failed: 0, items: [] } })
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+    await screen.findByText(ROOT_PATH)
+    fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
+    await screen.findByText('Rear Window--tt0047396')
+
+    fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
+    expect(
+      await screen.findByText(/没有执行任何导入/),
+    ).toBeInTheDocument()
   })
 })

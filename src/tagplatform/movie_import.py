@@ -448,12 +448,29 @@ def import_movie_dir(session: Session, root: Path, dir_name: str, *,
 
 def import_many(session: Session, root: Path, dir_names: list[str] | None, *,
                 overwrite: bool = False) -> BulkOutcome:
-    """批量导入；dir_names 为空表示全部（仍未处理的目录）。"""
-    available = [item.dir_name for item in scan_movie_dirs(root)
-                 if item.error is None]
-    targets = [name for name in (dir_names or available) if name in set(available)]
+    """批量导入；dir_names 为空表示全部（仍未处理的目录）。
+
+    名字对不上时**必须如实报失败**：早前静默过滤掉，前端拿到
+    imported/skipped/failed 全 0 却显示"导入完成"，用户以为导进去了。
+    """
+    items = scan_movie_dirs(root)
+    available = {item.dir_name: item for item in items if item.error is None}
+    known = set(available)
     outcome = BulkOutcome()
-    for name in targets:
+
+    requested = list(dir_names) if dir_names else list(available)
+    for name in requested:
+        if name not in known:
+            item = next((i for i in items if i.dir_name == name), None)
+            if item is not None and item.error:
+                reason = item.error
+            else:
+                reason = (f"这个目录下没有名为 {name} 的影片目录"
+                          "（可能选的是别的层或名字已变），未执行导入")
+            outcome.failed.append(ImportOutcome(
+                dir_name=name, status="failed", reason=reason,
+                frames=item.frames if item is not None else 0))
+            continue
         result = import_movie_dir(session, root, name, overwrite=overwrite)
         if result.status == "imported":
             outcome.imported.append(result)
