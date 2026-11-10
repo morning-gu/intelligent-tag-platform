@@ -33,8 +33,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -253,8 +255,17 @@ def scene_frames(root: Path, imdb_id: str | None, scene_id: str,
     directory = frames_dir(root, imdb_id, dir_name)
     if directory is None:
         return ()
+    return scene_frames_in(directory, scene_id)
+
+
+def scene_frames_in(directory: Path, scene_id: str) -> tuple[Path, ...]:
+    """帧目录 → 某场景的帧文件（按 frame 序号排序）；没有返回空元组。"""
     found: list[tuple[int, Path]] = []
-    for file in directory.iterdir():
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return ()
+    for file in entries:
         if not file.is_file():
             continue
         match = _FRAME_RE.match(file.name)
@@ -262,6 +273,96 @@ def scene_frames(root: Path, imdb_id: str | None, scene_id: str,
             found.append((int(match.group("idx")), file))
     found.sort(key=lambda item: item[0])
     return tuple(path for _, path in found)
+
+
+def _read_asset_id(content_path: Path) -> str | None:
+    """只取 content.json 里的 asset.asset_id（反查目录用，坏文件当没有）。"""
+    try:
+        data = json.loads(content_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    asset = data.get("asset")
+    if not isinstance(asset, dict):
+        return None
+    value = asset.get("asset_id")
+    return value if isinstance(value, str) else None
+
+
+def _find_by_asset_id(directory: Path, asset_id: str, depth: int) -> Path | None:
+    """在 directory 下（depth 层以内）找 content.json 声明该 asset_id 的目录。"""
+    try:
+        children = sorted(p for p in directory.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    for child in children:
+        content = child / "content.json"
+        if content.exists():
+            if _read_asset_id(content) == asset_id:
+                return child
+            continue
+        if depth > 1:
+            found = _find_by_asset_id(child, asset_id, depth - 1)
+            if found is not None:
+                return found
+    return None
+
+
+@lru_cache(maxsize=256)
+def _cached_asset_dir(root_str: str, asset_id: str) -> str | None:
+    """按 asset_id 反查目录（带缓存）：只读每个子目录的 content.json 取 id。"""
+    found = _find_by_asset_id(Path(root_str), asset_id, 2)
+    return str(found) if found is not None else None
+
+
+def find_movie_dir(roots: Sequence[Path | str], *, asset_id: str | None = None,
+                   imdb_id: str | None = None,
+                   dir_name: str | None = None) -> Path | None:
+    """在多处根目录里找这部片的目录（自动拼接路径的主入口）。
+
+    查找顺序（越具体越快，命中即返回）：
+
+    1. `dir_name` 同名目录（导入时就知道名字，最准）；
+    2. 目录名以 `--<imdb_id>` 结尾（本目录布局的约定）；
+    3. 逐层扫 content.json 里的 `asset.asset_id`（用户可能从上一层目录导入，
+       或者目录名被改过；深度 2 层，带进程内缓存）。
+
+    每一处根都试一遍，`settings.movie_asset_root` 与它的父目录都会传进来，
+    所以"浏览到 /cache/…/movie_asset 再进 movie_asset 选片"两条路都能找到帧。
+    """
+    for root in roots:
+        base = Path(root) if not isinstance(root, Path) else root
+        if not base.is_dir():
+            continue
+        if dir_name:
+            direct = base / dir_name
+            if (direct / "content.json").exists():
+                return direct
+        if imdb_id:
+            try:
+                for child in base.iterdir():
+                    if (child.is_dir() and imdb_of_dir(child.name) == imdb_id
+                            and (child / "content.json").exists()):
+                        return child
+            except OSError:
+                pass
+        if asset_id:
+            cached = _cached_asset_dir(str(base), asset_id)
+            if cached:
+                return Path(cached)
+    return None
+
+
+def resolve_scene_frames(roots: Sequence[Path | str], scene_id: str, *,
+                         asset_id: str | None = None, imdb_id: str | None = None,
+                         dir_name: str | None = None) -> tuple[Path, ...]:
+    """自动找到这部片的目录 → 取该场景的帧；找不到返回空元组。"""
+    movie_dir = find_movie_dir(roots, asset_id=asset_id, imdb_id=imdb_id,
+                               dir_name=dir_name)
+    if movie_dir is None:
+        return ()
+    return scene_frames_in(movie_dir / "frames", scene_id)
 
 
 def _read_payload(content_path: Path) -> dict:

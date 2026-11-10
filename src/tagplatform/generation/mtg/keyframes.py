@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from tagplatform.assets.builder import pick_keyframes
-from tagplatform.movie_import import scene_frames as imported_scene_frames
+from tagplatform.movie_import import resolve_scene_frames as imported_scene_frames
 from tagplatform.schemas import ContentJSON
 
 _STORY_SUFFIX_RE = re.compile(r"_story_(\d+)$")
@@ -115,29 +115,34 @@ def _cap_frames(plans: list[SceneFrames], max_frames: int) -> list[SceneFrames]:
 
 def plan_scene_frames(content: ContentJSON, dataset_root: str,
                       per_scene: int = 2, max_frames: int = 24,
-                      movie_asset_root: str | None = None
+                      movie_asset_root: str | None = None,
+                      extra_roots: str | None = None
                       ) -> dict[str, tuple[Path, ...]]:
     """资产场景 → 每场景若干帧；返回 {scene_id: (Path, ...)}（顺序同资产）。
 
     帧来源两处，**目录导入的资产优先**：
-    ① `movie_asset_root/<片名>--<imdb>/frames/` 里已挑好的帧
-       （命名 `scene_XXX_frame_N.jpg`，与场景 id 对齐，最贴内容本身）；
+    ① 目录导入时那套已挑好的帧：`movie_import.resolve_scene_frames` 会自动
+       拼接路径——先按目录名/imdb 后缀找，再按 content.json 里的 asset_id
+       反查（覆盖"从上一层目录导入""目录名改过"这两种情况）；根目录是
+       `settings.movie_asset_root` + 它的父目录 + `extra_roots`（逗号分隔）；
     ② MovieNet 数据集按 story 段现取（上传视频那条路一直走的就是它）。
     两处都没有就退化为纯文本 prompt。
     """
     movie_id = movie_id_of(content)
     if not movie_id:
         return {}
-    local_root = _local_root(movie_asset_root)
+    roots = _local_roots(movie_asset_root, extra_roots)
     annotation = _load_annotation(dataset_root, movie_id)
     story = (annotation or {}).get("story") or []
     frames_dir = Path(dataset_root) / "frames" / "frames" / movie_id
+    asset_id = content.asset.asset_id
 
     plans: list[SceneFrames] = []
     for scene in content.content.scenes:
         frames: tuple[Path, ...] = ()
-        if local_root is not None:
-            local = imported_scene_frames(local_root, movie_id, scene.scene_id)
+        if roots:
+            local = imported_scene_frames(
+                roots, scene.scene_id, asset_id=asset_id, imdb_id=movie_id)
             if local:
                 frames = local[:per_scene]
         if not frames and story:
@@ -153,12 +158,37 @@ def plan_scene_frames(content: ContentJSON, dataset_root: str,
     return planned if any(planned.values()) else {}
 
 
-def _local_root(movie_asset_root: str | None) -> Path | None:
-    """目录导入的帧根（不存在就当没有，绝不让它拖挂整条生成）。"""
-    if not movie_asset_root:
-        return None
-    try:
-        path = Path(movie_asset_root)
-        return path if path.is_dir() else None
-    except OSError:
-        return None
+def _local_roots(movie_asset_root: str | None,
+                 extra_roots: str | None = None) -> list[Path]:
+    """目录导入的帧根候选：配置根 + 它的父目录 + 额外配置的根。
+
+    父目录一定要带上：用户可以先浏览到 `/cache/…/movie_asset`（上一层）再
+    点进 `movie_asset` 选片，这类导入的目录不在配置根的正下方。
+    不存在的目录直接丢掉，绝不让它拖挂整条生成。
+    """
+    candidates: list[str] = []
+    if movie_asset_root:
+        try:
+            configured = Path(movie_asset_root)
+        except OSError:
+            configured = None
+        # 只有配的根真实存在时才连父目录一起找：配错的路径不该顺带扫到
+        # 它旁边不相关的目录
+        if configured is not None and configured.is_dir():
+            candidates.append(str(configured))
+            parent = configured.parent
+            if str(parent) != str(configured):
+                candidates.append(str(parent))
+    for chunk in (extra_roots or "").split(","):
+        text = chunk.strip()
+        if text:
+            candidates.append(text)
+    roots: list[Path] = []
+    for candidate in candidates:
+        try:
+            path = Path(candidate)
+            if path.is_dir() and path not in roots:
+                roots.append(path)
+        except OSError:
+            continue
+    return roots

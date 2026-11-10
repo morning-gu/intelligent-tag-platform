@@ -370,3 +370,47 @@ def test_import_many_unknown_root_level_name(session, tmp_path, movies):
     outcome = movie_import.import_many(
         session, tmp_path, ["Rear Window--tt1234567"])
     assert len(outcome.failed) == 1 and not outcome.imported
+
+
+def test_find_movie_dir_by_asset_id_when_name_changed(tmp_path):
+    """目录名被改过（没有 --tt 后缀）：靠 content.json 的 asset_id 反查。"""
+    outer = tmp_path / "movie_asset"
+    outer.mkdir()
+    _write_movie(outer, "随便起的名字", PAYLOAD)
+
+    assert movie_import.find_movie_dir(
+        [tmp_path], asset_id="movie_tt1234567") == outer / "随便起的名字"
+    # 从上一层浏览进来的情形：根是 tmp_path，片在 movie_asset/ 里面
+    frames = movie_import.resolve_scene_frames(
+        [tmp_path], "scene_001", asset_id="movie_tt1234567")
+    assert len(frames) == 3 and frames[0].name == "scene_001_frame_1.jpg"
+
+
+def test_plan_scene_frames_joins_parent_root(tmp_path):
+    """配置根在下一层、片实际在上一层：父目录自动兜住，帧照样找得到。"""
+    nested = tmp_path / "movie_asset"
+    nested.mkdir()
+    _write_movie(tmp_path, "Rear Window--tt0047396", PAYLOAD)  # 片在父层
+    content = to_content_json(parse_upstream(PAYLOAD))
+
+    # 配置根 = 空的子目录：_local_roots 会连父目录一起找 → 命中
+    hit = keyframes.plan_scene_frames(
+        content, str(tmp_path / "no_dataset"),
+        movie_asset_root=str(nested), per_scene=1)
+    assert [p.name for p in hit["scene_001"]] == ["scene_001_frame_1.jpg"]
+
+    # 根不存在 → 直接丢弃，不会误扫到别处；退化为"没有帧"
+    assert keyframes.plan_scene_frames(
+        content, str(tmp_path / "no_dataset"),
+        movie_asset_root=str(tmp_path / "nope")) == {}
+
+    # 额外根（逗号分隔，忽略空项）同样生效
+    extra = keyframes.plan_scene_frames(
+        content, str(tmp_path / "no_dataset"),
+        extra_roots=f" /nope , {tmp_path} ", per_scene=1)
+    assert set(extra) == {"scene_001", "scene_002"}
+
+    # 显式给 dataset 也没有：本地帧优先于数据集
+    assert keyframes.plan_scene_frames(
+        content, str(tmp_path / "no_dataset"), movie_asset_root=None,
+        extra_roots=None) == {}

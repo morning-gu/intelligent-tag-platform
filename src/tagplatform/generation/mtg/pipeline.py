@@ -271,6 +271,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         per_scene=settings.mtg_frames_per_scene,
         max_frames=settings.mtg_max_frames,
         movie_asset_root=settings.movie_asset_root,
+        extra_roots=settings.movie_asset_extra_roots,
     )
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}

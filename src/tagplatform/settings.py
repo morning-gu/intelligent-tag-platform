@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     # 与上传视频那条路并行存在（TAGPLT_MOVIE_ASSET_ROOT 可覆盖）。
     # 说明：目录布局按 2026-11 的现有布局写死，改布局只需改这里。
     movie_asset_root: str = "/cache/h50065879/movie_asset/movie_asset"
+    # 目录导入的额外帧根（逗号分隔）：配置根与它的父目录之外，再补几个位置。
+    # 生成任务找关键帧时会按 asset_id 在这些根下面自动反查目录。
+    movie_asset_extra_roots: str = ""
     # 每场景抽几张关键帧喂多模态模型
     asset_frames: int = 3
     # 场景级并发（生成资产的模型调用）
