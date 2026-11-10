@@ -73,6 +73,14 @@ tag_change_log   → 审计 tag_define 全生命周期（无外键，可指向�
 
 `tag_catalog.applicable_scope` 声明目录适用范围，挂载时 target_type 与之对应。
 
+> **任务创建的场景归并**：`POST /api/v1/generation/tasks` 允许直接提交场景子资产
+> （`asset_type='scene'`），服务端沿 `parent_id` 上溯到最近带 `content_json` 的
+> 祖先（正常即所属影片）建任务，归并后按 `asset_id` 去重；响应与任务列表中的
+> `asset_id` 是影片 id。这不是场景级挂载：`target_type` 仍恒为 `content`，
+> `target_id` 仍是影片 `asset_id`，上表预留语义不变。
+> 场景与影片都选、或只选了无内容的占位资产 → 前者去重为一条任务，后者 422
+> （detail 指明原资产与父级）。
+
 ---
 
 ## 3. 表定义（SQLite 落地 DDL）

@@ -10,6 +10,10 @@
 // - 创建任务 Modal：资产多选（GET /assets）+ mode 单选（默认闭环）+ 可选
 //   策略两个数字输入 → POST tasks → 成功提示 + 刷新；策略仅在填写时携带，
 //   未填字段交由后端默认值（30 / 0.7）。
+// - 场景资产（asset_type='scene'）：v2 内容识别只落影片级，场景行
+//   content_json 恒为 NULL——后端会把选中场景上溯归并到所属影片建任务，
+//   因此下拉里场景紧跟父影片排列并标注"归并到影片"，避免误解为按场景出
+//   标签（场景级打标本期不支持）。
 import {
   Alert,
   Button,
@@ -87,6 +91,29 @@ interface CreateFormValues {
   mode: string
   max_tags?: number
   min_confidence?: number
+}
+
+/** 资产下拉单项文案：场景行标注归并语义（影片/剧集保持原格式）。 */
+function assetOptionLabel(a: AssetSummary): string {
+  const base = `${a.title}（${a.asset_id}）`
+  return a.asset_type === 'scene' ? `${base}· 场景，任务归并到所属影片` : base
+}
+
+/** 资产下拉候选：同一父级聚合——影片/剧集在前、其场景紧随其后。
+ * 后端归并（场景 → 父影片）在 UI 上必须可见：光标选中场景时用户看到的
+ * 是"会归并到影片"，任务列表出现的 asset_id 也就能对得上。 */
+function assetOptions(assets: AssetSummary[]) {
+  const groupOf = (a: AssetSummary) =>
+    a.asset_type === 'scene' && a.parent_id !== null ? a.parent_id : a.asset_id
+  return [...assets]
+    .sort((a, b) => {
+      const ga = groupOf(a)
+      const gb = groupOf(b)
+      if (ga !== gb) return ga < gb ? -1 : 1
+      if (a.asset_type !== b.asset_type) return a.asset_type === 'scene' ? 1 : -1
+      return a.asset_id < b.asset_id ? -1 : 1
+    })
+    .map((a) => ({ value: a.asset_id, label: assetOptionLabel(a) }))
 }
 
 /** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
@@ -272,7 +299,7 @@ export default function GenerationTasks() {
       setCreateOpen(false)
       await loadTasks()
     } catch (err) {
-      // 422（mode 未知/资产无识别内容）/404（资产不存在）透出后端 detail
+      // 422（mode 未知/资产及其父级均无识别内容）/404（资产不存在）透出后端 detail
       message.error(err instanceof Error ? err.message : '创建任务失败')
     } finally {
       setCreating(false)
@@ -390,15 +417,13 @@ export default function GenerationTasks() {
             name="asset_ids"
             label="资产"
             rules={[{ required: true, message: '请选择至少一个资产' }]}
+            extra="选场景资产也会归并到所属影片建任务（内容识别在影片级）。"
           >
             <Select
               aria-label="资产多选"
               mode="multiple"
               loading={assetsLoading}
-              options={assets.map((a) => ({
-                value: a.asset_id,
-                label: `${a.title}（${a.asset_id}）`,
-              }))}
+              options={assetOptions(assets)}
               placeholder="选择要生成标签的资产"
             />
           </Form.Item>

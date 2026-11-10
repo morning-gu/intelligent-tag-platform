@@ -303,9 +303,10 @@ describe('GenerationTasks 生产任务页', () => {
     })
 
     // 选项仅在下拉展开后渲染：先 mouseDown 再按 title 定位点击
+    // 场景项 title 带归并后缀（后端会把场景归并到所属影片跑任务）
     fireEvent.mouseDown(screen.getByRole('combobox', { name: '资产多选' }))
     fireEvent.click(await screen.findByTitle('星际穿越（a-movie）'))
-    fireEvent.click(await screen.findByTitle('星际穿越-场景2（a-scene）'))
+    fireEvent.click(await screen.findByTitle(/^星际穿越-场景2（a-scene）/))
     // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
     fireEvent.change(screen.getByPlaceholderText('默认 30'), { target: { value: '20' } })
@@ -322,6 +323,25 @@ describe('GenerationTasks 生产任务页', () => {
     expect(await screen.findByText('已创建 1 个任务')).toBeInTheDocument()
     // 成功后关弹窗并刷新列表
     await waitFor(() => expect(listCallPaths()).toHaveLength(2))
+  })
+
+  it('创建弹窗：场景候选紧跟父影片且标注归并到影片（后端归并语义可见）', async () => {
+    mockApis()
+    renderGenerationTasks()
+    await screen.findByText('task-1')
+
+    fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+    fireEvent.mouseDown(await screen.findByRole('combobox', { name: '资产多选' }))
+
+    const movieOption = await screen.findByTitle('星际穿越（a-movie）')
+    const sceneOption = await screen.findByTitle(/^星际穿越-场景2（a-scene）/)
+    // 场景标注归并语义（用户能预期任务列表里出现的是影片 asset_id）
+    expect(sceneOption.textContent).toContain('归并到所属影片')
+    // 同组内影片排在其场景之前：DOM 顺序即下拉展示顺序
+    expect(
+      movieOption.compareDocumentPosition(sceneOption) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 
   it('创建弹窗：未填策略时不携带 policy 字段（mode 默认闭环）', async () => {

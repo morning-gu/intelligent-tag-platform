@@ -3,11 +3,15 @@
 薄路由层：校验（mode 注册表/资产存在/已识别）→ 建任务（queued）→
 executor.submit → 响应模型；业务规则全部在 tagplatform.generation
 （producer 注册表）、tagplatform.tasks（执行器状态机与生成流水线）与
-DB 层，router 只做协议转换与错误映射（mode 未知/资产未完成内容识别/
-非 failed 重试 → 422；未知资产/任务 → 404）。
+DB 层，router 只做协议转换与错误映射（mode 未知/资产及其父链均未完成
+内容识别/非 failed 重试 → 422；未知资产/任务 → 404）。
 
 v2 变更（doc §3.4-3.6，契约速查）：
 - 任务直连 asset_id（media_context 关联退役），创建/列表/详情形状不变；
+- 创建时**场景子资产归并到所属影片**（v2 内容只落影片级，场景行
+  content_json 恒为 NULL）：选中场景沿 parent_id 上溯到最近带内容的
+  祖先建任务，归并后按 asset_id 去重，响应 asset_id 即影片——"按场景
+  挑片建任务"因此可用，同时不引入本期未启用的场景级挂载；
 - 详情 results 取 pre_asset_tag（待审核行：review_status 三态，origin
   词表 closed|open），tag_name 解析 = candidate_name 或目录定义名；
 - /assets/{id}/tags 只回正式挂载（asset_tag 只含审核通过的复制行，
@@ -140,6 +144,45 @@ class AssetTagOut(BaseModel):
 
 # ---------- 组装辅助 ----------
 
+def _resolve_target_asset(session: Session, asset_id: str) -> MediaAsset:
+    """请求资产 → 真正带识别内容的打标目标（场景资产上溯父影片）。
+
+    v2 内容只落影片级：场景子资产（asset_type='scene'）的 content_json
+    恒为 NULL（content_import 只给父级写内容），但用户在创建任务时选中
+    某个场景是常见诉求（"按场景挑片"）。本函数把这类资产沿 parent_id
+    上溯到**最近一个带 content_json 的祖先**，任务仍挂在影片级资产上跑：
+
+    - 资产不存在 → 404（沿原契约）；
+    - 资产自带 content_json → 直接返回自身（影片/剧集/已识别的场景行）；
+    - 自身无内容但父级有内容 → 返回该父级（场景 → 影片的归并）；
+    - 整条父链都没有内容（上传占位资产/父级未识别）→ 422，detail 指明
+      是被归并的原资产与最终父级，便于定位是"没识别"还是"选错了"。
+    """
+    asset = session.get(MediaAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
+    if asset.content_json:
+        return asset
+    # 上溯父链：visited 防御脏数据形成的环（parent 自指/互指）导致死循环
+    current = asset
+    visited: set[str] = {asset.asset_id}
+    while current.parent_id and current.parent_id not in visited:
+        parent = session.get(MediaAsset, current.parent_id)
+        if parent is None:
+            break
+        if parent.content_json:
+            return parent
+        visited.add(parent.asset_id)
+        current = parent
+    # 无任何带内容的祖先：区分"归并失败"与"自身未识别"两种文案
+    if asset.asset_type == "scene" or asset.parent_id:
+        target = asset.parent_id or "（无父级）"
+        raise HTTPException(
+            status_code=422,
+            detail=f"资产 {asset_id} 无识别内容，其父级资产 {target} 也未完成内容识别")
+    raise HTTPException(status_code=422, detail=f"资产 {asset_id} 无识别内容")
+
+
 def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
     """evidence_json → 证据列表；空/损坏 JSON/条目 shape 非法（缺必填字段
     或类型不符 → ValidationError）一律按空列表兜底（终审 deferred 落地：
@@ -197,11 +240,16 @@ def create_generation_tasks(
     校验全部通过才建任务（任一失败整请求拒绝，零部分创建）：
     - mode 未注册 → 422（detail 列出可用 mode）；
     - 资产不存在 → 404；
-    - 资产未完成内容识别（content_json 为空，如场景子资产/上传占位）→ 422。
-    每资产建一条 queued 任务（policy_json 持久化请求策略），先落库（执行器
-    线程用独立会话读行）再逐条 executor.submit；随后重读真实状态返回——
-    同步模式（generation_workers=0）submit 返回即执行完，回 succeeded/failed
-    终态；异步模式回 queued/running 中间态。
+    - 资产无识别内容 → 422。**场景子资产按归属影片归并**（v2 内容只落
+      影片级，场景行 content_json 恒为 NULL）：请求里的场景资产沿
+      parent_id 上溯到最近带 content_json 的祖先，任务挂影片级资产跑；
+      自身上溯后仍无内容（上传占位/父级未识别）才 422，detail 指明原资产
+      与父级。
+    归并后按 asset_id 去重（同时选中影片与其场景只建一条任务，保持请求
+    顺序）。每资产建一条 queued 任务（policy_json 持久化请求策略），先
+    落库（执行器线程用独立会话读行）再逐条 executor.submit；随后重读真实
+    状态返回——同步模式（generation_workers=0）submit 返回即执行完，回
+    succeeded/failed 终态；异步模式回 queued/running 中间态。
     """
     if body.mode not in list_producers():
         raise HTTPException(
@@ -209,13 +257,12 @@ def create_generation_tasks(
             detail=f"未知 mode: {body.mode}（可用: {', '.join(list_producers())}）")
 
     assets: list[MediaAsset] = []
+    seen: set[str] = set()
     for asset_id in body.asset_ids:
-        asset = session.get(MediaAsset, asset_id)
-        if asset is None:
-            raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
-        if not asset.content_json:
-            raise HTTPException(
-                status_code=422, detail=f"资产 {asset_id} 无识别内容")
+        asset = _resolve_target_asset(session, asset_id)
+        if asset.asset_id in seen:
+            continue  # 归并后重复（影片与其场景同选）：只建一条任务
+        seen.add(asset.asset_id)
         assets.append(asset)
 
     now = datetime.now(timezone.utc)
