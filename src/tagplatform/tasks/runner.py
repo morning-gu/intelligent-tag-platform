@@ -6,10 +6,12 @@
 内容识别 → 显式 failed，Review Focus 4）→ producer 分发（get_producer，
 closed/open 注册于 tagplatform.generation 导入）→ prompt 组装渲染
 （content 文本两模式共用，candidates 文本仅 closed、行序 = 召回结果行序、
-第三字段 = 候选标签的父目录名）→ policy 解析 → produce → 重跑替换
-（_clear_pending：写结果前删该资产同 origin 的全部 pending 行——closed
-重跑不清 open 的待审行，doc §6.1）→ persist_tags（INSERT OR IGNORE，
-不 commit）→ 终态一次性 commit（生成结果与任务终态同事务落库）。
+第三字段 = 候选标签的父目录名）→ policy 解析 → produce → **过滤责任链**
+（run_filter_chain：质量评估 → 信息围栏，通过者才入库；被丢弃的标签
+不进审核队列、不以 rejected 落库）→ 重跑替换（_clear_pending：写结果前
+删该资产同 origin 的全部 pending 行——closed 重跑不清 open 的待审行，
+doc §6.1）→ persist_tags（INSERT OR IGNORE，不 commit）→ 终态一次性
+commit（生成结果与任务终态同事务落库）。
 
 事务语义：
 - 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist 的未提交
@@ -58,6 +60,7 @@ from tagplatform.db.models import (
 )
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.recall import embed_content_texts, recall_by_dir
+from tagplatform.filtering import FilterContext, run_filter_chain
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
 from tagplatform.schemas import ContentJSON
@@ -69,7 +72,7 @@ logger = logging.getLogger(__name__)
 def _clear_pending(session: Session, asset_id: str, origin: str) -> int:
     """删除该资产同 origin 的全部 pending 候选行（重跑替换，doc §6.1）。
 
-    调用时机：produce 之后、persist 之前（v1 位置）——persist 只做
+    调用时机：produce 与过滤责任链之后、persist 之前——persist 只做
     INSERT OR IGNORE，重跑替换的"删旧"完全由本函数承担。只删 pending：
     人工已定稿的行（approved/rejected）不受影响；只删同 origin 的行：
     closed 的重跑不清 open 的待审行（Review Focus 1）。返回删除行数。
@@ -204,7 +207,7 @@ def run_generation_task(task_id: str, session: Session, llm,
                         embedder) -> TagGenerationTask:
     """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
 
-    八步流程（v1 形状，数据源换 v2）：
+    九步流程（v1 形状，数据源换 v2；第 7 步为过滤责任链）：
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
     2. 资产缺失 / content_json 为空（未完成内容识别）→ failed + error、
        commit、返回 task（Review Focus 4）；
@@ -215,9 +218,14 @@ def run_generation_task(task_id: str, session: Session, llm,
     6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
        写入后置 failed（error=str(e)、finished_at）、commit、返回 task
        （不 re-raise，调用方看状态）；
-    7. 重跑替换：_clear_pending 删该资产同 origin 的全部 pending 行
+    7. **过滤责任链** run_filter_chain(tags, FilterContext(...), session)：
+       默认 quality（质量评估）→ fence（信息围栏），两环节当前均占位透传；
+       通过者才继续入库——被丢弃的标签不落 pre_asset_tag、不占审核队列、
+       不以 rejected 落库（rejected 是人工终审语义）。每环节的 kept/dropped
+       记日志，不落库；
+    8. 重跑替换：_clear_pending 删该资产同 origin 的全部 pending 行
        （closed 不清 open 待审行），persist_tags 只 INSERT OR IGNORE；
-    8. task.model_version = llm.model、prompt_version = 激活模板版本
+    9. task.model_version = llm.model、prompt_version = 激活模板版本
        （写入字符串；自拼 prompt 的生产器写自己的口径版本，如 mtg-v1）、
        succeeded、finished_at、一次性 commit、返回 task。
     """
@@ -278,7 +286,26 @@ def run_generation_task(task_id: str, session: Session, llm,
             policy=policy, prompt_text=prompt_text, run_id=run_id,
         )
         tags = producer.produce(spec, session, llm, embedder)
-        # 7. 重跑替换（doc §6.1）：写结果前删该资产同 origin 的全部 pending
+        # 7. 过滤责任链（"任务完成不直接展示"的落点）：质量评估 →
+        #    信息围栏，通过者才进审核队列。被丢弃的标签不落 pre 表、不以
+        #    rejected 落库（rejected = 人工终审语义，重跑跳过，doc §6.1）。
+        #    环节抛错 → 走下方任务级事务：回滚 + failed，零半截写入。
+        #    环节内的逐步日志由 run_filter_chain 与各环节自行输出，这里只
+        #    记一行汇总，避免同一批数据在日志里出现两三遍。
+        candidate_count = len(tags)
+        tags, reports = run_filter_chain(
+            tags,
+            FilterContext(task_id=task.task_id, asset_id=asset_id,
+                          mode=task.mode, content=content),
+            session,
+        )
+        logger.info(
+            "任务 %s 过滤汇总：%d 条候选 → %d 条入库；各环节 %s",
+            task.task_id, candidate_count, len(tags),
+            "、".join(f"{report.name}(保留 {report.kept}/丢弃 "
+                      f"{report.dropped})" for report in reports) or "（空链）",
+        )
+        # 8. 重跑替换（doc §6.1）：写结果前删该资产同 origin 的全部 pending
         #    行（closed 重跑不清 open 的待审行）；persist 只 INSERT OR
         #    IGNORE，替换语义完全由这步先删承担。v1 按 producer 的
         #    replaces_pending 声明门控（closed 靠 persist 覆盖更新），v2
@@ -290,7 +317,7 @@ def run_generation_task(task_id: str, session: Session, llm,
             logger.info("重跑替换：资产 %s 清掉 origin=%s 的 %d 条未审核候选",
                         asset_id, task.mode, cleared)
         persist_tags(session, asset_id, task.task_id, tags, run_id)
-        # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
+        # 9. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         #    （v2 删除上下文摘要向量回填：内容向量实时计算不落库，doc §3.1）
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；

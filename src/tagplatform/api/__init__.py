@@ -26,19 +26,35 @@ depends 与 router 模块会 `from tagplatform.api import get_session` 反向
 引用本模块，若先导入则依赖函数尚不存在（循环导入）。
 """
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
-
 from tagplatform.auth import bootstrap_admin
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, make_embedder
 from tagplatform.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
+
+
+def _configure_logging(settings: Settings) -> None:
+    """装配根日志（uvicorn 只配置自己的 logger，应用 logger 默认静默）。
+
+    没有这一步时 `logger.info`（生成流水线、过滤责任链）只会被 lastResort
+    处理器吃到 WARNING 以上，INFO 全丢——现象就是"标签被丢了但日志里没
+    任何线索"。仅在 root 尚未装 handler 时 basicConfig：不覆盖 uvicorn 与
+    测试（caplog/pytest）已有的日志配置。
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=str(settings.log_level).upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -102,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     if settings is None:
         settings = get_settings()
+    _configure_logging(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

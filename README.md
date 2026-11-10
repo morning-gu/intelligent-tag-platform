@@ -86,6 +86,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_RECALL_TOP_K_PER_TYPE` | `50` | 模式 A 每 tag_type 召回候选上限 |
 | `TAGPLT_OPEN_MATCH_THRESHOLD` | `0.85` | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog |
 | `TAGPLT_MEDIA_ROOT` | `data/media/` | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录） |
+| `TAGPLT_LOG_LEVEL` | `INFO` | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。
 
@@ -119,6 +120,7 @@ src/tagplatform/
 ├── embed/ + vectors.py     句向量嵌入与相似度计算
 ├── llm/                    OpenAI 兼容客户端 / Mock / 输出解析
 ├── generation/             阶段 2：模式 A（封闭式提取）/ 模式 B（开放式生成）+ 召回
+├── filtering/              生成结果过滤责任链：质量评估 → 信息围栏（当前占位）
 ├── prompts.py              prompt 模板渲染（版本化模板存库）
 ├── tasks/                  生成任务执行器：状态机、线程池、孤儿清理
 ├── results.py              标签结果入库（approved 保留 / pending 覆盖）
@@ -139,8 +141,9 @@ src/tagplatform/
   入库；批次与变更全程留痕（`import_batch` / `tag_change_log`）。
 - **阶段 2（生成引擎）**：内容识别 JSON 导入 → 建生成任务（模式 A 从
   库内按类型召回候选做封闭式提取 / 模式 B 开放式生成后归一匹配入库）→
-  后台线程池执行（0 = 同步）→ 生成结果与任务终态同事务落库，任务可
-  查询、失败可重试。
+  后台线程池执行（0 = 同步）→ 生成结果过**过滤责任链**（质量评估 →
+  信息围栏，通过者才进审核队列）→ 生成结果与任务终态同事务落库，任务
+  可查询、失败可重试。
 - **阶段 3（审核后台）**：登录认证（admin/reviewer 两级角色，除 `/health`
   外全 API 保护）→ 审核中心对结果行做 approve/reject/modify/merge 单条
   与批量审核（并发冲突保护、逐条独立不中断）→ 审核记录全程留痕、
