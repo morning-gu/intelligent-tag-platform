@@ -1,4 +1,4 @@
-// 内容资产列表（Task 11）：按资产类型分组展示（电影/剧集/场景），分组
+﻿// 内容资产列表（Task 11）：按资产类型分组展示（电影/剧集/场景），分组
 // 可折叠且默认折叠；标题搜索（回车/按钮触发），行点击进入详情页
 // /assets/{asset_id}。数据来自 GET /assets（q 标题子串匹配）。
 // 场景行标题就是场景描述（很长），列表里截断预览，点进详情再看全文
@@ -702,14 +702,22 @@ export default function AssetList() {
                   { title: '关键帧', dataIndex: 'frames', width: 80, render: (v, row) => (row.is_movie ? v : '-') },
                   {
                     title: '状态',
-                    width: 130,
+                    width: 190,
                     render: (_, row) =>
                       !row.is_movie ? (
                         <Typography.Text type="secondary">—</Typography.Text>
                       ) : row.error !== null ? (
                         <Tag color="red">无法导入</Tag>
                       ) : row.exists ? (
-                        <Tag color="blue">已导入</Tag>
+                        <span>
+                          <Tag color="blue">已导入</Tag>
+                          {row.matched_by !== null && row.matched_by !== 'asset_id' && (
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {row.matched_by === 'title' ? '按片名匹配' : '按 IMDb 匹配'}
+                              {row.existing_asset_id !== null ? ` → ${row.existing_asset_id}` : ''}
+                            </Typography.Text>
+                          )}
+                        </span>
                       ) : (
                         <Tag color="green">可导入</Tag>
                       ),
@@ -723,6 +731,9 @@ export default function AssetList() {
                       <Typography.Text type="secondary">
                         {row.asset_id ?? '无 asset_id'} · {row.scenes} 个场景 ·{' '}
                         {row.frames} 张关键帧
+                        {row.existing_asset_id !== null && row.existing_asset_id !== row.asset_id
+                          ? ` · 库里已有同片：${row.existing_asset_id}（${row.matched_by === 'title' ? '按片名' : '按 IMDb'}）`
+                          : ''}
                       </Typography.Text>
                     ) : (
                       <Typography.Text type="secondary">

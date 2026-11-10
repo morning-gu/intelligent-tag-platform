@@ -282,3 +282,71 @@ def test_api_browse_missing_path(client):
     response = client.get("/api/v1/content/import/browse",
                           params={"path": "/nonexistent/dir"})
     assert response.status_code == 422
+
+
+def test_asset_index_matches_upload_by_title(session, movies):
+    """上传建的 asset_xxx 与目录里的 movie_ttXXXX 是同一部片：按 imdb / 片名认出来。"""
+    # 有 imdb 线索的上传资产（内容 JSON 里记着 movie_tt0047396）
+    session.add(MediaAsset(asset_id="asset_deadbeef", asset_type="movie",
+                           title="Rear Window (1954)", video_uri="/tmp/rw.mp4",
+                           content_json=json.dumps({"asset": {"asset_id": "movie_tt0047396"}})))
+    # 完全没有 imdb 线索的上传资产（内容 JSON 里只有自己的 asset_id）
+    session.add(MediaAsset(asset_id="asset_cafe0000", asset_type="movie",
+                           title="Memento", video_uri="/tmp/mm.mp4",
+                           content_json=json.dumps({"asset": {"asset_id": "asset_cafe0000"}})))
+    session.commit()
+
+    index = movie_import.AssetIndex(session)
+    by_imdb = index.match("movie_tt0047396", "tt0047396", "Rear Window")
+    assert by_imdb is not None and by_imdb.asset_id == "asset_deadbeef"
+    assert by_imdb.matched_by == "imdb"
+    assert by_imdb.has_video is True
+
+    # 没有 imdb 线索时按片名认（年份括号不影响）
+    by_title = index.match("movie_tt0209144", "tt0209144", "Memento")
+    assert by_title is not None and by_title.asset_id == "asset_cafe0000"
+    assert by_title.matched_by == "title"
+
+    # imdb 对不上（重拍片）时不能按片名硬认
+    assert index.match("movie_tt9999999", "tt9999999", "Rear Window") is None
+
+
+def test_import_writes_into_matched_upload_asset(session, movies):
+    """目录导入认到上传资产时写进那一行：不新增影片行、视频地址保留。"""
+    _write_movie(movies, "Rear Window--tt1234567", PAYLOAD)
+    session.add(MediaAsset(asset_id="asset_deadbeef", asset_type="movie",
+                           title="Rear Window", video_uri="/tmp/rw.mp4"))
+    session.commit()
+
+    skipped = movie_import.import_movie_dir(session, movies, "Rear Window--tt1234567")
+    assert skipped.status == "skipped"
+    assert skipped.asset_id == "asset_deadbeef"
+    assert "已有内容" not in (skipped.reason or "")  # 没有内容 → 走视频保护分支
+
+    forced = movie_import.import_movie_dir(
+        session, movies, "Rear Window--tt1234567", overwrite=True)
+    assert forced.status == "imported"
+    assert forced.asset_id == "asset_deadbeef"
+
+    rows = session.query(MediaAsset).filter_by(asset_type="movie").all()
+    assert {row.asset_id for row in rows} == {"asset_deadbeef"}  # 没有多出一行
+    stored = session.get(MediaAsset, "asset_deadbeef")
+    assert stored.video_uri == "/tmp/rw.mp4"          # 视频地址没被抹掉
+    assert stored.content_json and json.loads(stored.content_json)["asset"]["asset_id"] == "asset_deadbeef"
+    scenes = session.query(MediaAsset).filter_by(asset_type="scene").all()
+    assert {row.asset_id for row in scenes} == {
+        "asset_deadbeef::scene_001", "asset_deadbeef::scene_002"}
+
+
+def test_api_browse_reports_matched_by_asset_id(client, movies):
+    """导入后回看：exists=True 且 matched_by 说明是靠 asset_id 认出来的。"""
+    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
+    client.post("/api/v1/content/import/movie-bulk",
+                json={"root": str(movies), "dir_names": ["Rear Window--tt0047396"]})
+
+    body = client.get("/api/v1/content/import/browse",
+                      params={"path": str(movies)}).json()
+    row = body["entries"][0]
+    assert row["exists"] is True
+    assert row["matched_by"] == "asset_id"
+    assert row["existing_asset_id"] == row["asset_id"] == "movie_tt1234567"

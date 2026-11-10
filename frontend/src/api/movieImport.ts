@@ -42,8 +42,13 @@ export interface DirEntry {
   movies: number
   scenes: number
   frames: number
+  /** content.json 声明的 asset_id（目录这一侧的主键） */
   asset_id: string | null
-  /** 库里已有同 asset_id 的资产 */
+  title: string | null
+  /** 库里认出来的同一部片：asset_id | imdb | title（上传那侧主键不同） */
+  matched_by: string | null
+  existing_asset_id: string | null
+  /** 库里已有该片（含按 imdb / 片名认出来的） */
   exists: boolean
   error: string | null
 }

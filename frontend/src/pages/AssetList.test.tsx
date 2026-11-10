@@ -624,6 +624,9 @@ describe('从目录导入资产', () => {
       scenes: 0,
       frames: 0,
       asset_id: null,
+      title: null,
+      matched_by: null,
+      existing_asset_id: null,
       exists: false,
       error: null,
     },
@@ -635,6 +638,9 @@ describe('从目录导入资产', () => {
       scenes: 0,
       frames: 0,
       asset_id: null,
+      title: null,
+      matched_by: null,
+      existing_asset_id: null,
       exists: false,
       error: null,
     },
@@ -649,6 +655,9 @@ describe('从目录导入资产', () => {
       scenes: 9,
       frames: 27,
       asset_id: 'movie_tt0047396',
+      title: 'Rear Window',
+      matched_by: null,
+      existing_asset_id: null,
       exists: false,
       error: null,
     },
@@ -660,6 +669,9 @@ describe('从目录导入资产', () => {
       scenes: 8,
       frames: 24,
       asset_id: 'movie_tt0075314',
+      title: 'Taxi Driver',
+      matched_by: 'title',
+      existing_asset_id: 'asset_taxi0001',
       exists: true,
       error: null,
     },
@@ -671,6 +683,9 @@ describe('从目录导入资产', () => {
       scenes: 0,
       frames: 0,
       asset_id: null,
+      title: null,
+      matched_by: null,
+      existing_asset_id: null,
       exists: false,
       error: '缺少 content.json',
     },
@@ -754,6 +769,8 @@ describe('从目录导入资产', () => {
     expect(screen.getByText('可导入')).toBeInTheDocument()
     expect(screen.getByText('已导入')).toBeInTheDocument()
     expect(screen.getByText('无法导入')).toBeInTheDocument()
+    // 上传那侧主键不同，状态列要说明是按什么认出来的
+    expect(screen.getByText(/按片名匹配 → asset_taxi0001/)).toBeInTheDocument()
   })
 
   it('路径栏可直接粘贴绝对路径打开', async () => {

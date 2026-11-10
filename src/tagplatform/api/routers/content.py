@@ -201,8 +201,13 @@ class DirEntryOut(BaseModel):
     movies: int = 0
     scenes: int = 0
     frames: int = 0
+    #: content.json 里声明的 asset_id（目录这一侧的主键）
     asset_id: str | None = None
-    # 库里已有同 asset_id 的资产（前端默认不勾、置灰）
+    title: str | None = None
+    #: 库里认出来的同一部片：asset_id（同主键）/ imdb / title（上传那侧主键）
+    matched_by: str | None = None
+    existing_asset_id: str | None = None
+    #: 库里已有该片（含按 imdb / 片名认出来的），前端默认不勾、置灰
     exists: bool = False
     error: str | None = None
 
@@ -262,22 +267,22 @@ def browse_dirs(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
     rows: list[DirEntryOut] = []
+    index = movie_import.AssetIndex(session)
     for entry in entries:
-        asset_id = None
-        exists = False
-        if entry.is_movie:
-            # 影片目录：顺手把"库里是否已有"也算出来，前端直接置灰
-            try:
-                data = movie_import._read_payload(Path(entry.path) / "content.json")
-                asset_id = (data.get("asset") or {}).get("asset_id")
-            except movie_import.MovieAssetError:
-                asset_id = None
-            exists = bool(asset_id and session.get(MediaAsset, asset_id))
-        rows.append(DirEntryOut(name=entry.name, path=entry.path,
-                                is_movie=entry.is_movie, movies=entry.movies,
-                                scenes=entry.scenes, frames=entry.frames,
-                                asset_id=asset_id, exists=exists,
-                                error=entry.error))
+        match = None
+        if entry.is_movie and entry.error is None:
+            # 影片目录：按 asset_id / imdb / 片名 认库里已有的同一部片。
+            # 上传那侧主键是 asset_xxx，目录这侧是 movie_ttXXXX，只比 asset_id
+            # 会把同一部片当成"没导入"，再导一遍就出现两条同名片。
+            match = index.match(entry.asset_id, movie_import.imdb_of_dir(entry.name),
+                                entry.title)
+        rows.append(DirEntryOut(
+            name=entry.name, path=entry.path, is_movie=entry.is_movie,
+            movies=entry.movies, scenes=entry.scenes, frames=entry.frames,
+            asset_id=entry.asset_id, title=entry.title,
+            matched_by=match.matched_by if match else None,
+            existing_asset_id=match.asset_id if match else None,
+            exists=match is not None, error=entry.error))
     return DirBrowseResponse(path=str(current),
                              parent=str(parent) if parent else None,
                              entries=rows)
@@ -295,16 +300,18 @@ def scan_movie_asset_dirs(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
     items: list[MovieDirOut] = []
+    index = movie_import.AssetIndex(session)
     for item in movie_import.scan_movie_dirs(base):
-        existing = (session.get(MediaAsset, item.asset_id)
-                    if item.asset_id else None)
+        # 与 browse 同一套匹配（asset_id → imdb → 片名），两个端点口径一致
+        match = (index.match(item.asset_id, item.imdb_id, item.title)
+                 if item.error is None else None)
         items.append(MovieDirOut(
             dir_name=item.dir_name, title=item.title, imdb_id=item.imdb_id,
             asset_id=item.asset_id, scenes=item.scenes, frames=item.frames,
             duration_ms=item.duration_ms, size_bytes=item.size_bytes,
-            exists=existing is not None,
-            has_content=bool(existing is not None and existing.content_json),
-            has_video=bool(existing is not None and existing.video_uri),
+            exists=match is not None,
+            has_content=bool(match is not None and match.has_content),
+            has_video=bool(match is not None and match.has_video),
             error=item.error))
     return MovieScanResponse(root=str(base), total=len(items), items=items)
 

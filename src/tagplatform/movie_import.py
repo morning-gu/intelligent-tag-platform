@@ -51,6 +51,8 @@ _IMDB_SUFFIX_RE = re.compile(r"--(tt\d+)$")
 #: 场景帧命名：`scene_001_frame_1.jpg`
 _FRAME_RE = re.compile(r"^(?P<scene>scene_\d+)_frame_(?P<idx>\d+)\.(?P<ext>jpe?g|png)$",
                        re.IGNORECASE)
+#: 片名结尾的年份括号：`The Godfather (1972)` → 去掉年份再比
+_TITLE_YEAR_RE = re.compile(r"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*$")
 
 
 class MovieAssetError(ValueError):
@@ -114,6 +116,12 @@ class DirEntry:
     scenes: int = 0
     frames: int = 0
     error: str | None = None
+    #: 影片目录里 content.json 声明的 asset_id 与标题
+    asset_id: str | None = None
+    title: str | None = None
+    #: 库里匹配到的已有资产（由路由层用 AssetIndex 填）
+    matched_by: str | None = None
+    existing_asset_id: str | None = None
 
 
 def resolve_root(root: str | None) -> Path:
@@ -152,7 +160,8 @@ def browse(path_str: str | None) -> tuple[Path, Path | None, list[DirEntry]]:
             item = _movie_item(child)
             entries.append(DirEntry(
                 name=child.name, path=str(child), is_movie=True, movies=0,
-                scenes=item.scenes, frames=item.frames, error=item.error))
+                scenes=item.scenes, frames=item.frames, error=item.error,
+                asset_id=item.asset_id, title=item.title))
             continue
         entries.append(DirEntry(
             name=child.name, path=str(child), is_movie=False,
@@ -283,12 +292,98 @@ def scan_movie_dirs(root: Path, *, limit: int | None = None) -> list[MovieDirIte
     return items
 
 
-def _existing_asset(session: Session, asset_id: str) -> MediaAsset | None:
-    return session.get(MediaAsset, asset_id)
+@dataclass(frozen=True)
+class ExistingMatch:
+    """目录里的片在库里已有的资产（按 asset_id / imdb / 片名 认出来的）。"""
+
+    asset_id: str
+    matched_by: str  # "asset_id" | "imdb" | "title"
+    title: str
+    has_content: bool
+    has_video: bool
+
+
+def normalize_title(title: str) -> str:
+    """片名归一：去首尾空白、去结尾括号里的年份、全角转半角不去、统一小写。"""
+    text = (title or "").strip().lower()
+    match = _TITLE_YEAR_RE.search(text)
+    if match:
+        text = text[:match.start()].strip()
+    return " ".join(text.split())
+
+
+def _imdb_of_asset(row: MediaAsset) -> str | None:
+    """资产 → imdb id：先看 asset_id 的 `movie_tt` 前缀，再看存的 JSON。"""
+    asset_id = row.asset_id or ""
+    if asset_id.startswith("movie_"):
+        return asset_id[len("movie_"):]
+    if row.content_json:
+        try:
+            stored = json.loads(row.content_json)
+            inner = (stored.get("asset") or {}).get("asset_id") or ""
+            if inner.startswith("movie_"):
+                return inner[len("movie_"):]
+        except Exception:  # noqa: BLE001 —— 内容 JSON 坏掉不影响匹配
+            return None
+    return None
+
+
+class AssetIndex:
+    """库内 movie 资产的匹配索引：asset_id / imdb / 片名 三路。
+
+    存在的意义：手工上传那条路建的资产主键是 `asset_<8位>`，目录里的片是
+    `movie_ttXXXX`；同一部片两边主键不同，只按 asset_id 比会全都"没导入"，
+    再导一遍就出现两条同名片。这里让目录导入**认到已有资产**，把内容写进
+    那一行（保留上传的视频地址），一部片始终只有一行。
+    """
+
+    def __init__(self, session: Session) -> None:
+        rows = (session.query(MediaAsset)
+                .filter(MediaAsset.asset_type == "movie").all())
+        self._by_id: dict[str, MediaAsset] = {}
+        self._by_imdb: dict[str, MediaAsset] = {}
+        self._by_title: dict[str, MediaAsset] = {}
+        for row in rows:
+            self._by_id[row.asset_id] = row
+            imdb = _imdb_of_asset(row)
+            if imdb:
+                self._by_imdb.setdefault(imdb, row)
+            key = normalize_title(row.title)
+            if key:
+                self._by_title.setdefault(key, row)
+
+    def match(self, asset_id: str | None, imdb: str | None,
+              title: str | None) -> ExistingMatch | None:
+        """按 asset_id → imdb → 片名 依次匹配；片名匹配要 imdb 不冲突。"""
+        row = self._by_id.get(asset_id or "")
+        if row is not None:
+            return self._wrap(row, "asset_id")
+        if imdb:
+            row = self._by_imdb.get(imdb)
+            if row is not None:
+                return self._wrap(row, "imdb")
+        key = normalize_title(title or "")
+        if key:
+            row = self._by_title.get(key)
+            if row is not None:
+                # 同名但 imdb 不同（重拍片）不算同一部
+                other = _imdb_of_asset(row)
+                if imdb and other and imdb != other:
+                    return None
+                return self._wrap(row, "title")
+        return None
+
+    @staticmethod
+    def _wrap(row: MediaAsset, matched_by: str) -> ExistingMatch:
+        return ExistingMatch(asset_id=row.asset_id, matched_by=matched_by,
+                             title=row.title,
+                             has_content=row.content_json is not None,
+                             has_video=row.video_uri is not None)
 
 
 def import_movie_dir(session: Session, root: Path, dir_name: str, *,
-                     overwrite: bool = False) -> ImportOutcome:
+                     overwrite: bool = False,
+                     index: AssetIndex | None = None) -> ImportOutcome:
     """把一部影片目录注册成资产（已存在则按 overwrite 决定是否覆盖内容）。"""
     movie_dir = root / dir_name
     if not movie_dir.is_dir():
@@ -312,18 +407,33 @@ def import_movie_dir(session: Session, root: Path, dir_name: str, *,
         return ImportOutcome(dir_name=dir_name, status="failed",
                              reason="content.json 缺少 asset.asset_id",
                              frames=frames)
-    existing = _existing_asset(session, asset_id)
-    if existing is not None:
-        if existing.video_uri and not overwrite:
+    # 先按 asset_id / imdb / 片名 找库里已有的同一部片（上传那条路的 asset_xxx
+    # 也要能认出来，否则会多出一行同名片）
+    index = index or AssetIndex(session)
+    match = index.match(asset_id, imdb_of_dir(dir_name), content.asset.title)
+    if match is not None:
+        if match.has_content and not overwrite:
+            if _same_content(session.get(MediaAsset, match.asset_id).content_json,
+                             data, match.asset_id):
+                return ImportOutcome(
+                    dir_name=dir_name, status="skipped", asset_id=match.asset_id,
+                    title=match.title, scenes=len(content.content.scenes),
+                    frames=frames, reason="内容与库内一致，无需重复导入")
+            how = "按片名匹配" if match.matched_by == "title" else "已存在"
             return ImportOutcome(
-                dir_name=dir_name, status="skipped", asset_id=asset_id,
-                title=existing.title, frames=frames,
+                dir_name=dir_name, status="skipped", asset_id=match.asset_id,
+                title=match.title, scenes=len(content.content.scenes),
+                frames=frames,
+                reason=(f"{how}到资产 {match.asset_id}（已有内容），"
+                        "跳过；需要覆盖请勾选「覆盖已导入资产的内容」"))
+        if match.has_video and not overwrite:
+            return ImportOutcome(
+                dir_name=dir_name, status="skipped", asset_id=match.asset_id,
+                title=match.title, frames=frames,
                 reason="该资产已绑定上传的视频，跳过（需要覆盖请显式勾选）")
-        if not overwrite and _same_content(existing.content_json, data, asset_id):
-            return ImportOutcome(
-                dir_name=dir_name, status="skipped", asset_id=asset_id,
-                title=existing.title, scenes=len(content.content.scenes),
-                frames=frames, reason="内容与库内一致，无需重复导入")
+        # 内容写进已有那一行：视频地址由 _upsert_movie 保留，不会丢
+        content.asset.asset_id = match.asset_id
+        asset_id = match.asset_id
 
     try:
         result = import_content_svc(content, session, None, raw=data)
