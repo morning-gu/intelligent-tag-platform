@@ -138,14 +138,14 @@ export default function AssetDetail() {
   /** 场景分段点击：seek 到场景起始毫秒 + 选中高亮。 */
   function handleSceneClick(scene: AssetScene) {
     setSelected({ assetId, sceneId: scene.scene_id, params: searchParams })
-    playerRef.current?.seek(scene.time_range.start_ms)
+    playerRef.current?.seek(scene.start_ms)
   }
 
   // 时间轴宽度基准：优先资产 duration_ms；缺失时回落到场景最大结束毫秒
   const maxSceneEnd =
     content === null
       ? 0
-      : content.content.scenes.reduce((m, s) => Math.max(m, s.time_range.end_ms), 0)
+      : content.content.scenes.reduce((m, s) => Math.max(m, s.end_ms ?? 0), 0)
   const durationMs = detail?.duration_ms ?? maxSceneEnd
 
   // 挂载表（v2）：仅挂载关系与展示值，评分/证据/审核状态留在 pre 侧
@@ -190,7 +190,7 @@ export default function AssetDetail() {
               </div>
               {content !== null && (
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  {content.content.summary}
+                  {content.content.description ?? '（无剧情描述）'}
                 </Typography.Paragraph>
               )}
             </>

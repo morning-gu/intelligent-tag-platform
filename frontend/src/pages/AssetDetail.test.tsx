@@ -37,12 +37,12 @@ const DETAIL: AssetDetailData = {
 }
 
 const SCENES = [
-  { scene_id: 's1', time_range: { start_ms: 0, end_ms: 60_000 }, description: '日常训练',
-    visual_features: [], dialogues: [], entities: [], events: [] },
-  { scene_id: 's2', time_range: { start_ms: 60_000, end_ms: 120_000 }, description: '主角争执推搡',
-    visual_features: [], dialogues: [], entities: [], events: [] },
-  { scene_id: 's3', time_range: { start_ms: 120_000, end_ms: 180_000 }, description: '离别远行',
-    visual_features: [], dialogues: [], entities: [], events: [] },
+  { scene_id: 's1', start_ms: 0, end_ms: 60_000, description: '日常训练',
+    dialogues: [], events: [] },
+  { scene_id: 's2', start_ms: 60_000, end_ms: 120_000, description: '主角争执推搡',
+    dialogues: [], events: [] },
+  { scene_id: 's3', start_ms: 120_000, end_ms: 180_000, description: '离别远行',
+    dialogues: [], events: [] },
 ]
 
 const CONTEXT: ContentContext = {
@@ -51,8 +51,7 @@ const CONTEXT: ContentContext = {
     asset_id: 'a1', asset_type: 'movie', title: '星际穿越', duration_ms: 180_000,
     video_uri: 'movies/interstellar.mp4', parent_id: null,
   },
-  content: { summary: '主角在太空遇难', scenes: SCENES },
-  metadata: { source: 'test', model_version: 'vision-v3', recognition_status: 'completed' },
+  content: { description: '主角在太空遇难', characters: [], scenes: SCENES },
 }
 
 const TAGS: AssetMount[] = [
