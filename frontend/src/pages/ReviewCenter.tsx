@@ -5,8 +5,8 @@
 //   GROUPED_PAGE_SIZE 行供分组，不分页。
 // - 列表按影片分组（Collapse）：组头是片名 + 条数，默认全部折叠，逐部
 //   展开审核；排序沿用后端顺序（低置信度优先，片内同序）。
-// - 表格列：标签名/目录（dir_name，null 兜底"—"）/来源（closed→Tag 闭环 /
-//   open→Tag 开放）/置信度/相关度/状态（三态 Tag）。
+// - 表格列：标签名/目录（dir_path 完整路径，缺路径回退 dir_name，都无则
+//   "—"）/来源（closed→Tag 闭环 / open→Tag 开放）/置信度/相关度/状态。
 // - 行内动作：通过/拒绝/修改/合并（通过=按候选目录入库；合并=候选名记成
 //   库内标签别名，后端仅此一支，新建标签走"通过入库"）。
 // - 相关度 = 与库内最相近标签的余弦（后端对齐 top-1）：判成新词也有值，
@@ -330,8 +330,11 @@ export default function ReviewCenter() {
     { title: '标签名', dataIndex: 'tag_name' },
     {
       title: '目录',
-      dataIndex: 'dir_name',
-      render: (v: string | null) => v ?? '—',
+      dataIndex: 'dir_path',
+      // 完整目录路径（根→叶，如"内容特征标签/情感/父子关系"）；只有名称
+      // 回退，两者都没有（新词候选未定目录）才是"—"
+      render: (_: string | null, item) =>
+        item.dir_path ?? item.dir_name ?? '—',
     },
     {
       title: '来源',

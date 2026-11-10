@@ -69,7 +69,7 @@ const ROW_A: ReviewItem = {
   target_type: 'content',
   dir_id: 'dir-emotion',
   dir_name: '情感',
-  dir_path: '情感',
+  dir_path: '内容特征标签/情感/父子关系',
   evidence: [{ scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' }],
   task_id: 'task-1',
   reviewer_id: null,
@@ -186,10 +186,10 @@ describe('ReviewCenter 审核中心', () => {
     expect(itemsCallPaths()[0]).toContain('status=pending')
     expect(itemsCallPaths()[0]).toContain('page_size=500')
 
-    // 展开第一部：只出现该片的行
+    // 展开第一部：只出现该片的行；目录列显示完整路径（不是只有叶子名）
     fireEvent.click(screen.getByText('星际穿越'))
     const tr = (await screen.findByText('犯罪')).closest('tr')!
-    expect(tr).toHaveTextContent('情感')
+    expect(tr).toHaveTextContent('内容特征标签/情感/父子关系')
     expect(tr).toHaveTextContent('闭环')
     expect(tr).toHaveTextContent('42%')
     expect(tr).toHaveTextContent('0.77') // 相关度 = 库内最高相似度，两位小数
