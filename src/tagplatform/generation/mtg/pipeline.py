@@ -483,7 +483,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             origin="generated", tag_id=None, tag_name=candidate.tag,
             candidate_type=candidate.dimension,
             candidate_description=reason or None,
-            relevance_score=None, confidence=confidence,
+            # 相关度 = 与库内最相近标签的余弦（对齐阶段的 top-1，判成新词也有
+            # 值——"有多不像库里的东西"本身就是审核时要看的信号）。库里没标签
+            # 或本条没参与对齐时才是 None。
+            relevance_score=(item.cosine if item is not None else None),
+            confidence=confidence,
             evidence=evidence, level=level,
             dir_id=assignment.dir_id,
             target_type=mount.target_type, target_id=mount.target_id,

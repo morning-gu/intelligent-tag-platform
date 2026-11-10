@@ -171,7 +171,10 @@ def test_generation_e2e_open_generated_rows(client):
     for row in results:
         assert row["origin"] == "open"
         assert isinstance(row["id"], int) and row["id"] > 0  # 行主键（B3 暴露）
-        assert row["relevance_score"] is None  # 未命中目录：无相关度
+        # 相关度 = 与库内最相近标签的余弦（对齐 top-1）：判成新词也有值，
+        # 它是"离库内最近的东西有多近"的信号；库为空/未参与对齐才是 None。
+        assert isinstance(row["relevance_score"], float)
+        assert 0.0 <= row["relevance_score"] <= 1.0
         assert row["review_status"] == "pending"
         # MockLLM 场景证据（Task 6）：open 行证据卡同样来自场景行（单场景恒定）
         assert row["evidence"] == [{

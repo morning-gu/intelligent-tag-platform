@@ -9,16 +9,12 @@ import type { AssetScene } from '../api/assets'
 function makeScene(sceneId: string, startMs: number, endMs: number): AssetScene {
   return {
     scene_id: sceneId,
-    start_ms: startMs,
-    end_ms: endMs,
+    time_range: { start_ms: startMs, end_ms: endMs },
     description: `${sceneId} 的描述文本`,
-    virtual_time: null,
-    location: null,
-    character_ids: [],
-    events: [],
-    emotion: [],
+    visual_features: [],
     dialogues: [],
-    audio_events: [],
+    entities: [],
+    events: [],
   }
 }
 

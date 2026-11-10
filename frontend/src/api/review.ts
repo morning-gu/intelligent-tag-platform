@@ -4,16 +4,26 @@
 // 模型一致；审核操作的 409 并发冲突经 client 的 ApiError.status 识别。
 import { apiFetch } from './client'
 
+/** 标签来源（= 任务模式：closed 闭环 / open 开放）。 */
+export type TagOrigin = 'closed' | 'open'
+
+/** 审核状态三态（与后端 _REVIEW_STATUSES 一致）。 */
+export type ReviewStatus = 'pending' | 'approved' | 'rejected'
+
 /** 审核动作（与后端 ReviewRequest.action 的 Literal 取值一致）。 */
 export type ReviewAction = 'approve' | 'reject' | 'modify' | 'merge'
 
-/** 审核动作 payload：modify 用展示字段别名（tag_name/description/dir_id——
- * 写回行内字段，改完直接按通过处理），merge 用 merge_to_tag_id（必填）；
- * comment 对两动作均可选（落 review_comment）。 */
+/** 审核动作 payload：modify 用展示字段别名（tag_name/description/dir_id）或
+ * 规范名（candidate_name/candidate_description/candidate_dir_id）——写回行内
+ * 字段，改完直接按通过处理；merge 用 merge_to_tag_id（必填）；comment 对
+ * 各动作均可选（落 review_comment）。 */
 export interface ReviewActionPayload {
   tag_name?: string
   description?: string
   dir_id?: string
+  candidate_name?: string
+  candidate_description?: string
+  candidate_dir_id?: string
   comment?: string
   merge_to_tag_id?: string
 }
