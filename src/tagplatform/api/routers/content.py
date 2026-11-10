@@ -9,6 +9,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
@@ -191,6 +192,29 @@ class MovieDirOut(BaseModel):
     error: str | None = None
 
 
+class DirEntryOut(BaseModel):
+    """目录浏览的一项：可能本身就是影片目录，也可能还套着几部片。"""
+
+    name: str
+    path: str
+    is_movie: bool = False
+    movies: int = 0
+    scenes: int = 0
+    frames: int = 0
+    asset_id: str | None = None
+    # 库里已有同 asset_id 的资产（前端默认不勾、置灰）
+    exists: bool = False
+    error: str | None = None
+
+
+class DirBrowseResponse(BaseModel):
+    """目录浏览响应：当前目录、上级目录、子项清单。"""
+
+    path: str
+    parent: str | None = None
+    entries: list[DirEntryOut]
+
+
 class MovieScanResponse(BaseModel):
     root: str
     total: int
@@ -220,6 +244,43 @@ class MovieImportResponse(BaseModel):
     skipped: int
     failed: int
     items: list[MovieImportItem]
+
+
+@router.get("/content/import/browse", response_model=DirBrowseResponse)
+def browse_dirs(
+    path: str | None = Query(None, description="要浏览的绝对路径，缺省用配置的根目录"),
+    session: Session = Depends(get_session),
+) -> DirBrowseResponse:
+    """浏览服务器目录（只列目录，不返回文件内容）：逐层点进目标影片目录。
+
+    不传 path 时落在配置的默认根（`settings.movie_asset_root`）。子项里带
+    `content.json` 的即影片目录，`movies` 大于 0 的普通目录说明里面还有片。
+    """
+    try:
+        current, parent, entries = movie_import.browse(path)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    rows: list[DirEntryOut] = []
+    for entry in entries:
+        asset_id = None
+        exists = False
+        if entry.is_movie:
+            # 影片目录：顺手把"库里是否已有"也算出来，前端直接置灰
+            try:
+                data = movie_import._read_payload(Path(entry.path) / "content.json")
+                asset_id = (data.get("asset") or {}).get("asset_id")
+            except movie_import.MovieAssetError:
+                asset_id = None
+            exists = bool(asset_id and session.get(MediaAsset, asset_id))
+        rows.append(DirEntryOut(name=entry.name, path=entry.path,
+                                is_movie=entry.is_movie, movies=entry.movies,
+                                scenes=entry.scenes, frames=entry.frames,
+                                asset_id=asset_id, exists=exists,
+                                error=entry.error))
+    return DirBrowseResponse(path=str(current),
+                             parent=str(parent) if parent else None,
+                             entries=rows)
 
 
 @router.get("/content/import/movie-scan", response_model=MovieScanResponse)

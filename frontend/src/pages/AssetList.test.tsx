@@ -1,4 +1,4 @@
-// 内容资产列表测试：mock apiFetch 按路径分发，覆盖：
+﻿// 内容资产列表测试：mock apiFetch 按路径分发，覆盖：
 // - 按类型分组、默认折叠、展开后渲染行（时长/视频/内容/更新时间与 null 兜底）；
 // - 场景描述在列表里截断预览，点行进入详情路由；
 // - 标题搜索传参（提交触发而非输入即触发）；
@@ -611,62 +611,83 @@ describe('上传视频与生成进度', () => {
     expect(lastUploadForm?.get('infer')).toBe('false')
   })
 })
-
 describe('从目录导入资产', () => {
-  const SCAN_ITEMS = [
+  // 目录浏览的桩：父目录里只有 movie_asset 一个文件夹，点进去才有影片
+  const ROOT_PATH = '/cache/h50065879/movie_asset'
+
+  const DIR_ENTRIES = [
     {
-      dir_name: 'Rear Window--tt0047396',
-      title: 'Rear Window',
-      imdb_id: 'tt0047396',
-      asset_id: 'movie_tt0047396',
-      scenes: 9,
-      frames: 27,
-      duration_ms: 6_000_000,
-      size_bytes: 2_400_000,
-      exists: false,
-      has_content: false,
-      has_video: false,
-      error: null,
-    },
-    {
-      dir_name: 'Taxi Driver--tt0075314',
-      title: 'Taxi Driver',
-      imdb_id: 'tt0075314',
-      asset_id: 'movie_tt0075314',
-      scenes: 8,
-      frames: 24,
-      duration_ms: 6_800_000,
-      size_bytes: 2_100_000,
-      exists: true,
-      has_content: true,
-      has_video: false,
-      error: null,
-    },
-    {
-      dir_name: 'Broken--tt0000000',
-      title: 'Broken',
-      imdb_id: 'tt0000000',
-      asset_id: null,
+      name: 'movie_asset',
+      path: `${ROOT_PATH}/movie_asset`,
+      is_movie: false,
+      movies: 2,
       scenes: 0,
       frames: 0,
-      duration_ms: null,
-      size_bytes: 0,
+      asset_id: null,
       exists: false,
-      has_content: false,
-      has_video: false,
+      error: null,
+    },
+    {
+      name: '_raw',
+      path: `${ROOT_PATH}/_raw`,
+      is_movie: false,
+      movies: 0,
+      scenes: 0,
+      frames: 0,
+      asset_id: null,
+      exists: false,
+      error: null,
+    },
+  ]
+
+  const MOVIE_ENTRIES = [
+    {
+      name: 'Rear Window--tt0047396',
+      path: `${ROOT_PATH}/movie_asset/Rear Window--tt0047396`,
+      is_movie: true,
+      movies: 0,
+      scenes: 9,
+      frames: 27,
+      asset_id: 'movie_tt0047396',
+      exists: false,
+      error: null,
+    },
+    {
+      name: 'Taxi Driver--tt0075314',
+      path: `${ROOT_PATH}/movie_asset/Taxi Driver--tt0075314`,
+      is_movie: true,
+      movies: 0,
+      scenes: 8,
+      frames: 24,
+      asset_id: 'movie_tt0075314',
+      exists: true,
+      error: null,
+    },
+    {
+      name: 'Broken--tt0000000',
+      path: `${ROOT_PATH}/movie_asset/Broken--tt0000000`,
+      is_movie: true,
+      movies: 0,
+      scenes: 0,
+      frames: 0,
+      asset_id: null,
+      exists: false,
       error: '缺少 content.json',
     },
   ]
 
-  /** 扫描 + 导入的 apiFetch 桩；导入后列表多一部片。 */
+  /** 浏览 + 导入的 apiFetch 桩；导入后列表多一部片。 */
   function mockDirApis(
-    options: { scanError?: Error; bulk?: Record<string, unknown> } = {},
+    options: { browseError?: Error; bulk?: Record<string, unknown> } = {},
   ) {
     let imported = false
     mockedApiFetch.mockImplementation(async (path: string) => {
-      if (path.startsWith('/api/v1/content/import/movie-scan')) {
-        if (options.scanError) throw options.scanError
-        return { root: '/cache/h50065879/movie_asset/movie_asset', total: 3, items: SCAN_ITEMS }
+      if (path.startsWith('/api/v1/content/import/browse')) {
+        if (options.browseError) throw options.browseError
+        if (path.includes('movie_asset')) {
+          return { path: `${ROOT_PATH}/movie_asset`, parent: ROOT_PATH, entries: MOVIE_ENTRIES }
+        }
+        return { path: ROOT_PATH, parent: '/cache/h50065879', entries: DIR_ENTRIES }
       }
       if (path === '/api/v1/content/import/movie-bulk') {
         imported = true
@@ -711,30 +732,55 @@ describe('从目录导入资产', () => {
     })
   }
 
-  it('扫描后列出目录：可导入的默认勾选，已导入/坏目录不可选', async () => {
+  it('先浏览目录：显示文件夹与影片目录类型，逐层点进目标目录', async () => {
     mockDirApis()
     renderAssetList()
     await screen.findByText('电影')
 
     fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
 
-    expect(await screen.findByText('Rear Window')).toBeInTheDocument()
-    expect(screen.getByText('Taxi Driver')).toBeInTheDocument()
-    // 只有可导入的那部被默认勾选
+    // 落点是后端默认根：只看到文件夹，没有可导入的片
+    expect(await screen.findByText(ROOT_PATH)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /movie_asset/ })).toBeInTheDocument()
+    expect(screen.getByText(/含 2 部/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '导入所选（0）' })).toBeInTheDocument()
+
+    // 点文件夹名进入下一层：出现影片目录 + 默认勾选可导入的
+    fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
+
+    expect(await screen.findByText('Rear Window--tt0047396')).toBeInTheDocument()
+    expect(screen.getAllByText('影片目录').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: '导入所选（1）' })).toBeInTheDocument()
-    // 状态标签：可导入 / 已导入 / 无法导入
     expect(screen.getByText('可导入')).toBeInTheDocument()
     expect(screen.getByText('已导入')).toBeInTheDocument()
     expect(screen.getByText('无法导入')).toBeInTheDocument()
   })
 
-  it('确认导入：POST 选中目录，成功提示 + 刷新列表', async () => {
+  it('路径栏可直接粘贴绝对路径打开', async () => {
     mockDirApis()
     renderAssetList()
     await screen.findByText('电影')
 
     fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
-    await screen.findByText('Rear Window')
+    await screen.findByText(ROOT_PATH)
+
+    fireEvent.change(screen.getByLabelText('目录路径'), {
+      target: { value: `${ROOT_PATH}/movie_asset` },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /打\s*开/ }))
+
+    expect(await screen.findByText('Rear Window--tt0047396')).toBeInTheDocument()
+  })
+
+  it('确认导入：POST 当前目录 + 勾选的影片名，成功提示 + 刷新列表', async () => {
+    mockDirApis()
+    renderAssetList()
+    await screen.findByText('电影')
+
+    fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
+    await screen.findByText(ROOT_PATH)
+    fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
+    await screen.findByText('Rear Window--tt0047396')
 
     fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
 
@@ -752,20 +798,20 @@ describe('从目录导入资产', () => {
     )
     const body = JSON.parse(String((bulkCall?.[1] as RequestInit).body))
     expect(body.dir_names).toEqual(['Rear Window--tt0047396'])
+    expect(body.root).toBe(`${ROOT_PATH}/movie_asset`)
     expect(body.overwrite).toBe(false)
 
-    // 导入成功后重新拉列表
     await waitFor(() => expect(assetsCallPaths().length).toBeGreaterThanOrEqual(2))
   })
 
-  it('扫描失败：Modal 内显式报错，不静默', async () => {
-    mockDirApis({ scanError: new Error('影片资产目录不存在: /nope') })
+  it('目录读取失败：Modal 内显式报错，不静默', async () => {
+    mockDirApis({ browseError: new Error('影片资产目录不存在: /nope') })
     renderAssetList()
     await screen.findByText('电影')
 
     fireEvent.click(screen.getByRole('button', { name: '从目录导入' }))
 
-    expect(await screen.findByText('目录导入失败')).toBeInTheDocument()
+    expect(await screen.findByText('目录读取失败')).toBeInTheDocument()
     expect(screen.getByText('影片资产目录不存在: /nope')).toBeInTheDocument()
   })
 })

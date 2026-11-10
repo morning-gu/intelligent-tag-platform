@@ -1,4 +1,4 @@
-"""影片资产目录导入（内容已备好，直接注册资产；与上传视频并行）。
+﻿"""影片资产目录导入（内容已备好，直接注册资产；与上传视频并行）。
 
 覆盖点：
 1. 扫描：目录名→imdb、缺 content.json 记错误、`_` 开头与非目录跳过；
@@ -208,4 +208,77 @@ def test_api_scan_and_bulk(client, movies):
 def test_api_scan_missing_root(client):
     response = client.get("/api/v1/content/import/movie-scan",
                           params={"root": "/nonexistent/movie_asset"})
+    assert response.status_code == 422
+
+
+def test_browse_lists_folders_and_movie_counts(tmp_path):
+    """浏览父目录：普通文件夹标出"里面藏着几部片"，不是影片目录。"""
+    outer = tmp_path / "movie_asset"
+    outer.mkdir()
+    _write_movie(outer, "Rear Window--tt0047396", PAYLOAD)
+    _write_movie(outer, "Taxi Driver--tt0075314", PAYLOAD)
+    (tmp_path / "_raw").mkdir()
+
+    current, parent, entries = movie_import.browse(str(tmp_path))
+    assert current == tmp_path
+    assert parent == tmp_path.parent
+    by_name = {entry.name: entry for entry in entries}
+    assert by_name["movie_asset"].is_movie is False
+    assert by_name["movie_asset"].movies == 2
+    assert by_name["_raw"].is_movie is False and by_name["_raw"].movies == 0
+    # `_` 开头的运行期目录排在后面
+    assert entries[-1].name == "_raw"
+
+
+def test_browse_movie_dir_lists_movies(tmp_path):
+    _write_movie(tmp_path, "Rear Window--tt0047396", PAYLOAD)
+    _write_movie(tmp_path, "Broken--tt0000002", {"asset": {}}, frames=0)
+
+    current, parent, entries = movie_import.browse(str(tmp_path))
+    by_name = {entry.name: entry for entry in entries}
+    good = by_name["Rear Window--tt0047396"]
+    assert good.is_movie is True and good.scenes == 2 and good.frames == 6
+    assert good.error is None
+    assert by_name["Broken--tt0000002"].error is not None
+    assert parent == tmp_path.parent
+
+
+def test_browse_missing_path_raises(tmp_path):
+    with pytest.raises(movie_import.MovieAssetError):
+        movie_import.browse(str(tmp_path / "nope"))
+
+
+def test_api_browse_and_import_with_root(client, movies):
+    """HTTP 层：先 browse 进目录，再带 root 导入；已导入的 exists=True。"""
+    nested = movies / "movie_asset"
+    nested.mkdir()
+    _write_movie(nested, "Rear Window--tt0047396", PAYLOAD)
+
+    outer = client.get("/api/v1/content/import/browse",
+                       params={"path": str(movies)})
+    assert outer.status_code == 200, outer.text
+    body = outer.json()
+    assert body["path"] == str(movies)
+    folder = next(e for e in body["entries"] if e["name"] == "movie_asset")
+    assert folder["is_movie"] is False and folder["movies"] == 1
+
+    inner = client.get("/api/v1/content/import/browse",
+                       params={"path": str(nested)})
+    assert inner.status_code == 200, inner.text
+    rows = inner.json()["entries"]
+    assert rows[0]["is_movie"] is True and rows[0]["exists"] is False
+    assert inner.json()["parent"] == str(movies)
+
+    imported = client.post("/api/v1/content/import/movie-bulk",
+                           json={"root": str(nested), "dir_names": None})
+    assert imported.status_code == 200 and imported.json()["imported"] == 1
+
+    again = client.get("/api/v1/content/import/browse",
+                       params={"path": str(nested)})
+    assert again.json()["entries"][0]["exists"] is True
+
+
+def test_api_browse_missing_path(client):
+    response = client.get("/api/v1/content/import/browse",
+                          params={"path": "/nonexistent/dir"})
     assert response.status_code == 422

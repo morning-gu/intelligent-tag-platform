@@ -33,6 +33,28 @@ export interface MovieScanResult {
   items: MovieDirItem[]
 }
 
+/** 目录浏览的一项：影片目录（有 content.json）或普通目录（里面可能还有片）。 */
+export interface DirEntry {
+  name: string
+  path: string
+  is_movie: boolean
+  /** 普通目录里套着几部片 */
+  movies: number
+  scenes: number
+  frames: number
+  asset_id: string | null
+  /** 库里已有同 asset_id 的资产 */
+  exists: boolean
+  error: string | null
+}
+
+/** 目录浏览响应：当前目录 + 上级目录 + 子项。 */
+export interface DirBrowseResult {
+  path: string
+  parent: string | null
+  entries: DirEntry[]
+}
+
 /** 单部导入结果：imported | skipped | failed。 */
 export interface MovieImportItem {
   dir_name: string
@@ -50,6 +72,12 @@ export interface MovieImportResult {
   skipped: number
   failed: number
   items: MovieImportItem[]
+}
+
+/** 浏览服务器目录（不传 path 落在后端默认根）；只列目录。 */
+export function browseDirs(path?: string | null): Promise<DirBrowseResult> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return apiFetch<DirBrowseResult>(`/api/v1/content/import/browse${query}`)
 }
 
 /** 扫描影片资产目录（不传 root 用后端配置值）。 */

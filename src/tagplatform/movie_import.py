@@ -101,6 +101,21 @@ class BulkOutcome:
                 "failed": len(self.failed)}
 
 
+@dataclass(frozen=True)
+class DirEntry:
+    """目录里的一项：影片目录（有 content.json）或普通目录（里面可能还有片）。"""
+
+    name: str
+    path: str
+    #: 这一项本身就是影片目录（目录下有 content.json）
+    is_movie: bool
+    #: 这一项下面还套着几部片（普通目录才有意义）
+    movies: int
+    scenes: int = 0
+    frames: int = 0
+    error: str | None = None
+
+
 def resolve_root(root: str | None) -> Path:
     """导入根目录：显式传入优先，否则用配置里的默认值；不存在直接报错。"""
     from tagplatform.settings import get_settings
@@ -112,6 +127,88 @@ def resolve_root(root: str | None) -> Path:
     if not path.is_dir():
         raise MovieAssetError(f"影片资产目录不存在: {raw}")
     return path
+
+
+def browse(path_str: str | None) -> tuple[Path, Path | None, list[DirEntry]]:
+    """浏览服务器目录：返回（当前目录, 上级目录, 子项清单）。
+
+    - 不传 path → 用配置里的默认根（前端打开弹窗的落点）；
+    - 子项只列**目录**，按名字排序；带 `content.json` 的标成影片目录；
+      其余目录统计"里面还套着几部片"，方便一层层点进去；
+    - 隐藏目录（`.` 开头）与 `_` 开头的运行期目录照样列出但排在后面：
+      服务器上确实存在，不藏起来，免得以为文件没了。
+    """
+    base = resolve_root(path_str)
+    parent = base.parent if base.parent != base else None
+    entries: list[DirEntry] = []
+    try:
+        children = sorted((p for p in base.iterdir() if p.is_dir()),
+                          key=_dir_sort_key)
+    except OSError as exc:
+        raise MovieAssetError(f"读不了目录: {base}（{exc}）") from None
+
+    for child in children:
+        if (child / "content.json").exists():
+            item = _movie_item(child)
+            entries.append(DirEntry(
+                name=child.name, path=str(child), is_movie=True, movies=0,
+                scenes=item.scenes, frames=item.frames, error=item.error))
+            continue
+        entries.append(DirEntry(
+            name=child.name, path=str(child), is_movie=False,
+            movies=_count_movies(child)))
+    return base, parent, entries
+
+
+def _dir_sort_key(path: Path) -> tuple[int, str]:
+    """排序：普通/影片目录在前（按名），`_` 与 `.` 开头的运行期目录垫后。"""
+    return (1 if path.name[:1] in {"_", "."} else 0, path.name.lower())
+
+
+def _count_movies(directory: Path, *, limit: int = 400) -> int:
+    """一个普通目录里套着几部片（有 content.json 的子目录数，封顶 limit 次探测）。"""
+    count = 0
+    try:
+        for index, child in enumerate(directory.iterdir()):
+            if index >= limit:
+                break
+            if child.is_dir() and (child / "content.json").exists():
+                count += 1
+    except OSError:
+        return count
+    return count
+
+
+def _movie_item(child: Path) -> MovieDirItem:
+    """单个影片目录 → MovieDirItem（解析失败只记 error，不抛）。"""
+    content_path = child / "content.json"
+    frames = child / "frames"
+    frame_files = [f for f in frames.iterdir()
+                   if f.is_file() and _FRAME_RE.match(f.name)] if frames.is_dir() else []
+    size = sum(f.stat().st_size for f in frame_files)
+    mtime = content_path.stat().st_mtime if content_path.exists() else child.stat().st_mtime
+    error = None
+    title, asset_id, scenes, duration = child.name, None, 0, None
+    try:
+        data = _read_payload(content_path)
+        # 只做一次宽松解析：坏内容在列表里直接标红，别等点了导入才失败
+        parse_upstream(data)
+        asset = data.get("asset") or {}
+        content = data.get("content") or {}
+        title = str(asset.get("title") or child.name)
+        asset_id = asset.get("asset_id")
+        scenes = len(content.get("scenes") or [])
+        duration = asset.get("duration_ms")
+    except MovieAssetError as exc:
+        error = str(exc)
+    except Exception as exc:  # noqa: BLE001 —— 上游格式不合法（pydantic 校验）
+        error = f"content.json 格式不合法: {exc}"
+    return MovieDirItem(
+        dir_name=child.name, path=str(child), title=title,
+        imdb_id=imdb_of_dir(child.name), asset_id=asset_id,
+        scenes=scenes, frames=len(frame_files),
+        duration_ms=duration if isinstance(duration, int) else None,
+        size_bytes=size, mtime=mtime, error=error)
 
 
 def imdb_of_dir(dir_name: str) -> str | None:
@@ -174,39 +271,13 @@ def scan_movie_dirs(root: Path, *, limit: int | None = None) -> list[MovieDirIte
     """扫描根目录下的影片目录（每部读一次 content.json 取标题/场景数）。
 
     单个目录坏掉不影响整体：错误记在 `error` 字段里，前端可以单独跳过。
+    `_` 开头的运行期目录不算影片。
     """
     items: list[MovieDirItem] = []
     for child in sorted(p for p in root.iterdir() if p.is_dir()):
         if child.name.startswith("_"):
             continue
-        content_path = child / "content.json"
-        frames = child / "frames"
-        frame_files = [f for f in frames.iterdir()
-                       if f.is_file() and _FRAME_RE.match(f.name)] if frames.is_dir() else []
-        size = sum(f.stat().st_size for f in frame_files)
-        mtime = content_path.stat().st_mtime if content_path.exists() else child.stat().st_mtime
-        error = None
-        title, asset_id, scenes, duration = child.name, None, 0, None
-        try:
-            data = _read_payload(content_path)
-            # 只做一次宽松解析：坏内容在列表里直接标红，别等点了导入才失败
-            parse_upstream(data)
-            asset = data.get("asset") or {}
-            content = data.get("content") or {}
-            title = str(asset.get("title") or child.name)
-            asset_id = asset.get("asset_id")
-            scenes = len(content.get("scenes") or [])
-            duration = asset.get("duration_ms")
-        except MovieAssetError as exc:
-            error = str(exc)
-        except Exception as exc:  # noqa: BLE001 —— 上游格式不合法（pydantic 校验）
-            error = f"content.json 格式不合法: {exc}"
-        items.append(MovieDirItem(
-            dir_name=child.name, path=str(child), title=title,
-            imdb_id=imdb_of_dir(child.name), asset_id=asset_id,
-            scenes=scenes, frames=len(frame_files),
-            duration_ms=duration if isinstance(duration, int) else None,
-            size_bytes=size, mtime=mtime, error=error))
+        items.append(_movie_item(child))
         if limit is not None and len(items) >= limit:
             break
     return items
