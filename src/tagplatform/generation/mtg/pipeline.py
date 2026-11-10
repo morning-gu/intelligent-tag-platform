@@ -51,7 +51,11 @@ from tagplatform.generation.mtg.prompts import (
     render_content,
 )
 from tagplatform.generation.mtg.verify import verify_pairs
-from tagplatform.library import library_index, rank_dir_assignments
+from tagplatform.library import (
+    DirAssignment,
+    library_index,
+    rank_dir_assignments,
+)
 from tagplatform.mounting import resolve_mount
 from tagplatform.settings import Settings, get_settings
 
@@ -59,7 +63,8 @@ logger = logging.getLogger(__name__)
 
 # 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分。
 # v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
-MTG_VERSION = "mtg-v2"
+# v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
+MTG_VERSION = "mtg-v3"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -160,6 +165,72 @@ def _make_verify_client(settings: Settings, llm):
     )
 
 
+def _dir_hint_entries(tag_library, spec: GenerationSpec,
+                      limit: int) -> list[dict]:
+    """可新增标签的目录 → 提示词条目（id + 全路径 + 粒度）。
+
+    只收 `dir_dynamic`（允许扩充）且落在本次生成范围内的目录——静态目录
+    不该出现在提示词里，否则模型会往不允许新增的目录里塞词，然后在校验
+    环节被打回，白烧一轮 token。
+    """
+    if tag_library is None or limit <= 0:
+        return []
+    entries: list[dict] = []
+    for directory in tag_library.new_tag_dirs(spec.policy.dir_ids):
+        path = "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name
+        entries.append({"dir_id": directory.dir_id, "path": path,
+                        "scope": tag_library.scope_of(directory.dir_id)})
+    entries.sort(key=lambda item: (item["path"], item["dir_id"]))
+    return entries[:limit]
+
+
+def _resolve_dir_value(tag_library, raw: str | None) -> str | None:
+    """模型给的目录串 → dir_id（容忍 id / 全路径 / 唯一目录名）。"""
+    if not raw or tag_library is None:
+        return None
+    text = raw.strip()
+    if tag_library.directory(text) is not None:
+        return text
+    by_path = {"/".join(tag_library.path_of(d.dir_id)): d.dir_id
+               for d in tag_library.dirs()}
+    if text in by_path:
+        return by_path[text]
+    by_name = [d.dir_id for d in tag_library.dirs() if d.dir_name == text]
+    return by_name[0] if len(by_name) == 1 else None
+
+
+def _validate_model_dir(tag_library, dir_id: str | None, spec: GenerationSpec,
+                        contents, evidence: list[Evidence],
+                        per_dir_count: dict[str, int]
+                        ) -> tuple[DirAssignment | None, object | None, str]:
+    """校验模型指定的目录：范围 → 存在 → 可扩展 → 配额 → 挂载点。
+
+    任何一步不过都返回 (None, None, 原因)，由调用方回退到向量归类；不静默
+    改写模型的目录归属（审核页要能看到"模型选错了"这件事）。
+    """
+    if not dir_id:
+        return None, None, "模型未给目录"
+    allowed = tag_library.descendants(spec.policy.dir_ids)
+    if dir_id not in allowed:
+        return None, None, f"模型给的目录 {dir_id} 不在本次生成范围"
+    directory = tag_library.directory(dir_id)
+    if directory is None:
+        return None, None, f"模型给的目录 {dir_id} 不存在"
+    if not directory.allows_new_tags:
+        return None, None, f"目录「{directory.dir_name}」不允许新增标签"
+    if (spec.policy.max_tags_per_dir
+            and per_dir_count.get(dir_id, 0) >= spec.policy.max_tags_per_dir):
+        return None, None, f"目录「{directory.dir_name}」已达产出上限"
+    scope = tag_library.scope_of(dir_id)
+    mount = resolve_mount(scope, spec.asset_id, contents, evidence)
+    if mount is None:
+        return None, None, (f"目录「{directory.dir_name}」适用范围 {scope} "
+                            "解析不出唯一挂载点")
+    return (DirAssignment(dir_id=dir_id, dir_name=directory.dir_name,
+                          scope=scope, score=0.0, reason="模型指定目录"),
+            mount, "")
+
+
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
                   scene_index: dict) -> list[Evidence]:
     """候选 → 证据列表：judge 引用优先，回退生成侧场景，只保留真实场景。
@@ -213,13 +284,18 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     if library and settings.open_library_hint_enabled:
         hints = recall_library_hints(library, embedder, contents,
                                      settings.open_library_hint_count)
+    # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
+    # 而不是等生成完再按向量猜。只列 dir_dynamic 且落在范围内的目录。
+    dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
+                if settings.open_dir_hint_max > 0 else [])
 
     # ---- 1. 多轮生成 ----
     entries: list[dict] = []
     runs: list[dict] = []
     for run_index in range(max(1, settings.mtg_runs)):
         messages = build_generation_messages(contents, frames, run_index,
-                                             library_hint=hints)
+                                             library_hint=hints,
+                                             dir_hint=dir_hint)
         response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
         _add_usage(usage, response.usage)
         if not response.ok:
@@ -438,42 +514,60 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                              "origin": "catalog", "band": item.band,
                              "dimension": None,
                              "dir_id": tags[-1].dir_id,
+                             "dir_source": "library",
                              "target_type": mount.target_type,
                              "confidence": confidence,
                              "evidence": [e.scene_id for e in evidence]})
             continue
 
-        # 新词：先看策略允不允许、能不能归属到可扩展目录
+        # 新词：先看模型给的目录能不能用，再回退到向量归类
         if not spec.policy.allow_new_tags:
             dropped.append({"tag": candidate.tag, "why": "策略禁止产出新词"})
             continue
         if tag_library is None:
             dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
             continue
-        # 目录候选按相似度降序逐个试：最佳目录挂不上（如 character 目录
-        # 但证据里没有唯一角色）时退到次优，别把标签整条丢掉
+        # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
+        #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
         assignment = None
         mount = None
+        dir_source = None
+        dir_reason = ""
         reasons: list[str] = []
-        for option in rank_dir_assignments(tag_library, embedder,
-                                           vector_by_name.get(candidate.tag),
-                                           spec.policy.dir_ids):
-            if option.dir_id is None:
-                reasons.append(f"无可归属目录（{option.reason}）")
-                continue
-            if (spec.policy.max_tags_per_dir
-                    and per_dir_count.get(option.dir_id, 0)
-                    >= spec.policy.max_tags_per_dir):
-                reasons.append(f"目录「{option.dir_name}」已达产出上限")
-                continue
-            candidate_mount = resolve_mount(option.scope, spec.asset_id,
-                                            contents, evidence)
-            if candidate_mount is None:
-                reasons.append(f"目录「{option.dir_name}」适用范围 "
-                               f"{option.scope} 解析不出唯一挂载点")
-                continue
-            assignment, mount = option, candidate_mount
-            break
+        model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
+        if candidate.dir_raw and model_dir is None:
+            reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
+        if model_dir:
+            assignment, mount, why = _validate_model_dir(
+                tag_library, model_dir, spec, contents, evidence, per_dir_count)
+            if assignment is not None:
+                dir_source = "model"
+            else:
+                reasons.append(why)
+                assignment = mount = None
+        # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
+        if assignment is None:
+            for option in rank_dir_assignments(tag_library, embedder,
+                                               vector_by_name.get(candidate.tag),
+                                               spec.policy.dir_ids):
+                if option.dir_id is None:
+                    reasons.append(f"无可归属目录（{option.reason}）")
+                    continue
+                if (spec.policy.max_tags_per_dir
+                        and per_dir_count.get(option.dir_id, 0)
+                        >= spec.policy.max_tags_per_dir):
+                    reasons.append(f"目录「{option.dir_name}」已达产出上限")
+                    continue
+                candidate_mount = resolve_mount(option.scope, spec.asset_id,
+                                                contents, evidence)
+                if candidate_mount is None:
+                    reasons.append(f"目录「{option.dir_name}」适用范围 "
+                                   f"{option.scope} 解析不出唯一挂载点")
+                    continue
+                assignment, mount = option, candidate_mount
+                dir_source = "fallback"
+                dir_reason = option.reason
+                break
         if assignment is None or mount is None:
             dropped.append({"tag": candidate.tag,
                             "why": "；".join(reasons) or "无可归属目录"})
@@ -498,7 +592,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                          "dimension": candidate.dimension,
                          "dir_id": assignment.dir_id,
                          "dir_name": assignment.dir_name,
-                         "dir_reason": assignment.reason,
+                         "dir_source": dir_source,
+                         "dir_model_raw": candidate.dir_raw,
+                         "dir_reason": (assignment.reason
+                                        if dir_source == "model"
+                                        else (dir_reason or assignment.reason)),
                          "target_type": mount.target_type,
                          "confidence": confidence,
                          "evidence": [e.scene_id for e in evidence]})
@@ -526,6 +624,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             "name_overlap": settings.open_library_name_overlap,
             "verify_enabled": bool(settings.open_library_verify_enabled),
             "replace_enabled": bool(settings.open_library_replace_enabled),
+            "dir_hint_max": settings.open_dir_hint_max,
+            "dir_hint_count": len(dir_hint),
         },
         "scenes": len(contents.content.scenes),
         "frames": frame_count,
@@ -539,9 +639,14 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         "verdicts": list(verdicts.values()),
         "accepted": [{"tag": row["name"], "candidate": row["tag"],
                       "origin": row["origin"],
+                      "dir_id": row.get("dir_id"),
+                      "dir_source": row.get("dir_source"),
+                      "dir_model_raw": row.get("dir_model_raw"),
+                      "dir_reason": row.get("dir_reason"),
                       "confidence": row["confidence"], "band": row["band"],
                       "evidence": row["evidence"]}
                      for row in tag_rows],
+        "dir_hint": [entry["dir_id"] for entry in dir_hint],
         "library": {
             "enabled": bool(library),
             "size": len(library),

@@ -1,4 +1,4 @@
-"""生成任务 API 测试（Task 9）。
+﻿"""生成任务 API 测试（Task 9）。
 
 覆盖契约（错误映射约定见 brief）：
 - POST /api/v1/generation/tasks：端到端同步执行（conftest client fixture
@@ -287,7 +287,7 @@ def test_task_list_filters_and_pagination(client):
     assert all(set(row.keys()) == TASK_KEYS for row in listing)
     # created_at 降序：后创建的 open 任务在前
     assert [row["task_id"] for row in listing] == [second["task_id"], first["task_id"]]
-    assert listing[0]["prompt_version"] == "mtg-v2"  # open 自拼 prompt 的口径版本
+    assert listing[0]["prompt_version"] == "mtg-v3"  # open 自拼 prompt 的口径版本
     assert listing[0]["asset_id"] == "movie_001"
 
     # status / mode / asset_id 过滤

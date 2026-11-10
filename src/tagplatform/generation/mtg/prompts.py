@@ -8,7 +8,9 @@
 - 审核 prompt 含标志串 `## 审核任务`；
 - 场景行统一为 `- {scene_id} [{start_ms}-{end_ms}] {description}`（与
   `tasks/runner._render_content_text` 同形，Mock 的 `_SCENE_LINE_RE` 直接可解析）；
-- 审核候选行统一为 `- {tag}｜{dimension}｜{reason}`（全角竖线分隔）。
+- 审核候选行统一为 `- {tag}｜{dimension}｜{reason}`（全角竖线分隔）；
+- 目录块标志串 `## 可以放新标签的目录`：只在有可扩展目录时出现，行格式
+  `- {dir_id}｜{全路径}｜{粒度}`，模型的 `dir` 字段按这个 id 回填。
 
 图片按场景内联：场景文字块之后紧跟该场景的关键帧（每张前有一行图注），
 让模型知道每张图属于哪个场景——这是"场景级视觉证据"能被模型引用的前提。
@@ -36,6 +38,9 @@ _DIMENSION_HINTS = {
     "叙事": "叙事结构或手法（如 多线叙事、倒叙、闭环结构）",
     "角色": "人物类型或人物关系特征（如 反英雄、群像、父子关系）",
 }
+
+# 目录挂载粒度 → 提示词里的中文说明（只影响措辞，不参与校验）
+_SCOPE_LABELS = {"content": "整片", "scene": "单场景", "character": "人物"}
 
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
@@ -94,8 +99,12 @@ def render_content(content: ContentJSON) -> str:
     return "\n".join(lines)
 
 
-def _generation_instructions() -> str:
+def _generation_instructions(with_dir: bool = False) -> str:
     dims = "\n".join(f"- {name}：{_DIMENSION_HINTS[name]}" for name in DIMENSIONS.values())
+    dir_rule = (
+        "\n5. dir 必须是「可以放新标签的目录」里出现过的**目录 id**，不能自造；"
+        "找不到合适目录的标签直接不要输出。" if with_dir else "")
+    dir_field = '"dir":"目录 id",' if with_dir else ""
     return (
         "## 要求\n"
         "围绕下面五个维度，为这部影片生成 15-20 个中文标签（不受任何既有词表限制，"
@@ -120,33 +129,41 @@ def _generation_instructions() -> str:
         "2. 标签要具体、可判别，避免空泛（如“好看”“精彩”）；同一含义只出现一次；\n"
         "3. scenes 只能填上面出现过的场景 id；无法对应到具体场景时给空数组；\n"
         "4. 只输出一个 JSON 对象，形如 "
-        '{"tags":[{"tag":"2-8 字中文标签","scope":"film|scene",'
+        '{"tags":[{"tag":"2-8 字中文标签",' + dir_field +
+        '"scope":"film|scene",'
         '"dimension":"风格|情绪|主题|叙事|角色",'
         '"scenes":["场景 id"],"reason":"20 字以内的内容依据"}]}；'
-        "不要解释、不要 Markdown 代码块。"
+        "不要解释、不要 Markdown 代码块。" + dir_rule
     )
 
 
-def _library_hint_block(names: list[str]) -> str:
-    """库内已有标签的提示块（只给名字，不给定义）。
+def _dir_hint_block(dirs: list[dict]) -> str:
+    """可新增标签的目录清单（生成阶段就把归属交给模型决定）。
 
-    措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
-    "悬疑解谜"这类更细的候选，只是不该原样复述。
+    只列 `dir_dynamic` 的目录：静态目录不允许扩充，出现在提示词里只会诱使
+    模型往里面塞新词，然后在校验环节被打回。
     """
-    listing = "\n".join(f"- {name}" for name in names)
+    lines = []
+    for entry in dirs:
+        label = _SCOPE_LABELS.get(entry.get("scope") or "", entry.get("scope") or "")
+        lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
     return (
-        "## 库里已有的标签\n"
-        "下面这些标签我们的标签库里已经有了，**不要原样重复输出**；"
-        "如果你认为其中某条对这部片不够准确、不够具体，可以给出更精确的说法：\n"
-        f"{listing}"
+        "## 可以放新标签的目录\n"
+        "每个标签都要落到下面某个目录里，用**目录 id** 填 `dir` 字段。"
+        "只能从这张表里选，不要自造 id（竖线后是目录全路径与挂载粒度）：\n"
+        + "\n".join(lines) + "\n"
+        "按标签本身的含义挑目录，不要看哪个目录空着就往哪塞；"
+        "一条标签实在没有合适的目录，就**不要输出它**——宁可少一条，"
+        "也不要放进不合适的目录。"
     )
 
 
 def build_generation_messages(content: ContentJSON,
                               frames_by_scene: dict[str, tuple[Path, ...]],
                               run_index: int = 0,
-                              library_hint: list[str] | None = None) -> list[dict]:
-    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内已有标签 + 要求。"""
+                              library_hint: list[str] | None = None,
+                              dir_hint: list[dict] | None = None) -> list[dict]:
+    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内标签/目录 + 要求。"""
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
@@ -162,8 +179,26 @@ def build_generation_messages(content: ContentJSON,
                           "image_url": {"url": _encode_image(frame)}})
     if library_hint:
         parts.append({"type": "text", "text": _library_hint_block(library_hint)})
-    parts.append({"type": "text", "text": _generation_instructions()})
+    if dir_hint:
+        parts.append({"type": "text", "text": _dir_hint_block(dir_hint)})
+    parts.append({"type": "text",
+                  "text": _generation_instructions(with_dir=bool(dir_hint))})
     return [{"role": "user", "content": parts}]
+
+
+def _library_hint_block(names: list[str]) -> str:
+    """库内已有标签的提示块（只给名字，不给定义）。
+
+    措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
+    "悬疑解谜"这类更细的候选，只是不该原样复述。
+    """
+    listing = "\n".join(f"- {name}" for name in names)
+    return (
+        "## 库里已有的标签\n"
+        "下面这些标签我们的标签库里已经有了，**不要原样重复输出**；"
+        "如果你认为其中某条对这部片不够准确、不够具体，可以给出更精确的说法：\n"
+        f"{listing}"
+    )
 
 
 def _render_judge_content(content: ContentJSON) -> str:

@@ -65,8 +65,27 @@ def test_settings_references_exist():
 
 
 def test_verify_max_tokens_default():
-    """复核输出上限的默认值：一次复核烧过 27k tokens，这个兜底不能丢。"""
-    assert Settings().open_library_verify_max_tokens == 4096
+    """复核输出上限的默认值：一次复核烧过 27k tokens，这个兜底不能丢。
+
+    标定值 8192（《open-library-tag-generation》§5.1）；合 main 时曾被整块换成
+    4096，复核在这种上限下更容易被截断判成"未复核"（= 不替换）。
+    """
+    assert Settings().open_library_verify_max_tokens == 8192
+
+
+def test_open_library_calibration_defaults():
+    """《open-library-tag-generation》§5.1 的标定值，用测试钉住。
+
+    事故背景：合 main 时 `settings.py` 被整段覆盖，四项标定一起退回旧值
+    （e5 / 合并阈值 0.90 / 台词 5 条 / 复核上限 4096），而线上 env 只覆盖了
+    模型名——于是生成实际跑在 BGE-M3 + 0.90 的错配口径上（≥0.90 几乎不合并）。
+    """
+    settings = Settings()
+
+    assert settings.embedding_model == "BAAI/bge-m3"
+    assert settings.mtg_merge_threshold == 0.75
+    assert settings.asset_dialogue_limit == 8
+    assert settings.semantic_similar_threshold == 0.85
 
 
 def test_verify_client_carries_max_tokens(monkeypatch):

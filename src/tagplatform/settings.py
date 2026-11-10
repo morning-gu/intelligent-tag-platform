@@ -20,8 +20,14 @@ class Settings(BaseSettings):
 
     # SQLite 数据库文件路径
     database_path: str = "data/tagplatform.db"
-    # 句向量模型（intfloat/multilingual-e5-base，768 维）
-    embedding_model: str = "intfloat/multilingual-e5-base"
+    # 句向量模型（1024 维）。2026-11-05 由 e5-base 换到 BGE-M3：
+    # 同一批 87 条人工标注上 AUC 0.903→0.928，且"重复 vs 新词"的分差
+    # 0.028→0.187（e5 把所有中文短词挤在 0.85-0.95，阈值只能在噪声里切）。
+    # 换模型必须重灌 tag_catalog.embedding（scripts/reembed_catalog.py）。
+    embedding_model: str = "BAAI/bge-m3"
+    # 导入校验：与库内标签余弦 ≥ 该值判"疑似重复"（含等于）。
+    # e5 时代是 0.90；换 BGE-M3 后 0.90 只对几乎逐字相同的对子触发，下调到 0.85。
+    semantic_similar_threshold: float = 0.85
     # True 时用确定性 MockEmbedder（测试专用，绝不触发模型下载）
     use_mock_embedder: bool = False
     # 标签类型逗号分隔白名单；空 = 不校验
@@ -66,8 +72,8 @@ class Settings(BaseSettings):
     asset_frames: int = 3
     # 场景级并发（生成资产的模型调用）
     asset_workers: int = 4
-    # 每场景最多带几行字幕（台词进资产，但全量会让 JSON 涨 8 倍）
-    asset_dialogue_limit: int = 5
+    # 每场景最多带几行字幕（进资产 JSON；标签生成会全量使用这些台词）
+    asset_dialogue_limit: int = 8
     # 是否让模型推断数据集没有的字段（中文描述/氛围/事件/说话人/剧情时间地点）。
     # False = 只填数据集事实，一次模型调用都不发。
     asset_infer: bool = True
@@ -78,8 +84,10 @@ class Settings(BaseSettings):
     # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
     mtg_frames_per_scene: int = 2
     mtg_max_frames: int = 24
-    # 跨轮语义合并阈值（e5 余弦，complete-link）
-    mtg_merge_threshold: float = 0.90
+    # 跨轮语义合并阈值（complete-link）。换 BGE-M3 后按"e5 0.90 会合掉的对子"
+    # 反推：同一批候选里 e5≥0.90 有 31 对，BGE-M3 上对应 0.75（13 对）——
+    # 刻意偏保守，宁可留两条相似候选让人看，也不要把不同的词合掉。
+    mtg_merge_threshold: float = 0.75
     # 单轮输出上限（模型被要求 15-20 个，这里兜底截断）
     mtg_max_candidates_per_run: int = 20
     # judge 通过后的最终产出上限（用户口径 10-15 条）
@@ -107,9 +115,12 @@ class Settings(BaseSettings):
     open_library_verify_enabled: bool = True
     # 复核调用的输出上限：推理模型在模棱两可的对子上会把思考写爆
     # （实测一次 27k tokens，任务从 4 分钟拖到 7 分钟），这里硬性兜底
-    open_library_verify_max_tokens: int = 4096
+    open_library_verify_max_tokens: int = 8192
     # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
     open_library_replace_enabled: bool = True
+    # 提示词里最多列多少个可扩展目录（按全路径排序后截断，控制 token）。
+    # 0 = 不注入目录，回到"生成后再按向量归类"的老路径。
+    open_dir_hint_max: int = 60
 
 
 @lru_cache

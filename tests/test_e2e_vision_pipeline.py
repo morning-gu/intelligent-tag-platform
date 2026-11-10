@@ -1,4 +1,4 @@
-"""端到端：上游资产 JSON → 导入 → 开放生成 → 待审核行。
+﻿"""端到端：上游资产 JSON → 导入 → 开放生成 → 待审核行。
 
 这条链路是「视频理解部门给资产 → 平台出标签 → 人工审核」的最小闭环，
 用 mock LLM/Embedder 固定行为（零网络），断言四件事：
@@ -87,7 +87,7 @@ def test_upstream_to_pending_tags(session):
     run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     session.refresh(task)
     assert task.status == "succeeded", task.error
-    assert task.prompt_version == "mtg-v2"
+    assert task.prompt_version == "mtg-v3"
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
     rows = session.query(PreAssetTag).filter(
