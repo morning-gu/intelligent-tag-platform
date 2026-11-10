@@ -282,12 +282,9 @@ export default function AssetList() {
       setDirInput(result.path)
       setDirParent(result.parent)
       setDirEntries(result.entries)
-      // 默认勾选：这一层里能导入、且库里还没有的影片目录
-      setDirPicked(
-        result.entries
-          .filter((item) => item.is_movie && item.error === null && !item.exists)
-          .map((item) => item.name),
-      )
+      // 不默认勾选：几百个目录里默认全勾中，用户一按导入就可能整批写库。
+      // 需要批量时用下面的「全选可导入」按钮显式选择。
+      setDirPicked([])
     } catch (err) {
       setDirError(err instanceof Error ? err.message : '目录读取失败')
     } finally {
@@ -657,6 +654,39 @@ export default function AssetList() {
               <Typography.Text>
                 当前目录：<Typography.Text code>{dirPath}</Typography.Text>
               </Typography.Text>
+              {(() => {
+                // 本层"可导入"的影片目录：显式全选只作用于这些行
+                const selectable = dirEntries.filter(
+                  (item) => item.is_movie && item.error === null && (!item.exists || dirOverwrite),
+                )
+                const allPicked =
+                  selectable.length > 0 && selectable.every((item) => dirPicked.includes(item.name))
+                return (
+                  <Space wrap>
+                    <Button
+                      size="small"
+                      disabled={dirLoading || dirImporting || selectable.length === 0}
+                      onClick={() => setDirPicked(selectable.map((item) => item.name))}
+                    >
+                      全选可导入（{selectable.length}）
+                    </Button>
+                    <Button
+                      size="small"
+                      disabled={dirPicked.length === 0}
+                      onClick={() => setDirPicked([])}
+                    >
+                      清空选择
+                    </Button>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {allPicked
+                        ? `已全选 ${dirPicked.length} 部`
+                        : dirPicked.length === 0
+                          ? '未选：勾选要导入的影片，或点「全选可导入」'
+                          : `已选 ${dirPicked.length} 部`}
+                    </Typography.Text>
+                  </Space>
+                )
+              })()}
               <Table<DirEntry>
                 size="small"
                 // 行键必须是"目录名"：勾选列表与导入请求里的 dir_names 都是这个名字。

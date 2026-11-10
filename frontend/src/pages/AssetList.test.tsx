@@ -760,12 +760,14 @@ describe('从目录导入资产', () => {
     expect(screen.getByText(/含 2 部/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '导入所选（0）' })).toBeInTheDocument()
 
-    // 点文件夹名进入下一层：出现影片目录 + 默认勾选可导入的
+    // 点文件夹名进入下一层：出现影片目录，但默认一个都不勾（防整批误写库）
     fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
 
     expect(await screen.findByText('Rear Window--tt0047396')).toBeInTheDocument()
     expect(screen.getAllByText('影片目录').length).toBeGreaterThan(0)
-    expect(screen.getByRole('button', { name: '导入所选（1）' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '导入所选（0）' })).toBeInTheDocument()
+    expect(screen.getByText(/未选：勾选要导入的影片/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '全选可导入（1）' })).toBeInTheDocument()
     expect(screen.getByText('可导入')).toBeInTheDocument()
     expect(screen.getByText('已导入')).toBeInTheDocument()
     expect(screen.getByText('无法导入')).toBeInTheDocument()
@@ -799,6 +801,8 @@ describe('从目录导入资产', () => {
     fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
     await screen.findByText('Rear Window--tt0047396')
 
+    // 不再默认勾选：先点「全选可导入」再导
+    fireEvent.click(screen.getByRole('button', { name: '全选可导入（1）' }))
     fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
 
     await waitFor(() =>
@@ -842,10 +846,19 @@ describe('从目录导入资产', () => {
     fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
     await screen.findByText('Rear Window--tt0047396')
 
-    // 回归点：行键曾是 path，勾选列表存的是目录名 → 默认勾中却显示未勾
+    // 默认不勾
     const newRow = screen.getByText('Rear Window--tt0047396').closest('tr') as HTMLElement
     const newBox = within(newRow).getByRole('checkbox')
+    expect(newBox).not.toBeChecked()
+
+    // 全选按钮把这层可导入的行都勾上（行键是目录名，框要真的变勾）
+    fireEvent.click(screen.getByRole('button', { name: '全选可导入（1）' }))
     expect(newBox).toBeChecked()
+    expect(screen.getByText(/已全选 1 部/)).toBeInTheDocument()
+
+    // 清空
+    fireEvent.click(screen.getByRole('button', { name: '清空选择' }))
+    expect(newBox).not.toBeChecked()
 
     // 已导入的行默认不可勾
     const doneRow = screen.getByText('Taxi Driver--tt0075314').closest('tr') as HTMLElement
@@ -853,11 +866,17 @@ describe('从目录导入资产', () => {
     expect(doneBox).not.toBeChecked()
     expect(doneBox).toBeDisabled()
 
-    // 手动取消再勾上：onChange 回传的必须是目录名（不是路径）
-    fireEvent.click(newBox)
-    expect(newBox).not.toBeChecked()
-    fireEvent.click(newBox)
-    expect(newBox).toBeChecked()
+    // 手动勾选/取消（每步重新取节点，重渲染会换掉 DOM）
+    const boxNow = () =>
+      within(
+        screen.getByText('Rear Window--tt0047396').closest('tr') as HTMLElement,
+      ).getByRole('checkbox')
+    fireEvent.click(boxNow())
+    expect(boxNow()).toBeChecked()
+    fireEvent.click(boxNow())
+    expect(boxNow()).not.toBeChecked()
+    fireEvent.click(boxNow())
+    expect(boxNow()).toBeChecked()
 
     fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
     await waitFor(() =>
@@ -884,6 +903,9 @@ describe('从目录导入资产', () => {
     fireEvent.click(screen.getByRole('button', { name: /movie_asset/ }))
     await screen.findByText('Rear Window--tt0047396')
 
+    // 不再默认勾选：先点「全选可导入」再导
+    fireEvent.click(screen.getByRole('button', { name: '全选可导入（1）' }))
+    fireEvent.click(screen.getByRole('button', { name: '全选可导入（1）' }))
     fireEvent.click(screen.getByRole('button', { name: '导入所选（1）' }))
     expect(
       await screen.findByText(/没有执行任何导入/),
