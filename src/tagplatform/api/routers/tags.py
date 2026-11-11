@@ -39,6 +39,7 @@ from tagplatform.db.models import (
     TagImportTask,
 )
 from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
+from tagplatform.governance.pipeline import is_directory_row, referenced_dir_names
 
 router = APIRouter(prefix="/api/v1/tags")
 
@@ -184,12 +185,12 @@ def import_tags(
 
     result = run_governance(parsed.rows, session, embedder)
 
-    # 标签行计数：批内被引用名为目录行（run_governance 同规则），其余为
-    # 标签定义行——total 口径只计后者（目录行落 tag_catalog 不进计数）
-    referenced_names = {r.parent_tag for r in parsed.rows
-                        if r.parent_tag is not None}
+    # 标签行计数：目录行判定与 run_governance 同源（显式 is_dir 标记优先，
+    # 未表态行按"被引用名"推断），total 口径只计标签定义行（目录行落
+    # tag_catalog 不进计数——含空目录）
+    referenced_names = referenced_dir_names(parsed.rows)
     summary_total = sum(1 for r in parsed.rows
-                        if r.tag_name not in referenced_names)
+                        if not is_directory_row(r, referenced_names))
 
     # 回填真实上传文件名（治理流水线写入的是占位 "governance"），并把
     # 行级解析错误明细并入 result_summary——治理流水线不感知 parsed.errors，

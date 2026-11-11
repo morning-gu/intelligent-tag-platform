@@ -1,16 +1,18 @@
 """标签治理流水线 v2：TagRow 行集 → 目录/标签双表落位 + 导入任务与审计。
 
 落位规则（计划契约速查，docs/table_design.md §2.1/§8）：
-- 行分类：名称被批内任一行的 parent_tag 引用 → **目录行**（tag_catalog，
-  dir_type 取行值（树状 XML 目录属性），缺省/非法归一 dir_dynamic；
-  applicable_scope 为 content/scene/character 组合，缺省/非法归一三值
-  全选）；其余 → **标签行**（tag_define，tag_type 取行值，缺省/非法
-  归一 val_fixed，val_generalized 放行落库）。层级 Excel/XML 的一/二/
-  三级天然被下级行引用成目录链，「标签」列与扁平行不被引用即标签——
-  分类无需感知解析层模板形状。已知边界：解析层把层级节点摊平为
-  TagRow（不保留"目录节点"标记），**无子引用的末级空目录**（如 XML 的
-  `<level2 name="剧情"/>` 且其下无标签）会退化为标签行；层级 Excel 不受
-  影响（标签列必填，层级行恒被本行标签引用）；
+- 行分类：解析层显式标记优先（`TagRow.is_dir` 三态：True 目录行 /
+  False 标签行 / None 未表态），未表态行按"名称被批内任一行 parent_tag
+  引用"推断为目录。目录行 → **tag_catalog**（dir_type 取行值（树状 XML
+  目录属性），缺省/非法归一 dir_dynamic；applicable_scope 为
+  content/scene/character 组合，缺省/非法归一三值全选）；标签行 →
+  **tag_define**（tag_type 取行值，缺省/非法归一 val_fixed，
+  val_generalized 放行落库）。层级 Excel（双表目录 sheet/层级列）、树状
+  XML 的 level 节点解析时即标 `is_dir=True`，「标签」列/<tag> 标
+  `is_dir=False`——**无子引用的末级空目录**因此保住目录身份（落
+  tag_catalog、其下保持空、不计标签数）。仅旧扁平模板等不表态的
+  `is_dir=None` 行仍按被引用名推断，其空末级行会退化为标签行（历史
+  语义，解析层不产出此类行）；
 - 标签行归属目录：parent_tag 命中批内目录行 > 库内同名目录（根目录
   优先、同级按 dir_id 稳定）> parent_tag 为空时落根目录「未分类」
   （批内同名根目录计划 > 库内 > 自动创建，不重复建第二个同名根目录）；
@@ -167,6 +169,32 @@ def _normalize_status(raw: str | None) -> str:
     return "deprecated" if raw in ("deprecated", "deprecate") else "active"
 
 
+def referenced_dir_names(rows: list[TagRow]) -> set[str]:
+    """批内被引用名：任一行 parent_tag 指向的名称（目录行推断的兜底依据）。"""
+    return {r.parent_tag for r in rows if r.parent_tag is not None}
+
+
+def is_directory_row(row: TagRow, referenced_names: set[str]) -> bool:
+    """行是否为目录行。
+
+    解析层显式表态优先（`TagRow.is_dir` 三态）：双表模板「标签目录」
+    sheet、层级模板的一/二/三级列、树状 XML 的 level1/2/3 节点恒为目录，
+    对应标签来源恒为标签；None（旧扁平模板、直接构造 TagRow 的调用方）
+    才按"名称被批内任一行 parent_tag 引用"推断。**空目录**——其下没有任何
+    标签行引用它——只有靠显式标记才保住目录身份，否则会被当成标签行落库。
+    """
+    if row.is_dir is not None:
+        return row.is_dir
+    return row.tag_name in referenced_names
+
+
+def batch_dir_items(rows: list[TagRow]) -> list[tuple[int, TagRow]]:
+    """批内目录行：(行下标, 行) 列表，行序。分类规则见 `is_directory_row`。"""
+    referenced_names = referenced_dir_names(rows)
+    return [(i, r) for i, r in enumerate(rows)
+            if is_directory_row(r, referenced_names)]
+
+
 def run_governance(rows: list[TagRow], session: Session, embedder,
                    config: GovernanceConfig | None = None) -> GovernanceResult:
     """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
@@ -195,16 +223,16 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     db_define_by_key = {(t.dir_id, t.tag_name): t for t in db_defines}
     db_define_names = {t.tag_name for t in db_defines if t.status != "deprecated"}
 
-    # ---------- 批内分类：被引用名为目录行，其余为标签行 ----------
-    referenced_names = {r.parent_tag for r in rows if r.parent_tag is not None}
-    dir_items = [(i, r) for i, r in enumerate(rows) if r.tag_name in referenced_names]
-    dir_row_by_name: dict[str, TagRow] = {}
-    for _i, r in dir_items:
-        # 裸名引用解析取首个出现的目录行（v1 batch_by_name.setdefault 语义）
-        dir_row_by_name.setdefault(r.tag_name, r)
+    # ---------- 批内分类：显式目录标记优先，其余按"被引用名"推断 ----------
+    # 解析层知道行是目录（双表模板目录 sheet / 层级列 / XML level 节点）时
+    # 带 is_dir=True，空目录因此不再退化为标签行；未表态的行（旧扁平模板、
+    # 直接构造 TagRow 的调用方）仍按名称被引用来推断，行为与 v2 初版一致。
+    referenced_names = referenced_dir_names(rows)
+    dir_items = batch_dir_items(rows)
+    dir_indexes = {i for i, _r in dir_items}
     tag_name_owners: dict[str, list[int]] = {}
     for i, r in enumerate(rows):
-        if r.tag_name not in referenced_names:
+        if i not in dir_indexes:
             tag_name_owners.setdefault(r.tag_name, []).append(i)
 
     # 别名归属预扫描（批内全局，v1 语义：共享别名判冲突，全部行参与）
@@ -240,7 +268,7 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     uncat_dir_id = (uncat_existing.dir_id if uncat_existing is not None
                     else f"dir_{uuid.uuid4().hex[:8]}")
     needs_uncat = any(
-        r.parent_tag is None and r.tag_name not in referenced_names for r in rows
+        r.parent_tag is None and i not in dir_indexes for i, r in enumerate(rows)
     )
     uncat_vec: np.ndarray | None = None
     texts = [f"{r.tag_name}。{r.description}" for r in rows]
@@ -357,8 +385,8 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     claimed: set[tuple[str, str]] = set()  # (目标目录标识, 标签名) 批内占用
 
     for i, r in enumerate(rows):
-        if r.tag_name in referenced_names:
-            continue  # 目录行已在 A 段处理
+        if i in dir_indexes:
+            continue  # 目录行已在 A 段处理（含无子引用的空目录）
 
         vec = batch_vecs[i]
         # 目标目录解析：批内目录行计划 > 库内同名目录 > 「未分类」> 缺失
