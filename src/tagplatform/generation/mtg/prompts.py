@@ -59,8 +59,40 @@ def _encode_image(path: Path) -> str:
     return f"data:image/{suffix};base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
-def render_content(content: ContentJSON) -> str:
-    """资产 → 生成/审核共用的内容文本（场景行与 runner 渲染同形）。"""
+# 全部模态（默认口径）；`eval/ablation.py` 的 `MODALITIES` 用同一套名字
+ALL_MODALITIES: frozenset[str] = frozenset({"video", "script", "dialogue"})
+
+
+def _active(modalities) -> frozenset[str]:
+    """None → 全开；否则只校验、不修正（拼错的名字必须当场报错）。"""
+    if modalities is None:
+        return ALL_MODALITIES
+    names = frozenset(modalities)
+    unknown = names - ALL_MODALITIES
+    if unknown:
+        raise ValueError(
+            f"未知模态 {sorted(unknown)}，只支持 {sorted(ALL_MODALITIES)}")
+    if not names:
+        raise ValueError("至少要开启一种模态")
+    return names
+
+
+def render_content(content: ContentJSON,
+                   modalities=None) -> str:
+    """资产 → 内容文本；`modalities` 控制 script / dialogue 两段是否出现。
+
+    - 关掉 `script`：整段资产文本都不给（摘要/人物/场景行/氛围/情绪/地点/
+      音乐全部属于“文字剧本”通道；只留“台词”没有场景上下文，模型分不清
+      哪句属于哪场）；
+    - 关掉 `dialogue`：逐行滤掉 `台词：` 开头的行（与 judge 侧
+      `_render_judge_content` 的滤法同形）；
+    - `video` 不在这里处理——关键帧在 `build_generation_messages` 里内联。
+
+    默认（`modalities=None`）等价全模态，行为与旧版逐字一致。
+    """
+    active = _active(modalities)
+    if "script" not in active:
+        return ""
     lines: list[str] = [f"电影：《{content.asset.title}》",
                         f"摘要：{content.content.summary[:_MAX_SUMMARY]}"]
     cast = [f"{ch.name}（{ch.description}）" if ch.description else ch.name
@@ -92,6 +124,8 @@ def render_content(content: ContentJSON) -> str:
             lines.append(f"  地点：{scene.location}")
         if scene.background_music:
             lines.append(f"  音乐：{scene.background_music}")
+        if "dialogue" not in active:
+            continue
         for dialogue in scene.dialogues:
             tone = (f"（{dialogue.emotion.text_emotion}）"
                     if dialogue.emotion and dialogue.emotion.text_emotion else "")
@@ -169,14 +203,28 @@ def build_generation_messages(content: ContentJSON,
                               frames_by_scene: dict[str, tuple[Path, ...]],
                               run_index: int = 0,
                               library_hint: list[str] | None = None,
-                              dir_hint: list[dict] | None = None) -> list[dict]:
-    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内标签/目录 + 要求。"""
+                              dir_hint: list[dict] | None = None,
+                              modalities=None) -> list[dict]:
+    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内标签/目录 + 要求。
+
+    `modalities` 是消融实验的唯一旋钮（见 `eval/ablation.py`）：
+    - 关掉 `video` → 即使调用方传了 `frames_by_scene` 也不内联任何关键帧
+      （不能指望调用方自己传空表，否则“传了但忘了清”会默默地变成 full）；
+    - 关掉 `script` / `dialogue` → 交给 `render_content` 裁剪。
+
+    关掉 script 时**不报错、不提示模型缺内容**：模型只知道“就给这些”，
+    这正是消融要测的“只有台词/只有画面够不够”。
+    """
+    active = _active(modalities)
+    body = render_content(content, active)
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
                  "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
-                 "## 内容\n" + render_content(content)),
+                 "## 内容\n" + body),
     }]
+    if "video" not in active:
+        frames_by_scene = {}
     for scene in content.content.scenes:
         frames = frames_by_scene.get(scene.scene_id) or ()
         for order, frame in enumerate(frames, 1):

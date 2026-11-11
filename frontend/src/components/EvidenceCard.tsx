@@ -28,7 +28,19 @@ export default function EvidenceCard({ assetId, evidence, onEvidenceClick }: Evi
         <Button
           key={`${ev.scene_id}-${ev.start_ms}`}
           size="small"
-          style={{ justifyContent: 'flex-start', height: 'auto', paddingInline: 8 }}
+          style={{
+            justifyContent: 'flex-start',
+            // 多行证据：场景号/时间段顶对齐，长描述换行后不悬在中间
+            alignItems: 'flex-start',
+            height: 'auto',
+            paddingInline: 8,
+            textAlign: 'left',
+            // antd Button 默认 white-space:nowrap，长描述（开放模式单条
+            // 可达 120 字）会把按钮顶到近 2000px，宿主表格 min-content
+            // 被撑爆后其余列被压到逐字换行。这里放开工换行是根治点。
+            whiteSpace: 'normal',
+            wordBreak: 'break-word',
+          }}
           onClick={() => {
             if (onEvidenceClick !== undefined) {
               onEvidenceClick(ev)
@@ -37,11 +49,20 @@ export default function EvidenceCard({ assetId, evidence, onEvidenceClick }: Evi
             }
           }}
         >
-          <Tag style={{ marginInlineEnd: 8 }}>{ev.scene_id}</Tag>
-          <Typography.Text type="secondary">
+          <Tag style={{ marginInlineEnd: 8, flexShrink: 0 }}>{ev.scene_id}</Tag>
+          {/* 时间段固定单行：按钮是 flex 布局，可收缩的文本会被压到逐字
+              换行（竖排观感），这里禁止收缩与换行，只让长描述换行。 */}
+          <Typography.Text
+            type="secondary"
+            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+          >
             {`${formatTimestamp(ev.start_ms)} - ${formatTimestamp(ev.end_ms)}`}
           </Typography.Text>
-          <Typography.Text style={{ marginInlineStart: 8 }}>{ev.description}</Typography.Text>
+          <Typography.Text
+            style={{ marginInlineStart: 8, wordBreak: 'break-word' }}
+          >
+            {ev.description}
+          </Typography.Text>
         </Button>
       ))}
     </div>

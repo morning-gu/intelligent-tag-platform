@@ -129,12 +129,18 @@ function formatTime(v: string | null): string {
   return v === null ? '—' : v.replace('T', ' ').slice(0, 19)
 }
 
-/** 结果行单条证据明细（详情面板证据列复用审核列表证据卡）。 */
+/** 结果行单条证据明细（详情面板证据列复用审核列表证据卡）。限宽：
+ * table-layout:auto 下列宽按内容 preferred 宽度分配，不限宽时证据列
+ * 会抢占绝大部分宽度，把标签名/目录挤成逐字换行（竖排观感）。 */
 function ResultEvidence({ assetId, evidence }: { assetId: string; evidence: ReviewEvidence[] }) {
   if (evidence.length === 0) {
     return <Typography.Text type="secondary">暂无证据</Typography.Text>
   }
-  return <EvidenceCard assetId={assetId} evidence={evidence} />
+  return (
+    <div style={{ maxWidth: 480 }}>
+      <EvidenceCard assetId={assetId} evidence={evidence} />
+    </div>
+  )
 }
 
 /** 行展开的任务详情面板：按 task_id 拉取详情，展示模型/Prompt 版本与

@@ -61,6 +61,12 @@ class ProducedTag:
       closed/open 产出来源）不是同一概念，落库时由任务模式决定。
     - `dir_id`：候选归属目录。catalog 取标签自身所在目录；generated 取
       可扩展目录里最相近的那个（生成时按目录范围与可否扩展决定）。
+    - `predicted_dir_id`：生成流水线给出的**预测**目录（与 `dir_id` 取值
+      相同，独立成字段是为了落库时留痕）。审核阶段人工改目录只动
+      `candidate_dir_id`，本字段落进 `pre_asset_tag.predicted_dir_id` 后
+      不可变，与人工终值一比就是一次天然的归属评测样本
+      （`scripts/eval_dir_assignment.py --method review`）。产物是命中
+      库内标签（origin=catalog）时保持 None——那不存在“预测归属”动作。
     - `target_type/target_id`：挂载粒度与挂载点，由目录的 applicable_scope
       决定——content → asset_id、scene → scene_id、character → character_id。
     - `alias_name`：命中库内时模型给出的原词（同名时为空）。它将来写进
@@ -81,6 +87,8 @@ class ProducedTag:
     level: str = "film"
     # ---- v2 增量：目录归属与挂载点 ----
     dir_id: str | None = None
+    # 生成时的预测目录快照（落库后不可变，仅供归属评测；见类 docstring）
+    predicted_dir_id: str | None = None
     target_type: str = "content"
     target_id: str | None = None
     alias_name: str | None = None

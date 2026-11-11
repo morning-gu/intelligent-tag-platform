@@ -275,13 +275,16 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     settings = get_settings()
     started = time.monotonic()
     contents = spec.content
-    frames = keyframes_mod.plan_scene_frames(
+    # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
+    # 见 `eval/ablation.py` 的纪律说明。
+    modalities = settings.mtg_modality_set
+    frames = (keyframes_mod.plan_scene_frames(
         contents, settings.dataset_root,
         per_scene=settings.mtg_frames_per_scene,
         max_frames=settings.mtg_max_frames,
         movie_asset_root=settings.movie_asset_root,
         extra_roots=settings.movie_asset_extra_roots,
-    )
+    ) if "video" in modalities else {})
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
@@ -306,7 +309,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     for run_index in range(max(1, settings.mtg_runs)):
         messages = build_generation_messages(contents, frames, run_index,
                                              library_hint=hints,
-                                             dir_hint=dir_hint)
+                                             dir_hint=dir_hint,
+                                             modalities=modalities)
         response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
         _add_usage(usage, response.usage)
         if not response.ok:
@@ -321,6 +325,10 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         for item in items:
             entries.append({**item, "run": run_index})
         runs.append({"run": run_index, "items": len(items),
+                     # 逐轮标签名：一致性评测（`scripts/eval_consistency.py`）
+                     # 要的就是“同一部片跑 N 轮分别产出了什么”，不存这里就只能
+                     # 重跑一遍才能算。只存名字不存证据，体量可控。
+                     "tags": [item.get("tag") for item in items],
                      "prompt_tokens": int(response.usage.get("prompt_tokens", 0) or 0),
                      "completion_tokens": int(response.usage.get("completion_tokens", 0) or 0)})
         logger.info("mtg 第 %d 轮：%d 个候选", run_index + 1, len(items))
@@ -360,7 +368,10 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
     scene_index = {scene.scene_id: scene for scene in contents.content.scenes}
     if settings.mtg_judge_enabled:
-        _require_quotes(verdicts, _normalize_quote(render_content(contents)))
+        # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
+        # 会让“引用了模型没看过的台词”误判为有效。
+        _require_quotes(verdicts,
+                        _normalize_quote(render_content(contents, modalities)))
     accepted: list[tuple[MergedCandidate, dict | None, list[Evidence]]] = []
     dropped: list[dict] = []
     for candidate in merged:
@@ -653,6 +664,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                         else "mock"),
         "params": {
             "runs": settings.mtg_runs,
+            "modalities": sorted(modalities),
             "frames_per_scene": settings.mtg_frames_per_scene,
             "max_frames": settings.mtg_max_frames,
             "merge_threshold": settings.mtg_merge_threshold,

@@ -73,20 +73,20 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 
 前缀 `TAGPLT_`（读 `.env` 与进程环境）：
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | 无 | OpenAI 兼容端点地址与密钥；LLM 生成必需，未设置时 complete 报错指引复制 `.env.example` |
-| `TAGPLT_DATABASE_PATH` | `data/tagplatform.db` | SQLite 数据库文件路径（迁移与应用共用） |
-| `TAGPLT_ADMIN_PASSWORD` | `admin123` | 首管理员启动引导密码（user_account 空表时创建 admin 账号；生产务必经本变量改强密码） |
-| `TAGPLT_SESSION_SECRET` | `dev-secret` | 会话令牌 HMAC 密钥；**生产必改**（默认值仅供开发/测试，泄漏即可伪造任意用户登录态） |
-| `TAGPLT_USE_MOCK_LLM` | `false` | true = 确定性 MockLLMClient（零网络，测试/冒烟） |
-| `TAGPLT_USE_MOCK_EMBEDDER` | `false` | true = 确定性 MockEmbedder（不下载模型） |
-| `TAGPLT_GENERATION_WORKERS` | `2` | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成） |
-| `TAGPLT_LLM_MODEL` | `qwen3.7-plus` | LLM 模型名 |
-| `TAGPLT_RECALL_TOP_K_PER_TYPE` | `50` | 模式 A 每 tag_type 召回候选上限 |
-| `TAGPLT_OPEN_MATCH_THRESHOLD` | `0.85` | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog |
-| `TAGPLT_MEDIA_ROOT` | `data/media/` | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录） |
-| `TAGPLT_LOG_LEVEL` | `INFO` | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
+| 变量                                     | 默认值                  | 说明                                                                                            |
+| ---------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | 无                      | OpenAI 兼容端点地址与密钥；LLM 生成必需，未设置时 complete 报错指引复制 `.env.example`        |
+| `TAGPLT_DATABASE_PATH`                 | `data/tagplatform.db` | SQLite 数据库文件路径（迁移与应用共用）                                                         |
+| `TAGPLT_ADMIN_PASSWORD`                | `admin123`            | 首管理员启动引导密码（user_account 空表时创建 admin 账号；生产务必经本变量改强密码）            |
+| `TAGPLT_SESSION_SECRET`                | `dev-secret`          | 会话令牌 HMAC 密钥；**生产必改**（默认值仅供开发/测试，泄漏即可伪造任意用户登录态）       |
+| `TAGPLT_USE_MOCK_LLM`                  | `false`               | true = 确定性 MockLLMClient（零网络，测试/冒烟）                                                |
+| `TAGPLT_USE_MOCK_EMBEDDER`             | `false`               | true = 确定性 MockEmbedder（不下载模型）                                                        |
+| `TAGPLT_GENERATION_WORKERS`            | `2`                   | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成）                                       |
+| `TAGPLT_LLM_MODEL`                     | `qwen3.7-plus`        | LLM 模型名                                                                                      |
+| `TAGPLT_RECALL_TOP_K_PER_TYPE`         | `50`                  | 模式 A 每 tag_type 召回候选上限                                                                 |
+| `TAGPLT_OPEN_MATCH_THRESHOLD`          | `0.85`                | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog                                       |
+| `TAGPLT_MEDIA_ROOT`                    | `data/media/`         | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录）                                      |
+| `TAGPLT_LOG_LEVEL`                     | `INFO`                | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。
 

@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     # ---------- 阶段 6：MovieTagGen 移植的开放式生成（2026-11） ----------
     # 生成轮数（跨轮并集，1 = 单轮）；轮数越高覆盖越好、成本线性上涨
     mtg_runs: int = 3
+    # 喂给模型的输入模态（逗号分隔）：video=关键帧 / script=场景文本 /
+    # dialogue=台词。默认三种全开（full）；关掉某项即对应消融变体，其余
+    # 参数不动——这是 `eval/ablation.py` 的前提，别在这里顺手改别的默认值。
+    mtg_modalities: str = "video,script,dialogue"
     # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
     mtg_frames_per_scene: int = 2
     mtg_max_frames: int = 24
@@ -112,6 +116,26 @@ class Settings(BaseSettings):
     mtg_judge_temperature: float = 0.0
     # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
     mtg_report_dir: str = "data/audit/mtg"
+
+    @property
+    def mtg_modality_set(self) -> frozenset[str]:
+        """`mtg_modalities` → 模态集合（空/全空串回落 full，不让任务裸跑）。
+
+        `eval/ablation.py` 的 `Variant` 会用同一套名字校验，非法值在这里就
+        报错，而不是等流水线跑到一半才发现拼错了。
+        """
+        from tagplatform.eval.ablation import MODALITIES
+
+        names = {part.strip().lower() for part in self.mtg_modalities.split(",")
+                 if part.strip()}
+        if not names:
+            return frozenset(MODALITIES)
+        unknown = names - set(MODALITIES)
+        if unknown:
+            raise ValueError(
+                f"mtg_modalities 含未知模态 {sorted(unknown)}，"
+                f"只支持 {list(MODALITIES)}")
+        return frozenset(names)
 
     # ---------- 阶段 7：用标签库提升开放生成质量（2026-11） ----------
     # 总开关：关掉 = 回到"不看库"的旧行为（提示不注入、分档不做、排序不含分档）

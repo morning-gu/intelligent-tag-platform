@@ -49,8 +49,24 @@ def _referenced_settings_attrs() -> dict[str, set[str]]:
     return found
 
 
+def _settings_attrs() -> set[str]:
+    """Settings 上真正可读的属性名：配置字段 + 手写的 `@property`。
+
+    只认 `model_fields` 会漏掉派生属性（如 `mtg_modality_set`）——它们确实是
+    正经的配置访问口，源码里 `settings.<x>` 读它们完全合法，不该被这条守护
+    测试挡住。用 `vars(Settings)` 逐个判 `property` 而不是 `dir(Settings)`，
+    是为了不把 BaseModel 的几十个内置方法一起当成合法字段（那会把守护力
+    削没）。
+    """
+    properties = {
+        name for name, value in vars(Settings).items()
+        if isinstance(value, property)
+    }
+    return set(Settings.model_fields) | properties
+
+
 def test_settings_references_exist():
-    defined = set(Settings.model_fields)
+    defined = _settings_attrs()
     refs = _referenced_settings_attrs()
     assert refs, "没扫到任何 settings.<x> 引用，扫描逻辑本身可能坏了"
     missing = {
