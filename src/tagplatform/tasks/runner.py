@@ -41,6 +41,7 @@ from tagplatform.generation.recall import (
     embed_content_texts,
     recall_candidates,
 )
+from tagplatform.filtering import FilterContext, run_filter_chain
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
 from tagplatform.content_io import load_content
@@ -231,6 +232,23 @@ def run_generation_task(task_id: str, session: Session, llm,
             library=library,
         )
         tags = producer.produce(spec, session, llm, embedder)
+        # 6.5 过滤责任链（合 main 的 filtering 能力）：质量评估 → 信息围栏，
+        #     通过者才进审核队列。被丢弃的标签不落 pre 表、不以 rejected
+        #     落库（rejected = 人工终审语义，重跑跳过）。两环节当前均占位
+        #     透传；环节抛错走下方任务级事务：回滚 + failed，零半截写入。
+        candidate_count = len(tags)
+        tags, reports = run_filter_chain(
+            tags,
+            FilterContext(task_id=task.task_id, asset_id=asset_id,
+                          mode=task.mode, content=content),
+            session,
+        )
+        if reports:
+            logger.info(
+                "任务 %s 过滤汇总：%d 条候选 → %d 条入库；各环节 %s",
+                task.task_id, candidate_count, len(tags),
+                "、".join(f"{report.name}(保留 {report.kept}/丢弃 "
+                          f"{report.dropped})" for report in reports))
         # 7. 结果入库（不 commit）：persist_tags 内部先清同 origin 的 pending
         #    行再逐条插入，重跑不会在审核队列里叠加历史候选
         summary = persist_tags(session, asset_id, task.task_id, tags, task.mode)

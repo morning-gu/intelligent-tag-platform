@@ -73,6 +73,14 @@ tag_change_log   → 审计 tag_define 全生命周期（无外键，可指向�
 
 `tag_catalog.applicable_scope` 声明目录适用范围，挂载时 target_type 与之对应。
 
+> **任务创建的场景归并**：`POST /api/v1/generation/tasks` 允许直接提交场景子资产
+> （`asset_type='scene'`），服务端沿 `parent_id` 上溯到最近带 `content_json` 的
+> 祖先（正常即所属影片）建任务，归并后按 `asset_id` 去重；响应与任务列表中的
+> `asset_id` 是影片 id。这不是场景级挂载：`target_type` 仍恒为 `content`，
+> `target_id` 仍是影片 `asset_id`，上表预留语义不变。
+> 场景与影片都选、或只选了无内容的占位资产 → 前者去重为一条任务，后者 422
+> （detail 指明原资产与父级）。
+
 ---
 
 ## 3. 表定义（SQLite 落地 DDL）
@@ -494,6 +502,22 @@ open 生成时的归一命中沿用 v1：mtg `_catalog_hits` 按 `open_match_thr
 ### 6.4 candidate_dir_id 赋值时序
 
 open 生成端（mtg-v1）产出的是自拟分类，不知道平台目录体系：生成时 `candidate_dir_id` 可空；审核 merge 入库时由合并流程赋值（此时起必填）。目录归属的唯一规范来源是 `tag_catalog`，生成端自拟分类不入库。
+
+### 6.5 生成结果过滤责任链（入库前）
+
+生成器产出候选标签后**不直接进审核队列**：先按顺序过责任链，通过者才写入 `pre_asset_tag`。当前默认链两环节均为**占位实现**（原样透传），接口先立、逻辑后续接入：
+
+| 顺序 | 环节 | 规划职责 | 当前行为 |
+|---|---|---|---|
+| 1 | `quality`（质量评估） | 证据一致性校验、置信/相关性复核、目录一致性检查 | 原样透传（note="未评估"） |
+| 2 | `fence`（信息围栏） | 敏感信息/剧透/版权拦截、范围围栏、丢弃明细留审计 | 原样透传（note="未围栏"） |
+
+关键约束：
+
+- **被过滤的行不入库**——既不落 `pre_asset_tag pending`（不占审核队列、不展示），也**不以 `rejected` 落库**（`rejected` 是人工驳即终审、重跑跳过的语义，见 §6.1，自动过滤不能复用该状态）；
+- **环节在任务事务内执行**（`persist` 之前）：环节抛错 → 任务 `failed` + 回滚，零半截写入，与生成失败的语义一致；
+- 过滤统计（每环节 kept/dropped/note）只记日志、不落库——跨轮次质量分析仍走 mtg 审计文件（§6.1）；日志内容：链开始/结束的汇总、每环节 `输入 N 条 → 保留 M 条、丢弃 K 条`、有丢弃时打出被丢标签名（`TAGPLT_LOG_LEVEL=DEBUG` 另有每环节传入明细）；
+- 新增环节 = 实现 `TagFilter` 协议 + `register_filter` 注册，runner 与审核/前端自动兼容。
 
 ---
 

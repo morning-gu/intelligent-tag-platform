@@ -3,9 +3,12 @@
 覆盖契约（错误映射约定见 brief）：
 - POST /api/v1/generation/tasks：端到端同步执行（conftest client fixture
   generation_workers=0，submit 返回即执行完）——closed 模式成功路径
-  （响应 tasks 状态 succeeded、详情 results 非空、资产标签视图非空）、
-  open 模式 generated 候选行、mode 未知 422（列可用 mode）、资产无识别
-  内容 422、空 asset_ids 422、未知资产 404；
+  （响应 tasks 状态 succeeded、详情 results 取 pre_asset_tag、
+  /assets/{id}/tags 仅 approved 挂载）、open 模式 mtg 产线成功路径
+  （全部 open 自由候选行：origin=open、candidate_name 原文、tag_id 空）、
+  mode 未知 422（列可用 mode）、资产未识别 422（自身及父链均无
+  content_json；场景子资产则会归并到所属影片，归并后去重）、空 asset_ids
+  422、未知资产 404；
 - GET /api/v1/generation/tasks：status/mode/asset_id 过滤 + created_at
   降序（task_id 决胜）+ limit/offset 分页；
 - GET /api/v1/generation/tasks/{task_id}：详情 + results 摘要（tag_name
@@ -210,14 +213,74 @@ def test_create_task_unknown_mode_422(client):
     assert "closed" in detail and "open" in detail
 
 
-def test_create_task_scene_without_context_422(client):
-    """资产存在但无识别内容（场景资产无 content_json）→ 整请求 422。"""
+def test_create_task_scene_resolves_to_parent_movie(client):
+    """选中场景子资产 → 归并到所属影片建任务（v2 内容只落影片级）。
+
+    场景行 content_json 恒为 NULL，但"按场景挑片建任务"是常见操作：创建
+    时沿 parent_id 上溯到带内容的影片，任务挂影片级资产跑，响应 asset_id
+    即影片 id（任务列表里出现的 asset_id 与所选场景不同是有意为之）。
+    """
     imported = _import_content(client)
+    movie_id = imported["asset_id"]
     scene_id = imported["scene_asset_ids"][0]
+    _import_catalog(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": [scene_id], "mode": "closed",
+        "policy": {"max_tags": 30, "min_confidence": 0.5}})
+    assert resp.status_code == 200
+    tasks = resp.json()["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["asset_id"] == movie_id  # 归并到影片
+    assert tasks[0]["status"] == "succeeded"
+    # 结果行同样落影片级资产（pre 行 asset_id = 影片）
+    detail = client.get(f"/api/v1/generation/tasks/{tasks[0]['task_id']}").json()
+    assert detail["asset_id"] == movie_id and detail["results"]
+
+
+def test_create_task_scene_and_movie_deduped(client):
+    """同时选中影片与其场景 → 归并后去重，只建一条任务。"""
+    imported = _import_content(client)
+    movie_id = imported["asset_id"]
+    scene_id = imported["scene_asset_ids"][0]
+    _import_catalog(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": [movie_id, scene_id], "mode": "closed",
+        "policy": {"max_tags": 30, "min_confidence": 0.5}})
+    assert resp.status_code == 200
+    assert [t["asset_id"] for t in resp.json()["tasks"]] == [movie_id]
+
+
+def test_create_task_orphan_scene_422(client):
+    """父级影片也无识别内容（上传占位场景）→ 422，detail 指明场景与父级。"""
+    from tagplatform.db.models import MediaAsset
+
+    with client.app.state.session_factory() as s:
+        s.add(MediaAsset(asset_id="movie_blank", asset_type="movie",
+                         title="占位影片", created_at=None))
+        s.flush()
+        s.add(MediaAsset(asset_id="movie_blank::scene_1", asset_type="scene",
+                         parent_id="movie_blank", title="占位场景",
+                         created_at=None))
+        s.commit()
     resp = client.post("/api/v1/generation/tasks",
-                       json={"asset_ids": [scene_id], "mode": "closed"})
+                       json={"asset_ids": ["movie_blank::scene_1"], "mode": "closed"})
     assert resp.status_code == 422
-    assert resp.json()["detail"] == f"资产 {scene_id} 无识别内容"
+    detail = resp.json()["detail"]
+    assert "movie_blank::scene_1" in detail and "movie_blank" in detail
+
+
+def test_create_task_movie_without_content_422(client):
+    """非场景资产自身未识别内容且无父级 → 422 保持原文案。"""
+    from tagplatform.db.models import MediaAsset
+
+    with client.app.state.session_factory() as s:
+        s.add(MediaAsset(asset_id="movie_raw", asset_type="movie",
+                         title="未识别影片", created_at=None))
+        s.commit()
+    resp = client.post("/api/v1/generation/tasks",
+                       json={"asset_ids": ["movie_raw"], "mode": "closed"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "资产 movie_raw 无识别内容"
 
 
 def test_create_task_unknown_asset_404(client):
