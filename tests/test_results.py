@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.generation import Evidence, ProducedTag
 from tagplatform.results import PersistSummary, persist_tags
 
@@ -50,7 +50,7 @@ def test_catalog_hit_is_auto_approved(session):
     s = persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作")], "closed")
     row = session.query(PreAssetTag).one()
     assert s == PersistSummary(cleared=0, inserted=1, skipped_finalized=0,
-                               auto_approved=1)
+                               auto_approved=1, mounted=1)
     assert row.review_status == "approved"
     assert row.reviewer_id == "system"
     assert "同名" in (row.review_comment or "")
@@ -59,6 +59,11 @@ def test_catalog_hit_is_auto_approved(session):
     assert row.candidate_name is None and row.candidate_alias is None
     # 命中库内标签没有“预测归属”动作，评测列为空
     assert row.predicted_dir_id is None
+    # 自动通过同时写正式挂载（资产详情读 asset_tag，不能只靠 pre 行）
+    mount = session.query(AssetTag).one()
+    assert (mount.asset_id, mount.target_type, mount.target_id) == \
+        ("a1", "content", "a1")
+    assert mount.tag_id == "tag_action" and mount.tag_name == "动作"
 
 
 def test_catalog_similar_records_alias(session):

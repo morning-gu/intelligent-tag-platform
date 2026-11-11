@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import PreAssetTag
+from tagplatform.db.models import AssetTag, PreAssetTag
 from tagplatform.generation.base import ProducedTag
 
 # 人工已定稿状态：重跑一律跳过（不覆盖、不复活）
@@ -42,6 +42,41 @@ class PersistSummary:
     inserted: int
     skipped_finalized: int
     auto_approved: int = 0
+    # 自动通过同时写进 asset_tag 的挂载行数（人工审核那条路在 review 服务里写）
+    mounted: int = 0
+
+
+def _mount_asset_tag(session: Session, *, asset_id: str, target_type: str,
+                     target_id: str, tag_id: str, tag_name: str,
+                     now: datetime) -> bool:
+    """自动通过的行同步写正式挂载（幂等：同键已挂则跳过）。
+
+    `asset_tag` 才是"资产有哪些标签"的权威口径；审核人工那条路在
+    review 服务里写，系统自动通过（同名命中/相似并入）也必须写，否则
+    资产详情看不到这些标签。
+    """
+    exists = (
+        session.query(AssetTag.id)
+        .filter(
+            AssetTag.asset_id == asset_id,
+            AssetTag.target_type == target_type,
+            AssetTag.target_id == target_id,
+            AssetTag.tag_id == tag_id,
+        )
+        .first()
+    )
+    if exists is not None:
+        return False
+    session.add(AssetTag(
+        asset_id=asset_id,
+        target_type=target_type,
+        target_id=target_id,
+        tag_id=tag_id,
+        tag_name=tag_name,
+        created_at=now,
+        updated_at=now,
+    ))
+    return True
 
 
 def _evidence_json(tag: ProducedTag) -> str:
@@ -162,5 +197,11 @@ def persist_tags(
         summary.inserted += 1
         if status == "approved":
             summary.auto_approved += 1
+            if _mount_asset_tag(
+                session, asset_id=asset_id, target_type=target_type,
+                target_id=target_id, tag_id=str(values["tag_id"]),
+                tag_name=tag.tag_name, now=now,
+            ):
+                summary.mounted += 1
 
     return summary

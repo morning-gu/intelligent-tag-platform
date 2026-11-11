@@ -266,6 +266,9 @@ def apply_review(session: Session, row_id: int, action: str,
         elif row.review_status == "approved" and not row.tag_id:
             ingested = _ingest_new_tag(session, row, library, reviewer)
             if ingested:
+                # 回填行内 tag_id：审核后 pre 行与 asset_tag 用同一个库内 id，
+                # 否则资产详情只能按候选名兜底匹配（历史行就是这么缺的）
+                row.tag_id = str(ingested["tag_id"])
                 _mount_asset_tag(session, row, tag_id=str(ingested["tag_id"]),
                                  tag_name=str(ingested["tag_name"]), now=now)
         elif row.review_status == "approved" and row.tag_id:

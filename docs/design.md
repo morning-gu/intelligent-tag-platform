@@ -420,8 +420,8 @@ v2 重建删除，不再保留过渡表。
 生成/召回/审核**直接读这两张表**（`library.load_library`，内容指纹做
 版本号，改标签即失效向量索引）；入库动作也改成真写：新词通过插
 `tag_define` + 记 `tag_change_log(create)`，合并别名追加到
-`tag_define.aliases` + 记 `tag_change_log(update)`。`data/taglibrary/*.json`
-与 `scripts/build_tag_library.py` 只作历史资料保留，运行期不再读取。
+`tag_define.aliases` + 记 `tag_change_log(update)`。早期的 `data/taglibrary/*.json`
+（JSON 库）已从仓库删除：运行期、脚本与测试夹具都不再有任何 JSON 库文件。
 
 **tag_generation_task：标签生产任务表**
 

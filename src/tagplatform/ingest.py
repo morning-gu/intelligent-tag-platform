@@ -1,7 +1,7 @@
 """入库动作：审核通过的新标签 / 新别名，直接落 `tag_define`。
 
-早期（v1 表结构未定稿时）这里写的是 `data/taglibrary/_pending/*.json` 预览，
-标签库切到 v2 两表后改成真写：
+v2 起标签库就是 `tag_catalog` / `tag_define` 两张正式表（早期 JSON 库已删除），
+入库一律真写：
 
 - 新词审核通过 → 插入 `tag_define`（同目录同名幂等），记 `tag_change_log(create)`；
 - 合并到既有标签 → 别名追加进 `tag_define.aliases`，记 `tag_change_log(update)`。
@@ -51,7 +51,7 @@ def _dump(aliases: list[str]) -> str | None:
 
 
 def _next_tag_id(session: Session, dir_id: str, tag_name: str) -> str:
-    """新标签 id：与 build_tag_library 同一规则（稳定、可复现）。"""
+    """新标签 id：`tag_{sha1(dir_id/tag_name)[:8]}`（稳定、可复现）。"""
     digest = hashlib.sha1(f"{dir_id}/{tag_name}".encode("utf-8")).hexdigest()[:8]
     tag_id = f"tag_{digest}"
     if session.get(TagDefine, tag_id) is not None:

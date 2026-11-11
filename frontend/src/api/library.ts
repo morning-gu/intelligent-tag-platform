@@ -1,6 +1,6 @@
-// 标签库 API（v2，JSON 模拟）：目录树/标签列表/统计与入库预览。
-// 本期正式的 tag_catalog / tag_define 由外部提供，生成与审核都读
-// data/taglibrary 的 JSON；这些接口是前端目录选择器的唯一数据源。
+// 标签库 API（v2）：目录树/标签列表/统计与入库预览。
+// 数据源就是 tag_catalog / tag_define 两张正式表（JSON 库已删除），
+// 生成/审核/前端目录选择器读的都是这套接口。
 import { apiFetch } from './client'
 
 /** 目录节点（与后端 /library/tree 的节点形状一致）。 */

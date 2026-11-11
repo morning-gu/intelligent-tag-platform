@@ -541,13 +541,16 @@ def test_modify_display_name_visible_in_list_and_detail(client):
     assert modified.status_code == 200
     assert modified.json()["tag_name"] == "动作改"
 
-    # 改名后：三处均显示修改后的名字（库内标签仍是"动作"）
+    # 改名后：审核侧（列表/详情）显示修改后的名字；正式挂载按 doc §3.6
+    # 复制 define 现值，资产详情仍是库内规范名"动作"
     items = client.get("/api/v1/review/items").json()["items"]
     assert items[0]["tag_name"] == "动作改"
     detail = client.get("/api/v1/generation/tasks/gen_mod").json()
     assert detail["results"][0]["tag_name"] == "动作改"
     tags = client.get("/api/v1/assets/a_mod/tags").json()
-    assert tags[0]["tag_name"] == "动作改"
+    assert tags[0]["tag_name"] == "动作"
+    # 候选名随行返回，前端要展示"审核侧改名"时用它
+    assert tags[0]["candidate_name"] == "动作改"
 
 
 def test_bad_evidence_degrades_to_empty_list(client):
