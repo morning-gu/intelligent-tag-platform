@@ -30,7 +30,11 @@ import numpy as np
 from conftest import MOCK_EMBEDDER
 from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.governance import TagRow, run_governance
-from tagplatform.governance.pipeline import GovernanceConfig
+from tagplatform.governance.pipeline import (
+    GovernanceConfig,
+    is_directory_row,
+    referenced_dir_names,
+)
 
 
 class SameVecEmbedder:
@@ -49,6 +53,32 @@ class SameVecEmbedder:
 
 def _row(name, parent=None, desc="d", aliases=None):
     return TagRow(None, name, "val_fixed", desc, parent, aliases or [], None, None)
+
+
+def test_is_dir_marker_overrides_reference_inference():
+    """三态优先级纯函数级钉死：显式 True/False > 被引用名推断。
+
+    - True：即便无人引用也判目录（空目录保身份的依据）；
+    - False：即便名称被别的行 parent_tag 引用也判标签（解析层知道该行
+      是标签时不被"同名父引用"误伤）；
+    - None：退化为旧推断口径。
+    """
+    rows = [
+        _row("空目录"),                          # 无人引用
+        TagRow(None, "剧情", "val_fixed", "", None, [], None, None, is_dir=True),
+        _row("被引用"),                          # 下面是它的"子"
+        TagRow(None, "冒名标签", "val_fixed", "", None, [], None, None,
+               is_dir=False),
+        _row("冒名标签", "被引用"),              # 该行 parent_tag 引用了它
+    ]
+    referenced = referenced_dir_names(rows)
+    assert referenced == {"被引用"}
+
+    by_name = {r.tag_name: r for r in rows}
+    assert is_directory_row(by_name["空目录"], referenced) is False  # None→推断
+    assert is_directory_row(by_name["剧情"], referenced) is True
+    assert is_directory_row(by_name["冒名标签"], referenced) is False  # False 优先
+    assert is_directory_row(by_name["被引用"], referenced) is True  # None→被引用
 
 
 # ---------- 落位拆分（Review Focus 5） ----------
@@ -108,6 +138,59 @@ def test_three_level_hierarchy_full_chain(session):
     assert defines[0].dir_id == dirs["悬疑"].dir_id
     assert dirs["悬疑"].parent_id == dirs["剧情"].dir_id
     assert dirs["剧情"].parent_id == dirs["内容"].dir_id
+
+
+def test_empty_leaf_directory_marked_is_dir_stays_directory(session):
+    """末级目录无任何标签引用时仍是目录（回归：曾被当成标签行落库）。
+
+    解析层给目录行打 is_dir=True（双表模板目录 sheet / 层级列 / XML
+    level 节点），治理流水线据此分类，不再靠"名称被引用"推断——空目录
+    保得住目录身份，其下保持空，不产生「未分类」也不进标签表。
+    """
+    # 目录行显式标记：一/二级目录 + 末级空目录（无人引用它）
+    dir_rows = [
+        TagRow(None, "内容特征标签", "val_fixed", "", None, [], None, None, is_dir=True),
+        TagRow(None, "主类型", "val_fixed", "", "内容特征标签", [], None, None, is_dir=True),
+        TagRow(None, "社交与话题", "val_fixed", "社会议题维度", "内容特征标签",
+               [], None, None, dir_type="dir_dynamic", is_dir=True),
+    ]
+    tag_row = TagRow(None, "剧情", "val_generalized", "以剧情为核心", "主类型",
+                     [], None, None, is_dir=False)
+
+    res = run_governance([*dir_rows, tag_row], session, MOCK_EMBEDDER)
+    assert res.issues == []
+    assert len(res.inserted) == 1  # 仅标签行计入
+
+    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
+    assert set(dirs) == {"内容特征标签", "主类型", "社交与话题"}
+    empty = dirs["社交与话题"]
+    assert empty.parent_id == dirs["内容特征标签"].dir_id
+    assert empty.dir_type == "dir_dynamic" and empty.description == "社会议题维度"
+    # 空目录不进标签表，也不触发「未分类」
+    assert [t.tag_name for t in session.query(TagDefine).all()] == ["剧情"]
+    assert "未分类" not in dirs
+    # 空目录的审计日志 kind='dir'（撤销照常反查得到）
+    kinds = {json.loads(e.after_json).get("kind")
+             for e in session.query(TagChangeLog).all()}
+    assert kinds == {"dir", "tag"}
+
+
+def test_unmarked_empty_leaf_directory_still_degraded(session):
+    """兜底语义保留：未标记的末级空目录仍按旧推断退化为标签行。
+
+    旧扁平模板/直接构造 TagRow 的调用方不表态（is_dir=None），治理流水线
+    无从判断——行为与 v2 初版一致（文档化的已知边界）。新解析器一律显式
+    表态，因此真实导入路径不受此限。
+    """
+    res = run_governance([
+        _row("内容", None, ""),
+        _row("剧情", "内容", ""),  # 未标记 + 无下级引用 → 退化为标签
+    ], session, MOCK_EMBEDDER)
+
+    assert res.issues == []
+    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
+    assert "内容" in dirs and "剧情" not in dirs
+    assert [t.tag_name for t in session.query(TagDefine).all()] == ["剧情"]
 
 
 def test_flat_import_falls_back_to_uncategorized_idempotent(session):

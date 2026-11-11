@@ -55,6 +55,10 @@ def _xml_tag_row(element: ET.Element, parent_name: str | None) -> TagRow:
         is_manual=generation_type is None or generation_type == "manual",
         dir_type=cell_text(
             element.attrib.get("dir_type") or element.attrib.get("目录类型")),
+        # level1/level2/level3 节点即目录、<tag> 即标签：显式表态（而非
+        # 留 None 交推断），末级空目录（其下无 tag 节点）才不会被治理流
+        # 水线当成标签行落库
+        is_dir=node_name != "tag",
     )
 
 
