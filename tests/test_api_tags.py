@@ -163,12 +163,19 @@ def test_import_xml_detected_by_content(client):
     resp = client.post("/api/v1/tags/import", files={"file": ("tags", xml)})
 
     assert resp.status_code == 200
-    # 无扩展名文件按内容嗅探走 XML 解析。注意：解析层把层级节点摊平为
-    # TagRow（不保留"目录节点"标记），末级空目录无子引用时按标签行落位
-    # （内容→目录、剧情→内容目录下的标签）。v2 口径：仅 1 个标签行进
-    # total（目录行「内容」不计入）
-    assert resp.json()["summary"]["total"] == 1
-    assert resp.json()["summary"]["inserted"] == 1
+    # 无扩展名文件按内容嗅探走 XML 解析。解析层给 level1/level2 节点打了
+    # 目录标记，末级空目录「剧情」（其下无 <tag>）仍是目录，不再退化为
+    # 标签行落库。v2 口径：无标签行 → total 0、inserted 0；两个目录都建了
+    assert resp.json()["summary"]["total"] == 0
+    assert resp.json()["summary"]["inserted"] == 0
+
+    # 空目录保留：内容（根）+ 剧情（挂内容），标签表为空
+    with client.app.state.session_factory() as s:
+        dirs = {d.dir_name: d for d in s.query(TagCatalog).all()}
+        assert set(dirs) == {"内容", "剧情"}
+        assert dirs["内容"].parent_id is None
+        assert dirs["剧情"].parent_id == dirs["内容"].dir_id
+        assert s.query(TagDefine).count() == 0
 
 
 def test_import_dual_sheet_template_via_api(client):
@@ -229,6 +236,66 @@ def test_import_dual_sheet_template_via_api(client):
     assert by_name["剧情"]["description"] == "以剧情为核心"
     assert by_name["剧情"]["aliases"] == ["情节"]
     assert by_name["喜剧"]["description"] == ""  # 缺省空字符串
+
+
+def test_import_dual_sheet_empty_leaf_directory_stays_directory(client):
+    """双表模板：末级目录下没有任何标签时必须仍是目录（空目录），不得退化成标签。
+
+    回归用例（v2 初版缺陷）：行分类只看"名称是否被批内 parent_tag 引用"，
+    「社交与话题」目录无标签引用 → 被当成标签行落 tag_define。现由解析层
+    给「标签目录」sheet 的每行打 is_dir=True 标记，空目录保持空目录。
+    """
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "填写说明"
+    workbook.active.append(["模板说明"])
+
+    dir_sheet = workbook.create_sheet("标签目录")
+    dir_sheet.append(["可选，留空由系统生成", "1=一级 2=二级 3=三级"])
+    dir_sheet.append(["目录ID\n(dir_id)", "目录层级", "上级目录名称",
+                      "目录名称\n(dir_name)", "目录类型\n(dir_type)",
+                      "适用范围", "目录描述", "别名"])
+    dir_sheet.append([None, 1, None, "内容特征标签", "dir_static", "content", None, None])
+    dir_sheet.append([None, 2, "内容特征标签", "主类型", "dir_static", "content", None, None])
+    # 末行目录：其下无任何标签行（空目录，正是本用例的回归点）
+    dir_sheet.append([None, 2, "内容特征标签", "社交与话题", "dir_dynamic",
+                      "content", "社会议题维度", None])
+
+    tag_sheet = workbook.create_sheet("标签定义")
+    tag_sheet.append(["可选，留空由系统生成", "必填"])
+    tag_sheet.append(["标签ID\n(tag_id)", "标签名称\n(tag_name)",
+                      "所属目录名称", "标签类型\n(tag_type)", "标签描述", "别名"])
+    tag_sheet.append([None, "剧情", "主类型", "val_generalized", "以剧情为核心", None])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    resp = client.post("/api/v1/tags/import",
+                       files={"file": ("empty-leaf.xlsx", buffer.getvalue())})
+    assert resp.status_code == 200, resp.text
+
+    body = resp.json()
+    # 3 个目录不计入计数：total 仅计 1 个标签行
+    assert body["summary"]["total"] == 1
+    assert body["summary"]["inserted"] == 1
+    assert body["summary"]["issues"] == []
+    assert body["summary"]["parse_errors"] == []
+
+    factory = client.app.state.session_factory
+    with factory() as s:
+        dirs = {d.dir_name: d for d in s.query(TagCatalog).all()}
+        # 空目录仍是目录（含其自有字段：dir_type/描述）
+        assert set(dirs) == {"内容特征标签", "主类型", "社交与话题"}
+        empty = dirs["社交与话题"]
+        assert empty.parent_id == dirs["内容特征标签"].dir_id
+        assert empty.dir_type == "dir_dynamic"
+        assert empty.description == "社会议题维度"
+        # 空目录不得落标签表
+        assert [t.tag_name for t in s.query(TagDefine).all()] == ["剧情"]
+        assert s.query(TagDefine).filter_by(tag_name="社交与话题").count() == 0
+        # 空目录的变更日志 kind 为 dir（撤销可反查到它）
+        log = next(e for e in s.query(TagChangeLog).all()
+                   if json.loads(e.after_json)["dir_id"] == empty.dir_id)
+        assert json.loads(log.after_json)["kind"] == "dir"
+        assert json.loads(log.after_json)["dir_name"] == "社交与话题"
 
 
 def test_import_twice_reports_duplicates(client):

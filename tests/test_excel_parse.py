@@ -126,3 +126,28 @@ def test_hierarchy_template_allows_same_tag_name_under_different_directories():
     assert not r.errors
     assert [row.tag_name for row in r.rows if row.tag_name == "其他"] == ["其他", "其他"]
     assert [row.parent_tag for row in r.rows if row.tag_name == "其他"] == ["剧情", "视觉"]
+
+
+def test_hierarchy_template_marks_directory_rows_explicitly():
+    """层级列 → is_dir=True，标签列 → is_dir=False（空目录不退化的前提）。"""
+    r = parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
+        ["内容", "剧情", None, "喜剧", "带有喜剧元素", None],
+    ]))
+
+    assert not r.errors
+    by_name = {row.tag_name: row for row in r.rows}
+    assert by_name["内容"].is_dir is True
+    assert by_name["剧情"].is_dir is True
+    # 「标签」列是标签行，绝不能因同名目录而被推断成目录
+    assert by_name["喜剧"].is_dir is False
+
+
+def test_legacy_flat_template_leaves_dir_flag_unset():
+    """旧扁平模板不知道行是目录：is_dir 留 None，交治理流水线推断兜底。"""
+    r = parse_tag_excel(build_xlsx([
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["悬疑", "val_fixed", "以悬念为核心", "剧情", "悬念,推理", "active"],
+    ]))
+
+    assert r.rows[0].is_dir is None

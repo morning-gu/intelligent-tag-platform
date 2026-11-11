@@ -11,16 +11,20 @@
   一级标签名称、二级标签名称、标签、标签描述必填；三级标签名称可空，
   父标签优先取三级标签名称，否则取二级标签名称；tag_type 为空时固定为
   manual，否则标记为非手动添加；TagRow.tag_type 固定为 val_fixed；
+  拆出的目录行标 `is_dir=True`、「标签」列拆出的标签行标
+  `is_dir=False`（层级行恒被本行标签引用，标记只为语义一致）；
 - 双表模板（docs/movietags-template.xlsx）按 sheet 名探测（任一存在即走
   该分支——首个 sheet 是填写说明页，不能按 active sheet 判格式）：「标签
   目录」「标签定义」两 sheet，列头格形如「目录ID\n(dir_id)」取换行前段
   匹配，列头行扫描定位（前面可有提示行）。目录行 → 目录 TagRow
   （tag_id=目录ID、parent_tag=上级目录名称——根目录留空、dir_type=目录
   类型、applicable_scope=适用范围，缺省交入库层归一；目录层级列仅用于
-  「二级及以上缺上级」的行级检查，建树以父链为准）；标签行 → 标签
-  TagRow（tag_id=标签ID、parent_tag=所属目录名称——必填、tag_type=标签
-  类型，缺省 val_fixed）。行号取各自 sheet 的实际行号，行级错误 detail
-  带 sheet 名；缺任一 sheet 或列头不全 → header_error；
+  「二级及以上缺上级」的行级检查，建树以父链为准），并显式标
+  `is_dir=True`——**空目录**（其下没有任何标签行的行）靠这个标记保住
+  目录身份，不会被治理流水线当成标签行落库；标签行 →
+  标签 TagRow（tag_id=标签ID、parent_tag=所属目录名称——必填、tag_type=标签
+  类型，缺省 val_fixed，标 `is_dir=False`）。行号取各自 sheet 的实际行号，
+  行级错误 detail 带 sheet 名；缺任一 sheet 或列头不全 → header_error；
 - 旧版英文表头模板仍兼容：必需列 tag_name/tag_type/description，缺失即
   header_error；其余列可选，缺可选列头不报错，多余列头忽略；
 - 整行单元格均为空白/None 的空行跳过；
@@ -231,6 +235,9 @@ def _parse_dual_dir_sheet(
             status=None,
             is_manual=False,
             dir_type=texts["目录类型"],
+            # 「标签目录」sheet 的每一行都是目录：显式标记，空目录（其下
+            # 无任何标签行）才不会被治理流水线当成标签行落库
+            is_dir=True,
         ))
 
 
@@ -286,6 +293,9 @@ def _parse_dual_tag_sheet(
             applicable_scope=None,
             status=None,
             is_manual=False,
+            # 「标签定义」sheet 的每一行都是标签：显式表态，同名目录不再
+            # 把本行拖进目录命名空间
+            is_dir=False,
         ))
 
 
@@ -381,6 +391,8 @@ def _parse_hierarchy_excel(
                 applicable_scope=None,
                 status=None,
                 is_manual=True,
+                # 层级列名即目录节点：显式标记（末级空目录不会退化为标签）
+                is_dir=True,
             ))
 
         result.rows.append(TagRow(
@@ -393,6 +405,8 @@ def _parse_hierarchy_excel(
             applicable_scope=None,
             status=None,
             is_manual=texts["标签生成方式"] is None,
+            # 「标签」列即标签行：显式表态（与层级列的目录标记互不干扰）
+            is_dir=False,
         ))
     return result
 

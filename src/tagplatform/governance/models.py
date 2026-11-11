@@ -18,7 +18,7 @@ class BadCell(Exception):
 
 @dataclass
 class TagRow:
-    """导入文件中的一行标签。"""
+    """导入文件中的一行：目录行或标签行（结构同形，靠 is_dir 区分）。"""
 
     tag_id: str | None
     tag_name: str
@@ -32,6 +32,14 @@ class TagRow:
     # 目录类型（dir_static|dir_dynamic），仅树状 XML 目录节点有值；
     # None 时入库层归一为 dir_dynamic
     dir_type: str | None = None
+    # 目录行显式标记（三态）：解析层本来就知道该行是目录（双表模板的
+    # 「标签目录」sheet、层级模板的一/二/三级列、树状 XML 的 level1/2/3
+    # 节点）时置 True，知道是标签（「标签定义」sheet、标签列、<tag> 节点）
+    # 时置 False；None = 解析层未表态，由治理流水线按"名称被批内其他行
+    # 引用即目录"推断兜底（旧扁平模板、直接构造 TagRow 的调用方）。
+    # **空目录**（其下没有任何标签行）只有靠本标记才保得住"目录"身份——
+    # 否则会被推断当成标签行落库。
+    is_dir: bool | None = None
 
 
 @dataclass
