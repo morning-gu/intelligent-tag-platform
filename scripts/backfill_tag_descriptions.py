@@ -44,7 +44,6 @@ from tagplatform.generation.mtg.descriptions import (
     clean_description,
     content_names,
     fill_descriptions,
-    is_general,
 )
 from tagplatform.generation.mtg.merge import normalize_tag
 from tagplatform.settings import get_settings
@@ -138,15 +137,15 @@ def main(argv: list[str] | None = None) -> int:
 
         # ---- 1. tag_define：只碰"生成 → 审核入库"造出来的标签 ----
         # 库里 500+ 条导入标签的描述来自人工整理的表，不能用启发式去改；
-        # 只有带创建日志来源资产（source.asset_id）的才是审核新建的产物。
+        # 只有带创建日志来源资产（source.asset_id）的才是审核新建的产物——这类
+        # 描述按构造来自生成侧，一律重写成通用释义（不靠文本启发式筛选：专名
+        # 清单未必覆盖到具体人名，"总统蜷身藏于货舱"这种就可能漏判）。
         define_targets: list[tuple[TagDefine, tuple[str, ...]]] = []
         for asset_id, tag_id in sources.items():
             row = session.get(TagDefine, tag_id)
             if row is None or not (row.description or "").strip():
                 continue
-            names = _names_of_asset(session, asset_id)
-            if not is_general(row.description, names):
-                define_targets.append((row, names))
+            define_targets.append((row, _names_of_asset(session, asset_id)))
 
         # ---- 2. pre_asset_tag：生成候选（candidate_name 非空）的描述 ----
         # 这些行的描述按构造就是"本片里的依据"（生成侧把 reason 写在这里），
