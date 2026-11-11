@@ -34,6 +34,8 @@ _EVIDENCE_MARKERS = (
 
 _SCENE_ID = re.compile(r"scene_\d+", re.I)
 _WRAP = "`'\"“”‘’《》〈〉"
+# 库内词条不带句末标点（"以…为特征的犯罪题材类型"），补写的句子结尾统一去掉
+_TAIL = "。．.；;，,、 "
 
 
 class DescriptionError(RuntimeError):
@@ -43,7 +45,7 @@ class DescriptionError(RuntimeError):
 def clean_description(text: str | None) -> str:
     """去空白、引号、首尾标点；不做截断（超长由校验拒绝，交补写重写）。"""
     raw = str(text or "").strip().strip(_WRAP).strip()
-    return re.sub(r"\s+", "", raw)
+    return re.sub(r"\s+", "", raw).rstrip(_TAIL)
 
 
 def is_general(text: str | None, names: Iterable[str] = ()) -> bool:

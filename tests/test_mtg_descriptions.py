@@ -122,6 +122,8 @@ def test_is_general_accepts_generic_protagonist_word():
 
 def test_clean_description_strips_wrappers():
     assert clean_description("  “以多线并行推进”  ") == "以多线并行推进"
+    # 库内词条不带句末标点
+    assert clean_description("以多线并行推进的叙事结构。") == "以多线并行推进的叙事结构"
 
 
 def test_content_names_collects_title(content_fixture):
