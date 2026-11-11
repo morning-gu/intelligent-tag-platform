@@ -5,8 +5,9 @@
 > 生成/召回/审核/入库全部直接读写这两张表（`tagplatform/library.py`、
 > `tagplatform/ingest.py`）；标签数据的入口是标签管理页的 Excel 导入
 > （`POST /api/v1/tags/import`）。
-> `data/taglibrary/*.json` 与 `scripts/build_tag_library.py` 仅作历史资料保留，
-> 运行期不再读取。以下为原始设计记录，阅读时以"当时为什么这么做"为准。
+> `data/taglibrary/*.json` 与 `scripts/build_tag_library.py` 已在 2026-11 的清理中
+> **从仓库删除**（如需查旧文件看 git 历史）。以下为原始设计记录，阅读时以
+> "当时为什么这么做"为准。
 
 本文对应 2026-11 这轮改造：动态标签生成**不读写** `tag_catalog` / `tag_define`，
 改为读 `data/taglibrary/*.json`（由 `docs/movietags-template.xlsx` 生成），

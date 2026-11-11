@@ -1,12 +1,13 @@
-"""测试用标签库（JSON 模拟）：目录树 + 标签的构造助手。
+"""测试用标签库：目录树 + 标签的构造助手（**不再有 JSON 文件**）。
 
-标签库运行时直接读 `tag_catalog` / `tag_define`；单测需要一套小而确定的库，
-这里的 JSON 只是**夹具的书写格式**——`write_library` 写完就把整套库镜像进
-已绑定的测试引擎（`seed_database`），所以测试断言走的仍是真实的 DB 路径。
+标签库运行时就是 `tag_catalog` / `tag_define` 两张表（v2 起 JSON 库已废弃，
+仓库里也不再有 `data/taglibrary/*.json`）。单测需要一套小而确定的库：这里的
+`DEFAULT_DIRS` / `DEFAULT_TAGS` 是**内存里的书写格式**，`write_library` 直接
+把它灌进已绑定的测试引擎，测试断言走的因此始终是真实 DB 路径。
 
-    write_library(root, dirs=..., tags=...)   # 写 dirs.json / tags.json + 镜像入库
+    write_library(root, dirs=..., tags=...)   # 灌入已绑定引擎（无文件落盘）
     DEFAULT_DIRS / DEFAULT_TAGS               # 五个目录 + 七个标签的默认库
-    library_root()                            # 当前测试库目录（模块内全局）
+    library_root()                            # 当前测试库的占位目录（兼容旧签名）
 
 目录覆盖三种可扩展性/粒度组合，保证 scope 与 dir_type 的行为都能测到。
 """
@@ -19,10 +20,17 @@ import tempfile
 from pathlib import Path
 
 _VERSION = itertools.count(1)
+# 当前库版本号（由 write_library 更新；库指纹缓存只认库内容，这里保留
+# 仅为兼容旧签名里"版本号自增失效缓存"的语义）
+_VERSION_TAG: list[str] = ["test-0"]
 
-# 当前生效的测试库目录：autouse fixture 首次 write_library 时确定，之后
-# add_tags/add_dirs 继续往里写（不再挂在 Settings 上——生产不再有 JSON 库）。
+# 当前生效的测试库目录（仅作占位：不再有 JSON 落盘，保留是为了兼容
+# `write_library(root)` / `library_root()` 的旧调用签名）。
 _ROOT: Path | None = None
+
+# 当前测试库的内存状态（目录 / 标签）；`write_library` 改写后立刻灌库。
+_DIRS: list[dict] = []
+_TAGS: list[dict] = []
 
 
 def _clear_cache() -> None:
@@ -81,20 +89,18 @@ DEFAULT_TAGS = [
 
 def write_library(root: str | Path | None = None, dirs=None, tags=None, *,
                   version: str | None = None) -> Path:
-    """把目录/标签写成 JSON 库（缺省用默认库），并同步已绑定的测试库。"""
-    global _ROOT
+    """设定当前测试库（缺省用默认库）并立刻灌进已绑定的测试引擎。
+
+    `root` 只为兼容旧签名（曾被当作 JSON 落盘目录）；现在不写任何文件，
+    库内容以 `tag_catalog` / `tag_define` 两行为唯一事实。
+    """
+    global _ROOT, _DIRS, _TAGS
     base = Path(root) if root is not None else library_root()
     base.mkdir(parents=True, exist_ok=True)
     _ROOT = base
-    version = version or f"test-{next(_VERSION)}"
-    (base / "dirs.json").write_text(json.dumps({
-        "version": version, "source": "tests",
-        "dirs": list(DEFAULT_DIRS if dirs is None else dirs),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    (base / "tags.json").write_text(json.dumps({
-        "version": version, "source": "tests",
-        "tags": list(DEFAULT_TAGS if tags is None else tags),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    _VERSION_TAG[0] = version or f"test-{next(_VERSION)}"
+    _DIRS = list(DEFAULT_DIRS if dirs is None else dirs)
+    _TAGS = list(DEFAULT_TAGS if tags is None else tags)
     _clear_cache()
     for engine in list(_BOUND_ENGINES):
         seed_database(engine)
@@ -131,14 +137,12 @@ def unbind_engine(engine) -> None:
 
 
 def _current() -> tuple[list, list]:
-    root = library_root()
-    dirs = json.loads((root / "dirs.json").read_text(encoding="utf-8"))["dirs"]
-    tags = json.loads((root / "tags.json").read_text(encoding="utf-8"))["tags"]
-    return dirs, tags
+    """当前测试库的 (dirs, tags)（内存状态，不再读文件）。"""
+    return list(_DIRS), list(_TAGS)
 
 
 def add_tags(tags: list[dict]) -> None:
-    """向当前测试库追加标签（同名已存在则跳过），版本号自增以失效缓存。"""
+    """向当前测试库追加标签（同名已存在则跳过）。"""
     dirs, existing = _current()
     names = {t["tag_name"] for t in existing}
     merged = existing + [t for t in tags if t["tag_name"] not in names]
@@ -154,7 +158,7 @@ def add_dirs(dirs: list[dict]) -> None:
 
 
 def library_root() -> Path:
-    """当前生效的标签库目录（首次访问时落到系统临时目录）。"""
+    """当前测试库的占位目录（不落文件；保留签名兼容旧调用）。"""
     global _ROOT
     if _ROOT is None:
         _ROOT = Path(tempfile.mkdtemp(prefix="taglibrary-"))
@@ -162,7 +166,7 @@ def library_root() -> Path:
 
 
 def seed_database(engine) -> None:
-    """把当前 JSON 标签库**整体镜像**进 `tag_catalog` / `tag_define`。
+    """把当前测试库**整体镜像**进 `tag_catalog` / `tag_define`。
 
     标签库切到 v2 后这两张是正式表，`pre_asset_tag.tag_id` 与 `candidate_dir_id`
     的外键指向它们；测试库由 `Base.metadata.create_all` 建表、不会跑迁移，
@@ -170,7 +174,7 @@ def seed_database(engine) -> None:
 
     用"先清空再灌"的权威镜像：测试常在同一个库里换一整套标签（同名不同
     id），增量插入会撞 `ux_tag_define_dir_name`。清空时临时关掉外键检查，
-    避免历史 pre 行挡住同步——测试里 DB 标签库本就应当与 JSON 库一致。
+    避免历史 pre 行挡住同步——测试里 DB 标签库本就是唯一事实。
     """
     dirs, tags = _current()
     raw = engine.raw_connection()
