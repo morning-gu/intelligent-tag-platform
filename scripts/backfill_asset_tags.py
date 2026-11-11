@@ -84,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
             plan.append((row, name))
 
         print(f"pre 中 approved 且有 tag_id: {len(rows)} 条")
+        orphans = session.query(PreAssetTag).filter(
+            PreAssetTag.review_status == "approved",
+            PreAssetTag.tag_id.is_(None)).count()
+        if orphans:
+            print(f"approved 但行内无 tag_id      : {orphans} 条"
+                  "（早期新词审核没回填 tag_id，挂载行已存在则无需处理）")
         print(f"已挂载（跳过）            : {len(rows) - len(plan) - len(skipped_no_define)} 条")
         print(f"待补写                    : {len(plan)} 条")
         if skipped_no_define:
