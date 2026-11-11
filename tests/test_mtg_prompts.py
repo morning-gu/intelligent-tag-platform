@@ -9,6 +9,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
     build_judge_messages,
@@ -83,3 +85,82 @@ def test_judge_prompt_keeps_scene_shape():
     assert "  人物情绪：张三（愤怒）" in text
     assert "只在台词里的一句话" not in text
     assert scene["scene_id"] in text
+
+
+# ---------------------------------------------------------------- 模态门控
+#
+# `modalities` 是消融实验**唯一**允许变的旋钮（`eval/ablation.py`）。每条
+# 断言都要能回答「关掉之后模型到底少看了什么」，否则消融结论无从解释。
+
+def _text_with(content, modalities) -> str:
+    messages = build_generation_messages(content, {}, modalities=modalities)
+    return "".join(part["text"] for part in messages[0]["content"]
+                   if part["type"] == "text")
+
+
+def test_default_modalities_render_everything():
+    """`modalities=None` 必须与旧行为逐字节一致（否则默认路径被悄悄改了口径）。"""
+    content = _content_with_dialogues(3)
+
+    assert _text_with(content, None) == _prompt_text(content)
+
+
+def test_script_off_drops_all_content_text():
+    """关掉场景文本 → 文本区整个为空；台词离了场景上下文无处归属，一并去掉。"""
+    content = _content_with_dialogues(2)
+    messages = build_generation_messages(
+        content, {}, modalities=frozenset({"video"}))
+    body = "".join(part["text"] for part in messages[0]["content"]
+                    if part["type"] == "text")
+
+    assert "第1句台词" not in body
+    assert "台词：" not in body
+    # 指令区仍在（模型仍要知道"输出什么"），只是没有了内容可读
+    assert "## 要求" in body
+
+
+def test_dialogue_off_keeps_scene_text_but_drops_lines():
+    """关掉台词 → 场景描述、氛围都留着，只少 `台词：` 行。"""
+    data = json.loads(json.dumps(FIXTURE))
+    scene = data["content"]["scenes"][0]
+    scene["emotions"] = ["紧张"]
+    scene["dialogues"] = [{"speaker": "张三", "text": "不该出现的台词",
+                           "start_ms": 0, "end_ms": 1}]
+    content = parse_content(data)
+
+    body = _text_with(content, frozenset({"video", "script"}))
+
+    assert "  氛围：紧张" in body
+    assert scene["scene_id"] in body
+    assert "不该出现的台词" not in body
+    assert "台词：" not in body
+
+
+def test_video_off_drops_image_parts(tmp_path):
+    """关掉关键帧 → 帧表被清空，prompt 里不再有任何 `image_url` 块。"""
+    frame = tmp_path / "f_001.jpg"
+    frame.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+    content = _content_with_dialogues(1)
+    frames = {content.content.scenes[0].scene_id: [frame]}
+
+    with_frames = build_generation_messages(content, frames)
+    without = build_generation_messages(
+        content, frames, modalities=frozenset({"script", "dialogue"}))
+
+    def _image_count(messages) -> int:
+        return sum(1 for part in messages[0]["content"]
+                   if part["type"] == "image_url")
+
+    # 调用方即使照样传了帧表，关掉 video 也必须清空——不能指望调用方记得
+    assert _image_count(with_frames) == 1
+    assert _image_count(without) == 0
+
+
+def test_unknown_modality_raises_instead_of_being_ignored():
+    """拼错的模态名必须当场报错：静默当成 full 会让消融结论全错。"""
+    content = _content_with_dialogues(1)
+
+    with pytest.raises(ValueError, match="未知模态"):
+        build_generation_messages(content, {}, modalities=frozenset({"viedo"}))
+    with pytest.raises(ValueError, match="至少要开启一种模态"):
+        build_generation_messages(content, {}, modalities=frozenset())
