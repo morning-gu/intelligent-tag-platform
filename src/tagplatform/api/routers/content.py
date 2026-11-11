@@ -3,15 +3,13 @@
 薄路由层：适配（get_adapter().adapt）→ 导入（import_content）→ 响应模型，
 业务规则全部在 tagplatform.adapters / content_import 与 DB 层，router 只做
 协议转换与错误映射（未知 kind / 内容 JSON 校验失败 / video_root 非法 →
-422；未知资产/未完成内容识别 → 404）。
-
-v2 合并语义（doc §3.1）：content_json 直写影片级 media_asset 行，context
-概念退役——完整 JSON 经 `GET /assets/{asset_id}/content` 取回（解析后的
-平台内部 ContentJSON）；资产详情带 recognized 布尔（content_json 非空），
-不再有 contexts 数组与 contexts 端点。
+422；未知资产 → 404）。内容只有一份：`media_asset.content_json`，完整 JSON
+走 `GET /assets/{asset_id}/content`；v1 的 contexts 数组与 contexts 端点已
+随 media_context 表退役，不再保留兼容路由。
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
@@ -19,10 +17,10 @@ from sqlalchemy.orm import Session
 
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
+import tagplatform.movie_import as movie_import
 from tagplatform.content_import import import_content as import_content_svc
-from tagplatform.content_io import load_content
+from tagplatform.content_template import template_from_stored
 from tagplatform.db.models import MediaAsset
-from tagplatform.schemas import ContentJSON
 
 router = APIRouter(prefix="/api/v1")
 
@@ -53,13 +51,21 @@ class AssetOut(BaseModel):
     title: str
     duration_ms: int | None = None
     video_uri: str | None = None
+    # 是否已有内容（影片行 content_json 非空；场景行恒 False）
+    has_content: bool = False
     created_at: datetime | None = None
+    # 最近一次写入内容的时间（没内容时等于上传时间）
+    updated_at: datetime | None = None
 
 
 class AssetDetail(AssetOut):
-    """资产详情：列表字段之上附内容识别状态（content_json 大字段不出详情）。"""
+    """资产详情：列表字段 + 内容状态（content_json 大字段不出详情）。
 
-    recognized: bool
+    `recognized` 是 main 分支同名字段的兼容别名（等价于 `has_content`）：
+    两边前端都读详情判断"有没有内容"，保留双名字段避免任一侧 404/KeyError。
+    """
+
+    recognized: bool = False
 
 
 def _asset_out(asset: MediaAsset) -> AssetOut:
@@ -71,7 +77,9 @@ def _asset_out(asset: MediaAsset) -> AssetOut:
         title=asset.title,
         duration_ms=asset.duration_ms,
         video_uri=asset.video_uri,
+        has_content=asset.content_json is not None,
         created_at=asset.created_at,
+        updated_at=asset.updated_at,
     )
 
 
@@ -134,35 +142,198 @@ def list_assets(
 
 @router.get("/assets/{asset_id}", response_model=AssetDetail)
 def get_asset(asset_id: str, session: Session = Depends(get_session)) -> AssetDetail:
-    """资产详情 + 识别状态（recognized = content_json 非空）；未知 asset_id → 404。"""
+    """资产详情（不含 content_json）；未知 asset_id → 404。"""
     asset = session.get(MediaAsset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
-    return AssetDetail(
-        **_asset_out(asset).model_dump(),
-        recognized=bool(asset.content_json),
-    )
+    return AssetDetail(**_asset_out(asset).model_dump(),
+                       recognized=asset.content_json is not None)
 
 
-@router.get("/assets/{asset_id}/content", response_model=ContentJSON)
-def get_asset_content(
-    asset_id: str, session: Session = Depends(get_session)
-) -> ContentJSON:
-    """资产的完整内容 JSON（解析 content_json 返回平台内部 ContentJSON）。
+@router.get("/assets/{asset_id}/content")
+def get_asset_content(asset_id: str, session: Session = Depends(get_session)) -> dict:
+    """资产主内容 JSON（`media_asset.content_json`，上游模板形态）。
 
-    资产不存在 → 404（"资产不存在"）；content_json 为空（未完成内容
-    识别，如上传占位资产/场景子资产）→ 404（"未完成内容识别"）。
+    这是 v2 的内容唯一数据源：生成任务与资产详情页都读这里（v1 的
+    media_context 已并入本表）。资产不存在 → 404；资产无内容 → 404。
     """
     asset = session.get(MediaAsset, asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
     if not asset.content_json:
-        raise HTTPException(
-            status_code=404, detail=f"资产未完成内容识别：{asset_id}")
-    return load_content(asset.content_json)
+        raise HTTPException(status_code=404, detail=f"资产无识别内容：{asset_id}")
+    return template_from_stored(asset.content_json)
 
 
 @router.get("/adapters", response_model=list[str])
 def list_adapters_api() -> list[str]:
     """已注册内容格式适配器 kind 列表（前端导入表单 kind 下拉数据源）。"""
     return list_adapters()
+
+
+# ---------- 目录导入：把已备好的影片资产目录直接注册成资产 ----------
+
+class MovieDirOut(BaseModel):
+    """扫描到的一部影片目录（前端列表一行）。"""
+
+    dir_name: str
+    title: str
+    imdb_id: str | None = None
+    asset_id: str | None = None
+    scenes: int = 0
+    frames: int = 0
+    duration_ms: int | None = None
+    size_bytes: int = 0
+    # 库里已有同 asset_id 的资产（前端置灰用）
+    exists: bool = False
+    has_content: bool = False
+    has_video: bool = False
+    # content.json 读不了时的原因（该行不可导入）
+    error: str | None = None
+
+
+class DirEntryOut(BaseModel):
+    """目录浏览的一项：可能本身就是影片目录，也可能还套着几部片。"""
+
+    name: str
+    path: str
+    is_movie: bool = False
+    movies: int = 0
+    scenes: int = 0
+    frames: int = 0
+    #: content.json 里声明的 asset_id（目录这一侧的主键）
+    asset_id: str | None = None
+    title: str | None = None
+    #: 库里认出来的同一部片：asset_id（同主键）/ imdb / title（上传那侧主键）
+    matched_by: str | None = None
+    existing_asset_id: str | None = None
+    #: 库里已有该片（含按 imdb / 片名认出来的），前端默认不勾、置灰
+    exists: bool = False
+    error: str | None = None
+
+
+class DirBrowseResponse(BaseModel):
+    """目录浏览响应：当前目录、上级目录、子项清单。"""
+
+    path: str
+    parent: str | None = None
+    entries: list[DirEntryOut]
+
+
+class MovieScanResponse(BaseModel):
+    root: str
+    total: int
+    items: list[MovieDirOut]
+
+
+class MovieImportRequest(BaseModel):
+    """目录导入请求：不传 dir_names 表示全部；overwrite 覆盖已有内容。"""
+
+    dir_names: list[str] | None = None
+    overwrite: bool = False
+    root: str | None = None
+
+
+class MovieImportItem(BaseModel):
+    dir_name: str
+    status: str          # imported | skipped | failed
+    asset_id: str | None = None
+    title: str | None = None
+    scenes: int = 0
+    frames: int = 0
+    reason: str | None = None
+
+
+class MovieImportResponse(BaseModel):
+    imported: int
+    skipped: int
+    failed: int
+    items: list[MovieImportItem]
+
+
+@router.get("/content/import/browse", response_model=DirBrowseResponse)
+def browse_dirs(
+    path: str | None = Query(None, description="要浏览的绝对路径，缺省用配置的根目录"),
+    session: Session = Depends(get_session),
+) -> DirBrowseResponse:
+    """浏览服务器目录（只列目录，不返回文件内容）：逐层点进目标影片目录。
+
+    不传 path 时落在配置的默认根（`settings.movie_asset_root`）。子项里带
+    `content.json` 的即影片目录，`movies` 大于 0 的普通目录说明里面还有片。
+    """
+    try:
+        current, parent, entries = movie_import.browse(path)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    rows: list[DirEntryOut] = []
+    index = movie_import.AssetIndex(session)
+    for entry in entries:
+        match = None
+        if entry.is_movie and entry.error is None:
+            # 影片目录：按 asset_id / imdb / 片名 认库里已有的同一部片。
+            # 上传那侧主键是 asset_xxx，目录这侧是 movie_ttXXXX，只比 asset_id
+            # 会把同一部片当成"没导入"，再导一遍就出现两条同名片。
+            match = index.match(entry.asset_id, movie_import.imdb_of_dir(entry.name),
+                                entry.title)
+        rows.append(DirEntryOut(
+            name=entry.name, path=entry.path, is_movie=entry.is_movie,
+            movies=entry.movies, scenes=entry.scenes, frames=entry.frames,
+            asset_id=entry.asset_id, title=entry.title,
+            matched_by=match.matched_by if match else None,
+            existing_asset_id=match.asset_id if match else None,
+            exists=match is not None, error=entry.error))
+    return DirBrowseResponse(path=str(current),
+                             parent=str(parent) if parent else None,
+                             entries=rows)
+
+
+@router.get("/content/import/movie-scan", response_model=MovieScanResponse)
+def scan_movie_asset_dirs(
+    root: str | None = Query(None, description="影片资产目录根，缺省用配置值"),
+    session: Session = Depends(get_session),
+) -> MovieScanResponse:
+    """扫描影片资产目录：每部片一条（标题/场景数/帧数/库里是否已有）。"""
+    try:
+        base = movie_import.resolve_root(root)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    items: list[MovieDirOut] = []
+    index = movie_import.AssetIndex(session)
+    for item in movie_import.scan_movie_dirs(base):
+        # 与 browse 同一套匹配（asset_id → imdb → 片名），两个端点口径一致
+        match = (index.match(item.asset_id, item.imdb_id, item.title)
+                 if item.error is None else None)
+        items.append(MovieDirOut(
+            dir_name=item.dir_name, title=item.title, imdb_id=item.imdb_id,
+            asset_id=item.asset_id, scenes=item.scenes, frames=item.frames,
+            duration_ms=item.duration_ms, size_bytes=item.size_bytes,
+            exists=match is not None,
+            has_content=bool(match is not None and match.has_content),
+            has_video=bool(match is not None and match.has_video),
+            error=item.error))
+    return MovieScanResponse(root=str(base), total=len(items), items=items)
+
+
+@router.post("/content/import/movie-bulk", response_model=MovieImportResponse)
+def import_movie_asset_dirs(
+    body: MovieImportRequest,
+    session: Session = Depends(get_session),
+) -> MovieImportResponse:
+    """把选中的影片目录注册成资产（不经过上传视频；已存在的按 overwrite 处理）。"""
+    try:
+        base = movie_import.resolve_root(body.root)
+    except movie_import.MovieAssetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    outcome = movie_import.import_many(
+        session, base, body.dir_names, overwrite=body.overwrite)
+    counts = outcome.counts
+    rows = [MovieImportItem(
+        dir_name=o.dir_name, status=o.status, asset_id=o.asset_id,
+        title=o.title, scenes=o.scenes, frames=o.frames, reason=o.reason)
+        for o in (*outcome.imported, *outcome.skipped, *outcome.failed)]
+    return MovieImportResponse(imported=counts["imported"],
+                               skipped=counts["skipped"],
+                               failed=counts["failed"], items=rows)

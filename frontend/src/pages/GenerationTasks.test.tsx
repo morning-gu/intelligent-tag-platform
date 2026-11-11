@@ -87,6 +87,10 @@ const DETAIL: GenerationTaskDetail = {
       relevance_score: 0.87,
       confidence: 0.92,
       review_status: 'pending',
+      target_type: 'content',
+      dir_id: 'dir_theme',
+      dir_name: '细分题材',
+      dir_path: '内容特征标签/细分题材',
       evidence: [
         { scene_id: 's2', start_ms: 65_000, end_ms: 71_000, description: '主角争执推搡' },
       ],
@@ -100,6 +104,10 @@ const DETAIL: GenerationTaskDetail = {
       relevance_score: null,
       confidence: null,
       review_status: 'approved',
+      target_type: 'content',
+      dir_id: 'dir_genre',
+      dir_name: '主类型',
+      dir_path: '内容特征标签/主类型',
       evidence: [],
     },
   ],
@@ -114,7 +122,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越',
     duration_ms: 10_800_000,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
   {
     asset_id: 'a-scene',
@@ -123,7 +133,9 @@ const ASSETS: AssetSummary[] = [
     title: '星际穿越-场景2',
     duration_ms: 65_000,
     video_uri: null,
+    has_content: false,
     created_at: null,
+    updated_at: null,
   },
 ]
 
@@ -306,6 +318,12 @@ describe('GenerationTasks 生产任务页', () => {
     // 场景项 title 带归并后缀（后端会把场景归并到所属影片跑任务）
     fireEvent.mouseDown(screen.getByRole('combobox', { name: '资产多选' }))
     fireEvent.click(await screen.findByTitle('星际穿越（a-movie）'))
+    // 选完即收起：combobox 的 aria-expanded 回到 false
+    await waitFor(() => expect(
+      screen.getByRole('combobox', { name: '资产多选' }).getAttribute('aria-expanded'),
+    ).toBe('false'))
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: '资产多选' }))
+    // 场景项 title 带归并后缀（· 场景，任务归并到所属影片）
     fireEvent.click(await screen.findByTitle(/^星际穿越-场景2（a-scene）/))
     // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
@@ -344,7 +362,7 @@ describe('GenerationTasks 生产任务页', () => {
     ).toBeTruthy()
   })
 
-  it('创建弹窗：未填策略时不携带 policy 字段（mode 默认闭环）', async () => {
+  it('创建弹窗：未填策略时不携带 policy 字段（mode 默认开放）', async () => {
     mockApis()
     renderGenerationTasks()
     await screen.findByText('task-1')
@@ -357,7 +375,7 @@ describe('GenerationTasks 生产任务页', () => {
     await waitFor(() => expect(postedBody('/api/v1/generation/tasks')).toBeDefined())
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie'],
-      mode: 'closed',
+      mode: 'open',
     })
   })
 
@@ -416,6 +434,30 @@ describe('GenerationTasks 生产任务页', () => {
     // 详情头部：模型/Prompt 版本展示
     expect(screen.getByText('mock-vision-v1')).toBeInTheDocument()
     expect(screen.getByText('p1')).toBeInTheDocument()
+    // 目录列给全层级路径（不是只有末级名），粒度列给中文
+    expect(within(openRow).getByText('内容特征标签/细分题材')).toBeInTheDocument()
+    expect(within(openRow).getByText('整片')).toBeInTheDocument()
+    expect(within(closedRow).getByText('内容特征标签/主类型')).toBeInTheDocument()
+  })
+
+  it('详情里点标签名：跳资产详情并带首个证据场景位置', async () => {
+    mockApis()
+    render(
+      <MemoryRouter initialEntries={['/tasks']}>
+        <Routes>
+          <Route path="/tasks" element={<GenerationTasks />} />
+          {/* 详情页以探针占位：断言路径里的 asset/scene/t */}
+          <Route path="/assets/:assetId" element={<div>资产详情占位</div>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await screen.findByText('task-1')
+    fireEvent.click(document.querySelector('.ant-table-row-expand-icon') as Element)
+    const link = await screen.findByText('主角争执')
+
+    fireEvent.click(link)
+
+    expect(await screen.findByText('资产详情占位')).toBeInTheDocument()
   })
 
   it('列表加载失败：渲染错误提示（透出错误文案）', async () => {

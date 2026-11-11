@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timezone
 
 import openpyxl
+import pytest
 
 from tagplatform.db.models import (
     AssetTag,
@@ -32,6 +33,9 @@ from tagplatform.db.models import (
     TagDefine,
     TagImportTask,
 )
+
+# 本模块断言导入后的**精确行数**：测试夹具不得预置标签库默认行
+pytestmark = pytest.mark.empty_library
 
 
 def build_xlsx(rows: list[list]) -> bytes:

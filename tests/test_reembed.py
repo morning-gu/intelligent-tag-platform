@@ -14,11 +14,15 @@
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 
 from tagplatform.db.models import MediaAsset, TagCatalog, TagDefine
 from tagplatform.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
 from tagplatform.vectors import decode_vector, encode_vector
+
+# 本模块断言重嵌入处理的行数（含"空库 0 行"）：夹具不得预置标签库默认行
+pytestmark = pytest.mark.empty_library
 
 
 class _FlipEmbedder:

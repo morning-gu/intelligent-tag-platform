@@ -15,7 +15,7 @@ Evidence/ProducedTag）定义调度与审核两侧共享的契约；TagProducer 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -25,10 +25,20 @@ from tagplatform.schemas import ContentJSON
 
 @dataclass
 class GenerationPolicy:
-    """单任务生成策略：产出上限与入库置信度门槛。"""
+    """单任务生成策略：产出上限、置信度门槛与目录范围。
+
+    - `dir_ids`：本次生成的范围（目录 id 列表；空 = 全库）。closed 只在这些
+      目录（含子目录）里召回，open 只在这些目录里对齐与产新词；
+    - `allow_new_tags`：是否允许产出库外新词。False 时只出"命中库内"的行，
+      适合只做补全、不想扩库的场景；
+    - `max_tags_per_dir`：单目录产出上限（0 = 不限），防止一个目录刷满队列。
+    """
 
     max_tags: int = 30
     min_confidence: float = 0.7
+    dir_ids: list[str] = field(default_factory=list)
+    allow_new_tags: bool = True
+    max_tags_per_dir: int = 0
 
 
 @dataclass
@@ -45,14 +55,20 @@ class Evidence:
 class ProducedTag:
     """Producer 产出的一枚候选标签（审核前的中间态，不直接入库）。
 
-    - origin="closed"：封闭式生成命中目录内既有定义（tag_define），
-      tag_id 必填、candidate_* 为 None；
-    - origin="open"：开放式生成（mtg）产出，tag_id 为 None 表示自由候选
-      （candidate_* 描述新标签），归一命中行带 tag_id（origin 仍为 open）。
-    candidate_type 仅作 mtg 审计信息，不入库（v2 pre_asset_tag 无此列）。
+    - `origin` 是**库内命中判定**：`"catalog"` 命中库内标签（tag_id 必填、
+      candidate_* 为 None）、`"generated"` 模型新造候选（tag_id 为 None、
+      candidate_* 描述新标签）。注意它与 `pre_asset_tag.origin` 列（任务的
+      closed/open 产出来源）不是同一概念，落库时由任务模式决定。
+    - `dir_id`：候选归属目录。catalog 取标签自身所在目录；generated 取
+      可扩展目录里最相近的那个（生成时按目录范围与可否扩展决定）。
+    - `target_type/target_id`：挂载粒度与挂载点，由目录的 applicable_scope
+      决定——content → asset_id、scene → scene_id、character → character_id。
+    - `alias_name`：命中库内时模型给出的原词（同名时为空）。它将来写进
+      `tag_define.aliases`，本期先随行保存，供入库预览用。
+    - `level` 为历史字段（film/scene），保留兼容旧调用。
     """
 
-    origin: str  # "closed" | "open"（v1 的 catalog|generated 词退役）
+    origin: str  # "catalog" | "generated"
     tag_id: str | None
     tag_name: str
     candidate_type: str | None
@@ -60,11 +76,23 @@ class ProducedTag:
     relevance_score: float | None
     confidence: float
     evidence: list[Evidence]
+    # 标签层级：film（影片级）/ scene（场景级）。默认 film 让闭环与目录
+    # 产出无需显式传参；开放生成按 MTG 合并结果的 scope 落值。
+    level: str = "film"
+    # ---- v2 增量：目录归属与挂载点 ----
+    dir_id: str | None = None
+    target_type: str = "content"
+    target_id: str | None = None
+    alias_name: str | None = None
 
 
 @dataclass
 class GenerationSpec:
-    """单次生成的完整输入：任务标识 + 内容 + 策略 + 渲染后 prompt。"""
+    """单次生成的完整输入：任务标识 + 内容 + 策略 + 渲染后 prompt。
+
+    `library` 是本轮的标签库（JSON 模拟）；None 表示按无库运行（对齐与
+    新词归属都退化为"没有可参照的库"）。
+    """
 
     task_id: str
     asset_id: str
@@ -72,6 +100,7 @@ class GenerationSpec:
     policy: GenerationPolicy
     prompt_text: str
     run_id: str
+    library: object | None = None
 
 
 class TagProducer(Protocol):

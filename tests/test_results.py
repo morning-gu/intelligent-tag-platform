@@ -1,73 +1,41 @@
-"""标签结果入库服务测试（v2 pre_asset_tag 重写，Task 6）。
+"""标签结果入库服务测试：ProducedTag → pre_asset_tag（v2 语义）。
 
-覆盖契约（brief + doc §6.1 + 三条语义红线）：
-- 首次写入：新 (asset, 标识) → pending 行，summary (inserted=N,
-  deleted_pending=0, skipped_finalized=0)；origin/target_type/target_id
-  按 v2 契约（origin 取 ProducedTag.origin，target_id=asset_id 本身，
-  candidate_type 不入库——v2 无此列，字段仅为 mtg 审计保留）；
-- 重跑替换（旧 pending）：runner 先 `_clear_pending` 删旧 → persist 插新，
-  分数/证据/task_id 为新值——删 pending 的责任在 runner，persist 只做
-  INSERT OR IGNORE；
-- persist 单独重跑（未清理）：pending 行占位撞部分唯一索引 → 旧行原样
-  不被覆盖（deleted_pending 计数）——锁死"persist 不先查后插、不更新"；
-- 终态保留：approved/rejected 行 → skipped_finalized 且逐字段不动
-  （驳回的候选不得被重跑复活，doc §6.1）；
-- 跨 origin 隔离：closed 插入撞 open 的 pending 行（同 tag_id 归一命中）
-  → 跳过且 open 行原样（persist 不删任何 pending 行）；
-- open 自由候选：candidate_name=tag_name、tag_id 空、candidate_description
-  入库；closed 缺 tag_id / 未知 origin（含 v1 残留词 catalog/generated）
-  → ValueError 零副作用。
-
-实现注意：asset_id/task_id/tag_id 均带外键——autouse fixture 先补齐父行
-（media_asset / tag_catalog+tag_define / tag_generation_task），目录行先
-flush 再插定义（跨表插入分步 flush，否则 FK 先于父行校验）。
+覆盖契约：
+- **命中库内**（origin=catalog）→ 直接 approved + reviewer_id="system"，
+  不进入人工队列；同名写"自动通过"，带 alias_name 写"相似并入"；
+- **库外新词**（origin=generated）→ pending，必须带 dir_id（候选目录）与
+  挂载点（content → asset_id；scene → scene_id；character → character_id）；
+- 重跑替换：同 origin 的 pending 行先被清掉再插新（不叠行、值刷新）；
+- 已定稿保留：approved / rejected 行重跑跳过（不覆盖、不复活）；
+- origin 隔离：closed 重跑不清 open 的待审行，反之亦然；
+- 唯一索引兜底：同批重复产出只落一行（第二个被跳过）；
+- 契约校验：catalog 缺 tag_id / generated 缺 dir_id / 未知 origin → ValueError。
 """
 
 import json
-from datetime import datetime, timezone
 
 import pytest
 
-from tagplatform.db.models import (
-    MediaAsset,
-    PreAssetTag,
-    TagCatalog,
-    TagDefine,
-    TagGenerationTask,
-)
+from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.generation import Evidence, ProducedTag
-from tagplatform.results import FINALIZED_STATUSES, PersistSummary, persist_tags
-from tagplatform.tasks.runner import _clear_pending
+from tagplatform.results import PersistSummary, persist_tags
 
 
-def _ptag(tag_id=None, name="悬疑", origin="closed", conf=0.9, rel=0.9,
-          evidence=None, candidate_description=None):
-    """ProducedTag 构造：candidate_type 恒非空——v2 不入库，仅 mtg 审计。"""
+def _ptag(tag_id=None, name="悬疑", origin="catalog", conf=0.9, *,
+          dir_id=None, target_type="content", target_id=None, alias=None):
     return ProducedTag(
         origin=origin, tag_id=tag_id, tag_name=name,
-        candidate_type="genre" if tag_id else "叙事",
-        candidate_description=candidate_description,
-        relevance_score=rel, confidence=conf,
-        evidence=evidence if evidence is not None
-        else [Evidence("scene_001", 1000, 2000, "证据")],
+        candidate_type=None, candidate_description="候选描述",
+        relevance_score=0.9, confidence=conf,
+        evidence=[Evidence("scene_001", 1000, 2000, "证据")],
+        dir_id=dir_id, target_type=target_type, target_id=target_id,
+        alias_name=alias,
     )
 
 
 @pytest.fixture(autouse=True)
 def _seed_fk_parents(session):
-    """补齐裸值（a1/t1/t2/tag_1/tag_2/dir_1）的外键父行（v2 双表：tag_define
-    经 dir_id 挂 tag_catalog，目录行先 flush 再插定义）。"""
     session.add(MediaAsset(asset_id="a1", asset_type="movie", title="测试影片"))
-    session.flush()
-    session.add(TagCatalog(dir_id="dir_1", dir_name="剧情目录",
-                           dir_type="dir_static", description="叙事类目"))
-    session.flush()
-    session.add_all([
-        TagDefine(tag_id="tag_1", tag_name="悬疑", tag_type="val_fixed",
-                  description="以悬念和谜题为核心", dir_id="dir_1"),
-        TagDefine(tag_id="tag_2", tag_name="喜剧", tag_type="val_fixed",
-                  description="以笑点为核心", dir_id="dir_1"),
-    ])
     session.add_all([
         TagGenerationTask(task_id="t1", asset_id="a1", mode="closed",
                           status="succeeded"),
@@ -77,214 +45,131 @@ def _seed_fk_parents(session):
     session.commit()
 
 
-def _row(session, tag_id=None, candidate_name=None) -> PreAssetTag:
-    q = session.query(PreAssetTag).filter(PreAssetTag.asset_id == "a1")
-    if tag_id is not None:
-        q = q.filter(PreAssetTag.tag_id == tag_id)
-    if candidate_name is not None:
-        q = q.filter(PreAssetTag.candidate_name == candidate_name)
-    return q.one()
+def test_catalog_hit_is_auto_approved(session):
+    s = persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作")], "closed")
+    row = session.query(PreAssetTag).one()
+    assert s == PersistSummary(cleared=0, inserted=1, skipped_finalized=0,
+                               auto_approved=1)
+    assert row.review_status == "approved"
+    assert row.reviewer_id == "system"
+    assert "同名" in (row.review_comment or "")
+    assert row.target_type == "content" and row.target_id == "a1"
+    assert row.origin == "closed" and row.tag_id == "tag_action"
+    assert row.candidate_name is None and row.candidate_alias is None
 
 
-_SNAPSHOT_ATTRS = ("id", "asset_id", "target_type", "target_id", "tag_id",
-                   "candidate_name", "candidate_dir_id", "candidate_description",
-                   "origin", "relevance_score", "confidence", "evidence_json",
-                   "task_id", "review_status", "reviewer_id", "review_comment",
-                   "created_at", "updated_at")
-
-
-def _snapshot(row) -> dict:
-    return {attr: getattr(row, attr) for attr in _SNAPSHOT_ATTRS}
-
-
-# ---- 首次写入 ----
-
-
-def test_persist_insert_pending(session):
+def test_catalog_similar_records_alias(session):
     s = persist_tags(session, "a1", "t1",
-                     [_ptag("tag_1"), _ptag("tag_2", name="喜剧")], "r1")
-    assert s == PersistSummary(inserted=2, deleted_pending=0, skipped_finalized=0)
-    row = _row(session, tag_id="tag_1")
-    assert row.review_status == "pending" and row.task_id == "t1"
-    assert row.origin == "closed" and row.target_type == "content"
-    assert row.target_id == "a1"  # content 级：target_id = asset_id 本身
-    assert row.candidate_name is None and row.candidate_dir_id is None
-    assert row.created_at is not None and row.updated_at is not None
+                     [_ptag("tag_revenge", "复仇", alias="报仇雪恨")], "closed")
+    row = session.query(PreAssetTag).one()
+    assert s.auto_approved == 1
+    assert row.candidate_alias == "报仇雪恨"
+    assert "别名候选" in (row.review_comment or "")
 
 
-def test_pre_table_has_no_candidate_type_column(session):
-    """v2 列契约：candidate_type 不入库（doc §3.5——生成端分类留在 mtg 审计
-    文件），persist 接受带 candidate_type 的 ProducedTag 而不报错。"""
-    assert not hasattr(PreAssetTag, "candidate_type")
-    persist_tags(session, "a1", "t1", [_ptag("tag_1")], "r1")
+def test_scene_scope_mounts_on_scene(session):
+    persist_tags(session, "a1", "t1",
+                 [_ptag("tag_twist", "剧情反转", target_type="scene",
+                        target_id="scene_001")], "closed")
+    row = session.query(PreAssetTag).one()
+    assert (row.target_type, row.target_id) == ("scene", "scene_001")
+
+
+def test_generated_candidate_lands_pending_with_dir(session):
+    s = persist_tags(session, "a1", "t1",
+                     [_ptag(None, "多线叙事", origin="generated",
+                            dir_id="dir_theme")], "open")
+    row = session.query(PreAssetTag).one()
+    assert s.inserted == 1 and s.auto_approved == 0
+    assert row.review_status == "pending"
+    assert row.candidate_name == "多线叙事" and row.tag_id is None
+    assert row.candidate_dir_id == "dir_theme"
+    assert row.reviewer_id is None
+    assert row.origin == "open"
+
+
+def test_generated_without_dir_raises(session):
+    with pytest.raises(ValueError):
+        persist_tags(session, "a1", "t1",
+                     [_ptag(None, "多线叙事", origin="generated")], "open")
+
+
+def test_rerun_replaces_pending_generated(session):
+    persist_tags(session, "a1", "t1",
+                 [_ptag(None, "多线叙事", origin="generated", dir_id="dir_theme",
+                        conf=0.95)], "open")
+    s = persist_tags(session, "a1", "t2",
+                     [_ptag(None, "多线叙事", origin="generated", dir_id="dir_theme",
+                            conf=0.5)], "open")
+    row = session.query(PreAssetTag).one()
+    assert s.cleared == 1 and s.inserted == 1
+    assert row.confidence == 0.5 and row.task_id == "t2"
+
+
+def test_rerun_keeps_auto_approved(session):
+    """系统自动通过的行是定稿行：重跑不覆盖（避免置信度来回跳）。"""
+    persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作", conf=0.95)],
+                 "closed")
+    s = persist_tags(session, "a1", "t2", [_ptag("tag_action", "动作", conf=0.5)],
+                     "closed")
+    row = session.query(PreAssetTag).one()
+    assert s.skipped_finalized == 1
+    assert row.confidence == 0.95 and row.task_id == "t1"
+
+
+def test_rerun_keeps_rejected(session):
+    persist_tags(session, "a1", "t1",
+                 [_ptag(None, "多线叙事", origin="generated", dir_id="dir_theme")],
+                 "open")
+    session.query(PreAssetTag).one().review_status = "rejected"
+    session.commit()
+    s = persist_tags(session, "a1", "t2",
+                     [_ptag(None, "多线叙事", origin="generated",
+                            dir_id="dir_theme", conf=0.5)], "open")
+    row = session.query(PreAssetTag).one()
+    assert s.skipped_finalized == 1
+    assert row.review_status == "rejected"
+
+
+def test_origin_isolation(session):
+    """closed 的待审行不被 open 重跑清掉（两模式各管各的未审行）。"""
+    persist_tags(session, "a1", "t1",
+                 [_ptag(None, "闭环新词", origin="generated", dir_id="dir_theme")],
+                 "closed")
+    persist_tags(session, "a1", "t2",
+                 [_ptag(None, "多线叙事", origin="generated", dir_id="dir_theme")],
+                 "open")
+    assert session.query(PreAssetTag).count() == 2
+    s = persist_tags(session, "a1", "t2",
+                     [_ptag(None, "多线叙事", origin="generated",
+                            dir_id="dir_theme")], "open")
+    assert s.cleared == 1 and session.query(PreAssetTag).count() == 2
+
+
+def test_duplicate_in_batch_lands_once(session):
+    """同一批里的重复产出只落一行（库内唯一索引 + 逐条存在性检查）。"""
+    s = persist_tags(session, "a1", "t1",
+                     [_ptag("tag_action", "动作"),
+                      _ptag("tag_action", "动作", conf=0.4)], "closed")
+    assert s.inserted == 1 and s.skipped_finalized == 1
     assert session.query(PreAssetTag).count() == 1
 
 
-def test_persist_writes_evidence_json(session):
-    persist_tags(session, "a1", "t1", [_ptag("tag_1")], "r1")
-    row = _row(session, tag_id="tag_1")
+def test_persist_writes_evidence_json_and_timestamps(session):
+    persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作")], "closed")
+    row = session.query(PreAssetTag).one()
     assert json.loads(row.evidence_json) == [
         {"scene_id": "scene_001", "start_ms": 1000, "end_ms": 2000,
          "description": "证据"}
     ]
+    assert row.created_at is not None and row.updated_at is not None
 
 
-# ---- 重跑替换（删旧在 runner 的 _clear_pending，persist 只插新）----
-
-
-def test_persist_rerun_replaces_pending(session):
-    """同标签二轮（旧 pending）：runner 先清同 origin pending（删旧）→
-    persist 插新，分数/证据/task_id 为新值，不叠行。"""
-    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95, rel=0.8)], "r1")
-    assert _clear_pending(session, "a1", "closed") == 1
-    new_evidence = [Evidence("scene_002", 3000, 4000, "新一轮证据")]
-    s = persist_tags(session, "a1", "t2",
-                     [_ptag("tag_1", conf=0.5, rel=0.7, evidence=new_evidence)],
-                     "r2")
-    assert s == PersistSummary(inserted=1, deleted_pending=0, skipped_finalized=0)
-    row = _row(session, tag_id="tag_1")
-    assert row.confidence == 0.5 and row.relevance_score == 0.7
-    assert row.task_id == "t2"
-    assert json.loads(row.evidence_json) == [
-        {"scene_id": "scene_002", "start_ms": 3000, "end_ms": 4000,
-         "description": "新一轮证据"}
-    ]
-    assert session.query(PreAssetTag).count() == 1  # 删旧插新：不叠行
-
-
-def test_persist_pending_conflict_skipped_not_overwritten(session):
-    """persist 只 INSERT OR IGNORE：未清旧 pending 直接重跑 → 旧行原样
-    （不被覆盖更新），撞索引跳过计入 deleted_pending（删除是 runner 的
-    同 origin 职责，本服务不删行）。"""
-    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
-    s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
-    row = _row(session, tag_id="tag_1")
-    assert s.inserted == 0 and s.deleted_pending == 1 and s.skipped_finalized == 0
-    assert row.confidence == 0.95 and row.task_id == "t1"  # 原值未动
-
-
-def test_persist_cross_origin_pending_preserved(session):
-    """closed 插入撞 open 的 pending 行（同 tag_id 的归一命中）：跳过且
-    open 行原样——persist 不删任何 pending，closed 不清 open 待审行。"""
-    now = datetime.now(timezone.utc)
-    session.add(PreAssetTag(
-        asset_id="a1", target_type="content", target_id="a1",
-        tag_id="tag_1", candidate_name="悬疑", origin="open",
-        confidence=0.8, review_status="pending", task_id="t1",
-        created_at=now, updated_at=now))
-    session.commit()
-    s = persist_tags(session, "a1", "t2", [_ptag("tag_1")], "r1")
-    assert s.deleted_pending == 1 and s.inserted == 0
-    row = _row(session, tag_id="tag_1")
-    assert row.origin == "open" and row.review_status == "pending"
-    assert session.query(PreAssetTag).count() == 1  # open 行未被删/覆盖
-
-
-# ---- 终态保留（approved/rejected 永不被覆盖）----
-
-
-def test_persist_approved_skipped(session):
-    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
-    _row(session, tag_id="tag_1").review_status = "approved"
-    session.commit()
-    before = _snapshot(_row(session, tag_id="tag_1"))
-    s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
-    session.expire_all()
-    row = _row(session, tag_id="tag_1")
-    assert s.skipped_finalized == 1 and s.inserted == 0
-    assert _snapshot(row) == before  # 终态行逐字段不动
-
-
-def test_persist_rejected_skipped(session):
-    """rejected 亦终态（doc §6.1：驳回即终审，翻案走人工改库不靠重跑）。"""
-    persist_tags(session, "a1", "t1", [_ptag("tag_1", conf=0.95)], "r1")
-    row = _row(session, tag_id="tag_1")
-    row.review_status = "rejected"
-    row.reviewer_id = "bob"
-    row.review_comment = "驳回"
-    session.commit()
-    before = _snapshot(row)
-    s = persist_tags(session, "a1", "t2", [_ptag("tag_1", conf=0.5)], "r2")
-    session.expire_all()
-    row = _row(session, tag_id="tag_1")
-    assert s.skipped_finalized == 1 and s.inserted == 0
-    assert _snapshot(row) == before
-
-
-def test_persist_open_approved_skipped(session):
-    """open 候选行 approved 后重跑同样跳过（FINALIZED_STATUSES 两 origin
-    统一，按行状态判定与 origin 无关）。"""
-    persist_tags(session, "a1", "t1",
-                 [_ptag(None, "多线叙事", origin="open", conf=0.9)], "r1")
-    _row(session, candidate_name="多线叙事").review_status = "approved"
-    session.commit()
-    s = persist_tags(session, "a1", "t2",
-                     [_ptag(None, "多线叙事", origin="open", conf=0.1)], "r2")
-    assert s.skipped_finalized == 1 and s.inserted == 0
-    row = _row(session, candidate_name="多线叙事")
-    assert row.confidence == 0.9 and row.task_id == "t1"  # 原值未动
-
-
-def test_finalized_statuses_vocabulary():
-    """v2 人工已定集 = {approved, rejected}（merge 退役：并入既有/合入新建
-    的终态都是 approved，doc §6.2）。"""
-    assert FINALIZED_STATUSES == ("approved", "rejected")
-
-
-# ---- open 自由候选 ----
-
-
-def test_persist_open_free_candidate(session):
-    """open 自由候选：tag_id 空、candidate_name=tag_name、描述入库、
-    candidate_dir_id 生成时不赋值（doc §6.4）。"""
-    g = _ptag(None, "多线叙事", origin="open",
-              candidate_description="多线并进的叙事结构")
-    persist_tags(session, "a1", "t1", [g], "r1")
-    row = _row(session, candidate_name="多线叙事")
-    assert row.tag_id is None and row.origin == "open"
-    assert row.candidate_description == "多线并进的叙事结构"
-    assert row.candidate_dir_id is None
-    assert row.review_status == "pending" and row.task_id == "t1"
-
-
-def test_persist_open_hit_row_keeps_candidate_name(session):
-    """open 归一命中行（Task 7）：tag_id + candidate_name 并存落库——命中行
-    保留候选原文（doc §6.2 可溯原则，并入既有也留原文）；夹具令候选名
-    ≠ 定义名（tag_1 定义名「悬疑」、候选原文「近义悬疑」），"原文保留"
-    断言具区分性；candidate_description 恒空（仅自由候选填写，doc §3.5，
-    即使 ProducedTag 带了描述也被门拦下）。"""
-    g = ProducedTag(
-        origin="open", tag_id="tag_1", tag_name="近义悬疑",
-        candidate_type="genre", candidate_description="不应入库的描述",
-        relevance_score=0.93, confidence=0.9,
-        evidence=[Evidence("scene_001", 1000, 2000, "证据")])
-    s = persist_tags(session, "a1", "t1", [g], "r1")
-    assert s == PersistSummary(inserted=1, deleted_pending=0, skipped_finalized=0)
-    row = _row(session, tag_id="tag_1")
-    assert row.candidate_name == "近义悬疑"  # 候选原文保留（非定义名回显）
-    assert row.tag_id == "tag_1"  # 指向定义：定义名「悬疑」≠ 候选原文
-    assert session.get(TagDefine, "tag_1").tag_name == "悬疑"
-    assert row.candidate_name != session.get(TagDefine, "tag_1").tag_name
-    assert row.candidate_description is None  # 描述门按 tag_id 拦截
-    assert row.origin == "open" and row.candidate_dir_id is None
-    assert row.relevance_score == pytest.approx(0.93)
-
-
-# ---- 契约校验（零副作用）----
-
-
-def test_persist_closed_without_tag_id_raises(session):
-    # origin=closed 但 tag_id 为空：closed 意味着命中目录内定义，tag_id 必填
+def test_persist_catalog_without_tag_id_raises(session):
     with pytest.raises(ValueError):
-        persist_tags(session, "a1", "t1", [_ptag(None)], "r1")
-    assert session.query(PreAssetTag).count() == 0  # 零副作用
+        persist_tags(session, "a1", "t1", [_ptag(None)], "closed")
 
 
 def test_persist_unknown_origin_raises(session):
-    # v1 残留词 catalog/generated 均不在 v2 词表（closed|open）
     with pytest.raises(ValueError):
-        persist_tags(session, "a1", "t1", [_ptag("tag_1", origin="catalog")], "r1")
-    with pytest.raises(ValueError):
-        persist_tags(session, "a1", "t1",
-                     [_ptag(None, "自由候选", origin="generated")], "r1")
-    assert session.query(PreAssetTag).count() == 0  # 零副作用
+        persist_tags(session, "a1", "t1", [_ptag("tag_action")], "alien")

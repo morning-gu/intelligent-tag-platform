@@ -90,6 +90,7 @@ from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
     generation,
     health,
     imports,
+    library,
     media,
     metrics,
     prompts,
@@ -148,6 +149,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = create_engine_for(settings.database_path)
     app.state.session_factory = make_session_factory(app.state.engine)
+    # 标签库直接读 tag_catalog / tag_define：把 app 引擎绑成"当前数据源"，
+    # 生成线程池里的工作线程也因此取到同一个库视图（见 library.bind_engine）
+    # （局部导入避免与 routers.library 重名）
+    from tagplatform import library as library_module
+
+    library_module.bind_engine(app.state.engine)
     app.state.embedder = make_embedder(
         settings.embedding_model, mock=settings.use_mock_embedder)
     app.state.llm = make_llm_client(settings)
@@ -157,6 +164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_deps = [Depends(get_current_user)]
     app.include_router(health.router)
     app.include_router(tags.router, dependencies=protected_deps)
+    app.include_router(library.router, dependencies=protected_deps)
     app.include_router(imports.router, dependencies=protected_deps)
     app.include_router(content.router, dependencies=protected_deps)
     app.include_router(media.router, dependencies=protected_deps)

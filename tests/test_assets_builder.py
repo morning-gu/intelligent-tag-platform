@@ -373,7 +373,10 @@ def test_infer_off_fills_only_dataset_facts(tmp_path):
 
 
 def test_source_tag_two_modes():
-    """推断 / 纯事实两种口径的 source 标识不同（重传不会错认缓存）。"""
+    """推断 / 纯事实两种口径的 source 标识不同（写进 media_asset.source）。
+
+    编码与 main 分支一致：`asset_builder:<版本>-<模式>`。
+    """
     assert source_tag(True) == f"asset_builder:{ASSET_BUILDER_VERSION}-infer"
     assert source_tag(False) == f"asset_builder:{ASSET_BUILDER_VERSION}-facts"
 

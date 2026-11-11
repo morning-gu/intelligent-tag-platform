@@ -33,7 +33,13 @@ class MergedCandidate:
     runs: int
     aliases: tuple[str, ...]
     reason: str
+    # 模型给的通用释义（"这个词是什么"）；空串表示这一轮没给，由流水线
+    # 用 descriptions.fill_descriptions 批量补写。
+    desc: str = ""
     scope: str | None = None
+    # 模型自报的归属目录（原始串，可能是 id / 路径 / 名字）；合并时取多数派，
+    # 由流水线解析成 dir_id 并校验，这里不做合法性判断。
+    dir_raw: str | None = None
 
 
 def normalize_tag(name: str) -> str:
@@ -89,7 +95,8 @@ def merge_candidates(entries: list[dict], embedder,
         if key not in groups:
             groups[key] = {
                 "names": [], "dimensions": Counter(), "scopes": Counter(),
-                "scenes": set(), "runs": set(), "reason": "",
+                "dirs": Counter(), "scenes": set(), "runs": set(), "reason": "",
+                "desc": "",
                 "first": len(order),
             }
             order.append(key)
@@ -99,10 +106,14 @@ def merge_candidates(entries: list[dict], embedder,
             group["dimensions"][entry["dimension"]] += 1
         if entry.get("scope"):
             group["scopes"][entry["scope"]] += 1
+        if entry.get("dir"):
+            group["dirs"][entry["dir"]] += 1
         group["scenes"].update(entry.get("scenes") or [])
         group["runs"].add(entry.get("run", 0))
         if not group["reason"] and entry.get("reason"):
             group["reason"] = entry["reason"]
+        if not group["desc"] and entry.get("desc"):
+            group["desc"] = entry["desc"]
 
     items = [groups[key] for key in order]
     if len(items) <= 1:
@@ -133,7 +144,9 @@ def merge_candidates(entries: list[dict], embedder,
             runs=len(runs),
             aliases=tuple(aliases),
             reason=best["reason"],
+            desc=best["desc"],
             scope=_primary_scope(members),
+            dir_raw=_primary_dir(members),
         ))
     # 按首次出现位置排序，保证输出稳定
     return merged
@@ -170,6 +183,20 @@ def _primary_scope(members: list[dict]) -> str | None:
     return counter.most_common(1)[0][0]
 
 
+def _primary_dir(members: list[dict]) -> str | None:
+    """簇内多数派目录（模型自报的原始串）；没有则 None。
+
+    并列时取字典序最小的，保证跨进程稳定（保序不依赖插入顺序）。
+    """
+    counter: Counter = Counter()
+    for member in members:
+        counter.update(member.get("dirs") or {})
+    if not counter:
+        return None
+    top = max(counter.values())
+    return sorted(name for name, count in counter.items() if count == top)[0]
+
+
 def _to_candidate(group: dict) -> MergedCandidate:
     aliases = tuple(dict.fromkeys(group["names"]))
     return MergedCandidate(
@@ -179,5 +206,7 @@ def _to_candidate(group: dict) -> MergedCandidate:
         runs=len(group["runs"]),
         aliases=aliases,
         reason=group["reason"],
+        desc=group["desc"],
         scope=_primary_scope([group]),
+        dir_raw=_primary_dir([group]),
     )

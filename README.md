@@ -131,14 +131,16 @@ src/tagplatform/
                              routers 阶段 3 新增 auth/review/users/video/metrics）
 ```
 
-**数据表（10 张）**：`media_asset`、`media_context`、`tag_catalog`、
-`generation_task`、`asset_tag`、`review_record`、`import_batch`、
-`tag_change_log`、`prompt_template`、`user_account`。
+**数据表（11 张）**：`media_asset`、`tag_catalog`（目录）、`tag_define`（标签）、
+`tag_generation_task`、`pre_asset_tag`、`asset_tag`、`tag_import_task`、
+`tag_change_log`、`prompt_template`、`user_account`
+（`media_context` 已并入 `media_asset.content_json`；标签库在 v2 重建里拆成
+目录/标签两表，v1 的 `tag_catalog_v1` / `import_batch_v1` 已删除）。
 
 **三阶段功能一览**：
 
 - **阶段 1（导入与治理）**：Excel 标签库上传 → 解析/检测 → 语义归一 →
-  入库；批次与变更全程留痕（`import_batch` / `tag_change_log`）。
+  入库；批次与变更全程留痕（`tag_import_task` / `tag_change_log`）。
 - **阶段 2（生成引擎）**：内容识别 JSON 导入 → 建生成任务（模式 A 从
   库内按类型召回候选做封闭式提取 / 模式 B 开放式生成后归一匹配入库）→
   后台线程池执行（0 = 同步）→ 生成结果过**过滤责任链**（质量评估 →

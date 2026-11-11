@@ -1,26 +1,38 @@
-"""closed 分组召回：内容多段文本嵌入 → 按标签目录分组取 top_k（v2 Task 6）。
+"""模式 A 分组召回：内容多段文本嵌入 → 按目录分组取 top_k。
 
-召回是封闭式提取的候选筛选层：把内容查询文本（剧情摘要 + 各场景描述，
-见 `embed_content_texts`）一次性批量嵌入，对 tag_define 有效行（排除
-status=="deprecated" 与 embedding 为空）按 dir_id（标签所属目录）分组；
-每 query × 每组余弦检索，组内合并命中取最高分截 top_k，跨组并集按
-tag_id 去重。v1 按 tag_type 分组——v2 目录/标签拆双表后，分组键自然
-映射为标签的所属目录（doc §3.3/§5）。
+召回是封闭式提取的候选筛选层，数据来自**标签库（JSON 模拟）**，不直接读
+`tag_catalog`：
 
-检索复用 vectors.search_similar（Embedder 契约保证向量已 L2 归一化，
-点积即余弦）；内容查询向量 query 角色，库内标签向量是入库/更新时按
-passage 角色算好的持久化 BLOB（doc §5 沿用 v1 已验证的 e5 前缀契约）。
-top_k 由 ClosedTagProducer 读全局配置传入。
+1. 内容查询文本（剧情摘要 + 各场景描述）一次性批量嵌入；
+2. 库内标签向量（`library.library_index`，按库/模型/范围缓存）与每个 query
+   做余弦；同一标签跨 query 取最高分；
+3. **按目录分组**：每组（一个目录）取最高分的 top_k 条，再跨组按分数降序
+   合并——这样"冷门目录"不会被热门目录整片挤掉；
+4. 候选带上目录与挂载粒度，供 prompt 展示和落库归属使用。
+
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
 from __future__ import annotations
 
-from sqlalchemy.orm import Session
+from dataclasses import dataclass
 
-from tagplatform.db.models import TagDefine
+import numpy as np
+
+from tagplatform.library import TagLibrary, library_index
 from tagplatform.schemas import ContentJSON
-from tagplatform.vectors import decode_vector, search_similar
+
+
+@dataclass(frozen=True)
+class RecallCandidate:
+    """闭式召回的候选行（渲染 candidates 文本 / 生成 catalog 行都用它）。"""
+
+    tag_id: str
+    tag_name: str
+    tag_type: str
+    description: str
+    dir_id: str
+    scope: str
 
 
 def embed_content_texts(content: ContentJSON) -> list[str]:
@@ -29,42 +41,59 @@ def embed_content_texts(content: ContentJSON) -> list[str]:
             *(scene.description for scene in content.content.scenes)]
 
 
-def recall_by_dir(session: Session, queries: list[str], embedder,
-                  top_k: int) -> list[TagDefine]:
-    """按所属目录（dir_id）分组召回：组内跨 query 取最高分 top_k，跨组按
-    tag_id 去重。
+def recall_candidates(
+    library: TagLibrary,
+    embedder,
+    queries: list[str],
+    *,
+    dir_ids: list[str] | None = None,
+    top_k: int = 50,
+) -> list[RecallCandidate]:
+    """按目录分组召回：组内跨 query 取最高分 top_k，跨组按分数降序合并。
 
-    - 有效行：status != "deprecated"（NULL 视为有效）且 embedding 非空
-      （None / 空字节均排除）；
-    - queries 一次批量嵌入（embedder 契约返回 (n, d)，逐行对应 queries），
-      role=query（内容查询侧，与库内 passage 语料相对，doc §5）；
-    - 无命中返回 []。
+    - 范围：`dir_ids`（含子目录）；空 = 全库；
+    - 库为空 / 查询为空 → 返回 []（调用方决定是否按"库未就绪"失败）；
+    - 分数是余弦（向量已归一化，点积即余弦）。
     """
-    query_vecs = embedder.embed(queries, role="query")
+    index = library_index(library, embedder, dir_ids)
+    if not index or not queries:
+        return []
+    query_vecs = np.asarray(embedder.embed([q for q in queries if q], role="query"),
+                            dtype=np.float32)
+    if query_vecs.size == 0:
+        return []
+    matrix = np.stack([tag.vector for tag in index])
+    best = (matrix @ query_vecs.T).max(axis=1)
 
-    # 全量有效行按所属目录分组（deprecated 与无向量行不参与召回）
-    groups: dict[str, list[TagDefine]] = {}
-    for row in session.query(TagDefine).all():
-        if row.status == "deprecated" or not row.embedding:
-            continue
-        groups.setdefault(row.dir_id, []).append(row)
+    # 目录 → 候选下标（保持库内顺序，保证同分时结果稳定）
+    groups: dict[str, list[int]] = {}
+    for pos, tag in enumerate(index):
+        groups.setdefault(tag.dir_id or "", []).append(pos)
 
-    picked: list[TagDefine] = []
+    scored: list[tuple[float, int]] = []
+    for positions in groups.values():
+        ranked = sorted(positions, key=lambda pos: (-float(best[pos]), pos))
+        scored.extend((float(best[pos]), pos) for pos in ranked[:top_k])
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    tags = library.tags()
+    by_id = {tag.tag_id: tag for tag in tags}
+    picked: list[RecallCandidate] = []
     seen: set[str] = set()
-    for dir_id in sorted(groups):  # 组序确定：按 dir_id 排序遍历
-        rows = groups[dir_id]
-        rows_by_id = {row.tag_id: row for row in rows}
-        candidates = [(row.tag_id, decode_vector(row.embedding)) for row in rows]
-        # 每 query 命中合并：同标签跨 query 取最高分
-        best: dict[str, float] = {}
-        for query_vec in query_vecs:
-            for tag_id, similarity in search_similar(query_vec, candidates, top_k):
-                if tag_id not in best or similarity > best[tag_id]:
-                    best[tag_id] = similarity
-        # 组内按最高分降序截 top_k（stable 排序：同分保持首命中顺序）
-        top = sorted(best.items(), key=lambda kv: -kv[1])[:top_k]
-        for tag_id, _similarity in top:
-            if tag_id not in seen:  # 跨组并集按 tag_id 去重
-                seen.add(tag_id)
-                picked.append(rows_by_id[tag_id])
+    for score, pos in scored:
+        tag = index[pos]
+        if tag.tag_id in seen:
+            continue
+        seen.add(tag.tag_id)
+        definition = by_id.get(tag.tag_id)
+        if definition is None:
+            continue
+        picked.append(RecallCandidate(
+            tag_id=definition.tag_id,
+            tag_name=definition.tag_name,
+            tag_type=definition.tag_type,
+            description=definition.description,
+            dir_id=definition.dir_id,
+            scope=library.scope_of(definition.dir_id),
+        ))
     return picked

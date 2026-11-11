@@ -71,8 +71,7 @@ describe('资产详情/内容/挂载端点契约（v2）', () => {
         video_uri: null,
         parent_id: null,
       },
-      content: { summary: '剧情摘要', scenes: [] },
-      metadata: { source: 'test', model_version: 'm1', recognition_status: 'completed' },
+      content: { description: '剧情摘要', characters: [], scenes: [] },
     }
     mockedApiFetch.mockResolvedValue(content as never)
 

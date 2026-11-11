@@ -18,6 +18,9 @@ multipart 提取与错误映射：
   核心层流式累计兜底）。
 """
 
+import json
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -42,6 +45,25 @@ class MediaUploadResponse(BaseModel):
     matched_title: str | None = None
     match_how: str | None = None
     build_task_id: str | None = None
+
+
+class MediaMatchResponse(BaseModel):
+    """选完文件后的预检结果：命中哪部片、这部片是否已有资产和内容。"""
+
+    matched: bool
+    movie_id: str | None = None
+    matched_title: str | None = None
+    match_how: str | None = None
+    asset_id: str | None = None
+    # 已有内容（content_json 非空）→ 前端问用户"是否重新生成"
+    has_content: bool = False
+    content_source: str | None = None
+    scene_count: int = 0
+    built_at: datetime | None = None
+    # 能否直接重新生成：只有经数据集索引命中（拿到 movie_id）才行；
+    # 按资产标题兜底命中（match_how="asset_title"，中文名/改名/数据集不可读）
+    # 只能提醒"已有同名资产"，重建得先把文件名改成含 IMDb id 或英文片名。
+    can_rebuild: bool = True
 
 
 class BuildTaskOut(BaseModel):
@@ -69,12 +91,79 @@ def enforce_upload_size_limit(request: Request) -> None:
         raise HTTPException(status_code=413, detail="文件大小超出上传上限")
 
 
+@router.get("/media/match", response_model=MediaMatchResponse)
+def match_media(
+    filename: str,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> MediaMatchResponse:
+    """按文件名预检：命中哪部片、这部片是否已有资产（有没有内容）。
+
+    只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**问用户
+    "该视频已有对应资产，是否重新生成"。判定只认 `media_asset`：资产行
+    存在且 `content_json` 非空，才算已有内容。
+
+    两级匹配：先查数据集索引（能拿到 movie_id，可直接重建）；索引没命中
+    时按**资产标题**兜底（`match_how="asset_title"`，`can_rebuild=false`
+    ——只能提醒，重建需要文件名带 IMDb id 或英文片名）。没有这层兜底，
+    中文名/改过名的文件重复上传时会静默通过。
+    """
+    matched = asset_build.match_filename(filename, settings.dataset_root)
+    if matched is None:
+        asset = asset_build.match_asset_title(session, filename)
+        if asset is None:
+            return MediaMatchResponse(matched=False)
+        return MediaMatchResponse(
+            matched=True,
+            matched_title=asset.title,
+            match_how="asset_title",
+            asset_id=asset.asset_id,
+            has_content=bool(asset.content_json),
+            content_source=asset.source,
+            scene_count=_scene_count(asset),
+            built_at=asset.updated_at,
+            can_rebuild=False,
+        )
+
+    asset = asset_build.asset_for_movie(session, matched.movie.movie_id)
+    if asset is None:
+        # 数据集命中但还没建过任务（例如内容是从 JSON 导入的）
+        asset = asset_build.match_asset_title(session, filename)
+    return MediaMatchResponse(
+        matched=True,
+        movie_id=matched.movie.movie_id,
+        matched_title=matched.movie.title,
+        match_how=matched.how,
+        asset_id=asset.asset_id if asset is not None else None,
+        has_content=bool(asset is not None and asset.content_json),
+        content_source=asset.source if asset is not None else None,
+        scene_count=_scene_count(asset),
+        built_at=asset.updated_at if asset is not None else None,
+    )
+
+
+def _scene_count(asset: MediaAsset | None) -> int:
+    """资产内容里的场景数（内容损坏/为空时按 0 算）。"""
+    if asset is None or not asset.content_json:
+        return 0
+    try:
+        payload = json.loads(asset.content_json)
+        return len((payload.get("content") or {}).get("scenes") or [])
+    except (ValueError, AttributeError):
+        return 0
+
+
 @router.post("/media/upload", response_model=MediaUploadResponse)
 def upload_media(
     request: Request,
     file: UploadFile,
     asset_id: str | None = Form(None),
     auto_build: bool = Form(True),
+    infer: bool | None = Form(
+        None,
+        description="是否用大模型补充资产字段（描述/氛围/事件/说话人）；"
+                    "false 时只填数据集已有的事实，不调用模型。"
+                    "缺省取全局配置 asset_infer"),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaUploadResponse:
@@ -83,14 +172,22 @@ def upload_media(
     同步 def：磁盘落盘与登记为阻塞操作，走线程池不占事件循环。进入本
     函数时 multipart 已由 FastAPI 收完解析（磁盘 spool，内存不上爆），
     先按 Content-Length 头早拒，再交核心层流式落盘与登记。
+
+    同一部片重复上传**不产生新资产**：按 movie_id 找到已有资产，只把视频
+    地址换掉，内容由后台任务整块覆盖。是否重新生成由前端预检时问用户，
+    这里不再有 force 开关。
+
+    infer=False：只落数据集事实（场景描述/字幕/时间），氛围、事件、说话人
+    留空，一次模型调用都不发；口径随之变为 asset_builder:v5-facts。
+    该项**不落任务行**，只作为本次执行参数透传给后台线程；不传则用全局
+    `settings.asset_infer`（与 main 的全局开关语义一致），表结构也不差一列。
     """
     enforce_upload_size_limit(request)
     filename = file.filename or ""
     asset_id = (asset_id or "").strip() or None
 
     # 客户端显式指定 asset_id 时只允许"预留主键"：已绑定视频的资产不能被
-    # 覆盖，否则任何登录用户都能把别人的视频换掉。自动匹配出的
-    # movie_<id> 不受此限——那代表同一部片的重复上传，覆盖是预期行为。
+    # 覆盖，否则任何登录用户都能把别人的视频换掉。
     if asset_id is not None:
         existing = session.get(MediaAsset, asset_id)
         if existing is not None and existing.video_uri:
@@ -98,16 +195,32 @@ def upload_media(
                 status_code=409,
                 detail="资产已绑定视频，不能通过上传覆盖") from None
 
-    # 先匹配再存盘：命中数据集时资产直接用 movie_<id> 作为主键，
-    # 重复上传同一部片不会产生一堆 asset_xxxx 孤儿行
+    # 先匹配：命中数据集时复用这部片已有的资产（asset_id 不变、内容覆盖），
+    # 没命中就是一条全新的占位资产
     matched = asset_build.match_filename(filename, settings.dataset_root)
     if matched is not None and asset_id is None:
-        asset_id = f"movie_{matched.movie.movie_id}"
+        current = asset_build.asset_for_movie(session, matched.movie.movie_id)
+        if current is not None:
+            asset_id = current.asset_id
+
+    # 兜底护栏：数据集没命中、但库里已有同名资产 → 拒绝静默重复入库。
+    # 这条只会挡"同一部片、文件名认不出"的情况（中文名/改名）；换个带
+    # IMDb id 或英文片名的文件名上传即可。前端预检也会提示，这里是不
+    # 依赖前端状态的第二道闸。
+    if matched is None and asset_id is None:
+        duplicate = asset_build.match_asset_title(session, filename)
+        if duplicate is not None and duplicate.content_json:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"已有同名资产《{duplicate.title}》，不能重复上传；"
+                        "要重新生成请把文件名改成含 IMDb id（如 tt0068646）"
+                        "或英文片名再传")) from None
 
     try:
         stored = media.save_upload(
             file.file, filename, session, settings.media_root,
-            asset_id=asset_id)
+            asset_id=asset_id,
+            title=matched.movie.title if matched is not None else None)
     except media.UnsupportedVideoFormat:
         raise HTTPException(
             status_code=422, detail="不支持的视频格式") from None
@@ -119,7 +232,7 @@ def upload_media(
     if matched is not None and auto_build:
         task = asset_build.create_task(session, stored.asset_id,
                                        matched.movie.movie_id)
-        asset_build.submit(task.task_id, settings)
+        asset_build.submit(task.task_id, settings, infer=infer)
 
     return MediaUploadResponse(
         asset_id=stored.asset_id,

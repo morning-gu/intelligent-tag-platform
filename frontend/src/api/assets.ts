@@ -16,28 +16,19 @@ export interface AssetSummary {
   title: string
   duration_ms: number | null
   video_uri: string | null
+  /** 是否已有内容（影片行 content_json 非空；场景行恒 false）。 */
+  has_content: boolean
   created_at: string | null
+  /** 最近一次写入内容的时间（没内容时等于上传时间）。 */
+  updated_at: string | null
 }
 
-/** 毫秒时间区间（与后端 TimeRange 一致）。 */
-export interface SceneTimeRange {
-  start_ms: number
-  end_ms: number
-}
-
-/** 场景内单条台词（与后端 Dialogue 一致）。 */
+/** 场景内单条台词（与后端 Dialogue 一致；时间可缺失）。 */
 export interface SceneDialogue {
   speaker: string
   text: string
-  start_ms: number
-  end_ms: number
-}
-
-/** 场景内识别出的实体（与后端 Entity 一致）。 */
-export interface SceneEntity {
-  entity_id: string
-  name: string
-  type: string
+  start_ms: number | null
+  end_ms: number | null
 }
 
 /** 场景内识别出的事件（与后端 Event 一致）。 */
@@ -46,18 +37,34 @@ export interface SceneEvent {
   description: string
 }
 
-/** 单个场景（与后端 Scene 一致：时间区间 + 描述 + 多模态识别结果）。 */
+/** 角色项（内容 JSON 的 characters[]）。 */
+export interface AssetCharacter {
+  character_id: string
+  name: string
+  aliases: string[]
+  description: string | null
+}
+
+/** 单个场景（与后端 Scene 一致：**扁平** start_ms/end_ms + 描述 + 多模态
+ * 识别结果；旧的嵌套 time_range 形状已随 v2 内容 JSON 退役）。 */
 export interface AssetScene {
   scene_id: string
-  time_range: SceneTimeRange
-  description: string
-  visual_features: string[]
+  start_ms: number
+  end_ms: number
+  description: string | null
+  /** 影片内虚拟时间（如"1945年夏末，婚礼当天午后"）。 */
+  virtual_time?: string | null
+  location?: string | null
+  /** 场景涉及角色（对应 content.characters[].character_id）。 */
+  character_ids?: string[]
+  emotion?: string | null
+  audio_events?: string[]
   dialogues: SceneDialogue[]
-  entities: SceneEntity[]
   events: SceneEvent[]
 }
 
-/** 完整内容 JSON（与后端 ContentJSON 一致，schema v1.0）。 */
+/** 完整内容 JSON（与后端 ContentJSON 一致，schema v1.0）：剧情描述在
+ * content.description，人物表在 content.characters。 */
 export interface ContentContext {
   schema_version: string
   asset: {
@@ -69,13 +76,9 @@ export interface ContentContext {
     parent_id: string | null
   }
   content: {
-    summary: string
+    description: string | null
+    characters: AssetCharacter[]
     scenes: AssetScene[]
-  }
-  metadata: {
-    source: string
-    model_version: string | null
-    recognition_status: string
   }
 }
 

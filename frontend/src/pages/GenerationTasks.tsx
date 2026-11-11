@@ -7,8 +7,8 @@
 //   版本（Prompt 内容管理属阶段 4，此处仅展示版本号）。
 // - failed 行"重试"：POST retry → 成功提示 + 刷新列表；422（非 failed）/
 //   404 透出后端 detail。
-// - 创建任务 Modal：资产多选（GET /assets）+ mode 单选（默认闭环）+ 可选
-//   策略两个数字输入 → POST tasks → 成功提示 + 刷新；策略仅在填写时携带，
+// - 创建任务 Modal：资产多选（GET /assets，选完即收起下拉）+ mode 单选
+//   （默认开放）+ 可选策略两个数字输入 → POST tasks → 成功提示 + 刷新；策略仅在填写时携带，
 //   未填字段交由后端默认值（30 / 0.7）。
 // - 场景资产（asset_type='scene'）：v2 内容识别只落影片级，场景行
 //   content_json 恒为 NULL——后端会把选中场景上溯归并到所属影片建任务，
@@ -33,6 +33,7 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
 import type { ReviewEvidence } from '../api/review'
 import {
@@ -72,6 +73,13 @@ const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
 const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
+/** 挂载粒度中文展示（目录 applicable_scope 的落库结果，与审核中心同表）。 */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  content: '整片',
+  scene: '单场景',
+  character: '人物',
+}
+
 /** 结果行的审核状态中文展示与 Tag 颜色（三态，与审核中心一致；
  * merged 随"修改即通过"语义退役）。 */
 const REVIEW_STATUS_LABELS: Record<string, string> = {
@@ -85,7 +93,7 @@ const REVIEW_STATUS_COLORS: Record<string, string> = {
   rejected: 'red',
 }
 
-/** 创建弹窗表单值：资产非空多选 + mode（默认闭环）+ 可选策略两项。 */
+/** 创建弹窗表单值：资产非空多选 + mode（默认开放）+ 可选策略两项。 */
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
@@ -134,6 +142,7 @@ function ResultEvidence({ assetId, evidence }: { assetId: string; evidence: Revi
 function TaskDetailPanel({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     // StrictMode 会双调 effect：以 cancelled 丢弃过期请求结果
@@ -159,7 +168,43 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
   }
 
   const resultColumns: TableProps<GenerationTaskResult>['columns'] = [
-    { title: '标签名', dataIndex: 'tag_name' },
+    {
+      title: '标签名',
+      dataIndex: 'tag_name',
+      // 点标签名跳资产详情并定位到这条标签的首个证据场景（与证据卡同一落点：
+      // 审核要在内容里看依据，不能只给一个标签字符串）。
+      render: (v: string, record) => {
+        const first = record.evidence[0]
+        if (detail.asset_id === null || first === undefined) {
+          return v
+        }
+        return (
+          <Typography.Link
+            onClick={() => {
+              navigate(
+                `/assets/${detail.asset_id}?scene=${first.scene_id}&t=${first.start_ms}`,
+              )
+            }}
+          >
+            {v}
+          </Typography.Link>
+        )
+      },
+    },
+    {
+      title: '目录',
+      dataIndex: 'dir_path',
+      render: (v: string | null, record) => v ?? record.dir_name ?? '未归属',
+    },
+    {
+      title: '粒度',
+      dataIndex: 'target_type',
+      render: (v: string) => (
+        <Tag color={v === 'content' ? 'default' : 'cyan'}>
+          {TARGET_TYPE_LABELS[v] ?? v}
+        </Tag>
+      ),
+    },
     {
       title: '来源',
       dataIndex: 'origin',
@@ -228,6 +273,9 @@ export default function GenerationTasks() {
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [creating, setCreating] = useState(false)
+  // 资产多选下拉的开合由我们接管：antd 多选默认选中后不收起，弹层会一直挂在
+  // 弹窗上挡住下面的字段，这里每选一次就收起（再点输入框可继续加选）。
+  const [assetOpen, setAssetOpen] = useState(false)
   const [createForm] = Form.useForm<CreateFormValues>()
 
   const loadTasks = useCallback(async () => {
@@ -422,16 +470,19 @@ export default function GenerationTasks() {
             <Select
               aria-label="资产多选"
               mode="multiple"
+              open={assetOpen}
+              onDropdownVisibleChange={setAssetOpen}
+              onChange={() => setAssetOpen(false)}
               loading={assetsLoading}
               options={assetOptions(assets)}
               placeholder="选择要生成标签的资产"
             />
           </Form.Item>
-          <Form.Item name="mode" label="模式" initialValue="closed">
+          <Form.Item name="mode" label="模式" initialValue="open">
             <Radio.Group
               options={[
-                { value: 'closed', label: '闭环' },
                 { value: 'open', label: '开放' },
+                { value: 'closed', label: '闭环' },
               ]}
             />
           </Form.Item>

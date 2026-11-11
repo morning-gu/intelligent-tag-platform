@@ -9,12 +9,12 @@
   与 MovieTagGen 的"证据可追溯"要求对齐。
 
 保留的平台语义：
-- 空库不报错（与 closed 相反），候选与 `tag_define` 标签向量归一匹配
-  （阈值 `open_match_threshold`，≥ 含等于才算命中）：命中行生成时即带
-  tag_id 且 candidate_name 保留候选原文（doc §6.2 可溯原则），origin
-  统一 open（v2 词表，v1 的 catalog/generated 退役，doc §3.5）；未命中
-  为自由候选（tag_id 空、candidate_name 原文）待审核；
-- `persist_tags` 的 INSERT OR IGNORE 与审核已定集跳过规则不变（runner 负责落库）。
+- 空目录不报错（与 closed 相反）；
+- 标签库装满后按"库内对齐"分三档标记（`catalog_align`）：同名 → origin=catalog
+  并挂 tag_id；疑似经 LLM 复核（`verify`）确认同一概念 → 替换成库内标准名并
+  挂 tag_id（原词记进审计，供将来写别名）；其余走 generated，分档只进审计与
+  排序，不删任何行；
+- `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
 
 每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：三轮原始候选、合并簇、
 judge 判决、淘汰原因、tokens 与耗时——`generation_task` 表没有 usage 列，
@@ -26,27 +26,54 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagDefine
 from tagplatform.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.generation.mtg import keyframes as keyframes_mod
+from tagplatform.generation.mtg.catalog_align import (
+    BAND_DUPLICATE,
+    BAND_NEW,
+    BAND_RANK,
+    BAND_SUSPECT,
+    Alignment,
+    align_candidates,
+    recall_library_hints,
+    summarize_bands,
+)
+from tagplatform.generation.mtg.descriptions import (
+    content_names,
+    fill_descriptions,
+    is_general,
+)
 from tagplatform.generation.mtg.judge import judge_candidates
-from tagplatform.generation.mtg.merge import MergedCandidate, merge_candidates
+from tagplatform.generation.mtg.merge import (
+    MergedCandidate,
+    merge_candidates,
+    normalize_tag,
+)
 from tagplatform.generation.mtg.parse import parse_generation_items
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
     render_content,
 )
+from tagplatform.generation.mtg.verify import verify_pairs
+from tagplatform.library import (
+    DirAssignment,
+    library_index,
+    rank_dir_assignments,
+)
+from tagplatform.mounting import resolve_mount
 from tagplatform.settings import Settings, get_settings
-from tagplatform.vectors import decode_vector, search_similar
 
 logger = logging.getLogger(__name__)
 
-# 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分
-MTG_VERSION = "mtg-v1"
+# 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分。
+# v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
+# v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
+MTG_VERSION = "mtg-v3"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -125,26 +152,92 @@ def _make_judge_client(settings: Settings, llm):
     )
 
 
-def _catalog_hits(session: Session, embedder, names: list[str],
-                  threshold: float) -> dict[str, tuple[str, float]]:
-    """候选名 → (tag_id, 相似度)：与标签定义（tag_define）向量余弦
-    >= 阈值（含等于）才算命中，空库返回空。
+def _make_verify_client(settings: Settings, llm):
+    """相似度复核客户端：与 judge 同模型，但温度 0 且**卡输出上限**。
 
-    v2 查 tag_define（v1 单表 tag_catalog 退役，阈值语义不变）；
-    status=deprecated 的定义不入候选（沿 v1 排除已废弃的口径）。
+    judge 一次要出 20 条判决，输出量本来就大；复核只有几条二分类，实测却
+    有一次烧掉 27k completion tokens（推理模型在模棱两可的对子上反复权衡），
+    把 4 分钟的任务拖到 7 分钟。这里给 max_tokens 兜底，超了就解析失败 →
+    不替换，代价可控。
     """
-    rows = [row for row in session.query(TagDefine).all()
-            if row.status != "deprecated" and row.embedding]
-    if not rows or not names:
-        return {}
-    vectors = embedder.embed(names, role="query")
-    candidates = [(row.tag_id, decode_vector(row.embedding)) for row in rows]
-    hits: dict[str, tuple[str, float]] = {}
-    for name, vector in zip(names, vectors):
-        matched = search_similar(vector, candidates, top_k=1)
-        if matched and matched[0][1] >= threshold:
-            hits[name] = (matched[0][0], float(matched[0][1]))
-    return hits
+    from tagplatform.llm.mock import MockLLMClient
+    if settings.use_mock_llm or isinstance(llm, MockLLMClient):
+        return llm
+    from tagplatform.llm import OpenAIClient
+    return OpenAIClient(
+        model=settings.mtg_judge_model,
+        base_url_env=settings.llm_base_url_env,
+        api_key_env=settings.llm_api_key_env,
+        temperature=0.0,
+        max_tokens=settings.open_library_verify_max_tokens,
+        request_interval=settings.llm_request_interval,
+    )
+
+
+def _dir_hint_entries(tag_library, spec: GenerationSpec,
+                      limit: int) -> list[dict]:
+    """可新增标签的目录 → 提示词条目（id + 全路径 + 粒度）。
+
+    只收 `dir_dynamic`（允许扩充）且落在本次生成范围内的目录——静态目录
+    不该出现在提示词里，否则模型会往不允许新增的目录里塞词，然后在校验
+    环节被打回，白烧一轮 token。
+    """
+    if tag_library is None or limit <= 0:
+        return []
+    entries: list[dict] = []
+    for directory in tag_library.new_tag_dirs(spec.policy.dir_ids):
+        path = "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name
+        entries.append({"dir_id": directory.dir_id, "path": path,
+                        "scope": tag_library.scope_of(directory.dir_id)})
+    entries.sort(key=lambda item: (item["path"], item["dir_id"]))
+    return entries[:limit]
+
+
+def _resolve_dir_value(tag_library, raw: str | None) -> str | None:
+    """模型给的目录串 → dir_id（容忍 id / 全路径 / 唯一目录名）。"""
+    if not raw or tag_library is None:
+        return None
+    text = raw.strip()
+    if tag_library.directory(text) is not None:
+        return text
+    by_path = {"/".join(tag_library.path_of(d.dir_id)): d.dir_id
+               for d in tag_library.dirs()}
+    if text in by_path:
+        return by_path[text]
+    by_name = [d.dir_id for d in tag_library.dirs() if d.dir_name == text]
+    return by_name[0] if len(by_name) == 1 else None
+
+
+def _validate_model_dir(tag_library, dir_id: str | None, spec: GenerationSpec,
+                        contents, evidence: list[Evidence],
+                        per_dir_count: dict[str, int]
+                        ) -> tuple[DirAssignment | None, object | None, str]:
+    """校验模型指定的目录：范围 → 存在 → 可扩展 → 配额 → 挂载点。
+
+    任何一步不过都返回 (None, None, 原因)，由调用方回退到向量归类；不静默
+    改写模型的目录归属（审核页要能看到"模型选错了"这件事）。
+    """
+    if not dir_id:
+        return None, None, "模型未给目录"
+    allowed = tag_library.descendants(spec.policy.dir_ids)
+    if dir_id not in allowed:
+        return None, None, f"模型给的目录 {dir_id} 不在本次生成范围"
+    directory = tag_library.directory(dir_id)
+    if directory is None:
+        return None, None, f"模型给的目录 {dir_id} 不存在"
+    if not directory.allows_new_tags:
+        return None, None, f"目录「{directory.dir_name}」不允许新增标签"
+    if (spec.policy.max_tags_per_dir
+            and per_dir_count.get(dir_id, 0) >= spec.policy.max_tags_per_dir):
+        return None, None, f"目录「{directory.dir_name}」已达产出上限"
+    scope = tag_library.scope_of(dir_id)
+    mount = resolve_mount(scope, spec.asset_id, contents, evidence)
+    if mount is None:
+        return None, None, (f"目录「{directory.dir_name}」适用范围 {scope} "
+                            "解析不出唯一挂载点")
+    return (DirAssignment(dir_id=dir_id, dir_name=directory.dir_name,
+                          scope=scope, score=0.0, reason="模型指定目录"),
+            mount, "")
 
 
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
@@ -186,15 +279,34 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         contents, settings.dataset_root,
         per_scene=settings.mtg_frames_per_scene,
         max_frames=settings.mtg_max_frames,
+        movie_asset_root=settings.movie_asset_root,
+        extra_roots=settings.movie_asset_extra_roots,
     )
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+    # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
+    # 库来自 JSON 模拟（spec.library），按任务的目录范围过滤；向量按
+    # 库/模型/范围缓存，同一进程内不重复嵌入。
+    tag_library = spec.library if settings.open_library_enabled else None
+    library = (library_index(tag_library, embedder, spec.policy.dir_ids)
+               if tag_library is not None else [])
+    hints: list[str] = []
+    if library and settings.open_library_hint_enabled:
+        hints = recall_library_hints(library, embedder, contents,
+                                     settings.open_library_hint_count)
+    # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
+    # 而不是等生成完再按向量猜。只列 dir_dynamic 且落在范围内的目录。
+    dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
+                if settings.open_dir_hint_max > 0 else [])
 
     # ---- 1. 多轮生成 ----
     entries: list[dict] = []
     runs: list[dict] = []
     for run_index in range(max(1, settings.mtg_runs)):
-        messages = build_generation_messages(contents, frames, run_index)
+        messages = build_generation_messages(contents, frames, run_index,
+                                             library_hint=hints,
+                                             dir_hint=dir_hint)
         response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
         _add_usage(usage, response.usage)
         if not response.ok:
@@ -278,53 +390,256 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             continue
         accepted.append((candidate, verdict, evidence))
 
-    # ---- 5. 排序、截断、定义匹配（归一命中）----
+    # ---- 5. 库内对齐、复核、排序、截断、落库归属 ----
+    # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
+    # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
+    alignment: dict[str, Alignment] = {}
+    replacements: list[dict] = []
+    verify_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    verify_trace: dict = {}
+    if library and accepted:
+        alignment = align_candidates(
+            library, embedder, [candidate.tag for candidate, _, _ in accepted],
+            suspect_cosine=settings.open_library_suspect_cosine,
+            name_overlap=settings.open_library_name_overlap,
+        )
+        # 疑似对子交给模型复核：分档只能看"像不像"，替换要看"是不是"。
+        # 复核失败/开关关掉都按"未复核"处理（不替换），并把结论写进审计。
+        if settings.open_library_verify_enabled:
+            pairs = [(name, item.matched_name, item.cosine or 0.0)
+                     for name, item in alignment.items()
+                     if item.band == BAND_SUSPECT and item.matched_name]
+            if pairs:
+                client = _make_verify_client(settings, llm)
+                verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
+                                           usage=verify_usage, trace=verify_trace)
+                for name, same in verdict_map.items():
+                    if name not in alignment:
+                        continue
+                    item = alignment[name]
+                    if same is False and item.band == BAND_SUSPECT:
+                        # 复核否定的就是"新标签"：分档要跟着改，否则它会被
+                        # 一直当疑似压在排序后面，把名额让给别的疑似。
+                        alignment[name] = replace(
+                            item, same_concept=False, band=BAND_NEW,
+                            reason=f"{item.reason}；复核判非同一概念")
+                    else:
+                        alignment[name] = replace(item, same_concept=same)
+
     limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
-    def _rank(item) -> tuple[int, float, int]:
-        """队列排序：重要度（core 优先）→ judge 把握 → 出现轮数。
+    def _band_rank(tag: str) -> int:
+        item = alignment.get(tag)
+        return BAND_RANK[item.band] if item is not None else BAND_RANK["new"]
+
+    def _rank(item) -> tuple[int, int, float, int]:
+        """队列排序：重要度 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
 
         先看重要度而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
         对影片重要；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
-        而 core 的"视角反转"被挤掉。
+        而 core 的"视角反转"被挤掉。分档插在重要度之后、把握之前：
+        同样重要的两条，优先留库外新词。
         """
         candidate, verdict, _ = item
         importance = _IMPORTANCE_RANK.get((verdict or {}).get("importance"), 0)
         confidence = verdict["confidence"] if verdict else 0.8
-        return (-importance, -confidence, -candidate.runs)
+        return (-importance, -_band_rank(candidate.tag), -confidence,
+                -candidate.runs)
 
     accepted.sort(key=_rank)
-    accepted = accepted[:limit]
 
-    names = [candidate.tag for candidate, _, _ in accepted]
-    hits = _catalog_hits(session, embedder, names,
-                         settings.open_match_threshold) if names else {}
+    def _plan(candidate) -> tuple[Alignment | None, bool]:
+        """(对齐结论, 是否替换成库内标签)。
+
+        同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
+        疑似 → 复核通过 + 替换开关打开才换成库内标准名。
+        """
+        item = alignment.get(candidate.tag)
+        same_name = bool(item is not None and item.band == BAND_DUPLICATE
+                         and item.matched_tag_id)
+        replace_suspect = bool(item is not None
+                               and settings.open_library_replace_enabled
+                               and item.band == BAND_SUSPECT
+                               and item.same_concept is True
+                               and item.matched_tag_id)
+        return item, same_name or replace_suspect
+
+    plans = {candidate.tag: _plan(candidate) for candidate, _, _ in accepted}
+    # 命中的库内标签不占新标签名额：它们本来就是"库里已有的东西"，
+    # 让它挤掉一条真正的新词没有道理。两桶各自排序、各自受 limit 约束。
+    replaced = [item for item in accepted if plans[item[0].tag][1]]
+    fresh = [item for item in accepted if not plans[item[0].tag][1]]
+    kept_replaced = replaced[:limit]
+    truncated = fresh[limit:] + replaced[limit:]
+    accepted = fresh[:limit] + kept_replaced
 
     tags: list[ProducedTag] = []
+    tag_rows: list[dict] = []
+    # 新词要落到"可扩展目录"里：先批量嵌入候选名，再逐个按目录描述相似度归属
+    new_names = [candidate.tag for candidate, _, _ in accepted
+                 if not plans.get(candidate.tag, (None, False))[1]]
+    new_vectors = (embedder.embed(new_names, role="query")
+                   if new_names else [])
+    vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
+    per_dir_count: dict[str, int] = {}
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
-        reason = (verdict or {}).get("reason") or candidate.reason
-        if candidate.tag in hits:
-            # 归一命中行（doc §6.2）：生成时即带 tag_id，origin 仍是 open
-            # （v2 词表收敛，v1 的 catalog 词退役）；tag_name 即 candidate_name
-            # 原文保留可溯（并入既有时候选原文也留），candidate_description
-            # 不填（仅自由候选填写，doc §3.5）
-            tag_id, similarity = hits[candidate.tag]
+        # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
+        # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
+        level = candidate.scope if candidate.scope in ("film", "scene") else "film"
+        item, is_replace = plans.get(candidate.tag, (None, False))
+        if is_replace and item is not None:
+            matched = next((tag for tag in library
+                            if tag.tag_id == item.matched_tag_id), None)
+            mount = resolve_mount(matched.scope if matched else "content",
+                                  spec.asset_id, contents, evidence)
+            if mount is None:
+                dropped.append({"tag": candidate.tag,
+                                "why": f"目录适用范围 {matched.scope if matched else '?'} "
+                                       "解析不出唯一挂载点"})
+                continue
+            if item.band == BAND_SUSPECT:
+                replacements.append({
+                    "generated": candidate.tag,
+                    "library": item.matched_name,
+                    "tag_id": item.matched_tag_id,
+                    "cosine": (None if item.cosine is None
+                               else round(item.cosine, 3)),
+                    "reason": item.reason,
+                })
             tags.append(ProducedTag(
-                origin="open", tag_id=tag_id, tag_name=candidate.tag,
+                origin="catalog", tag_id=item.matched_tag_id,
+                tag_name=item.matched_name or candidate.tag,
                 candidate_type=None, candidate_description=None,
-                relevance_score=similarity, confidence=confidence,
-                evidence=evidence,
+                relevance_score=item.cosine, confidence=confidence,
+                evidence=evidence, level=level,
+                dir_id=matched.dir_id if matched else None,
+                target_type=mount.target_type, target_id=mount.target_id,
+                # 相似命中：模型原词将来写进 tag_define.aliases
+                alias_name=(candidate.tag
+                            if item.band == BAND_SUSPECT
+                            and candidate.tag != (item.matched_name or "") else None),
             ))
-        else:
-            # 自由候选（未命中标签定义）：tag_id 空，candidate_name 原文
-            tags.append(ProducedTag(
-                origin="open", tag_id=None, tag_name=candidate.tag,
-                candidate_type=candidate.dimension,
-                candidate_description=reason or None,
-                relevance_score=None, confidence=confidence,
-                evidence=evidence,
-            ))
+            tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
+                             "origin": "catalog", "band": item.band,
+                             "dimension": None,
+                             "dir_id": tags[-1].dir_id,
+                             "dir_source": "library",
+                             "target_type": mount.target_type,
+                             "confidence": confidence,
+                             "evidence": [e.scene_id for e in evidence]})
+            continue
+
+        # 新词：先看模型给的目录能不能用，再回退到向量归类
+        if not spec.policy.allow_new_tags:
+            dropped.append({"tag": candidate.tag, "why": "策略禁止产出新词"})
+            continue
+        if tag_library is None:
+            dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
+            continue
+        # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
+        #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
+        assignment = None
+        mount = None
+        dir_source = None
+        dir_reason = ""
+        reasons: list[str] = []
+        model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
+        if candidate.dir_raw and model_dir is None:
+            reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
+        if model_dir:
+            assignment, mount, why = _validate_model_dir(
+                tag_library, model_dir, spec, contents, evidence, per_dir_count)
+            if assignment is not None:
+                dir_source = "model"
+            else:
+                reasons.append(why)
+                assignment = mount = None
+        # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
+        if assignment is None:
+            for option in rank_dir_assignments(tag_library, embedder,
+                                               vector_by_name.get(candidate.tag),
+                                               spec.policy.dir_ids):
+                if option.dir_id is None:
+                    reasons.append(f"无可归属目录（{option.reason}）")
+                    continue
+                if (spec.policy.max_tags_per_dir
+                        and per_dir_count.get(option.dir_id, 0)
+                        >= spec.policy.max_tags_per_dir):
+                    reasons.append(f"目录「{option.dir_name}」已达产出上限")
+                    continue
+                candidate_mount = resolve_mount(option.scope, spec.asset_id,
+                                                contents, evidence)
+                if candidate_mount is None:
+                    reasons.append(f"目录「{option.dir_name}」适用范围 "
+                                   f"{option.scope} 解析不出唯一挂载点")
+                    continue
+                assignment, mount = option, candidate_mount
+                dir_source = "fallback"
+                dir_reason = option.reason
+                break
+        if assignment is None or mount is None:
+            dropped.append({"tag": candidate.tag,
+                            "why": "；".join(reasons) or "无可归属目录"})
+            continue
+        per_dir_count[assignment.dir_id] = per_dir_count.get(assignment.dir_id, 0) + 1
+        tags.append(ProducedTag(
+            origin="generated", tag_id=None, tag_name=candidate.tag,
+            candidate_type=candidate.dimension,
+            # 描述是"这个词本身"的通用释义；模型给的 desc 先落在这里，
+            # 不合规的在本段之后统一补写/清空（见描述通用化那一步）。
+            candidate_description=(candidate.desc or None),
+            # 相关度 = 与库内最相近标签的余弦（对齐阶段的 top-1，判成新词也有
+            # 值——"有多不像库里的东西"本身就是审核时要看的信号）。库里没标签
+            # 或本条没参与对齐时才是 None。
+            relevance_score=(item.cosine if item is not None else None),
+            confidence=confidence,
+            evidence=evidence, level=level,
+            dir_id=assignment.dir_id,
+            target_type=mount.target_type, target_id=mount.target_id,
+        ))
+        tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
+                         "origin": "generated",
+                         "band": (item.band if item is not None else None),
+                         "dimension": candidate.dimension,
+                         "dir_id": assignment.dir_id,
+                         "dir_name": assignment.dir_name,
+                         "dir_source": dir_source,
+                         "dir_model_raw": candidate.dir_raw,
+                         "dir_reason": (assignment.reason
+                                        if dir_source == "model"
+                                        else (dir_reason or assignment.reason)),
+                         "target_type": mount.target_type,
+                         "confidence": confidence,
+                         "evidence": [e.scene_id for e in evidence]})
+
+    # ---- 5.5 描述通用化 ----
+    # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"
+    # 的通用释义。模型照提示给了 desc 就直接用；没给或写得像剧情（含片名/
+    # 人名/场景/“本片”）的，这里批量补写一次；补不出来就留空——宁可没有描述，
+    # 也不把某一部片的剧情当标签释义落库。
+    names = content_names(contents)
+    needs_desc = [tag for tag in tags
+                  if tag.origin == "generated"
+                  and not is_general(tag.candidate_description, names)]
+    desc_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    desc_filled: dict[str, str] = {}
+    if needs_desc:
+        desc_filled = fill_descriptions(
+            llm,
+            [{"tag": tag.tag_name,
+              "dir": (" / ".join(tag_library.path_of(tag.dir_id))
+                      if tag_library is not None and tag.dir_id else None)}
+             for tag in needs_desc],
+            names=names, run_id=spec.run_id, usage=desc_usage)
+        for tag in needs_desc:
+            tag.candidate_description = desc_filled.get(normalize_tag(tag.tag_name))
+    descriptions_summary = {
+        "needs": len(needs_desc),
+        "filled": len(desc_filled),
+        "empty": len(needs_desc) - len(desc_filled),
+        "usage": desc_usage,
+    }
 
     # ---- 6. 审计落盘 ----
     elapsed = time.monotonic() - started
@@ -343,6 +658,14 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             "merge_threshold": settings.mtg_merge_threshold,
             "judge_confidence_floor": _JUDGE_CONFIDENCE_FLOOR,
             "max_final_tags": limit,
+            "library_enabled": bool(settings.open_library_enabled),
+            "library_hint_count": len(hints),
+            "suspect_cosine": settings.open_library_suspect_cosine,
+            "name_overlap": settings.open_library_name_overlap,
+            "verify_enabled": bool(settings.open_library_verify_enabled),
+            "replace_enabled": bool(settings.open_library_replace_enabled),
+            "dir_hint_max": settings.open_dir_hint_max,
+            "dir_hint_count": len(dir_hint),
         },
         "scenes": len(contents.content.scenes),
         "frames": frame_count,
@@ -354,11 +677,39 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                     "scope": m.scope}
                    for m in merged],
         "verdicts": list(verdicts.values()),
-        "accepted": [{"tag": t.tag_name, "origin": t.origin,
-                      "dimension": t.candidate_type,
-                      "confidence": t.confidence,
-                      "evidence": [e.scene_id for e in t.evidence]}
-                     for t in tags],
+        "accepted": [{"tag": row["name"], "candidate": row["tag"],
+                      "origin": row["origin"],
+                      "dir_id": row.get("dir_id"),
+                      "dir_source": row.get("dir_source"),
+                      "dir_model_raw": row.get("dir_model_raw"),
+                      "dir_reason": row.get("dir_reason"),
+                      "confidence": row["confidence"], "band": row["band"],
+                      "evidence": row["evidence"]}
+                     for row in tag_rows],
+        "dir_hint": [entry["dir_id"] for entry in dir_hint],
+        "library": {
+            "enabled": bool(library),
+            "size": len(library),
+            "hints": hints,
+            "bands": summarize_bands(alignment),
+            "align": [
+                {"tag": name, "band": item.band, "reason": item.reason,
+                 "matched": item.matched_name,
+                 "cosine": None if item.cosine is None else round(item.cosine, 3),
+                 "same_concept": item.same_concept}
+                for name, item in alignment.items()
+            ],
+            "replacements": replacements,
+            "verify_raw": verify_trace.get("raw"),
+            "truncated": [
+                {"tag": candidate.tag,
+                 "band": (alignment[candidate.tag].band
+                          if candidate.tag in alignment else None)}
+                for candidate, _, _ in truncated
+            ],
+        },
+        "verify_usage": verify_usage,
+        "descriptions": descriptions_summary,
         "dropped": dropped,
         "elapsed_s": round(elapsed, 1),
     }

@@ -33,11 +33,22 @@ def _bad_element(index: int, reason: str) -> LLMParseError:
 
 
 def _parse_array(content: str) -> list:
-    """json.loads → 顶层必须为数组；否则抛 LLMParseError。"""
+    """json.loads → 顶层数组；容忍模型把数组包在单键对象里（{"tags": [...]}）。
+
+    Qwen/DeepSeek 在 JSON 模式下常把结果包成对象；只要对象里恰好有一个
+    列表值就按该列表解析，多个列表/无列表才判为结构不符。
+    """
     try:
         data = json.loads(content)
     except json.JSONDecodeError as e:
         raise LLMParseError(f"LLM 输出不是合法 JSON: {e}") from None
+    if isinstance(data, dict):
+        lists = [value for value in data.values() if isinstance(value, list)]
+        if len(lists) == 1:
+            return lists[0]
+        keys = list(data)
+        raise LLMParseError(
+            f"LLM 输出是对象但列表值数量为 {len(lists)}（键: {keys}）")
     if not isinstance(data, list):
         raise LLMParseError(f"LLM 输出不是 JSON 数组（{type(data).__name__}）")
     return data

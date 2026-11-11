@@ -1,6 +1,6 @@
 """`/api/v1/generation` 与 `/api/v1/assets/{asset_id}/tags` 路由：生成任务创建、查询与重试。
 
-薄路由层：校验（mode 注册表/资产存在/已识别）→ 建任务（queued）→
+薄路由层：校验（mode 注册表/资产存在/识别内容）→ 建任务（queued）→
 executor.submit → 响应模型；业务规则全部在 tagplatform.generation
 （producer 注册表）、tagplatform.tasks（执行器状态机与生成流水线）与
 DB 层，router 只做协议转换与错误映射（mode 未知/资产及其父链均未完成
@@ -13,7 +13,8 @@ v2 变更（doc §3.4-3.6，契约速查）：
   祖先建任务，归并后按 asset_id 去重，响应 asset_id 即影片——"按场景
   挑片建任务"因此可用，同时不引入本期未启用的场景级挂载；
 - 详情 results 取 pre_asset_tag（待审核行：review_status 三态，origin
-  词表 closed|open），tag_name 解析 = candidate_name 或目录定义名；
+  词表 closed|open），tag_name 解析 = candidate_name 或目录定义名，
+  目录列（dir_id/dir_name/dir_path）由 JSON 标签库实时解析；
 - /assets/{id}/tags 只回正式挂载（asset_tag 只含审核通过的复制行，
   评分/证据留在 pre 侧）；origin 经同键 pre 行解析（asset_tag 不存
   origin，无对应 pre 行时为 None）。
@@ -33,13 +34,8 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
-from tagplatform.db.models import (
-    AssetTag,
-    MediaAsset,
-    PreAssetTag,
-    TagDefine,
-    TagGenerationTask,
-)
+from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 
@@ -49,10 +45,17 @@ router = APIRouter(prefix="/api/v1")
 # ---------- 响应模型 ----------
 
 class GenerationPolicyIn(BaseModel):
-    """生成策略请求体：缺省值与 GenerationPolicy（生成引擎契约）一致。"""
+    """生成策略请求体：缺省值与 GenerationPolicy（生成引擎契约）一致。
+
+    `dir_ids` 限定本次生成的目录范围（空 = 全库）；`allow_new_tags=False`
+    时只产出命中库内标签的行；`max_tags_per_dir` 限制单目录产出条数。
+    """
 
     max_tags: int = 30
     min_confidence: float = 0.7
+    dir_ids: list[str] = Field(default_factory=list)
+    allow_new_tags: bool = True
+    max_tags_per_dir: int = 0
 
 
 class GenerationTaskCreateRequest(BaseModel):
@@ -78,10 +81,10 @@ class GenerationTaskCreateResponse(BaseModel):
 
 
 class GenerationTaskOut(BaseModel):
-    """任务列表项（asset_id 直列——v2 任务外键直连 media_asset，无外连）。"""
+    """任务列表项（asset_id 直连 media_asset，未知资产时为空）。"""
 
     task_id: str
-    asset_id: str
+    asset_id: str | None = None
     mode: str
     status: str
     model_version: str | None = None
@@ -100,27 +103,34 @@ class EvidenceOut(BaseModel):
     description: str
 
 
-class PreTagOut(BaseModel):
-    """生成结果摘要行（pre_asset_tag 行）：id 为行主键（审核操作路由的
-    定位键）；tag_name 展示解析 = candidate_name 优先（open 行 / 审核
-    modify 落在行内的展示字段），否则回退目录定义名（tag_id →
-    tag_define.tag_name）。"""
+class GenerationResultOut(BaseModel):
+    """生成结果摘要行：id 为 pre_asset_tag 行主键（审核操作路由与前端行操作
+    的定位键）；tag_name 展示解析 candidate_name 优先、目录名回退。"""
 
     id: int
     tag_name: str
+    # 库内标签 id（closed 行/已合并行非空）；开放生成的新词行是 None
     tag_id: str | None = None
+    # 行内候选名（开放生成新词非空；closed 行是 None）
     candidate_name: str | None = None
     origin: str
     relevance_score: float | None = None
     confidence: float | None = None
     review_status: str
+    # 挂载粒度：由标签所属目录的 applicable_scope 决定
+    target_type: str = "content"
+    # 所属目录（JSON 标签库）：新词必填，catalog 行取标签自身目录
+    dir_id: str | None = None
+    dir_name: str | None = None
+    # 目录全路径（L1/…/末级）；审核中心同样展示这一列，两边口径一致
+    dir_path: str | None = None
     evidence: list[EvidenceOut] = []
 
 
 class GenerationTaskDetail(GenerationTaskOut):
     """任务详情：在列表字段之上附该任务全部结果摘要行。"""
 
-    results: list[PreTagOut]
+    results: list[GenerationResultOut]
 
 
 class GenerationTaskRetryResponse(BaseModel):
@@ -130,15 +140,13 @@ class GenerationTaskRetryResponse(BaseModel):
     status: str
 
 
-class AssetTagOut(BaseModel):
-    """资产正式挂载行：asset_tag 只含审核通过的复制行（pending 留在 pre
-    表），只保留挂载关系与展示值——评分/证据不在正式表（doc §3.6）；
-    origin 经同键 pre 行解析（asset_tag 不存 origin，无 pre 行时为 None）。"""
+class AssetTagOut(GenerationResultOut):
+    """资产标签行：摘要形状（含行主键 id）+ 标识原样（tag_id/catalog 行、
+    candidate_name/generated 行）+ 挂载时间。"""
 
-    id: int
-    tag_id: str
-    tag_name: str
-    origin: str | None = None
+    tag_id: str | None = None
+    candidate_name: str | None = None
+    # 挂载时间（取终审行的写入时间；与 main 同名字段对齐）
     created_at: datetime | None = None
 
 
@@ -201,28 +209,60 @@ def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
         return []
 
 
-def _define_names(session: Session, rows: list[PreAssetTag]) -> dict[str, str]:
-    """带 tag_id 的 pre 行 → 目录定义名映射（一次批量取全）。"""
+def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
+    """行内 tag_id → 标签库信息（名称/类型/目录），只查 JSON 库不读表。"""
+    library = try_load_library()
     tag_ids = {r.tag_id for r in rows if r.tag_id}
-    if not tag_ids:
+    if library is None or not tag_ids:
         return {}
-    return {t.tag_id: t.tag_name
-            for t in session.query(TagDefine)
-            .filter(TagDefine.tag_id.in_(tag_ids))}
+    info: dict[str, dict] = {}
+    for tag_id in tag_ids:
+        definition = library.tag(tag_id)
+        if definition is None:
+            continue
+        directory = library.directory(definition.dir_id)
+        info[tag_id] = {
+            "tag_name": definition.tag_name,
+            "tag_type": definition.tag_type,
+            "dir_id": definition.dir_id,
+            "dir_name": directory.dir_name if directory else None,
+        }
+    return info
 
 
-def _pre_tag_out(row: PreAssetTag, names: dict[str, str]) -> PreTagOut:
-    """pre_asset_tag 行 → 结果摘要（tag_name 解析 = candidate_name 或定义名，
-    与审核列表同规：审核 modify 落在行内的展示字段优先）。"""
-    return PreTagOut(
+def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
+    """pre_asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。
+
+    tag_name 展示解析与审核列表同规：candidate_name 非空优先（审核 modify
+    落在行内的展示字段，改了什么显示什么），否则回退库内标签名。
+    """
+    definition = info.get(row.tag_id or "", {})
+    # 三级回退：行内展示名 → 库内标签名 → tag_id。历史行（上一轮落在旧
+    # tag_catalog 的 id）在 JSON 库里查不到，回退成 id，不能显示成空字符串。
+    tag_name = (row.candidate_name or definition.get("tag_name")
+                or row.tag_id or "")
+    dir_id = row.candidate_dir_id or definition.get("dir_id")
+    library = try_load_library()
+    dir_name = definition.get("dir_name")
+    path: list[str] = []
+    if library is not None and dir_id:
+        path = library.path_of(dir_id)
+        if dir_name is None:
+            directory = library.directory(dir_id)
+            dir_name = directory.dir_name if directory else None
+    return GenerationResultOut(
         id=row.id,
-        tag_name=row.candidate_name or names.get(row.tag_id or "", ""),
+        tag_name=tag_name,
         tag_id=row.tag_id,
         candidate_name=row.candidate_name,
         origin=row.origin,
         relevance_score=row.relevance_score,
         confidence=row.confidence,
         review_status=row.review_status,
+        target_type=row.target_type,
+        dir_id=dir_id,
+        dir_name=dir_name,
+        dir_path="/".join(path) if path else None,
         evidence=_parse_evidence(row.evidence_json),
     )
 
@@ -305,7 +345,7 @@ def list_generation_tasks(
     session: Session = Depends(get_session),
 ) -> list[GenerationTaskOut]:
     """任务列表：status/mode/asset_id 过滤，created_at 降序（task_id 决胜），
-    limit/offset 分页（默认 100/0）。asset_id 直列（v2 任务外键直连资产）。"""
+    limit/offset 分页（默认 100/0）。资产直接来自任务行。"""
     query = session.query(TagGenerationTask)
     if status is not None:
         query = query.filter(TagGenerationTask.status == status)
@@ -336,8 +376,8 @@ def list_generation_tasks(
 def get_generation_task(
     task_id: str, session: Session = Depends(get_session)
 ) -> GenerationTaskDetail:
-    """任务详情 + 结果摘要列表（pre 行：tag_name 按 candidate_name/定义名
-    解析、evidence 解析、行 id 主键）；未知任务 → 404。"""
+    """任务详情 + 结果摘要列表（tag_name 按 candidate_name/目录名解析）；
+    未知任务 → 404。"""
     task = session.get(TagGenerationTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
@@ -347,7 +387,7 @@ def get_generation_task(
         .order_by(PreAssetTag.id)  # 入库行序（producer 产出序：相关度降序截断后）
         .all()
     )
-    names = _define_names(session, rows)
+    info = _tag_info(rows)
     return GenerationTaskDetail(
         task_id=task.task_id,
         asset_id=task.asset_id,
@@ -358,7 +398,7 @@ def get_generation_task(
         error=task.error,
         created_at=task.created_at,
         finished_at=task.finished_at,
-        results=[_pre_tag_out(row, names) for row in rows],
+        results=[_result_out(row, info) for row in rows],
     )
 
 
@@ -389,33 +429,19 @@ def retry_generation_task(
 def list_asset_tags(
     asset_id: str, session: Session = Depends(get_session)
 ) -> list[AssetTagOut]:
-    """资产正式挂载标签（仅 approved——asset_tag 只收审核通过的复制行，
-    pending 留在 pre 表；评分/证据不在正式表，doc §3.6）：摘要形状 +
-    行主键 + origin 经同键 pre 行解析；未知资产 → 404。"""
+    """资产标签行（跨任务）：只返回审核已通过的行（v2 语义：pre 表审核通过
+    ≈ 正式挂载；入库复制逻辑实现后再切 asset_tag）；未知资产 → 404。"""
     if session.get(MediaAsset, asset_id) is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
     rows = (
-        session.query(AssetTag)
-        .filter(AssetTag.asset_id == asset_id)
-        .order_by(AssetTag.id)
+        session.query(PreAssetTag)
+        .filter(
+            PreAssetTag.asset_id == asset_id,
+            PreAssetTag.review_status == "approved",
+        )
+        .order_by(PreAssetTag.id)
         .all()
     )
-    # origin 不在正式表（doc §3.6 列契约）：asset×实体×tag_id 在 pre 表
-    # 至多一行（doc §6.1 去重视图），按同键回查 origin
-    origins = {
-        (p.target_type, p.target_id, p.tag_id): p.origin
-        for p in session.query(PreAssetTag).filter(
-            PreAssetTag.asset_id == asset_id,
-            PreAssetTag.tag_id.isnot(None),
-        ).all()
-    }
-    return [
-        AssetTagOut(
-            id=row.id,
-            tag_id=row.tag_id,
-            tag_name=row.tag_name,
-            origin=origins.get((row.target_type, row.target_id, row.tag_id)),
-            created_at=row.created_at,
-        )
-        for row in rows
-    ]
+    info = _tag_info(rows)
+    return [AssetTagOut(**_result_out(row, info).model_dump(),
+                        created_at=row.created_at) for row in rows]

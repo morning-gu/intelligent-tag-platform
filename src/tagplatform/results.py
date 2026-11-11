@@ -1,38 +1,19 @@
-"""标签结果入库服务：ProducedTag → pre_asset_tag 的 INSERT OR IGNORE（v2 Task 6）。
+"""标签结果入库：ProducedTag → `pre_asset_tag` 的「删旧插新 + 自动判定」。
 
-v2 重跑语义（doc §6.1）在这里收敛为最薄的一层：本服务**只做逐行
-INSERT OR IGNORE**——旧行的处理（pending 删旧）是执行器 `_clear_pending`
-的职责（写结果前删该资产同 origin 的全部 pending 行，closed 重跑不清
-open 的待审行）；本服务对已存在行的唯一动作是"撞部分唯一索引即跳过"：
+对应设计文档 §6.1（重跑与幂等）与 v2 的"重复不入审"口径：
 
-- 无旧行 → 插入 pending（审核队列）；
-- 撞 approved/rejected 终态行 → 跳过什么都不动（skipped_finalized）——
-  终审不被重跑覆盖、驳回的候选不得被自动复活（doc §6.1；v2 人工已定集
-  收窄为两态，merge 的终态都是 approved，doc §6.2）；
-- 撞 pending 行（直调未清理 / 跨 origin 残留）→ 跳过不覆盖
-  （deleted_pending 计数）——删旧是 runner 的同 origin 职责。
+- 任务写结果前，先删除该资产**同 origin** 的全部 `pending` 行（closed 重跑
+  不清 open 的待审行，反之亦然）；
+- **命中库内标签**（`ProducedTag.origin == "catalog"`）的行不再进人工队列：
+  直接落 `review_status="approved"`、`reviewer_id="system"`。完全同名记
+  "自动通过"，相似并入（带 `alias_name`）记"相似并入，原名记为别名候选"；
+- **库外新词**（`origin == "generated"`）落 `pending`，带候选目录
+  （`candidate_dir_id`）与挂载点（`target_type/target_id`），等人工审核；
+- 已定稿行（approved / rejected）不动——重跑不得复活人工已定或已驳回的标签；
+- 去重边界是两个部分唯一索引：`ux_pre_tag_catalog`（asset×target×tag_id）
+  与 `ux_pre_tag_candidate`（asset×target×candidate_name）。
 
-插入真打数据库（savepoint 内 flush），冲突由 pre_asset_tag 的两个部分
-唯一索引裁决（ux_pre_tag_catalog 按 tag_id、ux_pre_tag_candidate 按
-candidate_name），冲突发生后才回查旧行分类——非先查后插的竞态写法。
-
-v2 词表：origin 取值 closed|open（ProducedTag.origin 原样落列；v1 的
-catalog/generated 词退役，未知值 ValueError 零副作用拒绝）。closed 意味
-着命中目录内定义，tag_id 必填。列契约（doc §3.5）：target_type='content'
-（本期唯一启用粒度）、target_id=asset_id 本身、candidate_name 仅 open 行
-（closed 行恒空，展示名由 tag_id 解析）、candidate_description 仅 open
-自由候选（归一命中行空）、candidate_dir_id 生成时不赋值（doc §6.4）、
-candidate_type 不入库（v2 无此列，ProducedTag 字段保留供 mtg 审计）。
-
-实现注意：
-- **服务内不 commit**：调用方（runner）统一事务控制，保证一次任务的
-  全部写入要么整体落库要么整体回滚（任务级事务原子性）；
-- **run_id 参数当前不入库**（pre_asset_tag 无对应列），仅为契约签名
-  完整保留——与 runner 的 `run_id = f"{task_id}:{uuid4().hex[:6]}"`
-  对齐，未来审计列扩展时无需改签名；
-- 时间戳显式赋 UTC now（时间戳列无默认值，Task 3 审查遗留注意项）。
-
-分层红线：本模块不得 import fastapi（设计文档 §9.4）。
+分层红线：本模块不 import fastapi（设计文档 §9.4）。
 """
 
 from __future__ import annotations
@@ -41,61 +22,53 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from tagplatform.db.models import PreAssetTag
 from tagplatform.generation.base import ProducedTag
 
-# 审核已定状态（人工已定集）：重跑一律跳过——v2 收窄为 approved/rejected
-# （merge 退役：并入既有/合入新建的终态都是 approved，doc §6.2；驳回的
-# 候选不得被重跑复活，doc §6.1）
+# 人工已定稿状态：重跑一律跳过（不覆盖、不复活）
 FINALIZED_STATUSES = ("approved", "rejected")
-
-# origin 词表（v2）：closed|open；其余取值（含 v1 残留词 catalog/generated）
-# ValueError 零副作用拒绝
-_ORIGINS = ("closed", "open")
+# 系统自动判定的审核人标识
+SYSTEM_REVIEWER = "system"
 
 
 @dataclass
 class PersistSummary:
-    """入库结果摘要：
-    - inserted：新插入的 pending 行数；
-    - deleted_pending：撞 pending 行被索引拒入的次数——重跑替换中这些行
-      的删旧由 runner 的 `_clear_pending` 负责（本服务不删行；直调未清理
-      或跨 origin 残留时在此可见，runner 编排下恒为 0）；
-    - skipped_finalized：撞 approved/rejected 终态行被跳过的次数。
-    """
+    """入库结果：清掉的旧待审行 / 新插入行 / 系统自动通过 / 跳过已定稿。"""
 
+    cleared: int
     inserted: int
-    deleted_pending: int
     skipped_finalized: int
+    auto_approved: int = 0
 
 
 def _evidence_json(tag: ProducedTag) -> str:
-    """Evidence 列表 → JSON 数组字符串（asdict 逐条展开，中文不转义）。"""
+    """Evidence 列表 → JSON 数组字符串（中文不转义）。"""
     return json.dumps([asdict(e) for e in tag.evidence], ensure_ascii=False)
 
 
-def _find_conflict(session: Session, asset_id: str,
-                   tag: ProducedTag) -> PreAssetTag | None:
-    """定位撞唯一索引的旧行（冲突发生后回查分类，非先查后插）。
-
-    查询作用域与部分唯一索引一致（doc §3.5）：tag_id 非空行走
-    ux_pre_tag_catalog（asset×实体×tag_id）；tag_id 为空的候选行走
-    ux_pre_tag_candidate（tag_id IS NULL 且 candidate_name 非空）。
-    """
-    q = session.query(PreAssetTag).filter(
-        PreAssetTag.asset_id == asset_id,
-        PreAssetTag.target_type == "content",
-        PreAssetTag.target_id == asset_id,
+def _existing(session: Session, asset_id: str, target_type: str, target_id: str,
+              field, value) -> PreAssetTag | None:
+    """按 (asset, target, tag_id|candidate_name) 查既有行（跨 origin）。"""
+    return (
+        session.query(PreAssetTag)
+        .filter(
+            PreAssetTag.asset_id == asset_id,
+            PreAssetTag.target_type == target_type,
+            PreAssetTag.target_id == target_id,
+            field == value,
+        )
+        .one_or_none()
     )
-    if tag.tag_id:
-        return q.filter(PreAssetTag.tag_id == tag.tag_id).one_or_none()
-    return q.filter(
-        PreAssetTag.tag_id.is_(None),
-        PreAssetTag.candidate_name == tag.tag_name,
-    ).one_or_none()
+
+
+def _auto_comment(tag: ProducedTag) -> str:
+    """系统自动通过的留痕：同名与相似并入分开写，便于事后审计。"""
+    if tag.alias_name:
+        return f"系统自动并入库内标签「{tag.tag_name}」，原名「{tag.alias_name}」记为别名候选"
+    return f"系统自动通过：与库内标签「{tag.tag_name}」同名"
 
 
 def persist_tags(
@@ -103,58 +76,85 @@ def persist_tags(
     asset_id: str,
     task_id: str,
     tags: list[ProducedTag],
-    run_id: str,
+    origin: str,
 ) -> PersistSummary:
-    """将 Producer 产出逐行 INSERT OR IGNORE 进 pre_asset_tag（不 commit，
-    调用方提交）。
+    """把 Producer 产出写进 `pre_asset_tag`（不 commit，调用方统一提交）。
 
-    每行在 savepoint 内插入：撞部分唯一索引时 savepoint 回滚、该行跳过，
-    回查旧行分类计数（终态跳过 / pending 占位）；非唯一性冲突（外键等）
-    原样上抛——真实数据错误不能吞。
+    origin：任务模式（closed / open），即行的产出来源，落库后不可变。
     """
+    if origin not in ("closed", "open"):
+        raise ValueError(f"未知 origin: {origin!r}（合法取值 closed|open）")
+
     now = datetime.now(timezone.utc)
-    summary = PersistSummary(inserted=0, deleted_pending=0, skipped_finalized=0)
+    cleared = session.execute(
+        delete(PreAssetTag).where(
+            PreAssetTag.asset_id == asset_id,
+            PreAssetTag.origin == origin,
+            PreAssetTag.review_status == "pending",
+        )
+    ).rowcount or 0
 
+    summary = PersistSummary(cleared=cleared, inserted=0, skipped_finalized=0)
     for tag in tags:
-        # 契约校验前置（零副作用）：未知 origin / closed 缺 tag_id 直接拒绝
-        if tag.origin not in _ORIGINS:
+        target_type = tag.target_type or "content"
+        target_id = tag.target_id or asset_id
+        if tag.origin == "catalog":
+            if not tag.tag_id:
+                raise ValueError(
+                    "catalog 标签缺少 tag_id（ProducedTag 契约要求必填）")
+            field, value = PreAssetTag.tag_id, tag.tag_id
+            values: dict[str, object] = {
+                "tag_id": tag.tag_id,
+                "candidate_name": None,
+                "candidate_description": None,
+                "candidate_alias": tag.alias_name,
+            }
+            status = "approved"
+            comment = _auto_comment(tag)
+        elif tag.origin == "generated":
+            if not tag.dir_id:
+                raise ValueError(
+                    f"新词缺少候选目录: {tag.tag_name!r}（生成侧必须给出 dir_id）")
+            field, value = PreAssetTag.candidate_name, tag.tag_name
+            values = {
+                "tag_id": None,
+                "candidate_name": tag.tag_name,
+                "candidate_description": tag.candidate_description,
+                "candidate_dir_id": tag.dir_id,
+                "candidate_alias": None,
+            }
+            status = "pending"
+            comment = None
+        else:
             raise ValueError(
-                f"未知 origin: {tag.origin!r}（合法取值 closed|open）")
-        if tag.origin == "closed" and not tag.tag_id:
-            raise ValueError("closed 标签缺少 tag_id（命中目录内定义必带）")
+                f"未知产出类型: {tag.origin!r}（合法取值 catalog|generated）")
 
-        row = PreAssetTag(
+        existing = _existing(session, asset_id, target_type, target_id,
+                             field, value)
+        if existing is not None:
+            # pending 行已被上一步清掉，这里命中的只可能是已定稿行或其他
+            # origin 的待审行：都不覆盖（不复活、不抢行）
+            summary.skipped_finalized += 1
+            continue
+
+        session.add(PreAssetTag(
             asset_id=asset_id,
-            target_type="content",
-            target_id=asset_id,
-            tag_id=tag.tag_id,
-            # candidate_name 仅 open 行（closed 行恒空，展示名由 tag_id 解析）
-            candidate_name=(tag.tag_name if tag.origin == "open" else None),
-            candidate_dir_id=None,  # 生成时不赋值（doc §6.4，合入时才赋）
-            # candidate_description 仅 open 自由候选（归一命中行空，doc §3.5）
-            candidate_description=(tag.candidate_description
-                                   if tag.tag_id is None else None),
-            origin=tag.origin,
+            target_type=target_type,
+            target_id=target_id,
+            origin=origin,
             relevance_score=tag.relevance_score,
             confidence=tag.confidence,
             evidence_json=_evidence_json(tag),
+            review_status=status,
+            reviewer_id=SYSTEM_REVIEWER if status == "approved" else None,
+            review_comment=comment,
             task_id=task_id,
-            review_status="pending",
             created_at=now,
             updated_at=now,
-        )
-        try:
-            with session.begin_nested():  # SAVEPOINT：单行插入的冲突隔离
-                session.add(row)
-                session.flush()
-            summary.inserted += 1
-        except IntegrityError:
-            conflict = _find_conflict(session, asset_id, tag)
-            if conflict is None:
-                raise  # 非唯一索引冲突（外键等）：数据错误，不能吞
-            if conflict.review_status in FINALIZED_STATUSES:
-                summary.skipped_finalized += 1
-            else:
-                summary.deleted_pending += 1
+            **values,
+        ))
+        summary.inserted += 1
+        if status == "approved":
+            summary.auto_approved += 1
 
     return summary

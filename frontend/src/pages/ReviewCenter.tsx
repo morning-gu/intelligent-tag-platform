@@ -1,56 +1,55 @@
-// 审核中心（v2 行即日志）：标签行的筛选列表与四动作审核。
-// - 顶部筛选栏：状态/目录/置信度区间/来源（statuses/origins 为契约固定
-//   枚举，dirs 动态取自 /review/filters）；默认拉 status=pending，后端
-//   confidence 升序返回（低分先审）；分页走列表 API。v1 的 tag_type 与
-//   mode 维度随词表退役——origin 即模式（closed 闭环 / open 开放）。
-// - 表格列：资产标题/标签名/目录（dir_name，null 兜底"—"）/来源
-//   （closed→Tag 闭环 / open→Tag 开放）/置信度/相关度/状态（三态 Tag，
-//   v1 的 merged 紫 随词表退役）。
-// - 行动作按形态分支（后端语义注入）：行有 tag_id（closed 行 / open 归一
-//   命中行）出 通过/拒绝/修改/合并；open 自由候选行（tag_id 为空）只出
-//   拒绝/合并——直接 approve/modify 后端 422，修改弹窗仅在 tag_id 行出现。
-// - 修改弹窗：候选名/候选描述/备注，提交即通过（后端 modify=更新候选后
-//   直接走 approve 流程，无需二次点击）。
-// - 合并弹窗两支互斥（Radio 切换，备注两支共用）：并入既有=搜索选择既有
-//   标签（fetchTags kind=tag）；合入新建=选目录（fetchTagCatalog kind=dir
-//   lazily 拉取）+新标签名+描述。payload 走 never 互斥类型，不会混。
+// 审核中心（v2 行即日志）：按影片分组的标签行审核。
+// - 顶部筛选栏：状态/目录/置信度区间/来源（statuses/modes 为契约固定
+//   枚举，dirs 动态取自 /review/filters，按 dir_id 精确过滤）；默认拉
+//   status=pending，后端 confidence 升序返回（低分先审）；一次取回
+//   GROUPED_PAGE_SIZE 行供分组，不分页。
+// - 列表按影片分组（Collapse）：组头是片名 + 条数，默认全部折叠，逐部
+//   展开审核；排序沿用后端顺序（低置信度优先，片内同序）。
+// - 表格列：标签名/目录（dir_path 完整路径，缺路径回退 dir_name，都无则
+//   "—"）/来源（closed→Tag 闭环 / open→Tag 开放）/置信度/相关度/状态。
+// - 行内动作：通过/拒绝/修改/合并（通过=按候选目录入库；合并=候选名记成
+//   库内标签别名，后端仅此一支，新建标签走"通过入库"）。
+// - 相关度 = 与库内最相近标签的余弦（后端对齐 top-1）：判成新词也有值，
+//   是"离库里的东西最近有多近"的信号。
 // - 行展开 EvidenceCard 展示证据明细，点击跳内容详情并定位场景。
-// - 勾选行批量通过/拒绝（逐条独立端点）；冲突处理（Review Focus 1）：
-//   审核操作 409 → 统一提示"该标签已被他人处理"并自动刷新列表；批量
-//   失败项（含冲突）去重后汇总提示（Review Focus 4）。
+// - 勾选行批量通过/拒绝（逐条独立端点，跨影片共享选择）；冲突处理：审核
+//   操作 409 → 统一提示"该标签已被他人处理"并自动刷新列表。
 import {
   Alert,
   Button,
+  Collapse,
+  Empty,
   Form,
   Input,
   InputNumber,
   Modal,
   Popconfirm,
   Progress,
-  Radio,
   Select,
   Space,
   Table,
   Tag,
+  Typography,
   message,
 } from 'antd'
 import type { TableProps } from 'antd'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError } from '../api/client'
 import { fetchTagCatalog, type TagNode } from '../api/catalog'
 import {
   batchReviewAssetTags,
   fetchReviewFilters,
   fetchReviewItems,
-  fetchTags,
   reviewAssetTag,
   type ReviewActionPayload,
   type ReviewFilters,
   type ReviewItem,
-  type ReviewStatus,
-  type TagOrigin,
 } from '../api/review'
 import EvidenceCard from '../components/EvidenceCard'
+
+/** 一次拉取上限：审核队列按影片分组展示，分组需要完整行集，故用大
+ * page_size 一次取回；超出时页面提示收窄筛选。 */
+const GROUPED_PAGE_SIZE = 500
 
 /** 审核状态中文展示（键集与后端契约固定枚举一致；merged 已退役）。 */
 const STATUS_LABELS: Record<string, string> = {
@@ -75,6 +74,13 @@ const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放'
 /** 来源 Tag 颜色（沿 v1 模式列配色：闭环蓝 / 开放紫）。 */
 const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
+/** 挂载粒度中文展示（目录 applicable_scope 的落库结果）。 */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  content: '整片',
+  scene: '单场景',
+  character: '人物',
+}
+
 /** 来源下拉兜底（origins 为契约固定枚举，filters 失败时仍可筛）。 */
 const ORIGIN_FALLBACK = ['closed', 'open']
 
@@ -85,30 +91,24 @@ interface ModifyFormValues {
   comment?: string
 }
 
-/** 合并弹窗模式：并入既有 / 合入新建（两支 payload 互斥，Radio 切换）。 */
-type MergeMode = 'existing' | 'new'
-
-/** 合并弹窗表单值（按模式取用字段：支一 merge_to_tag_id；支二 new_*）。 */
+/** 合并弹窗表单值：目标标签（merge_to_tag_id）+ 可选备注。 */
 interface MergeFormValues {
   merge_to_tag_id?: string
-  new_tag_name?: string
-  new_dir_id?: string
-  new_description?: string
   comment?: string
 }
 
 export default function ReviewCenter() {
-  // —— 列表数据与分页 ——
+  // —— 列表数据：按影片分组展示，一次取回全部匹配行 ——
   const [items, setItems] = useState<ReviewItem[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(50)
+  // 展开的影片分组：默认全部折叠（先看影片与待审条数，逐部展开审核）
+  const [openKeys, setOpenKeys] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   // —— 筛选状态（默认拉待审核）——
   const [status, setStatus] = useState<string | undefined>('pending')
-  const [dir, setDir] = useState<string | undefined>()
+  const [dirId, setDirId] = useState<string | undefined>()
   const [confidenceMin, setConfidenceMin] = useState<number | undefined>()
   const [confidenceMax, setConfidenceMax] = useState<number | undefined>()
   const [origin, setOrigin] = useState<string | undefined>()
@@ -120,9 +120,6 @@ export default function ReviewCenter() {
   const [merging, setMerging] = useState<ReviewItem | null>(null)
   const [tagOptions, setTagOptions] = useState<TagNode[]>([])
   const [tagSearching, setTagSearching] = useState(false)
-  const [mergeMode, setMergeMode] = useState<MergeMode>('existing')
-  const [dirOptions, setDirOptions] = useState<TagNode[]>([])
-  const [dirLoading, setDirLoading] = useState(false)
   const [batchLoading, setBatchLoading] = useState(false)
   const [modifyForm] = Form.useForm<ModifyFormValues>()
   const [mergeForm] = Form.useForm<MergeFormValues>()
@@ -131,13 +128,13 @@ export default function ReviewCenter() {
     setLoading(true)
     try {
       const res = await fetchReviewItems({
-        status: status as ReviewStatus | undefined,
+        status,
         confidence_min: confidenceMin,
         confidence_max: confidenceMax,
-        dir,
-        origin: origin as TagOrigin | undefined,
-        page,
-        page_size: pageSize,
+        dir_id: dirId,
+        origin,
+        page: 1,
+        page_size: GROUPED_PAGE_SIZE,
       })
       setItems(res.items)
       setTotal(res.total)
@@ -147,7 +144,25 @@ export default function ReviewCenter() {
     } finally {
       setLoading(false)
     }
-  }, [status, dir, confidenceMin, confidenceMax, origin, page, pageSize])
+  }, [status, dirId, confidenceMin, confidenceMax, origin])
+
+  /** 按影片分组（保持后端返回顺序：低置信度优先，影片内同样低分在前）。 */
+  const groups = useMemo(() => {
+    const map = new Map<
+      string,
+      { assetId: string; title: string; rows: ReviewItem[] }
+    >()
+    for (const item of items) {
+      const group = map.get(item.asset_id) ?? {
+        assetId: item.asset_id,
+        title: item.asset_title ?? item.asset_id,
+        rows: [],
+      }
+      group.rows.push(item)
+      map.set(item.asset_id, group)
+    }
+    return [...map.values()]
+  }, [items])
 
   useEffect(() => {
     // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
@@ -198,10 +213,9 @@ export default function ReviewCenter() {
 
   function openModify(item: ReviewItem) {
     modifyForm.resetFields()
-    // 预填候选名：open 行即候选原文；closed 行 candidate_name 为空，回退
-    // 展示名（定义名）——修改落在行内 candidate_name 作展示名覆盖，不动
-    // 目录定义（tag_name = candidate_name 优先，回退定义名）
-    modifyForm.setFieldsValue({ candidate_name: item.candidate_name ?? item.tag_name })
+    // 预填展示名（后端 tag_name 已是"候选名优先、目录名回退"）；提交落在
+    // 行内 candidate_name 作展示名覆盖，不动目录定义
+    modifyForm.setFieldsValue({ candidate_name: item.tag_name })
     setEditing(item)
   }
 
@@ -236,12 +250,12 @@ export default function ReviewCenter() {
     }
   }
 
-  /** 标准标签搜索（合并支一数据源）：即查即显（内部工具、limit=20 限流，
+  /** 标准标签搜索（合并弹窗数据源）：即查即显（内部工具、limit=20 限流，
    * 不做防抖）；kind=tag 只取标签，不混入目录节点。 */
   async function searchTags(q: string) {
     setTagSearching(true)
     try {
-      const res = await fetchTags(q)
+      const res = await fetchTagCatalog({ kind: 'tag', q: q || undefined, limit: 20 })
       setTagOptions(res.items)
     } catch {
       setTagOptions([]) // 搜索失败：清空候选不阻塞弹窗，再次搜索可恢复
@@ -250,34 +264,10 @@ export default function ReviewCenter() {
     }
   }
 
-  /** 合入新建的目录下拉（lazily：首次切到"合入新建"才拉取，kind=dir 只取
-   * 目录节点）；失败留空不阻塞弹窗，重开弹窗可重试。 */
-  async function loadDirOptions() {
-    if (dirOptions.length > 0 || dirLoading) return
-    setDirLoading(true)
-    try {
-      const res = await fetchTagCatalog({ kind: 'dir', limit: 200 })
-      setDirOptions(res.items)
-    } catch {
-      setDirOptions([])
-    } finally {
-      setDirLoading(false)
-    }
-  }
-
   function openMerge(item: ReviewItem) {
     mergeForm.resetFields()
-    setMergeMode('existing')
     setMerging(item)
-    void searchTags('') // 打开弹窗即预载候选标签（默认支一并入既有）
-  }
-
-  /** 合并模式切换：清空两支表单（防跨支残留值泄入 payload）；切到合入
-   * 新建时 lazily 拉取目录下拉。 */
-  function handleMergeModeChange(mode: MergeMode) {
-    setMergeMode(mode)
-    mergeForm.resetFields()
-    if (mode === 'new') void loadDirOptions()
+    void searchTags('') // 打开弹窗即预载候选标签
   }
 
   async function handleMergeSubmit() {
@@ -286,31 +276,18 @@ export default function ReviewCenter() {
     try {
       values = await mergeForm.validateFields()
     } catch {
-      return // 必填校验失败（合并目标/目录/新标签名）：字段已原位提示
+      return // 必填校验失败（合并目标）：字段已原位提示
     }
     const comment = values.comment?.trim() || undefined
-    // 两支 payload 走 never 互斥类型：键集按支精确构造，不会混
-    let payload: ReviewActionPayload
-    if (mergeMode === 'existing') {
-      // 支一：并入既有标签（merge_to_tag_id 必填已由表单规则校验，备注可选）
-      const mergeTo = values.merge_to_tag_id as string
-      payload = comment !== undefined
-        ? { merge_to_tag_id: mergeTo, comment }
-        : { merge_to_tag_id: mergeTo }
-    } else {
-      // 支二：新建标签入库（new_tag_name + new_dir_id 必填，描述/备注可选）
-      payload = {
-        new_tag_name: (values.new_tag_name as string).trim(),
-        new_dir_id: values.new_dir_id as string,
-        ...(values.new_description?.trim()
-          ? { new_description: values.new_description.trim() }
-          : {}),
-        ...(comment !== undefined ? { comment } : {}),
-      }
-    }
+    // 合并只有一支：候选名记为库内标签的别名（后端 merge_to_tag_id）；
+    // "新建标签"走通过入库（approve 按目录建 tag_define），不在这里绕。
+    const mergeTo = values.merge_to_tag_id as string
+    const payload: ReviewActionPayload = comment !== undefined
+      ? { merge_to_tag_id: mergeTo, comment }
+      : { merge_to_tag_id: mergeTo }
     try {
       await reviewAssetTag(merging.id, 'merge', payload)
-      message.success(mergeMode === 'existing' ? '已合并到目标标签' : '已新建标签并合并入库')
+      message.success('已合并到目标标签')
       setMerging(null)
       await loadItems()
     } catch (err) {
@@ -346,18 +323,36 @@ export default function ReviewCenter() {
     value: s,
     label: STATUS_LABELS[s] ?? s,
   }))
-  const originOptions = (filters?.origins ?? ORIGIN_FALLBACK).map((o) => ({
+  const originOptions = (filters?.modes ?? ORIGIN_FALLBACK).map((o) => ({
     value: o,
     label: ORIGIN_LABELS[o] ?? o,
   }))
+  // 目录下拉按 dir_id 精确过滤（后端 dir_id 入参），展示用全路径
+  const dirOptions = (filters?.dirs ?? []).map((d) => ({
+    value: d.dir_id,
+    label: d.path || d.dir_name,
+  }))
 
   const columns: TableProps<ReviewItem>['columns'] = [
-    { title: '资产标题', dataIndex: 'asset_title', render: (v: string | null) => v ?? '—' },
     { title: '标签名', dataIndex: 'tag_name' },
     {
       title: '目录',
-      dataIndex: 'dir_name',
-      render: (v: string | null) => v ?? '—',
+      dataIndex: 'dir_path',
+      // 完整目录路径（根→叶，如"内容特征标签/情感/父子关系"）；只有名称
+      // 回退，两者都没有（新词候选未定目录）才是"—"
+      render: (_: string | null, item) =>
+        item.dir_path ?? item.dir_name ?? '—',
+    },
+    {
+      title: '粒度',
+      dataIndex: 'target_type',
+      // 这条标签挂在哪一级（目录 applicable_scope 的落库结果）：整片/单场景/人物。
+      // 审核时要判断"这条标签该不该挂在这一级"，缺了这列只能靠猜。
+      render: (v: string) => (
+        <Tag color={v === 'content' ? 'default' : 'cyan'}>
+          {TARGET_TYPE_LABELS[v] ?? v}
+        </Tag>
+      ),
     },
     {
       title: '来源',
@@ -389,18 +384,16 @@ export default function ReviewCenter() {
       key: 'actions',
       render: (_, item) => (
         <Space size={0}>
-          {/* 行有 tag_id（closed 行 / open 归一命中行）才出 通过/修改——
-              open 自由候选直接 approve/modify 后端 422 */}
-          {item.tag_id !== null && (
-            <Popconfirm
-              title="确认通过该标签？"
-              okText="确定"
-              cancelText="取消"
-              onConfirm={() => void handleReview(item, 'approve')}
-            >
-              <Button type="link" size="small">通过</Button>
-            </Popconfirm>
-          )}
+          {/* 通过 = 按候选目录入库（后端 record_tag_definition）：新词、库内
+              命中行都能通过；目录校验不过返回 422，前端透出 detail */}
+          <Popconfirm
+            title="确认通过该标签？"
+            okText="确定"
+            cancelText="取消"
+            onConfirm={() => void handleReview(item, 'approve')}
+          >
+            <Button type="link" size="small">通过</Button>
+          </Popconfirm>
           <Popconfirm
             title="确认拒绝该标签？"
             okText="确定"
@@ -409,10 +402,8 @@ export default function ReviewCenter() {
           >
             <Button type="link" size="small" danger>拒绝</Button>
           </Popconfirm>
-          {item.tag_id !== null && (
-            <Button type="link" size="small" onClick={() => openModify(item)}>修改</Button>
-          )}
-          {/* 合并对两种行形都可用——候选行经 merge 归置入库后走 approve 流程 */}
+          <Button type="link" size="small" onClick={() => openModify(item)}>修改</Button>
+          {/* 合并 = 候选名记为库内标签别名（不改标准名） */}
           <Button type="link" size="small" onClick={() => openMerge(item)}>合并</Button>
         </Space>
       ),
@@ -425,7 +416,7 @@ export default function ReviewCenter() {
         <Select
           aria-label="状态筛选"
           value={status}
-          onChange={(v) => { setPage(1); setStatus(v) }}
+          onChange={(v) => { setStatus(v) }}
           options={statusOptions}
           allowClear
           placeholder="状态"
@@ -433,12 +424,14 @@ export default function ReviewCenter() {
         />
         <Select
           aria-label="目录筛选"
-          value={dir}
-          onChange={(v) => { setPage(1); setDir(v) }}
-          options={(filters?.dirs ?? []).map((d) => ({ value: d, label: d }))}
+          value={dirId}
+          onChange={(v) => { setDirId(v) }}
+          options={dirOptions}
           allowClear
+          showSearch
+          optionFilterProp="label"
           placeholder="目录"
-          style={{ width: 140 }}
+          style={{ width: 200 }}
         />
         <InputNumber
           placeholder="最低置信度"
@@ -446,7 +439,7 @@ export default function ReviewCenter() {
           max={1}
           step={0.1}
           value={confidenceMin}
-          onChange={(v) => { setPage(1); setConfidenceMin(v ?? undefined) }}
+          onChange={(v) => { setConfidenceMin(v ?? undefined) }}
           style={{ width: 130 }}
         />
         <InputNumber
@@ -455,13 +448,13 @@ export default function ReviewCenter() {
           max={1}
           step={0.1}
           value={confidenceMax}
-          onChange={(v) => { setPage(1); setConfidenceMax(v ?? undefined) }}
+          onChange={(v) => { setConfidenceMax(v ?? undefined) }}
           style={{ width: 130 }}
         />
         <Select
           aria-label="来源筛选"
           value={origin}
-          onChange={(v) => { setPage(1); setOrigin(v) }}
+          onChange={(v) => { setOrigin(v) }}
           options={originOptions}
           allowClear
           placeholder="来源"
@@ -489,30 +482,55 @@ export default function ReviewCenter() {
       {loadError !== null && (
         <Alert type="error" showIcon message="审核列表加载失败" description={loadError} />
       )}
-      <Table<ReviewItem>
-        rowKey="id"
-        columns={columns}
-        dataSource={items}
-        loading={loading}
-        rowSelection={{
-          selectedRowKeys: selectedIds,
-          onChange: (keys) => setSelectedIds(keys.map(Number)),
-        }}
-        expandable={{
-          expandedRowRender: (item) => (
-            <EvidenceCard assetId={item.asset_id} evidence={item.evidence} />
-          ),
-          rowExpandable: (item) => item.evidence.length > 0,
-        }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps) },
-        }}
-      />
+      <Typography.Text type="secondary">
+        {`共 ${total} 条 · 涉及 ${groups.length} 部影片`}
+        {total > GROUPED_PAGE_SIZE
+          ? `（仅展示前 ${GROUPED_PAGE_SIZE} 条，请用筛选收窄范围）`
+          : ''}
+      </Typography.Text>
+      {groups.length === 0 ? (
+        loading ? null : <Empty description="当前筛选下没有标签" />
+      ) : (
+        <Collapse
+          activeKey={openKeys}
+          onChange={(keys) => setOpenKeys(keys as string[])}
+          items={groups.map((group) => ({
+            key: group.assetId,
+            label: (
+              <Space>
+                <Typography.Text strong>{group.title}</Typography.Text>
+                <Tag>{`${group.rows.length} 条`}</Tag>
+              </Space>
+            ),
+            children: (
+              <Table<ReviewItem>
+                rowKey="id"
+                columns={columns}
+                dataSource={group.rows}
+                loading={loading}
+                rowSelection={{
+                  selectedRowKeys: selectedIds,
+                  // 每部影片一张表，跨表共享选择：只替换本表范围内的选择，
+                  // 保留其他影片已勾选的行（批量操作按全集提交）
+                  onChange: (keys) => {
+                    const groupIds = new Set(group.rows.map((row) => row.id))
+                    const kept = selectedIds.filter((id) => !groupIds.has(id))
+                    setSelectedIds([...kept, ...keys.map(Number)])
+                  },
+                }}
+                expandable={{
+                  expandedRowRender: (item) => (
+                    <EvidenceCard assetId={item.asset_id} evidence={item.evidence} />
+                  ),
+                  rowExpandable: (item) => item.evidence.length > 0,
+                }}
+                pagination={false}
+                size="small"
+              />
+            ),
+          }))}
+        />
+      )}
       <Modal
         title={`修改标签：${editing?.tag_name ?? ''}`}
         open={editing !== null}
@@ -542,59 +560,23 @@ export default function ReviewCenter() {
         onCancel={() => setMerging(null)}
       >
         <Form form={mergeForm} layout="vertical">
-          <Radio.Group
-            value={mergeMode}
-            onChange={(e) => handleMergeModeChange(e.target.value as MergeMode)}
-            style={{ marginBottom: 12 }}
+          <Form.Item
+            name="merge_to_tag_id"
+            label="合并目标（库内标签）"
+            extra="合并后库内标签保留为标准名，本行候选名记为它的别名；要新建标签请直接「通过」（按目录入库）"
+            rules={[{ required: true, message: '请选择合并目标标签' }]}
           >
-            <Radio value="existing">并入既有标签</Radio>
-            <Radio value="new">合入新建标签</Radio>
-          </Radio.Group>
-          {mergeMode === 'existing' ? (
-            <Form.Item
-              name="merge_to_tag_id"
-              label="合并目标"
-              rules={[{ required: true, message: '请选择合并目标标签' }]}
-            >
-              <Select
-                aria-label="搜索标准标签"
-                showSearch
-                filterOption={false}
-                loading={tagSearching}
-                onSearch={(q) => void searchTags(q)}
-                options={tagOptions.map((t) => ({ value: t.id, label: t.name }))}
-                placeholder="搜索并选择标准标签"
-                style={{ width: '100%' }}
-              />
-            </Form.Item>
-          ) : (
-            <>
-              <Form.Item
-                name="new_dir_id"
-                label="目标目录"
-                rules={[{ required: true, message: '请选择目标目录' }]}
-              >
-                <Select
-                  aria-label="目标目录"
-                  loading={dirLoading}
-                  options={dirOptions.map((d) => ({ value: d.id, label: d.name }))}
-                  placeholder="选择新标签归属目录"
-                  style={{ width: '100%' }}
-                />
-              </Form.Item>
-              <Form.Item
-                name="new_tag_name"
-                label="新标签名"
-                rules={[{ required: true, message: '请填写新标签名' }]}
-              >
-                <Input />
-              </Form.Item>
-              <Form.Item name="new_description" label="新标签描述">
-                <Input.TextArea rows={2} />
-              </Form.Item>
-            </>
-          )}
-          {/* 备注两支共用（并入既有/合入新建同款 TextArea） */}
+            <Select
+              aria-label="搜索标准标签"
+              showSearch
+              filterOption={false}
+              loading={tagSearching}
+              onSearch={(q) => void searchTags(q)}
+              options={tagOptions.map((t) => ({ value: t.id, label: t.name }))}
+              placeholder="搜索并选择标准标签"
+              style={{ width: '100%' }}
+            />
+          </Form.Item>
           <Form.Item name="comment" label="备注">
             <Input.TextArea rows={2} />
           </Form.Item>

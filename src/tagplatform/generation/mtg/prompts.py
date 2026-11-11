@@ -8,7 +8,9 @@
 - 审核 prompt 含标志串 `## 审核任务`；
 - 场景行统一为 `- {scene_id} [{start_ms}-{end_ms}] {description}`（与
   `tasks/runner._render_content_text` 同形，Mock 的 `_SCENE_LINE_RE` 直接可解析）；
-- 审核候选行统一为 `- {tag}｜{dimension}｜{reason}`（全角竖线分隔）。
+- 审核候选行统一为 `- {tag}｜{dimension}｜{reason}`（全角竖线分隔）；
+- 目录块标志串 `## 可以放新标签的目录`：只在有可扩展目录时出现，行格式
+  `- {dir_id}｜{全路径}｜{粒度}`，模型的 `dir` 字段按这个 id 回填。
 
 图片按场景内联：场景文字块之后紧跟该场景的关键帧（每张前有一行图注），
 让模型知道每张图属于哪个场景——这是"场景级视觉证据"能被模型引用的前提。
@@ -37,14 +39,18 @@ _DIMENSION_HINTS = {
     "角色": "人物类型或人物关系特征（如 反英雄、群像、父子关系）",
 }
 
+# 目录挂载粒度 → 提示词里的中文说明（只影响措辞，不参与校验）
+_SCOPE_LABELS = {"content": "整片", "scene": "单场景", "character": "人物"}
+
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
 
 # prompt 内明细上限（控制 token；资产本身已按场景裁剪过台词）
 _MAX_CAST = 8
-_MAX_DIALOGUES = 3
 _MAX_SCENE_DESC = 240
 _MAX_SUMMARY = 600
+# 台词不设上限：资产侧已按 asset_dialogue_limit 控量（8 条/场景），这里全用——
+# 台词是情绪与主题最直接的证据，按条数筛掉的往往正是关键那句。
 
 
 def _encode_image(path: Path) -> str:
@@ -86,15 +92,19 @@ def render_content(content: ContentJSON) -> str:
             lines.append(f"  地点：{scene.location}")
         if scene.background_music:
             lines.append(f"  音乐：{scene.background_music}")
-        for dialogue in scene.dialogues[:_MAX_DIALOGUES]:
+        for dialogue in scene.dialogues:
             tone = (f"（{dialogue.emotion.text_emotion}）"
                     if dialogue.emotion and dialogue.emotion.text_emotion else "")
             lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
     return "\n".join(lines)
 
 
-def _generation_instructions() -> str:
+def _generation_instructions(with_dir: bool = False) -> str:
     dims = "\n".join(f"- {name}：{_DIMENSION_HINTS[name]}" for name in DIMENSIONS.values())
+    dir_rule = (
+        "\n5. dir 必须是「可以放新标签的目录」里出现过的**目录 id**，不能自造；"
+        "找不到合适目录的标签直接不要输出。" if with_dir else "")
+    dir_field = '"dir":"目录 id",' if with_dir else ""
     return (
         "## 要求\n"
         "围绕下面五个维度，为这部影片生成 15-20 个中文标签（不受任何既有词表限制，"
@@ -112,6 +122,12 @@ def _generation_instructions() -> str:
         "  每个场景最多贡献一条场景级标签（同一场戏不要拆成“雨中交锋”“雨中表白”\n"
         "  两条），场景级标签合计最多 5 条。\n"
         "所有标签都不超过 8 个字。\n"
+        "每条标签还要给一句**通用释义**（字段 desc）：解释**这个词本身**指什么、\n"
+        "具备什么特征，10-32 字，像词典条目。它以后会脱离本片单独使用，所以\n"
+        "不能出现片名、人名、具体剧情或某一场戏的画面，不要写“本片/这部片/影片中”。\n"
+        "例：「宏大史诗」→「整体氛围宏大壮阔，具有史诗般的叙事格局」；\n"
+        "「幽闭压迫」→「以封闭狭窄空间带来的压抑窒息感为特征的氛围」。\n"
+        "（desc 写“这个词是什么”，reason 才是“本片哪里有依据”，两者不要混。）\n"
         "配额：全片级不少于 10 条，场景级最多 5 条。\n"
         "凑不出第二个场景支撑的特征，就老实标成 scene 级——不要为了凑全片级编造场景。\n"
         "硬性约束：\n"
@@ -119,17 +135,42 @@ def _generation_instructions() -> str:
         "2. 标签要具体、可判别，避免空泛（如“好看”“精彩”）；同一含义只出现一次；\n"
         "3. scenes 只能填上面出现过的场景 id；无法对应到具体场景时给空数组；\n"
         "4. 只输出一个 JSON 对象，形如 "
-        '{"tags":[{"tag":"2-8 字中文标签","scope":"film|scene",'
+        '{"tags":[{"tag":"2-8 字中文标签",' + dir_field +
+        '"scope":"film|scene",'
         '"dimension":"风格|情绪|主题|叙事|角色",'
+        '"desc":"10-32 字通用释义（不含片名/人名/剧情）",'
         '"scenes":["场景 id"],"reason":"20 字以内的内容依据"}]}；'
-        "不要解释、不要 Markdown 代码块。"
+        "不要解释、不要 Markdown 代码块。" + dir_rule
+    )
+
+
+def _dir_hint_block(dirs: list[dict]) -> str:
+    """可新增标签的目录清单（生成阶段就把归属交给模型决定）。
+
+    只列 `dir_dynamic` 的目录：静态目录不允许扩充，出现在提示词里只会诱使
+    模型往里面塞新词，然后在校验环节被打回。
+    """
+    lines = []
+    for entry in dirs:
+        label = _SCOPE_LABELS.get(entry.get("scope") or "", entry.get("scope") or "")
+        lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
+    return (
+        "## 可以放新标签的目录\n"
+        "每个标签都要落到下面某个目录里，用**目录 id** 填 `dir` 字段。"
+        "只能从这张表里选，不要自造 id（竖线后是目录全路径与挂载粒度）：\n"
+        + "\n".join(lines) + "\n"
+        "按标签本身的含义挑目录，不要看哪个目录空着就往哪塞；"
+        "一条标签实在没有合适的目录，就**不要输出它**——宁可少一条，"
+        "也不要放进不合适的目录。"
     )
 
 
 def build_generation_messages(content: ContentJSON,
                               frames_by_scene: dict[str, tuple[Path, ...]],
-                              run_index: int = 0) -> list[dict]:
-    """构造一轮生成请求：内容 + 场景内联关键帧 + 维度/格式要求。"""
+                              run_index: int = 0,
+                              library_hint: list[str] | None = None,
+                              dir_hint: list[dict] | None = None) -> list[dict]:
+    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内标签/目录 + 要求。"""
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
@@ -143,8 +184,41 @@ def build_generation_messages(content: ContentJSON,
                           "text": f"〔关键帧〕{scene.scene_id} 第 {order}/{len(frames)} 张"})
             parts.append({"type": "image_url",
                           "image_url": {"url": _encode_image(frame)}})
-    parts.append({"type": "text", "text": _generation_instructions()})
+    if library_hint:
+        parts.append({"type": "text", "text": _library_hint_block(library_hint)})
+    if dir_hint:
+        parts.append({"type": "text", "text": _dir_hint_block(dir_hint)})
+    parts.append({"type": "text",
+                  "text": _generation_instructions(with_dir=bool(dir_hint))})
     return [{"role": "user", "content": parts}]
+
+
+def _library_hint_block(names: list[str]) -> str:
+    """库内已有标签的提示块（只给名字，不给定义）。
+
+    措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
+    "悬疑解谜"这类更细的候选，只是不该原样复述。
+    """
+    listing = "\n".join(f"- {name}" for name in names)
+    return (
+        "## 库里已有的标签\n"
+        "下面这些标签我们的标签库里已经有了，**不要原样重复输出**；"
+        "如果你认为其中某条对这部片不够准确、不够具体，可以给出更精确的说法：\n"
+        f"{listing}"
+    )
+
+
+def _render_judge_content(content: ContentJSON) -> str:
+    """judge 看到的内容文本：与生成同形，但**不含台词**。
+
+    A/B 实测（同一批候选连判两次，只差台词）：角斗士 31 条、傲慢与偏见 32 条，
+    判定结果 0 处变化，而 judge prompt 分别少 24% / 36%。原因是资产里的场景
+    描述本来就是拿字幕一起生成出来的，台词对「这个标签有没有依据」不再提供
+    新证据；它只在生成阶段值钱（直接语料、语气、只可能出现在台词里的概念）。
+    """
+    text = render_content(content)
+    return "\n".join(line for line in text.splitlines()
+                     if not line.startswith("  台词："))
 
 
 def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[dict]:
@@ -159,9 +233,9 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[d
         "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
         "请逐个判定候选标签是否被内容真实支持。\n\n"
         "## 候选标签\n" + "\n".join(lines) + "\n\n"
-        "## 影片内容\n" + render_content(content) + "\n\n"
+        "## 影片内容\n" + _render_judge_content(content) + "\n\n"
         "## 判定标准\n"
-        "- supported：内容中有明确依据（场景描述、氛围、人物情绪或台词至少一处）；\n"
+        "- supported：内容中有明确依据（场景描述、氛围、人物情绪至少一处）；\n"
         "- insufficient：内容不足以判断（不要臆测）；\n"
         "- contradicted：内容明显与标签矛盾；\n"
         "- importance：core（贯穿全片的主要特征）/ secondary（局部但清晰）/ "
@@ -169,7 +243,7 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[d
         "- confidence：0-1，你对判定结果的把握；\n"
         "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
         "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
-        "台词或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
+        "氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
         "理由**；找不到能摘的原文就判 insufficient。\n"
         "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
         "另外注意作用域：若候选是面向全片的概括（措辞含“全片/整体/贯穿/始终”或"

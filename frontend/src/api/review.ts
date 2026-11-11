@@ -1,77 +1,32 @@
-// 审核 API（v2 行即日志）：/review 列表与筛选项、/asset-tags 审核操作（单条
-// 与批量）、/tags 标签搜索（合并弹窗数据源）的类型契约与取数函数 + 证据时间
-// 戳格式化。类型形状与后端 tagplatform/api/routers/review.py、tags.py 的
-// Pydantic 模型一致（词表 closed|open / pending|approved|rejected 与库 CHECK
-// 约束同源）；审核操作的 409 并发冲突经 client 的 ApiError.status 识别。
-// v1 的 mode/tag_type 维度随词表退役：列表行出 tag_id/candidate_name/dir_name，
-// 筛选出 dirs，查询出 dir；merge payload 拆两支（并入既有标签 / 新建入库）。
+// 审核 API（Task 10）：/review 列表与筛选项、/asset-tags 审核操作（单条
+// 与批量）、/tags 标准标签搜索的类型契约与取数函数 + 证据时间戳格式化。
+// 类型形状与后端 tagplatform/api/routers/review.py、tags.py 的 Pydantic
+// 模型一致；审核操作的 409 并发冲突经 client 的 ApiError.status 识别。
 import { apiFetch } from './client'
-import type { TagKind, TagNode } from './catalog'
 
-/** 产出来源词表（pre_asset_tag.origin，库 CHECK 约束）。 */
+/** 标签来源（= 任务模式：closed 闭环 / open 开放）。 */
 export type TagOrigin = 'closed' | 'open'
 
-/** 审核状态词表（pre_asset_tag.review_status，库 CHECK 约束）。 */
+/** 审核状态三态（与后端 _REVIEW_STATUSES 一致）。 */
 export type ReviewStatus = 'pending' | 'approved' | 'rejected'
 
-/** 审核动作（与后端 ReviewRequest.action 的 Literal 取值一致；批量端点仅
- * 接受 approve/reject）。 */
+/** 审核动作（与后端 ReviewRequest.action 的 Literal 取值一致）。 */
 export type ReviewAction = 'approve' | 'reject' | 'modify' | 'merge'
 
-/** 审核动作 payload（按动作分形，doc §6.2）：
- * - approve/reject：仅可选备注；
- * - modify：候选展示字段两键可选 + 备注（更新后直接 approve）；
- * - merge 两支互斥——并入既有标签（merge_to_tag_id，备注可选）或新建标签
- *   入库（new_tag_name + new_dir_id 必填，描述/备注可选）。
- *
- * 真互斥实现：各分支以 `?: never` 哨兵钉死他支专属键。普通可选字段联合
- * 挡不住混用——TS 对联合目标的溢出属性检查跨成员池化（键存在于任一成员
- * 即放行，如 merge_to_tag_id 与 new_tag_name 并存可静默通过），never 钉死
- * 后混用对象对所有成员均不可赋值，编译期必报错。动作与载荷的对应关系
- * （如 merge 配裸 {comment}）超出本类型表达力，由调用方保证、后端 422
- * 兜底；互斥哨兵用例见 review.test.ts 顶部 @ts-expect-error 反向哨兵块。 */
-export type ReviewActionPayload =
-  /** approve/reject：仅备注（modify/merge 专属键 never 钉死） */
-  | {
-      comment?: string
-      candidate_name?: never
-      candidate_description?: never
-      merge_to_tag_id?: never
-      new_tag_name?: never
-      new_dir_id?: never
-      new_description?: never
-    }
-  /** modify：候选展示字段 + 备注（merge 两支专属键 never 钉死） */
-  | {
-      candidate_name?: string
-      candidate_description?: string
-      comment?: string
-      merge_to_tag_id?: never
-      new_tag_name?: never
-      new_dir_id?: never
-      new_description?: never
-    }
-  /** merge 支一：并入既有标签（new_tag 三键 + modify 两键 never 钉死；
-   * comment 为四动作共享键，支一同样可携带） */
-  | {
-      merge_to_tag_id: string
-      comment?: string
-      candidate_name?: never
-      candidate_description?: never
-      new_tag_name?: never
-      new_dir_id?: never
-      new_description?: never
-    }
-  /** merge 支二：新建标签入库（merge_to_tag_id + modify 两键 never 钉死） */
-  | {
-      new_tag_name: string
-      new_dir_id: string
-      new_description?: string
-      comment?: string
-      candidate_name?: never
-      candidate_description?: never
-      merge_to_tag_id?: never
-    }
+/** 审核动作 payload：modify 用展示字段别名（tag_name/description/dir_id）或
+ * 规范名（candidate_name/candidate_description/candidate_dir_id）——写回行内
+ * 字段，改完直接按通过处理；merge 用 merge_to_tag_id（必填）；comment 对
+ * 各动作均可选（落 review_comment）。 */
+export interface ReviewActionPayload {
+  tag_name?: string
+  description?: string
+  dir_id?: string
+  candidate_name?: string
+  candidate_description?: string
+  candidate_dir_id?: string
+  comment?: string
+  merge_to_tag_id?: string
+}
 
 /** 单条证据明细（与后端 EvidenceOut 一致）。 */
 export interface ReviewEvidence {
@@ -81,23 +36,31 @@ export interface ReviewEvidence {
   description: string
 }
 
-/** 审核列表单行（与后端 ReviewItemOut 一致）：tag_name = candidate_name
- * （open 候选/审核 modify 落在行内的展示字段）优先，否则回退目录定义名
- * （closed 行/已合并行）；dir_name = 定义目录名 or 候选目录名 or null。 */
+/** 审核列表单行（与后端 ReviewItemOut 一致）：tag_name 取候选名优先、库内
+ * 标签名回退；tag_type 只来自库内标签（库外新词为 null）；mode 与 origin
+ * 同义；confidence/relevance 缺失时为 null。 */
 export interface ReviewItem {
   id: number
   asset_id: string
   asset_title: string | null
   tag_name: string
-  tag_id: string | null
-  candidate_name: string | null
-  origin: TagOrigin
-  dir_name: string | null
+  origin: string
+  mode: string | null
+  tag_type: string | null
   confidence: number | null
   relevance: number | null
-  review_status: ReviewStatus
+  review_status: string
+  /** 挂载粒度：content / scene / character（由目录 applicable_scope 决定）。 */
+  target_type: string
+  /** 归属目录（库内行取标签目录，新词取候选目录）。 */
+  dir_id: string | null
+  dir_name: string | null
+  /** 目录全路径（"内容特征标签/主类型"），列表展示用。 */
+  dir_path: string | null
   evidence: ReviewEvidence[]
   task_id: string | null
+  reviewer_id: string | null
+  review_comment: string | null
 }
 
 /** GET /review/items 响应：当前页行 + 过滤后总数 + 页码（分页走列表 API）。 */
@@ -107,23 +70,33 @@ export interface ReviewItemsResponse {
   page: number
 }
 
-/** GET /review/filters 响应：筛选下拉选项——statuses/origins 为契约固定
- * 枚举，dirs 为 tag_catalog 库内目录名去重升序（空库空列表）。 */
-export interface ReviewFilters {
-  statuses: ReviewStatus[]
-  origins: TagOrigin[]
-  dirs: string[]
+/** 筛选/选择用的目录选项（来自 JSON 标签库）。 */
+export interface ReviewDirOption {
+  dir_id: string
+  dir_name: string
+  path: string
+  dir_type: string
+  applicable_scope: string
 }
 
-/** 审核列表查询参数：undefined 字段不拼入查询串（0 为合法边界值，保留）。
- * dir 为目录名精确匹配（定义目录或候选目录任一命中）。 */
+/** GET /review/filters 响应：筛选下拉选项（tag_types/dirs 来自标签库）。 */
+export interface ReviewFilters {
+  tag_types: string[]
+  statuses: string[]
+  modes: string[]
+  dirs: ReviewDirOption[]
+}
+
+/** 审核列表查询参数：undefined 字段不拼入查询串（0 为合法边界值，保留）。 */
 export interface ReviewItemQuery {
-  status?: ReviewStatus
+  status?: string
   confidence_min?: number
   confidence_max?: number
-  dir?: string
-  origin?: TagOrigin
+  tag_type?: string
+  mode?: string
   asset_id?: string
+  origin?: string
+  dir_id?: string
   page?: number
   page_size?: number
 }
@@ -140,13 +113,13 @@ export function fetchReviewItems(query: ReviewItemQuery = {}): Promise<ReviewIte
   return apiFetch<ReviewItemsResponse>(`/api/v1/review/items${search ? `?${search}` : ''}`)
 }
 
-/** 筛选下拉选项（statuses/origins 契约固定枚举，dirs 库内动态推导）。 */
+/** 筛选下拉选项（tag_types 动态，statuses/modes 契约固定枚举）。 */
 export function fetchReviewFilters(): Promise<ReviewFilters> {
   return apiFetch<ReviewFilters>('/api/v1/review/filters')
 }
 
-/** 单条审核：四动作即时落库，返回更新后的行摘要（与任务详情结果行同形）；
- * 行已被处理时后端 409（ApiError.status === 409，调用方按冲突分支处理）。 */
+/** 单条审核：四动作即时落库，返回更新后的行摘要；行已被处理时后端
+ * 409（ApiError.status === 409，调用方按冲突分支处理）。 */
 export function reviewAssetTag(
   id: number,
   action: ReviewAction,
@@ -165,12 +138,11 @@ export interface BatchReviewItemResult {
   detail?: string | null
 }
 
-/** 批量审核（仅 approve/reject——modify/merge 载荷逐行各异，无批量语义）：
- * 逐条独立执行，单条失败（冲突/载荷非法/未知行）不影响其余。 */
+/** 批量审核：逐条独立执行，单条失败（冲突/载荷非法/未知行）不影响其余。 */
 export function batchReviewAssetTags(
   ids: number[],
-  action: Extract<ReviewAction, 'approve' | 'reject'>,
-  payload?: { comment?: string },
+  action: ReviewAction,
+  payload?: ReviewActionPayload,
 ): Promise<{ results: BatchReviewItemResult[] }> {
   return apiFetch<{ results: BatchReviewItemResult[] }>('/api/v1/asset-tags/batch-review', {
     method: 'POST',
@@ -178,20 +150,21 @@ export function batchReviewAssetTags(
   })
 }
 
-/** 标签搜索（合并弹窗数据源）：走混合树列表端点，kind 默认 'tag' 只取标签，
- * q 对 name 与 aliases 子串匹配；返回节点即 catalog 的 TagNode 形状。 */
-export function fetchTags(
-  q: string,
-  kind: TagKind = 'tag',
-  limit = 20,
-): Promise<{ items: TagNode[] }> {
-  const params = new URLSearchParams()
+/** 标准标签目录项（合并目标选择用，与后端 TagOut 的取用字段一致）。 */
+export interface TagOption {
+  tag_id: string
+  tag_name: string
+  tag_type: string
+  description: string
+}
+
+/** 标准标签搜索：q 对 tag_name 与 aliases 子串匹配（合并弹窗数据源）。 */
+export function fetchTags(q: string, limit = 20): Promise<{ items: TagOption[] }> {
+  const params = new URLSearchParams({ limit: String(limit) })
   if (q !== '') {
     params.set('q', q)
   }
-  params.set('kind', kind)
-  params.set('limit', String(limit))
-  return apiFetch<{ items: TagNode[] }>(`/api/v1/tags?${params.toString()}`)
+  return apiFetch<{ items: TagOption[] }>(`/api/v1/tags?${params.toString()}`)
 }
 
 /** 毫秒时间戳 → mm:ss（分钟位不封顶，超一小时自然进位；秒向下取整）。 */

@@ -164,7 +164,10 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert len(results) >= 1
     first = results[0]
     assert first["origin"] == "closed"
-    assert first["review_status"] == "pending"
+    # closed 生成从库内召回候选、产出即库内标签（tag_id 非空、名称同名）：
+    # 审核口径是"同名直接通过"，所以终态是 approved（无需人工再审）。
+    # 人工审核链路由 test_api_review / test_review_service 覆盖。
+    assert first["review_status"] == "approved"
     assert first["tag_id"] and first["candidate_name"] is None
     assert 0.5 <= first["confidence"] <= 1.0
     assert 0.0 <= first["relevance_score"] <= 1.0
@@ -178,37 +181,38 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     # 暴露，而非仅靠 MockLLM 选中概率兜底）——按 runner 同款路径复算：
     # 30 枚导入标签全量召回（top_k=50 ≥ 每目录 10 枚）
     from tagplatform.content_io import load_content
-    from tagplatform.generation.recall import embed_content_texts, recall_by_dir
+    from tagplatform.generation.recall import embed_content_texts, recall_candidates
+    from tagplatform.library import load_library
     with client.app.state.session_factory() as s:
         content = load_content(s.get(MediaAsset, asset_id).content_json)
-        candidates = recall_by_dir(s, embed_content_texts(content),
-                                   client.app.state.embedder, 50)
+        candidates = recall_candidates(load_library(s),
+                                       client.app.state.embedder,
+                                       embed_content_texts(content), top_k=50)
     assert len(candidates) == 30
     # 产出 ⊆ 候选（同键闭合：LLM 只能从候选清单选择，不得编造）
     assert {r["tag_id"] for r in results} <= {c.tag_id for c in candidates}
 
-    # 5. 审核 approve → 正式挂载出现在 /assets/{id}/tags（asset_tag 复制行）
-    approve = client.post(f"/api/v1/asset-tags/{first['id']}/review",
-                          json={"action": "approve"})
-    assert approve.status_code == 200, approve.text
-    assert approve.json()["review_status"] == "approved"
+    # 5. 自动通过 → 正式挂载已出现在 /assets/{id}/tags（asset_tag 复制行），
+    #    一条生成结果一条挂载，且挂载的 tag_id/tag_name 与结果一致
     tags = client.get(f"/api/v1/assets/{asset_id}/tags")
     assert tags.status_code == 200
     mounted = tags.json()
-    assert len(mounted) == 1
-    assert mounted[0]["tag_id"] == first["tag_id"]
-    assert mounted[0]["tag_name"] == first["tag_name"]
-    assert mounted[0]["origin"] == "closed"
-    assert mounted[0]["created_at"] is not None
+    assert len(mounted) == len(results)
+    by_tag = {row["tag_id"]: row for row in mounted}
+    for result in results:
+        row = by_tag[result["tag_id"]]
+        assert row["tag_name"] == result["tag_name"]
+        assert row["origin"] == "closed"
+        assert row["created_at"] is not None
 
-    # 6. metrics：summary 三键非零（pending / approved 计数 / 任务 succeeded）
-    #    + 通过率与证据覆盖满值 + dir-coverage 非空且 approved 汇总一致
+    # 6. metrics：summary 三键（终审分布 / 通过率 / 任务成功率）
+    #    + 证据覆盖满值 + dir-coverage 非空且 approved 汇总一致
     metrics = client.get("/api/v1/metrics/summary")
     assert metrics.status_code == 200
     m = metrics.json()
-    assert m["pending_count"] == len(results) - 1 > 0  # 其余行仍待审
-    assert m["review_stats"]["approved"]["count"] == 1
-    assert m["generated_pass_rate"] == 1.0  # 唯一终审行即 approve
+    assert m["pending_count"] == 0  # closed 行全部自动通过，无待审
+    assert m["review_stats"]["approved"]["count"] == len(results)
+    assert m["generated_pass_rate"] == 1.0  # 全部终审行都是 approve
     assert m["evidence_coverage"] == 1.0    # 全部生成行带场景证据
     assert m["task_stats"]["total"] == 1
     assert m["task_stats"]["succeeded"] == 1
@@ -218,7 +222,7 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     rows = coverage.json()
     assert rows  # 非空
     assert sum(row["total"] for row in rows) == len(results)
-    assert sum(row["approved"] for row in rows) == 1
+    assert sum(row["approved"] for row in rows) == len(results)  # 全部自动通过
 
     # metrics 第三端点：confidence 分桶——非空、桶标签格式、与互锁风格一致
     # （各桶 count 之和 == 全部带置信度行数；本链全部行带 confidence）

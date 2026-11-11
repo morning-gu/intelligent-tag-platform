@@ -26,6 +26,7 @@ from dataclasses import fields
 from datetime import datetime, timezone
 
 import numpy as np
+import pytest
 
 from conftest import MOCK_EMBEDDER
 from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
@@ -35,6 +36,9 @@ from tagplatform.governance.pipeline import (
     is_directory_row,
     referenced_dir_names,
 )
+
+# 本模块断言导入后的**精确行数**：测试夹具不得预置标签库默认行
+pytestmark = pytest.mark.empty_library
 
 
 class SameVecEmbedder:
