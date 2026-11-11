@@ -115,7 +115,7 @@ def normalize_scope(value) -> str | None:
 
 
 def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
-    """生成输出 → [{tag, scope, dimension, dir, scenes, reason}]（非法项丢弃）。"""
+    """生成输出 → [{tag, scope, dimension, dir, scenes, reason, desc}]（非法项丢弃）。"""
     items: list[dict] = []
     seen: set[str] = set()
     for entry in extract_json_array(text):
@@ -130,7 +130,7 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
         seen.add(key)
         scenes = [s.strip() for s in entry.get("scenes") or []
                   if isinstance(s, str) and s.strip()]
-        reason = str(entry.get("reason") or entry.get("description") or "").strip()
+        reason = str(entry.get("reason") or "").strip()
         items.append({
             "tag": tag,
             "scope": normalize_scope(entry.get("scope")),
@@ -141,6 +141,9 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
                               or entry.get("catalog_id")),
             "scenes": scenes,
             "reason": reason[:40],
+            # 通用释义（旧口径里模型只给 reason；这里兼容 description 字段，
+            # 是否"够通用"由 descriptions.is_general 判定，不在解析层猜）
+            "desc": str(entry.get("desc") or entry.get("definition") or "").strip(),
         })
         if len(items) >= max_items:
             break

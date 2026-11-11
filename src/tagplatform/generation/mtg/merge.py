@@ -33,6 +33,9 @@ class MergedCandidate:
     runs: int
     aliases: tuple[str, ...]
     reason: str
+    # 模型给的通用释义（"这个词是什么"）；空串表示这一轮没给，由流水线
+    # 用 descriptions.fill_descriptions 批量补写。
+    desc: str = ""
     scope: str | None = None
     # 模型自报的归属目录（原始串，可能是 id / 路径 / 名字）；合并时取多数派，
     # 由流水线解析成 dir_id 并校验，这里不做合法性判断。
@@ -93,6 +96,7 @@ def merge_candidates(entries: list[dict], embedder,
             groups[key] = {
                 "names": [], "dimensions": Counter(), "scopes": Counter(),
                 "dirs": Counter(), "scenes": set(), "runs": set(), "reason": "",
+                "desc": "",
                 "first": len(order),
             }
             order.append(key)
@@ -108,6 +112,8 @@ def merge_candidates(entries: list[dict], embedder,
         group["runs"].add(entry.get("run", 0))
         if not group["reason"] and entry.get("reason"):
             group["reason"] = entry["reason"]
+        if not group["desc"] and entry.get("desc"):
+            group["desc"] = entry["desc"]
 
     items = [groups[key] for key in order]
     if len(items) <= 1:
@@ -138,6 +144,7 @@ def merge_candidates(entries: list[dict], embedder,
             runs=len(runs),
             aliases=tuple(aliases),
             reason=best["reason"],
+            desc=best["desc"],
             scope=_primary_scope(members),
             dir_raw=_primary_dir(members),
         ))
@@ -199,6 +206,7 @@ def _to_candidate(group: dict) -> MergedCandidate:
         runs=len(group["runs"]),
         aliases=aliases,
         reason=group["reason"],
+        desc=group["desc"],
         scope=_primary_scope([group]),
         dir_raw=_primary_dir([group]),
     )

@@ -43,8 +43,17 @@ from tagplatform.generation.mtg.catalog_align import (
     recall_library_hints,
     summarize_bands,
 )
+from tagplatform.generation.mtg.descriptions import (
+    content_names,
+    fill_descriptions,
+    is_general,
+)
 from tagplatform.generation.mtg.judge import judge_candidates
-from tagplatform.generation.mtg.merge import MergedCandidate, merge_candidates
+from tagplatform.generation.mtg.merge import (
+    MergedCandidate,
+    merge_candidates,
+    normalize_tag,
+)
 from tagplatform.generation.mtg.parse import parse_generation_items
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
@@ -475,7 +484,6 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     per_dir_count: dict[str, int] = {}
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
-        reason = (verdict or {}).get("reason") or candidate.reason
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
         level = candidate.scope if candidate.scope in ("film", "scene") else "film"
@@ -578,7 +586,9 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         tags.append(ProducedTag(
             origin="generated", tag_id=None, tag_name=candidate.tag,
             candidate_type=candidate.dimension,
-            candidate_description=reason or None,
+            # 描述是"这个词本身"的通用释义；模型给的 desc 先落在这里，
+            # 不合规的在本段之后统一补写/清空（见描述通用化那一步）。
+            candidate_description=(candidate.desc or None),
             # 相关度 = 与库内最相近标签的余弦（对齐阶段的 top-1，判成新词也有
             # 值——"有多不像库里的东西"本身就是审核时要看的信号）。库里没标签
             # 或本条没参与对齐时才是 None。
@@ -602,6 +612,34 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                          "target_type": mount.target_type,
                          "confidence": confidence,
                          "evidence": [e.scene_id for e in evidence]})
+
+    # ---- 5.5 描述通用化 ----
+    # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"
+    # 的通用释义。模型照提示给了 desc 就直接用；没给或写得像剧情（含片名/
+    # 人名/场景/“本片”）的，这里批量补写一次；补不出来就留空——宁可没有描述，
+    # 也不把某一部片的剧情当标签释义落库。
+    names = content_names(contents)
+    needs_desc = [tag for tag in tags
+                  if tag.origin == "generated"
+                  and not is_general(tag.candidate_description, names)]
+    desc_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    desc_filled: dict[str, str] = {}
+    if needs_desc:
+        desc_filled = fill_descriptions(
+            llm,
+            [{"tag": tag.tag_name,
+              "dir": (" / ".join(tag_library.path_of(tag.dir_id))
+                      if tag_library is not None and tag.dir_id else None)}
+             for tag in needs_desc],
+            names=names, run_id=spec.run_id, usage=desc_usage)
+        for tag in needs_desc:
+            tag.candidate_description = desc_filled.get(normalize_tag(tag.tag_name))
+    descriptions_summary = {
+        "needs": len(needs_desc),
+        "filled": len(desc_filled),
+        "empty": len(needs_desc) - len(desc_filled),
+        "usage": desc_usage,
+    }
 
     # ---- 6. 审计落盘 ----
     elapsed = time.monotonic() - started
@@ -671,6 +709,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             ],
         },
         "verify_usage": verify_usage,
+        "descriptions": descriptions_summary,
         "dropped": dropped,
         "elapsed_s": round(elapsed, 1),
     }
