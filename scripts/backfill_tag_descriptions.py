@@ -136,24 +136,30 @@ def main(argv: list[str] | None = None) -> int:
         sources = _create_sources(session)
         now = datetime.now(timezone.utc)
 
-        # ---- 1. tag_define：已入库的描述 ----
+        # ---- 1. tag_define：只碰"生成 → 审核入库"造出来的标签 ----
+        # 库里 500+ 条导入标签的描述来自人工整理的表，不能用启发式去改；
+        # 只有带创建日志来源资产（source.asset_id）的才是审核新建的产物。
         define_targets: list[tuple[TagDefine, tuple[str, ...]]] = []
-        for row in session.query(TagDefine).all():
-            names = _names_of_asset(session, sources.get(row.tag_id))
+        for asset_id, tag_id in sources.items():
+            row = session.get(TagDefine, tag_id)
+            if row is None or not (row.description or "").strip():
+                continue
+            names = _names_of_asset(session, asset_id)
             if not is_general(row.description, names):
                 define_targets.append((row, names))
 
-        # ---- 2. pre_asset_tag：待审候选的描述 ----
+        # ---- 2. pre_asset_tag：生成候选（candidate_name 非空）的描述 ----
+        # 这些行的描述按构造就是"本片里的依据"（生成侧把 reason 写在这里），
+        # 不做启发式筛选——全部重写成通用释义。
         pre_query = session.query(PreAssetTag).filter(
             PreAssetTag.candidate_description.isnot(None),
+            PreAssetTag.candidate_name.isnot(None),
             PreAssetTag.review_status == "pending")
         if args.asset:
             pre_query = pre_query.filter(PreAssetTag.asset_id == args.asset)
         pre_by_asset: dict[str, list[PreAssetTag]] = {}
         for row in pre_query.all():
-            names = _names_of_asset(session, row.asset_id)
-            if not is_general(row.candidate_description, names):
-                pre_by_asset.setdefault(row.asset_id, []).append(row)
+            pre_by_asset.setdefault(row.asset_id, []).append(row)
 
         print(f"数据库: {database}")
         print(f"待改写的已入库标签描述: {len(define_targets)} 条")

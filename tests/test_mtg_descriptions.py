@@ -106,13 +106,18 @@ def test_is_general_accepts_dictionary_style():
 @pytest.mark.parametrize("text, names", [
     ("总统蜷身藏于货舱，空间封闭压迫", ("总统",)),   # 具体人物 + 剧情
     ("本片贯穿始终的幽闭压迫感", ()),                 # 指代本片
-    ("主角在货舱里的压抑", ()),                       # 指代主角
+    ("片中主角在货舱里的压抑", ()),                   # 指代具体影片
     ("scene_001 的空间压迫感", ()),                   # 场景 id
     ("压抑", ()),                                     # 太短
     ("场景" + "压" * 40, ()),                          # 太长
 ])
 def test_is_general_rejects_plot_specific(text, names):
     assert not is_general(text, names)
+
+
+def test_is_general_accepts_generic_protagonist_word():
+    """“主角”在库里是通用用法，不能当泄漏（否则会误杀成片定义）。"""
+    assert is_general("主角因遭受不公或伤害而展开复仇行动的剧情母题")
 
 
 def test_clean_description_strips_wrappers():

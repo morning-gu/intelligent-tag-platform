@@ -21,13 +21,15 @@ from tagplatform.generation.mtg.parse import MTGParseError, extract_json_array
 logger = logging.getLogger(__name__)
 
 # 描述长度：库内现有 9-30 字，均值 17。上限留一点余量给"一句完整释义"。
-DESC_MIN = 10
+DESC_MIN = 9
 DESC_MAX = 32
 
-# 指代本片/某场戏的措辞——通用释义里不该出现
+# 指代本片/某场戏的措辞——通用释义里不该出现。
+# 注意不含"主角/结尾/开头"：这些在库里是**通用**用法（"主角因遭受不公…
+# 展开复仇行动的剧情母题"就是一条合格的词条），把它们当泄漏会误杀成片定义。
 _EVIDENCE_MARKERS = (
     "本片", "该片", "这部片", "这部影", "片中", "影片中", "剧情中", "故事中",
-    "主角", "结尾", "开头", "这一幕", "本场",
+    "这一幕", "本场", "本剧",
 )
 
 _SCENE_ID = re.compile(r"scene_\d+", re.I)
