@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         # 描述按构造来自生成侧，一律重写成通用释义（不靠文本启发式筛选：专名
         # 清单未必覆盖到具体人名，"总统蜷身藏于货舱"这种就可能漏判）。
         define_targets: list[tuple[TagDefine, tuple[str, ...]]] = []
-        for asset_id, tag_id in sources.items():
+        for tag_id, asset_id in sources.items():  # sources: tag_id → 来源资产
             row = session.get(TagDefine, tag_id)
             if row is None or not (row.description or "").strip():
                 continue
