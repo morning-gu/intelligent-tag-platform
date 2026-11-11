@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
-from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.generation import list_producers
 from tagplatform.tasks import TaskExecutor
@@ -140,13 +140,32 @@ class GenerationTaskRetryResponse(BaseModel):
     status: str
 
 
-class AssetTagOut(GenerationResultOut):
-    """资产标签行：摘要形状（含行主键 id）+ 标识原样（tag_id/catalog 行、
-    candidate_name/generated 行）+ 挂载时间。"""
+class AssetTagOut(BaseModel):
+    """资产正式挂载行（`asset_tag`）：审核通过后复制过来的挂载关系。
 
+    - `id`：挂载行主键（审核接口返回的是**被审核的 pre 行**主键，两者语义
+      不同，前端不要跨接口比较）；
+    - `tag_name` 是库内规范名（审核 modify 的临时改名留在 pre 侧，正式挂载
+      按 doc §3.6/§6.3 复制 define 现值）；
+    - `origin` 由同键 pre 行回填（正式表不存来源），无对应 pre 行时为 None；
+    - 目录列由 `tag_define → tag_catalog` 实时解析；
+    - 评分/证据/审核状态是审核侧字段：挂载视图不带（恒 None/空），保留这些
+      字段是为了让审核接口能复用同一个响应模型。
+    """
+
+    id: int
     tag_id: str | None = None
+    tag_name: str
     candidate_name: str | None = None
-    # 挂载时间（取终审行的写入时间；与 main 同名字段对齐）
+    origin: str | None = None
+    relevance_score: float | None = None
+    confidence: float | None = None
+    review_status: str = "approved"
+    target_type: str = "content"
+    dir_id: str | None = None
+    dir_name: str | None = None
+    dir_path: str | None = None
+    evidence: list[EvidenceOut] = []
     created_at: datetime | None = None
 
 
@@ -210,7 +229,8 @@ def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
 
 
 def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
-    """行内 tag_id → 标签库信息（名称/类型/目录），只查 JSON 库不读表。"""
+    """行内 tag_id → 目录信息（名称/类型/目录），读 `tag_catalog`/`tag_define`
+    的库视图（v2 起标签库就是这两张表，不再有 JSON 文件）。"""
     library = try_load_library()
     tag_ids = {r.tag_id for r in rows if r.tag_id}
     if library is None or not tag_ids:
@@ -230,6 +250,19 @@ def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
     return info
 
 
+def _dir_info(dir_id: str | None) -> tuple[str | None, str | None, str | None]:
+    """dir_id → (dir_name, dir_path, 全路径最后一级名)；库不可用/目录缺失时
+    全部返回 None（调用方按"没有目录"展示）。"""
+    library = try_load_library()
+    if library is None or not dir_id:
+        return None, None, None
+    directory = library.directory(dir_id)
+    if directory is None:
+        return None, None, None
+    path = library.path_of(dir_id)
+    return directory.dir_name, ("/".join(path) if path else None), None
+
+
 def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
     """pre_asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。
 
@@ -238,18 +271,16 @@ def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
     """
     definition = info.get(row.tag_id or "", {})
     # 三级回退：行内展示名 → 库内标签名 → tag_id。历史行（上一轮落在旧
-    # tag_catalog 的 id）在 JSON 库里查不到，回退成 id，不能显示成空字符串。
+    # tag_catalog 的 id）在库里查不到，回退成 id，不能显示成空字符串。
     tag_name = (row.candidate_name or definition.get("tag_name")
                 or row.tag_id or "")
     dir_id = row.candidate_dir_id or definition.get("dir_id")
-    library = try_load_library()
     dir_name = definition.get("dir_name")
-    path: list[str] = []
-    if library is not None and dir_id:
-        path = library.path_of(dir_id)
-        if dir_name is None:
-            directory = library.directory(dir_id)
-            dir_name = directory.dir_name if directory else None
+    dir_path: str | None = None
+    if dir_id and not dir_name:
+        dir_name, dir_path, _ = _dir_info(dir_id)
+    elif dir_id:
+        _, dir_path, _ = _dir_info(dir_id)
     return GenerationResultOut(
         id=row.id,
         tag_name=tag_name,
@@ -262,7 +293,7 @@ def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
         target_type=row.target_type,
         dir_id=dir_id,
         dir_name=dir_name,
-        dir_path="/".join(path) if path else None,
+        dir_path=dir_path,
         evidence=_parse_evidence(row.evidence_json),
     )
 
@@ -429,19 +460,59 @@ def retry_generation_task(
 def list_asset_tags(
     asset_id: str, session: Session = Depends(get_session)
 ) -> list[AssetTagOut]:
-    """资产标签行（跨任务）：只返回审核已通过的行（v2 语义：pre 表审核通过
-    ≈ 正式挂载；入库复制逻辑实现后再切 asset_tag）；未知资产 → 404。"""
+    """资产正式挂载标签：读 `asset_tag`（审核通过的复制行才是权威口径，
+    doc §3.6）；origin/候选名由同键 pre 行回填，目录列按 `tag_define →
+    tag_catalog` 解析；未知资产 → 404。
+
+    历史说明：早期本端点直接读 `pre_asset_tag` 的 approved 行（那时还没有
+    "审核生效 → 复制进 asset_tag"这一步）。两表口径一旦分叉（历史 approved
+    行没被复制、或 modify 改了 pre 侧名字），以 asset_tag 为准。
+    """
     if session.get(MediaAsset, asset_id) is None:
         raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
-    rows = (
-        session.query(PreAssetTag)
-        .filter(
-            PreAssetTag.asset_id == asset_id,
-            PreAssetTag.review_status == "approved",
-        )
-        .order_by(PreAssetTag.id)
+    mounts = (
+        session.query(AssetTag)
+        .filter(AssetTag.asset_id == asset_id)
+        .order_by(AssetTag.id)
         .all()
     )
-    info = _tag_info(rows)
-    return [AssetTagOut(**_result_out(row, info).model_dump(),
-                        created_at=row.created_at) for row in rows]
+    if not mounts:
+        return []
+    # 同键 pre 行：origin / candidate_name 只存在于审核侧（正式表不存）。
+    # 新词入库后 pre 行的 tag_id 可能仍为空（ingest 只改 define/挂载），所以
+    # 再按"候选名 = 挂载名"建一份索引兜底。
+    pre_rows = session.query(PreAssetTag).filter(
+        PreAssetTag.asset_id == asset_id,
+    ).all()
+    pres = {
+        (p.target_type, p.target_id, p.tag_id): p
+        for p in pre_rows if p.tag_id
+    }
+    pres_by_name = {
+        (p.target_type, p.target_id, p.candidate_name): p
+        for p in pre_rows if p.candidate_name
+    }
+    info = _tag_info(pre_rows)
+    out: list[AssetTagOut] = []
+    for mount in mounts:
+        pre = pres.get((mount.target_type, mount.target_id, mount.tag_id))
+        if pre is None:
+            pre = pres_by_name.get(
+                (mount.target_type, mount.target_id, mount.tag_name))
+        # 目录：新词候选挂在 pre 的 candidate_dir_id；库内标签走 tag_define.dir_id
+        dir_id = (pre.candidate_dir_id if pre is not None else None) or \
+            info.get(mount.tag_id, {}).get("dir_id")
+        dir_name, dir_path, _ = _dir_info(dir_id)
+        out.append(AssetTagOut(
+            id=mount.id,
+            tag_id=mount.tag_id,
+            tag_name=mount.tag_name,
+            candidate_name=(pre.candidate_name if pre is not None else None),
+            origin=(pre.origin if pre is not None else None),
+            target_type=mount.target_type,
+            dir_id=dir_id,
+            dir_name=dir_name,
+            dir_path=dir_path,
+            created_at=mount.created_at,
+        ))
+    return out

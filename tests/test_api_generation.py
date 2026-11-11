@@ -141,7 +141,7 @@ def test_generation_e2e_closed_succeeded(client):
         "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
         "description": "两名人物在仓库中发生激烈争执"}]
 
-    # 自动通过的行直接进资产标签视图（无需人工动作）
+    # 自动通过的行直接进正式挂载（persist 同时写 asset_tag），无需人工动作
     tags_resp = client.get("/api/v1/assets/movie_001/tags")
     assert tags_resp.status_code == 200
     tags = tags_resp.json()
@@ -151,7 +151,8 @@ def test_generation_e2e_closed_succeeded(client):
         assert set(row.keys()) == ASSET_TAG_KEYS
         assert row["tag_id"] is not None and row["candidate_name"] is None
         assert row["tag_name"] == res["tag_name"]  # 同按入库行序，逐行对应
-        assert row["id"] == res["id"]  # 两端点同一批行的主键一致
+        # id 是 asset_tag 主键（与 pre 行主键不同源），用 tag_id + 名字对账
+        assert row["tag_id"] == res["tag_id"]
 
 
 def test_generation_e2e_open_generated_rows(client):
@@ -184,7 +185,7 @@ def test_generation_e2e_open_generated_rows(client):
             "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
             "description": "两名人物在仓库中发生激烈争执"}]
 
-    # 资产标签视图只收 approved 行：新词行全部通过后可见（tag_id 为空）
+    # 新词行审核通过前不进正式挂载；通过后由审核链路写 asset_tag（带新词 tag_id）
     assert client.get("/api/v1/assets/movie_001/tags").json() == []
     for row in results:
         assert client.post(f"/api/v1/asset-tags/{row['id']}/review",
@@ -193,7 +194,8 @@ def test_generation_e2e_open_generated_rows(client):
     assert len(tags) == 3
     for row in tags:
         assert set(row.keys()) == ASSET_TAG_KEYS
-        assert row["tag_id"] is None
+        # 新词入库拿到自己的 tag_id（asset_tag 存的是库内 id，不是候选名）
+        assert row["tag_id"] is not None
         assert row["candidate_name"] == row["tag_name"]
     assert {row["candidate_name"] for row in tags} == names
 
