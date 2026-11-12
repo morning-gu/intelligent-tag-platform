@@ -138,8 +138,6 @@ EXPECTED_COLUMNS = {
         # 0009 补列：SQLite ADD COLUMN 追加在表尾（模型里它排在
         # candidate_description 之后，物理顺序不影响读写）
         ("candidate_alias", "TEXT", 0, None),
-        # 0010 补列：生成时预测目录快照（同样是表尾追加）
-        ("predicted_dir_id", "TEXT", 0, None),
     ],
     "asset_tag": [
         ("id", "INTEGER", 1, None),
@@ -225,7 +223,6 @@ EXPECTED_INDEXES = {
     "idx_pre_tag_asset",
     "idx_pre_tag_task",
     "idx_pre_tag_review",
-    "idx_pre_tag_predicted_dir",
     "idx_asset_tag_asset",
     "idx_asset_tag_tag",
     "idx_import_task_status",

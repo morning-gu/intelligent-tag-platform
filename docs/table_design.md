@@ -217,9 +217,6 @@ CREATE TABLE pre_asset_tag (
     tag_id                TEXT REFERENCES tag_define(tag_id),
     candidate_name        TEXT,
     candidate_dir_id      TEXT REFERENCES tag_catalog(dir_id),
-    -- 生成时的预测目录（0010）。写入后不可变，刻意不挂外键：
-    -- 目录被治理删除后仍要留住历史预测，仅供归属评测读
-    predicted_dir_id      TEXT,
     candidate_description TEXT,
     origin                TEXT NOT NULL CHECK (origin IN ('closed', 'open')),
     relevance_score       REAL,
@@ -245,7 +242,6 @@ CREATE UNIQUE INDEX ux_pre_tag_candidate ON pre_asset_tag (asset_id, target_type
 CREATE INDEX idx_pre_tag_asset  ON pre_asset_tag(asset_id);
 CREATE INDEX idx_pre_tag_task   ON pre_asset_tag(task_id);
 CREATE INDEX idx_pre_tag_review ON pre_asset_tag(review_status);
-CREATE INDEX idx_pre_tag_predicted_dir ON pre_asset_tag(predicted_dir_id);
 ```
 
 **字段说明（closed / open 两模式）：**
@@ -255,15 +251,8 @@ CREATE INDEX idx_pre_tag_predicted_dir ON pre_asset_tag(predicted_dir_id);
 | `tag_id` | 必填（来自 `tag_define`） | 初始为空，审核合入标签库后赋值 |
 | `candidate_name` | 空 | 必填 |
 | `candidate_dir_id` | 空 | 生成时可空（mtg-v1 自拟分类不知目录体系），**合入时赋值** |
-| `predicted_dir_id` | 空（命中库内标签无“预测归属”动作） | 生成时写入（可用时回退为 `candidate_dir_id`） |
 | `candidate_description` | 空 | 仅 generated 标签填写 |
 | `origin` | `closed` | `open`（不可变，记录产出来源） |
-
-`predicted_dir_id` 是**生成时的预测快照**，写入后不可变：审核 `modify` 改目录只动
-`candidate_dir_id`，本列原值因此完整保留——快照与人工终值一比就是一条天然的
-归属评测样本（见 `scripts/eval_dir_assignment.py --method review`）。它**不挂外键**
-（与 `candidate_dir_id` 的“当前归属必须合法”语义不同），且**业务逻辑不得据此列分支**，
-只供评测读取。
 
 v1 的 `candidate_type`（LLM 自拟分类）不再入表——生成端分类留在 mtg 审计文件，入库后的规范归属以目录为准。
 

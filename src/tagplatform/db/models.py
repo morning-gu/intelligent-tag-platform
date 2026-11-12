@@ -239,8 +239,6 @@ class PreAssetTag(Base):
         Index("idx_pre_tag_asset", "asset_id"),
         Index("idx_pre_tag_task", "task_id"),
         Index("idx_pre_tag_review", "review_status"),
-        # 归属评测的过滤列（迁移 0010 建的同名索引，两处保持一致）
-        Index("idx_pre_tag_predicted_dir", "predicted_dir_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -262,12 +260,6 @@ class PreAssetTag(Base):
     candidate_dir_id: Mapped[str | None] = mapped_column(
         ForeignKey("tag_catalog.dir_id"), nullable=True
     )
-    # 生成时给出的预测目录（迁移 0010）。**写入后不可变**：审核改目录只动
-    # candidate_dir_id，本列的原值因此保留下来，与人工终值一比就是一次天然的
-    # 归属评测样本（见 scripts/eval_dir_assignment.py --method review）。
-    # 刻意不挂外键：目录被治理删除后仍要能留住这条历史预测（与 candidate_dir_id
-    # 的"当前归属必须合法"语义不同）。**业务逻辑不得据此列分支，只供评测读。**
-    predicted_dir_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     candidate_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 系统自动并入时模型给出的原词：将来写入 tag_define.aliases
     candidate_alias: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -537,7 +529,7 @@ class AssetBuildTask(Base):
     """
 
     __tablename__ = "asset_build_task"
-    # status 枚举约束 + asset/status 两个命名索引（0004 的旧索引已在 0010 换名）
+    # status 枚举约束 + asset/status 两个命名索引（0004 的旧索引已在 0009 换名）
     __table_args__ = (
         CheckConstraint(
             "status IN ('queued', 'running', 'succeeded', 'failed')",

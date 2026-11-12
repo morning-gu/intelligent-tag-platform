@@ -3,7 +3,7 @@
 主线（doc §8 带数据彩排法，与 test_migration_0007/0008 同款范式）：
 
 - 临时文件库升到 0009 → 插资产 / 目录 / 一条"已有人工归属"的待审标签行
-  → upgrade head（0010）→ 断言：
+  → upgrade 0010（head 已前移到 0011 删列，彩排钉住本版本号）→ 断言：
   * `predicted_dir_id` 列存在、类型 TEXT、可空（ADD COLUMN 纯元数据，
     老行不需要回填）；
   * 老行全列原样保留，`candidate_dir_id` 不动、`predicted_dir_id` 为 NULL
@@ -147,7 +147,7 @@ def test_0010_upgrade_rehearsal(rehearsal):
     command.upgrade(cfg, "0009")
     _seed_0009_data(db_path)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0010")
 
     # ---- 列：存在、TEXT、可空、无默认值（老行不回填，语义就是"没预测过"）----
     columns = dict(
@@ -196,11 +196,11 @@ def test_0010_upgrade_rehearsal(rehearsal):
 
 
 def test_0010_downgrade_and_reupgrade(rehearsal):
-    """downgrade 回 0009 删列删索引、行保留；再升回 head 可重入。"""
+    """downgrade 回 0009 删列删索引、行保留；再升回 0010 可重入。"""
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0009")
     _seed_0009_data(db_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0010")
 
     command.downgrade(cfg, "0009")
 
@@ -209,7 +209,7 @@ def test_0010_downgrade_and_reupgrade(rehearsal):
     # 行数据保留（downgrade 只删列，不删行）
     assert _row(db_path, "candidate_name", "candidate_dir_id") == ("悬疑", "dir_scene")
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0010")
 
     assert "predicted_dir_id" in _column_names(db_path, "pre_asset_tag")
     assert "idx_pre_tag_predicted_dir" in _index_names(db_path)

@@ -144,8 +144,6 @@ def persist_tags(
                 "candidate_description": None,
                 "candidate_alias": tag.alias_name,
             }
-            # 命中库内标签没有“预测归属”动作，评测列为空（见 models 注释）
-            predicted_dir_id: str | None = None
             status = "approved"
             comment = _auto_comment(tag)
         elif tag.origin == "generated":
@@ -160,9 +158,6 @@ def persist_tags(
                 "candidate_dir_id": tag.dir_id,
                 "candidate_alias": None,
             }
-            # 预测目录快照：落库后不可变，审核改目录只动 candidate_dir_id。
-            # 兼容未填 predicted_dir_id 的老调用方：退化成与 dir_id 相同。
-            predicted_dir_id = tag.predicted_dir_id or tag.dir_id
             status = "pending"
             comment = None
         else:
@@ -185,7 +180,6 @@ def persist_tags(
             relevance_score=tag.relevance_score,
             confidence=tag.confidence,
             evidence_json=_evidence_json(tag),
-            predicted_dir_id=predicted_dir_id,
             review_status=status,
             reviewer_id=SYSTEM_REVIEWER if status == "approved" else None,
             review_comment=comment,
