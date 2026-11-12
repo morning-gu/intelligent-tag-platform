@@ -22,15 +22,14 @@ from tagplatform.results import PersistSummary, persist_tags
 
 
 def _ptag(tag_id=None, name="悬疑", origin="catalog", conf=0.9, *,
-          dir_id=None, target_type="content", target_id=None, alias=None,
-          predicted_dir_id=None):
+          dir_id=None, target_type="content", target_id=None, alias=None):
     return ProducedTag(
         origin=origin, tag_id=tag_id, tag_name=name,
         candidate_type=None, candidate_description="候选描述",
         relevance_score=0.9, confidence=conf,
         evidence=[Evidence("scene_001", 1000, 2000, "证据")],
         dir_id=dir_id, target_type=target_type, target_id=target_id,
-        alias_name=alias, predicted_dir_id=predicted_dir_id,
+        alias_name=alias,
     )
 
 
@@ -57,8 +56,6 @@ def test_catalog_hit_is_auto_approved(session):
     assert row.target_type == "content" and row.target_id == "a1"
     assert row.origin == "closed" and row.tag_id == "tag_action"
     assert row.candidate_name is None and row.candidate_alias is None
-    # 命中库内标签没有“预测归属”动作，评测列为空
-    assert row.predicted_dir_id is None
     # 自动通过同时写正式挂载（资产详情读 asset_tag，不能只靠 pre 行）
     mount = session.query(AssetTag).one()
     assert (mount.asset_id, mount.target_type, mount.target_id) == \
@@ -94,26 +91,6 @@ def test_generated_candidate_lands_pending_with_dir(session):
     assert row.candidate_dir_id == "dir_theme"
     assert row.reviewer_id is None
     assert row.origin == "open"
-
-
-def test_generated_snapshots_predicted_dir(session):
-    """生成侧的预测目录要与候选目录一起落库（不可变快照，供归属评测）。"""
-    persist_tags(session, "a1", "t1",
-                 [_ptag(None, "多线叙事", origin="generated",
-                        dir_id="dir_theme", predicted_dir_id="dir_scene")],
-                 "open")
-    row = session.query(PreAssetTag).one()
-    assert row.candidate_dir_id == "dir_theme"
-    assert row.predicted_dir_id == "dir_scene"
-
-
-def test_generated_without_explicit_prediction_falls_back_to_dir(session):
-    """没显式填预测目录的老调用方：退化成与 dir_id 相同（不丢样本）。"""
-    persist_tags(session, "a1", "t1",
-                 [_ptag(None, "多线叙事", origin="generated",
-                        dir_id="dir_genre")], "open")
-    row = session.query(PreAssetTag).one()
-    assert row.predicted_dir_id == "dir_genre"
 
 
 def test_generated_without_dir_raises(session):

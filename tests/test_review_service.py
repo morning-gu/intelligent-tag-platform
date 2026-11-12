@@ -20,8 +20,6 @@ import pytest
 from tagplatform.db.models import MediaAsset, PreAssetTag
 from tagplatform.review import ConflictError, apply_review
 
-from tests.library_fixture import add_dirs
-
 
 @pytest.fixture(autouse=True)
 def _seed_parents(session):
@@ -41,8 +39,6 @@ def _seed_row(session, origin="open", status="pending",
         candidate_name=candidate_name if tag_id is None else None,
         candidate_description="候选描述" if tag_id is None else None,
         candidate_dir_id="dir_theme" if tag_id is None else None,
-        # 生成时的预测目录快照（迁移 0010），审核流程不得更改
-        predicted_dir_id="dir_genre" if tag_id is None else None,
         origin=origin,
         relevance_score=None if tag_id is None else 0.9,
         confidence=0.8,
@@ -107,36 +103,6 @@ def test_modify_catalog_row_maps_display_keys(session):
     assert returned.candidate_dir_id == "dir_theme"
     assert returned.tag_id == "tag_action"  # 挂载关系不动
     assert returned.review_status == "approved"
-
-
-def test_modify_dir_keeps_predicted_dir_snapshot(session):
-    """审核改目录只动 candidate_dir_id，预测快照必须原值保留。
-
-    这是 `scripts/eval_dir_assignment.py --method review` 的数据基础：
-    快照与人工终值一比，就是一条真实的归属评测样本。
-    """
-    # 默认库里 content 粒度的动态目录只有 dir_theme，需另加一个才能换目录
-    add_dirs([{"dir_id": "dir_mood", "parent_id": "dir_content", "level": 2,
-               "dir_name": "情绪基调", "dir_type": "dir_dynamic",
-               "applicable_scope": "content", "description": "情绪与氛围",
-               "aliases": []}])
-    row = _seed_row(session)
-    assert row.predicted_dir_id == "dir_genre"
-    returned = apply_review(session, row.id, "modify", "alice", {
-        "candidate_dir_id": "dir_mood"})
-    assert returned.candidate_dir_id == "dir_mood"
-    assert returned.predicted_dir_id == "dir_genre"  # 未被人为改动
-
-
-def test_merge_keeps_predicted_dir_snapshot(session):
-    """merge 清空候选字段，但不动预测快照。"""
-    row = _seed_row(session)
-    returned = apply_review(session, row.id, "merge", "alice", {
-        "merge_to_tag_id": "tag_revenge"})
-    assert returned.tag_id == "tag_revenge"
-    assert returned.candidate_name is None
-    assert returned.candidate_dir_id is None
-    assert returned.predicted_dir_id == "dir_genre"
 
 
 def test_modify_without_mappable_field_raises(session):

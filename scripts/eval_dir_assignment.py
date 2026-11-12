@@ -6,12 +6,11 @@
     python scripts/eval_dir_assignment.py --strict            # 只认精确目录
     python scripts/eval_dir_assignment.py --k 3 5 --limit 200
     python scripts/eval_dir_assignment.py --json out.json     # 落盘供前后对比
-    python scripts/eval_dir_assignment.py --method review     # 人工审核留痕
 
-两种口径
-========
+口径
+====
 
-**① library（默认，库内标签留一法）**——零标注、随时可跑：
+**库内标签留一法**（零标注、随时可跑）：
 
 对每一枚库内标签（有效、非占位、真实目录是可扩展目录）：
 1. 用标签名做查询向量（`role="query"`）；
@@ -24,13 +23,6 @@
 写得清不清楚、动态目录之间有没有重叠。它完全确定性（同一份库 + 同一个
 模型永远同一个分数），因此可直接当回归基线——改提示词、改目录描述、换
 嵌入模型，分数掉下去就是真掉下去了。
-
-**② review（人工审核留痕）**——有真实数据才有意义：
-
-拿 `pre_asset_tag` 里已定稿的开放模式行：`predicted_dir_id`（生成时给出
-的目录）vs `candidate_dir_id`（人工最终采纳的目录）。truth 是人工的，
-predicted 是系统的，因此 Top-1 命中率就是"预测被采纳的比例"。样本量够
-（几百条）才有统计意义。
 
 指标解读（实现见 `tagplatform/eval/ranking.py`）
 =================================================
@@ -236,42 +228,6 @@ def library_samples(library: TagLibrary, embedder, dir_ids: list[str] | None,
     return samples, warnings
 
 
-def review_samples(session, limit: int | None, *, strict: bool):
-    """人工审核留痕：truth = 人工采纳的目录，predicted = 系统给的目录。"""
-    from tagplatform.db.models import PreAssetTag
-
-    rows = (session.query(PreAssetTag)
-            .filter(PreAssetTag.review_status == "approved",
-                    PreAssetTag.predicted_dir_id.isnot(None),
-                    PreAssetTag.candidate_dir_id.isnot(None))
-            .all())
-    if limit:
-        rows = rows[:limit]
-    if not rows:
-        return [], ["没有可评测的审核留痕（需要 0010 迁移后的生成行 + 人工审核）"]
-
-    adopted = sum(1 for r in rows if r.predicted_dir_id == r.candidate_dir_id)
-    samples = []
-    for row in rows:
-        truth = row.candidate_dir_id
-        predicted = row.predicted_dir_id
-        relevance = {truth: GRADE_EXACT}
-        if predicted != truth:
-            relevance[predicted] = GRADE_NONE  # 预测错的就是纯噪声
-        samples.append(RankingSample(
-            ranked=(predicted,), relevance=relevance,
-            label=(row.candidate_name or f"#{row.id}"),
-        ))
-    warnings = [
-        f"{len(rows)} 条已定稿且两个目录都非空，其中 {adopted} 条预测被采纳"
-        f"（{adopted / len(rows):.0%}）",
-        "单候选口径下 NDCG / HitRate / MRR 三者等价，只看 Top-1 采纳率",
-    ]
-    return samples, warnings
-
-
-# ---------------------------------------------------------------- 输出
-
 def _fmt(value: float | None) -> str:
     return "暂无" if value is None else f"{value:.3f}"
 
@@ -329,11 +285,9 @@ def build_payload(report: EvaluationReport, samples: list[RankingSample],
         for name in ("hit_rate", "recall", "precision", "ndcg", "mrr"):
             metrics[f"{name}@{k}"] = report.metric(name, k)
     return {
-        "method": args.method,
         "strict": args.strict,
         "database": get_settings().database_path,
-        "embedding_model": (None if args.method == "review"
-                            else get_settings().embedding_model),
+        "embedding_model": get_settings().embedding_model,
         "n_samples": report.n_samples,
         "n_candidates": n_candidates,
         "metrics": metrics,
@@ -346,9 +300,6 @@ def build_payload(report: EvaluationReport, samples: list[RankingSample],
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="目录归属排序评测（只读）")
-    parser.add_argument("--method", choices=("library", "review"),
-                        default="library",
-                        help="library=库内标签留一法（默认）；review=人工审核留痕")
     parser.add_argument("--k", type=int, nargs="+", default=[3, 5],
                         help="截断位置（默认 3 5；不要超过候选列表长度 5）")
     parser.add_argument("--strict", action="store_true",
@@ -365,17 +316,13 @@ def main(argv: list[str] | None = None) -> int:
         library = library_from_session(session)
         n_dirs = len(library.dirs())
         n_dynamic = len(library.new_tag_dirs(None))
-        if args.method == "review":
-            samples, warnings = review_samples(session, args.limit, strict=args.strict)
-            n_candidates = 1
-        else:
-            embedder = make_embedder(settings.embedding_model,
-                                     mock=settings.use_mock_embedder)
-            samples, warnings = library_samples(library, embedder, None,
-                                                args.limit, strict=args.strict)
-            n_candidates = n_dynamic
+        embedder = make_embedder(settings.embedding_model,
+                                 mock=settings.use_mock_embedder)
+        samples, warnings = library_samples(library, embedder, None,
+                                            args.limit, strict=args.strict)
+        n_candidates = n_dynamic
 
-        print(f"方法 {args.method}　严格口径 {args.strict}　库 {settings.database_path}")
+        print(f"严格口径 {args.strict}　库 {settings.database_path}")
         print(f"目录 {n_dirs} 个（可扩展 {n_dynamic}），标签 {len(library.tags())} 枚")
 
         report = evaluate_samples(samples, tuple(args.k))
