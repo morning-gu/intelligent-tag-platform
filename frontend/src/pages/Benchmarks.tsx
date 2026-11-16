@@ -75,7 +75,6 @@ export default function Benchmarks() {
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [limit, setLimit] = useState(15)
-  const [algorithm, setAlgorithm] = useState('mtg-v3')
   const [promptSettings, setPromptSettings] = useState<{ prompt: string; max_length: number }>()
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
@@ -101,16 +100,8 @@ export default function Benchmarks() {
   async function create() {
     setBusy(true)
     try {
-      await apiFetch(endpoint, { method: 'POST', body: JSON.stringify({ asset_ids: selected, max_tags: limit, algorithm, evaluation_prompt: prompt }) })
+      await apiFetch(endpoint, { method: 'POST', body: JSON.stringify({ asset_ids: selected, max_tags: limit, algorithm: 'x-mlclass-online-v1', evaluation_prompt: prompt }) })
       setPrompt(promptSettings?.prompt ?? '')
-      await refresh()
-    } catch (e) { setError(String(e)) }
-    finally { setBusy(false) }
-  }
-  async function replay(report: Report) {
-    setBusy(true)
-    try {
-      await apiFetch(`${endpoint}/${report.id}/replay-xmlclass`, { method: 'POST' })
       await refresh()
     } catch (e) { setError(String(e)) }
     finally { setBusy(false) }
@@ -130,10 +121,9 @@ export default function Benchmarks() {
     } catch (e) { setError(String(e)) }
   }
   return <Space direction="vertical" size="large" style={{ width: '100%' }}>
-    <Card title="算法基准 · mtg-v3 / 在线 X-MLClass">
-      <Typography.Paragraph>选片后生成并使用固定的 glm-5.3-flash 独立评估，建议首轮 5–10 部。对照实验请先完成 mtg-v3，再点击该批次的「用 X-MLClass 回放对比」，复用相同影片、片序、初始词表和标签上限。</Typography.Paragraph>
+    <Card title="算法基准 · 在线 X-MLClass">
+      <Typography.Paragraph>在线 X-MLClass 生成后，glm-5.3-flash 会判断每条标签能否独立读懂，以及能否帮助观众了解或选择这部影片。</Typography.Paragraph>
       <Space wrap>
-        <Select aria-label="基准算法" value={algorithm} onChange={setAlgorithm} style={{ width: 220 }} options={[{ value: 'mtg-v3', label: 'mtg-v3' }, { value: 'x-mlclass-online-v1', label: '在线 X-MLClass' }]} />
         <Select mode="multiple" maxCount={50} optionFilterProp="label" aria-label="基准影片" placeholder="选择影片（按选择顺序运行）" style={{ minWidth: 320 }} value={selected} onChange={setSelected} options={assets.filter(a => a.has_content).map(a => ({ value: a.asset_id, label: a.title }))} />
         <InputNumber aria-label="统一标签上限" min={1} max={100} value={limit} onChange={v => setLimit(v ?? 15)} />
         <Button type="primary" loading={busy} disabled={!selected.length || !promptSettings || !prompt.trim()} onClick={() => void create()}>生成并自动评估</Button>
@@ -151,12 +141,11 @@ export default function Benchmarks() {
         <Typography.Text type="secondary">修改只用于本次批次并随报告保存。系统会保留可直接展示、建议改写、不建议展示三类输出格式。</Typography.Text>
       </div>
       <Typography.Paragraph type="secondary">可展示占比按每部片的可直接展示概念去重后计算。改写建议只用于评估查看。</Typography.Paragraph>
-      <Typography.Paragraph type="secondary">X-MLClass 在同一批次按片序积累候选，默认至少两部影片支持才加入实验词表。回放使用基线保存的评估提示词，不使用上方当前编辑值。</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">X-MLClass 在同一批次按片序积累候选，默认至少两部影片支持才加入实验词表。每个批次独立保存词表和评测结果。</Typography.Paragraph>
     </Card>
     {error && <Alert type="error" message={error} />}
     {reports.map(report => <Card key={report.id} title={`${report.algorithm} · ${report.created_at} · ${statuses[report.status] ?? report.status}`} extra={
       <Space>
-        {report.algorithm === 'mtg-v3' && report.status === 'succeeded' && <Button loading={busy} onClick={() => void replay(report)}>用 X-MLClass 回放对比</Button>}
         <Button onClick={() => void download(report)}>导出完整快照</Button>
         {(report.status === 'succeeded' || report.status === 'failed') && (
           <Popconfirm title="删除这条评估记录？" description="删除后无法从算法基准页找回。"
@@ -202,7 +191,7 @@ export default function Benchmarks() {
           const tokens = cost.usage.total_tokens ?? (cost.usage.prompt_tokens != null && cost.usage.completion_tokens != null ? cost.usage.prompt_tokens + cost.usage.completion_tokens : null)
           return `${tokens ?? '未知'} / ${cost.elapsed_s}`
         } },
-        { title: '对比 token / 秒', render: (_, i) => costText(i.comparison ?? i.comparison_cost) },
+        ...(report.baseline_id ? [{ title: '对比 token / 秒', render: (_: unknown, i: Item) => costText(i.comparison ?? i.comparison_cost) }] : []),
         { title: '实验词表 / 待积累', render: (_, i) => i.discovery ? `${i.discovery.vocabulary_after} / ${i.discovery.candidates_after}` : '—' },
         { title: '错误', dataIndex: 'error' },
       ]} expandable={{ expandedRowRender: item => <Space direction="vertical" style={{ width: '100%' }}>

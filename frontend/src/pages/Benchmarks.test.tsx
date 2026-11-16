@@ -23,17 +23,17 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
-it('replays a completed baseline without sending current selection or a changed cap', async () => {
+it('has no algorithm selector or MTG replay action', async () => {
   render(<Benchmarks />)
-  fireEvent.click(await screen.findByRole('button', { name: '用 X-MLClass 回放对比' }))
-  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/v1/benchmarks/bench_a/replay-xmlclass', { method: 'POST' }))
+  await screen.findByRole('button', { name: '删除记录' })
+  expect(screen.getByText('算法基准 · 在线 X-MLClass')).toBeInTheDocument()
+  expect(screen.queryByRole('combobox', { name: '基准算法' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '用 X-MLClass 回放对比' })).not.toBeInTheDocument()
 })
 
-it('submits the selected independent algorithm and ordered assets', async () => {
+it('always submits X-MLClass with ordered assets and the edited prompt', async () => {
   render(<Benchmarks />)
-  await screen.findByRole('button', { name: '用 X-MLClass 回放对比' })
-  fireEvent.mouseDown(screen.getByRole('combobox', { name: '基准算法' }))
-  fireEvent.click(await screen.findByTitle('在线 X-MLClass'))
+  await screen.findByRole('button', { name: '删除记录' })
   fireEvent.mouseDown(screen.getByRole('combobox', { name: '基准影片' }))
   fireEvent.click(await screen.findByTitle('测试影片'))
   fireEvent.change(screen.getByLabelText('本次评估提示词'), { target: { value: '自定义展示评测' } })
