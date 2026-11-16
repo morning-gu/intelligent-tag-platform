@@ -19,6 +19,7 @@ const BASE_MENU_ITEMS: MenuItems = [
   { key: '/', label: '工作台' },
   { key: '/review', label: '审核中心' },
   { key: '/assets', label: '内容资产' },
+  { key: '/benchmarks', label: '算法基准' },
   { key: '/tasks', label: '生产任务' },
   { key: '/imports', label: '导入任务' },
   { key: '/tags', label: '标签库' },

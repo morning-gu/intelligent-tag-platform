@@ -85,6 +85,7 @@ from tagplatform.api.depends import get_current_user, require_admin  # noqa: E40
 
 from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
     auth,
+    benchmarks,
     config,
     content,
     generation,
@@ -142,6 +143,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reset_orphan_running(session)
         finally:
             session.close()
+        from pathlib import Path
+        from tagplatform.benchmark import recover_interrupted
+        recover_interrupted(Path(settings.mtg_report_dir) / 'benchmarks')
         yield
         app.state.executor.shutdown()
 
@@ -162,6 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）
     protected_deps = [Depends(get_current_user)]
+    app.include_router(benchmarks.router, dependencies=protected_deps)
     app.include_router(health.router)
     app.include_router(tags.router, dependencies=protected_deps)
     app.include_router(library.router, dependencies=protected_deps)

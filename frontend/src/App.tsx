@@ -1,3 +1,4 @@
+import Benchmarks from './pages/Benchmarks'
 // 应用路由装配：/login 公开；其余页面统一套路由门禁（RequireAuth）与主布局。
 // Router 由 main.tsx 提供（BrowserRouter）——App 只含 Routes，测试以
 // MemoryRouter 注入。全部业务页面已实现：工作台/审核中心/质量评估/内容资产
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="review" element={<ReviewCenter />} />
           <Route path="assets" element={<AssetList />} />
           <Route path="assets/:assetId" element={<AssetDetail />} />
+          <Route path="benchmarks" element={<Benchmarks />} />
           <Route path="tasks" element={<GenerationTasks />} />
           <Route path="imports" element={<TagImports />} />
           <Route path="tags" element={<TagCatalog />} />

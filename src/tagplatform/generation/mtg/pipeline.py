@@ -270,9 +270,9 @@ def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
 
 
 def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
-                        judge_client=None) -> list[ProducedTag]:
+                        judge_client=None, *, settings: Settings | None = None) -> list[ProducedTag]:
     """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
-    settings = get_settings()
+    settings = settings or get_settings()
     started = time.monotonic()
     contents = spec.content
     frames = keyframes_mod.plan_scene_frames(
