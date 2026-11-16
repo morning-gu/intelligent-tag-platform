@@ -1,5 +1,4 @@
 """Authenticated benchmark API. Inputs and results live alongside MTG audit reports."""
-import json
 import logging
 import re
 import uuid
@@ -7,15 +6,15 @@ from typing import Literal
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.routers.generation import _resolve_target_asset
 from tagplatform.benchmark import (
-    run, save, public_report, DEFAULT_EVALUATION_MODEL,
-    EVALUATION_VERSION, EVALUATION_PROMPT,
+    delete_finished_report, load_report, run, save, public_report, DEFAULT_EVALUATION_MODEL,
+    EVALUATION_VERSION, EVALUATION_PROMPT, MAX_EVALUATION_PROMPT_LENGTH, CUSTOM_PROMPT_OUTPUT_FORMAT,
 )
 from tagplatform.library import try_load_library, TagLibrary, Directory, TagDef
 from tagplatform.generation.xmlclass import XMLCLASS_VERSION
@@ -32,6 +31,7 @@ class Create(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=50)
     max_tags: int = Field(default=15, ge=1, le=100)
     algorithm: Literal['mtg-v3', 'x-mlclass-online-v1'] = 'mtg-v3'
+    evaluation_prompt: str | None = Field(default=None, max_length=MAX_EVALUATION_PROMPT_LENGTH)
 
 
 @router.get('')
@@ -40,25 +40,50 @@ def listing(request: Request):
     reports = []
     for path in directory.glob('*.json'):
         try:
-            report = public_report(json.loads(path.read_text(encoding='utf-8')))
+            report = public_report(load_report(path))
             if 'created_at' not in report or 'id' not in report:
                 raise ValueError('基准批次标识缺失')
             reports.append(report)
+        except FileNotFoundError:
+            continue
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             logging.getLogger(__name__).exception('无法读取基准报告 %s', path)
     return sorted(reports, key=lambda r: r['created_at'], reverse=True)
 
 
-@router.get('/{report_id}')
-def detail(report_id: str, request: Request):
+@router.get('/evaluation-prompt')
+def evaluation_prompt():
+    return {'prompt': EVALUATION_PROMPT, 'max_length': MAX_EVALUATION_PROMPT_LENGTH}
+
+
+def _report_path(request: Request, report_id: str) -> Path:
     if not re.fullmatch(r'bench_[0-9a-f]{32}', report_id):
         raise HTTPException(404, '基准批次不存在')
+    return root(request) / f'{report_id}.json'
+
+
+@router.get('/{report_id}')
+def detail(report_id: str, request: Request):
+    path = _report_path(request, report_id)
     try:
-        return json.loads((root(request) / f'{report_id}.json').read_text(encoding='utf-8'))
+        return load_report(path)
     except FileNotFoundError:
         raise HTTPException(404, '基准批次不存在') from None
     except (OSError, ValueError):
         raise HTTPException(500, '基准报告无法读取') from None
+
+
+@router.delete('/{report_id}', status_code=204, response_class=Response)
+def delete(report_id: str, request: Request):
+    path = _report_path(request, report_id)
+    try:
+        removed = delete_finished_report(path)
+    except FileNotFoundError:
+        raise HTTPException(404, '基准批次不存在') from None
+    except (OSError, ValueError):
+        raise HTTPException(500, '无法删除基准报告，请重试') from None
+    if not removed:
+        raise HTTPException(409, '请等待批次结束后再删除')
 
 
 @router.post('')
@@ -72,7 +97,7 @@ def create(body: Create, request: Request, background: BackgroundTasks, session:
     for aid in body.asset_ids:
         asset = _resolve_target_asset(session, aid)
         assets[asset.asset_id] = asset
-    report = new_report(settings, library, body.algorithm, body.max_tags)
+    report = new_report(settings, library, body.algorithm, body.max_tags, body.evaluation_prompt)
     report['items'] = [dict(asset_id=a.asset_id, title=a.title, content_json=a.content_json,
                             status='queued') for a in assets.values()]
     save(root(request), report)
@@ -97,12 +122,17 @@ def validate_settings(settings, algorithm):
             raise HTTPException(422, 'NLI 假设模板必须包含 {label} 且不含其他占位符') from None
 
 
-def new_report(settings, library, algorithm, max_tags):
+def new_report(settings, library, algorithm, max_tags, evaluation_prompt=None):
+    prompt = EVALUATION_PROMPT if evaluation_prompt is None else evaluation_prompt.strip()
+    if not prompt:
+        raise HTTPException(422, '评估提示词不能为空')
+    is_custom = prompt != EVALUATION_PROMPT
     return dict(id='bench_'+uuid.uuid4().hex, schema_version=2, algorithm=algorithm,
                   created_at=datetime.now(timezone.utc).isoformat(), status='queued',
                   evaluation_model=DEFAULT_EVALUATION_MODEL, max_tags=max_tags,
                   evaluation_version=EVALUATION_VERSION,
-                  evaluation_prompt=EVALUATION_PROMPT,
+                  evaluation_prompt=prompt, custom_evaluation_prompt=is_custom,
+                  evaluation_format_instruction=CUSTOM_PROMPT_OUTPUT_FORMAT if is_custom else '',
                   generation_model=settings.llm_model, embedding_model=settings.embedding_model,
                   generation_temperature=settings.llm_temperature,
                   library_version=library.version,
@@ -121,7 +151,8 @@ def replay_xmlclass(report_id: str, request: Request, background: BackgroundTask
         raise HTTPException(422, '请选择已全部完成的 mtg-v3 基准批次')
     if (baseline.get('evaluation_version') != EVALUATION_VERSION
             or baseline.get('evaluation_model') != DEFAULT_EVALUATION_MODEL
-            or baseline.get('evaluation_prompt') != EVALUATION_PROMPT):
+            or not isinstance(baseline.get('evaluation_prompt'), str)
+            or not baseline['evaluation_prompt'].strip()):
         raise HTTPException(422, '原批次评估口径不同，请先重新运行 mtg-v3')
     if (baseline.get('generation_model') != settings.llm_model
             or baseline.get('embedding_model') != settings.embedding_model
@@ -134,7 +165,9 @@ def replay_xmlclass(report_id: str, request: Request, background: BackgroundTask
                              version=baseline['library_version'])
         if not library.tags() or not baseline['items']:
             raise ValueError('empty snapshot')
-        report = new_report(settings, library, XMLCLASS_VERSION, baseline['max_tags'])
+        report = new_report(settings, library, XMLCLASS_VERSION, baseline['max_tags'], baseline['evaluation_prompt'])
+        report['evaluation_format_instruction'] = baseline.get('evaluation_format_instruction', '')
+        report['custom_evaluation_prompt'] = baseline.get('custom_evaluation_prompt', False)
         report['baseline_id'] = baseline['id']
         report['items'] = [dict(asset_id=i['asset_id'], title=i['title'], content_json=i['content_json'],
                                 status='queued', baseline_tags=i['tags']) for i in baseline['items']]

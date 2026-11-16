@@ -25,8 +25,7 @@ class Evaluator:
     def complete(self, messages, run_id):
         payload = json.loads(messages[1]['content'])
         self.inputs.append(payload)
-        rows = [dict(id=t['id'], supported=True, concept=t['name'], reason='原文支持',
-                     evidence=[dict(scene_id=t['evidence'][0]['scene_id'], quote=TEXT)]) for t in payload['tags']]
+        rows = [dict(id=t['id'], verdict='keep', concept=t['name'], reason='观众可理解', suggestion=None) for t in payload['tags']]
         return LLMResponse(json.dumps({'judgments': rows}, ensure_ascii=False), {'total_tokens': 9}, {}, True)
 
 
@@ -98,7 +97,7 @@ def test_joint_evaluation_hides_source_and_preserves_unique_reasons(content_fixt
     assert [r['tag_name'] for r in result['a_only']] == ['A独有']
     assert [r['tag_name'] for r in result['b_only']] == ['B独有']
     assert all(r['reason'] for r in result['rows'])
-    assert all(set(t) == {'id', 'name', 'evidence'} for t in evaluator.inputs[0]['tags'])
+    assert all(set(t) == {'id', 'name'} for t in evaluator.inputs[0]['tags'])
 
 
 def baseline(client, tmp_path, content_fixture):
@@ -160,3 +159,76 @@ def test_public_unknown_usage_and_restart_state(tmp_path):
     saved = json.loads((tmp_path / 'bench_test.json').read_text(encoding='utf-8'))
     assert saved['status'] == 'failed' and saved['discovery_state']['labels'] == ['kept']
     assert benchmark.public_report(saved)['summary']['generation_tokens'] == 0
+
+
+def test_custom_prompt_replayed_exactly(client, tmp_path, content_fixture, monkeypatch):
+    source = baseline(client, tmp_path, content_fixture)
+    source.update(evaluation_prompt='按观众理解程度评估', custom_evaluation_prompt=True,
+                  evaluation_format_instruction=benchmark.CUSTOM_PROMPT_OUTPUT_FORMAT)
+    benchmark.save(tmp_path / 'benchmarks', source)
+    captured = []
+    monkeypatch.setattr(api, 'run', lambda *args: captured.append(args))
+    response = client.post(f'/api/v1/benchmarks/{source["id"]}/replay-xmlclass')
+    assert response.status_code == 200
+    replay = captured[0][0]
+    for key in ('evaluation_prompt', 'evaluation_format_instruction', 'custom_evaluation_prompt'):
+        assert replay[key] == source[key]
+
+
+def test_viewer_quality_and_comparison_allow_non_keep_without_concept(content_fixture):
+    class MixedEvaluator:
+        def complete(self, messages, run_id):
+            assert messages[0]['content'] == 'custom-format'
+            payload = json.loads(messages[1]['content'])
+            assert set(payload) == {'film', 'tags'}
+            rows = [dict(id=t['id'], verdict=t['name'], reason='展示理由',
+                         concept='独立概念' if t['name'] == 'keep' else None,
+                         suggestion='可读的改写' if t['name'] == 'rewrite' else None)
+                    for t in payload['tags']]
+            return LLMResponse(json.dumps({'judgments': rows}), {'total_tokens': 9}, {}, True)
+    tags = [dict(tag_name=name) for name in ('keep', 'rewrite', 'omit')]
+    result = benchmark.evaluate(content_fixture, tags, MixedEvaluator(), 'eval', prompt='custom', output_format='-format')
+    assert result['quality'] == dict(keep=1, rewrite=1, omit=1, distinct_keep=1, display_rate=1/3)
+    comparison = benchmark.compare(content_fixture, tags[:1], tags[1:], MixedEvaluator(), 'compare',
+                                   prompt='custom', output_format='-format')
+    assert len(comparison['rows']) == 3
+    assert len(comparison['a_only']) == 1 and not comparison['b_only']
+
+
+def test_prompt_endpoint_and_report_deletion(client, tmp_path, content_fixture):
+    source = baseline(client, tmp_path, content_fixture)
+    assert client.get('/api/v1/benchmarks/evaluation-prompt').json()['prompt'] == benchmark.EVALUATION_PROMPT
+    path = f'/api/v1/benchmarks/{source["id"]}'
+    source['status'] = 'running'
+    benchmark.save(tmp_path / 'benchmarks', source)
+    assert client.delete(path).status_code == 409
+    assert client.get(path).status_code == 200
+    source['status'] = 'succeeded'
+    benchmark.save(tmp_path / 'benchmarks', source)
+    assert client.delete(path).status_code == 204
+    assert client.get(path).status_code == 404
+
+
+def test_legacy_evidence_metrics_remain_readable():
+    report = dict(evaluation_version='evidence-concept-v2', items=[dict(status='succeeded', tags=[{}],
+                  evaluation=dict(independent_count=1, judgments=[dict(supported=True)]))])
+    public = benchmark.public_report(report)
+    assert public['summary']['mean_independent_count'] == 1
+    assert 'quality' not in public['summary']
+
+
+def test_create_custom_prompt_for_both_algorithms(client, tmp_path, content_fixture, monkeypatch):
+    baseline(client, tmp_path, content_fixture)
+    captured = []
+    monkeypatch.setattr(api, 'run', lambda *args: captured.append(args))
+    monkeypatch.setattr(api, '_resolve_target_asset', lambda *args: SimpleNamespace(
+        asset_id='a', title='影片', content_json=content_fixture.model_dump_json()))
+    for algorithm in ('mtg-v3', XMLCLASS_VERSION):
+        response = client.post('/api/v1/benchmarks', json=dict(asset_ids=['a'], algorithm=algorithm,
+                              evaluation_prompt='  自定义观众评测  '))
+        assert response.status_code == 200, response.text
+        report = captured[-1][0]
+        assert report['evaluation_prompt'] == '自定义观众评测'
+        assert report['custom_evaluation_prompt']
+        assert report['evaluation_format_instruction'] == benchmark.CUSTOM_PROMPT_OUTPUT_FORMAT
+    assert client.post('/api/v1/benchmarks', json=dict(asset_ids=['a'], evaluation_prompt=' ')).status_code == 422

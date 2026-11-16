@@ -19,7 +19,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   vi.mocked(fetchAssets).mockResolvedValue([{ asset_id: 'film1', title: '测试影片', asset_type: 'movie',
     parent_id: null, duration_ms: null, video_uri: null, has_content: true, created_at: null, updated_at: null }])
-  vi.mocked(apiFetch).mockImplementation(async (_path, init) => init?.method === 'POST' ? {} : [baseline])
+  vi.mocked(apiFetch).mockImplementation(async (path, init) => path.endsWith('/evaluation-prompt') ? { prompt: '默认评测', max_length: 12000 } : init?.method === 'POST' ? {} : [baseline])
 })
 afterEach(cleanup)
 
@@ -36,18 +36,20 @@ it('submits the selected independent algorithm and ordered assets', async () => 
   fireEvent.click(await screen.findByTitle('在线 X-MLClass'))
   fireEvent.mouseDown(screen.getByRole('combobox', { name: '基准影片' }))
   fireEvent.click(await screen.findByTitle('测试影片'))
+  fireEvent.change(screen.getByLabelText('本次评估提示词'), { target: { value: '自定义展示评测' } })
   fireEvent.click(screen.getByRole('button', { name: '生成并自动评估' }))
   await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/v1/benchmarks', {
-    method: 'POST', body: JSON.stringify({ asset_ids: ['film1'], max_tags: 15, algorithm: 'x-mlclass-online-v1' }),
+    method: 'POST', body: JSON.stringify({ asset_ids: ['film1'], max_tags: 15, algorithm: 'x-mlclass-online-v1', evaluation_prompt: '自定义展示评测' }),
   }))
 })
 
 it('shows discovery growth, unknown tokens and exclusive judgments', async () => {
-  vi.mocked(apiFetch).mockResolvedValue([{ ...baseline, id: 'bench_b', algorithm: 'x-mlclass-online-v1', baseline_id: 'bench_a',
+  vi.mocked(apiFetch).mockImplementation(async (path) => path.endsWith('/evaluation-prompt') ? { prompt: '默认评测', max_length: 12000 } : [{ ...baseline, id: 'bench_b', algorithm: 'x-mlclass-online-v1', baseline_id: 'bench_a', evaluation_version: 'viewer-quality-v3',
+    summary: { ...baseline.summary, quality: { keep: 1, rewrite: 0, omit: 0, distinct_keep: 1, display_rate: 1, mean_distinct_keep: 1 } },
     items: [{ asset_id: 'film1', title: '测试影片', status: 'succeeded', generation_tokens: null, tags: [],
       discovery: { vocabulary_before: 8, vocabulary_after: 9, candidates_after: 2, added_labels: ['new'], rescored: true, nli_pairs: 32 },
       comparison: { usage: { total_tokens: 20 }, elapsed_s: 2, rows: [{ id: 0, side: 'b', tag_name: '候鸟迁徙',
-        supported: true, concept: '候鸟迁徙', exclusive: true, reason: '迁徙路线有原文支持', evidence: [] }] },
+        verdict: 'keep', concept: '候鸟迁徙', exclusive: true, reason: '迁徙路线有原文支持', evidence: [] }] },
     }],
   }])
   render(<Benchmarks />)
@@ -59,4 +61,12 @@ it('shows discovery growth, unknown tokens and exclusive judgments', async () =>
   fireEvent.click(expand)
   expect(await screen.findByText('迁徙路线有原文支持')).toBeInTheDocument()
   expect(screen.getByText(/已重打分/)).toBeInTheDocument()
+})
+
+
+it('deletes a finished report after confirmation', async () => {
+  render(<Benchmarks />)
+  fireEvent.click(await screen.findByRole('button', { name: '删除记录' }))
+  fireEvent.click(await screen.findByRole('button', { name: /^删\s*除$/ }))
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/v1/benchmarks/bench_a', { method: 'DELETE' }))
 })
