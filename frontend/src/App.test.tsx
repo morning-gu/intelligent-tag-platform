@@ -63,7 +63,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：九项菜单齐全（含仅 admin 可见的用户管理与模型配置）', async () => {
+  it('admin 登录：十项菜单齐全（含算法基准与仅 admin 可见的管理入口）', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -71,7 +71,8 @@ describe('路由门禁（requireAuth）', () => {
     // 等布局渲染完成（任一菜单项出现）
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(9)
+    expect(menuItems).toHaveLength(10)
+    expect(screen.getByRole('menuitem', { name: '算法基准' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
@@ -84,13 +85,14 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
 
-  it('普通用户：菜单仅七项，不显示用户管理与模型配置', async () => {
+  it('普通用户：菜单八项，含算法基准，不显示用户管理与模型配置', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u2', username: 'alice', role: 'reviewer' })
 
     renderAt('/')
 
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
-    expect(screen.getAllByRole('menuitem')).toHaveLength(7)
+    expect(screen.getAllByRole('menuitem')).toHaveLength(8)
+    expect(screen.getByRole('menuitem', { name: '算法基准' })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: '用户管理' })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: '模型配置' })).not.toBeInTheDocument()
   })

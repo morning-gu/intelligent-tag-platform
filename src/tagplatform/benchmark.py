@@ -1,6 +1,7 @@
 """Isolated, snapshot-based algorithm benchmarks; never writes production tags."""
 import json
 import logging
+import random
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -8,6 +9,9 @@ from pathlib import Path
 from tagplatform.content_io import load_content
 from tagplatform.generation.base import GenerationPolicy, GenerationSpec
 from tagplatform.generation.mtg.pipeline import run_open_generation
+from tagplatform.generation.xmlclass import XMLCLASS_VERSION
+from tagplatform.generation.xmlclass.nli import LocalNLI
+from tagplatform.generation.xmlclass.pipeline import DiscoveryState, run_generation, llm_tokens
 from tagplatform.llm.client import OpenAIClient
 
 DEFAULT_EVALUATION_MODEL = 'glm-5.3-flash'
@@ -88,11 +92,18 @@ def evaluate(content, tags, client, run_id, trace=None):
 def run(report, root, library, app):
     report['status'] = 'running'
     save(root, report)
-    settings = app.state.settings
+    # Freeze experiment parameters at creation, even if application settings change.
+    settings = app.state.settings.model_copy(update=report.get('settings', {}))
     evaluator = OpenAIClient(model=report['evaluation_model'], base_url_env=settings.llm_base_url_env,
                              api_key_env=settings.llm_api_key_env, temperature=0,
                              request_interval=settings.llm_request_interval)
     try:
+        online = report['algorithm'] == XMLCLASS_VERSION
+        discovery = DiscoveryState.from_library(library) if online else None
+        nli = LocalNLI(settings) if online else None
+        vector_cache = {}
+        if online:
+            report['discovery_state'] = discovery.snapshot()
         for index, item in enumerate(report['items']):
             item['status'] = 'running'
             item['stage'] = 'generating'
@@ -104,24 +115,43 @@ def run(report, root, library, app):
                 spec = GenerationSpec(task_id, item['asset_id'], content,
                                       GenerationPolicy(), '', task_id, library)
                 started = time.monotonic()
-                with app.state.session_factory() as session:
-                    tags = run_open_generation(spec, session, app.state.llm, app.state.embedder,
-                                               settings=settings)
+                if online:
+                    item['audit'] = {}
+                    tags, updated = run_generation(spec, discovery, app.state.llm, app.state.embedder,
+                                                   nli, settings, item['audit'], vector_cache)
+                else:
+                    with app.state.session_factory() as session:
+                        tags = run_open_generation(spec, session, app.state.llm, app.state.embedder,
+                                                   settings=settings)
                 item['generation_elapsed_s'] = round(time.monotonic()-started, 2)
                 item['raw_tag_count'] = len(tags)
                 item['tags'] = [asdict(t) for t in tags[:report['max_tags']]]
-                audit = Path(settings.mtg_report_dir) / f'{task_id}.json'
-                if not audit.exists():
-                    raise ValueError('生成审计未保存，无法确认 token 成本')
-                item['audit'] = json.loads(audit.read_text(encoding='utf-8'))
-                usage_parts = [item['audit'].get(k, {}) for k in ('usage', 'judge_usage', 'verify_usage')]
-                usage_parts.append(item['audit'].get('descriptions', {}).get('usage', {}))
-                item['generation_tokens'] = sum(int(u.get(k, 0) or 0) for u in usage_parts for k in ('prompt_tokens', 'completion_tokens'))
+                if online:
+                    discovery = updated
+                    report['discovery_state'] = discovery.snapshot()
+                    item['generation_tokens'] = llm_tokens(item['audit'])
+                    item['discovery'] = {k: item['audit'][k] for k in (
+                        'vocabulary_before', 'vocabulary_after', 'candidates_after',
+                        'added_labels', 'low_coverage_scenes', 'rescored', 'nli_pairs')}
+                else:
+                    audit = Path(settings.mtg_report_dir) / f'{task_id}.json'
+                    if not audit.exists():
+                        raise ValueError('生成审计未保存，无法确认 token 成本')
+                    item['audit'] = json.loads(audit.read_text(encoding='utf-8'))
+                    usage_parts = [item['audit'].get(k, {}) for k in ('usage', 'judge_usage', 'verify_usage')]
+                    usage_parts.append(item['audit'].get('descriptions', {}).get('usage', {}))
+                    item['generation_tokens'] = sum(int(u.get(k, 0) or 0) for u in usage_parts for k in ('prompt_tokens', 'completion_tokens'))
                 item['evaluation_trace'] = {}
                 item['stage'] = 'evaluating'
                 save(root, report)
                 item['evaluation'] = evaluate(content, item['tags'], evaluator, task_id+'-eval',
                                               item['evaluation_trace'])
+                if 'baseline_tags' in item:
+                    item['stage'] = 'comparing'
+                    item['comparison_trace'] = {}
+                    save(root, report)
+                    item['comparison'] = compare(content, item['baseline_tags'], item['tags'],
+                                                 evaluator, task_id+'-compare', item['comparison_trace'])
                 item['status'] = 'succeeded'
                 item['stage'] = 'completed'
             except Exception as exc:
@@ -129,7 +159,7 @@ def run(report, root, library, app):
                     item['generation_elapsed_s'] = round(time.monotonic()-started, 2)
                     audit = Path(settings.mtg_report_dir) / f'{task_id}.json'
                     try:
-                        if audit.exists():
+                        if not online and audit.exists():
                             item['audit'] = json.loads(audit.read_text(encoding='utf-8'))
                     except (OSError, ValueError):
                         logging.getLogger(__name__).exception('无法读取失败审计 %s', task_id)
@@ -174,14 +204,17 @@ def recover_interrupted(root):
 
 def public_report(report):
     """Small polling payload; full inputs/audits are fetched only for export."""
-    result = {k: v for k, v in report.items() if k not in ('library', 'settings', 'items', 'evaluation_prompt')}
+    result = {k: v for k, v in report.items() if k not in ('library', 'settings', 'items', 'evaluation_prompt', 'discovery_state')}
     result['items'] = [{k: v for k, v in item.items()
-                        if k not in ('content_json', 'audit', 'evaluation_trace')}
+                        if k not in ('content_json', 'audit', 'evaluation_trace', 'baseline_tags', 'comparison_trace')}
                        for item in report['items']]
     for source, item in zip(report['items'], result['items']):
         trace = source.get('evaluation_trace')
         if trace:
             item['evaluation_cost'] = {k: trace[k] for k in ('usage', 'elapsed_s')}
+        trace = source.get('comparison_trace')
+        if trace:
+            item['comparison_cost'] = {k: trace[k] for k in ('usage', 'elapsed_s')}
         if 'evaluation' in item:
             evaluation = dict(item['evaluation'])
             size = len(item.get('tags', []))
@@ -202,7 +235,25 @@ def public_report(report):
         effective_rate=sum(i['evaluation']['independent_count'] for i in evaluated) / count if count else None,
         mean_independent_count=sum(i['evaluation']['independent_count'] for i in evaluated) / len(evaluated) if evaluated else None,
         unsupported_rate=unsupported / count if count else None,
-        generation_tokens=sum(i.get('generation_tokens', 0) for i in report['items']),
+        generation_tokens=sum(i.get('generation_tokens') or 0 for i in report['items']),
         generation_elapsed_s=round(sum(i.get('generation_elapsed_s', 0) for i in report['items']), 2),
     )
     return result
+
+
+def compare(content, baseline_tags, experiment_tags, client, run_id, trace=None):
+    """Joint concept judgments: hide source, confidence, and ordering from evaluator."""
+    entries = [('a', tag) for tag in baseline_tags] + [('b', tag) for tag in experiment_tags]
+    random.Random(run_id).shuffle(entries)
+    result = evaluate(content, [tag for _, tag in entries], client, run_id, trace)
+    rows = []
+    for judgment in result['judgments']:
+        side, tag = entries[judgment['id']]
+        rows.append(dict(side=side, tag_name=tag['tag_name'], **judgment))
+    concepts = {side: {r['concept'].strip().casefold() for r in rows if r['side'] == side}
+                for side in ('a', 'b')}
+    for row in rows:
+        row['exclusive'] = row['concept'].strip().casefold() not in concepts['b' if row['side'] == 'a' else 'a']
+    return dict(rows=rows, usage=result['usage'], elapsed_s=result['elapsed_s'],
+                a_only=[r for r in rows if r['side'] == 'a' and r['exclusive']],
+                b_only=[r for r in rows if r['side'] == 'b' and r['exclusive']])

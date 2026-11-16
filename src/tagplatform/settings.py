@@ -6,6 +6,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -135,6 +136,22 @@ class Settings(BaseSettings):
     # 提示词里最多列多少个可扩展目录（按全路径排序后截断，控制 token）。
     # 0 = 不注入目录，回到"生成后再按向量归类"的老路径。
     open_dir_hint_max: int = 60
+
+    # 在线 X-MLClass 只在算法基准运行。模型可设成本地目录，首次使用才加载。
+    xmlclass_nli_model: str = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+    xmlclass_nli_device: str = "cpu"
+    xmlclass_nli_batch_size: int = Field(default=16, ge=1)
+    xmlclass_nli_max_length: int = Field(default=512, ge=32)
+    xmlclass_nli_hypothesis: str = "这个场景包含{label}。"
+    xmlclass_recall_top_k: int = Field(default=8, ge=1)
+    xmlclass_low_coverage_threshold: float = Field(default=0.5, ge=0, le=1)
+    xmlclass_min_label_support: float = Field(default=0.7, ge=0, le=1)
+    xmlclass_min_scene_chars: int = Field(default=8, ge=8)
+    xmlclass_max_discovery_scenes: int = Field(default=5, ge=0)
+    xmlclass_keywords_per_scene: int = Field(default=3, ge=1)
+    xmlclass_min_support_documents: int = Field(default=2, ge=1)
+    xmlclass_synonym_cosine: float = Field(default=0.75, ge=-1, le=1)
+    xmlclass_synonym_top_k: int = Field(default=3, ge=1)
 
 
 @lru_cache
