@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.routers.generation import _resolve_target_asset
-from tagplatform.benchmark import run, save, public_report
+from tagplatform.benchmark import (
+    run, save, public_report, DEFAULT_EVALUATION_MODEL,
+    EVALUATION_VERSION, EVALUATION_PROMPT,
+)
 from tagplatform.library import try_load_library
 from dataclasses import asdict
 
@@ -26,7 +29,6 @@ def root(request):
 class Create(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=50)
     max_tags: int = Field(default=15, ge=1, le=100)
-    evaluation_model: str = Field(min_length=1, max_length=200)
 
 
 @router.get('')
@@ -59,9 +61,9 @@ def detail(report_id: str, request: Request):
 @router.post('')
 def create(body: Create, request: Request, background: BackgroundTasks, session: Session = Depends(get_session)):
     settings = request.app.state.settings
-    model = body.evaluation_model.strip()
-    if not model or model in (settings.llm_model, settings.mtg_judge_model):
-        raise HTTPException(422, '请选择与生成模型、内部 judge 不同的独立评估模型')
+    model = DEFAULT_EVALUATION_MODEL
+    if model in (settings.llm_model, settings.mtg_judge_model):
+        raise HTTPException(422, '生成模型或内部 judge 与固定评估模型 glm-5.3-flash 相同，请调整部署配置')
     if (settings.use_mock_llm or settings.use_mock_embedder or settings.mtg_runs != 3
             or not settings.mtg_judge_enabled or not settings.open_library_enabled):
         raise HTTPException(422, 'mtg-v3 基准要求真实 LLM/嵌入器、mtg_runs=3，并启用 judge 和标签库')
@@ -75,7 +77,8 @@ def create(body: Create, request: Request, background: BackgroundTasks, session:
     report = dict(id='bench_'+uuid.uuid4().hex, schema_version=1, algorithm='mtg-v3',
                   created_at=datetime.now(timezone.utc).isoformat(), status='queued',
                   evaluation_model=model, max_tags=body.max_tags,
-                  evaluation_version='evidence-concept-v1',
+                  evaluation_version=EVALUATION_VERSION,
+                  evaluation_prompt=EVALUATION_PROMPT,
                   generation_model=settings.llm_model, embedding_model=settings.embedding_model,
                   generation_temperature=settings.llm_temperature,
                   library_version=library.version,
