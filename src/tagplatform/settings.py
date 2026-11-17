@@ -140,7 +140,9 @@ class Settings(BaseSettings):
     # 在线 X-MLClass 只在算法基准运行。模型可设成本地目录，首次使用才加载。
     xmlclass_nli_model: str = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
     xmlclass_nli_device: str = "cpu"
-    xmlclass_nli_batch_size: int = Field(default=16, ge=1)
+    xmlclass_nli_batch_size: int = Field(default=32, ge=1)
+    xmlclass_nli_threads: int = Field(default=10, ge=1)
+    xmlclass_nli_processes: int = Field(default=2, ge=1)
     xmlclass_nli_max_length: int = Field(default=512, ge=32)
     xmlclass_nli_hypothesis: str = "这个场景包含{label}。"
     xmlclass_recall_top_k: int = Field(default=8, ge=1)

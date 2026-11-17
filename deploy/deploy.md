@@ -42,7 +42,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-需要运行在线 X-MLClass 基准时，再执行 `.venv/bin/pip install -e ".[xmlclass]"` 安装 NLI tokenizer 依赖；离线服务器提前准备 NLI 模型目录并设置 `TAGPLT_XMLCLASS_NLI_MODEL`。配置、回放和评估说明见 [在线 X-MLClass 实验](../docs/x-mlclass-online.md)。
+需要运行在线 X-MLClass 基准时，再执行 `.venv/bin/pip install -e ".[xmlclass]"` 安装 NLI tokenizer 依赖。离线服务器提前准备 NLI 模型目录并设置 `TAGPLT_XMLCLASS_NLI_MODEL`。配置和评估说明见 [在线 X-MLClass 实验](../docs/x-mlclass-online.md)。
 
 > torch 体积提示：lock 里 pin 了 torch，Linux 上默认拉 CUDA 版轮子（含
 > nvidia-* 依赖，数 GB）。纯 CPU 服务器可自行改配 CPU 轮源后重装。

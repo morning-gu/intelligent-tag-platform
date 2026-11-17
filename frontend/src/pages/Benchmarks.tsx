@@ -7,38 +7,39 @@ const qualityLabels = { keep: '可直接展示', rewrite: '建议改写', omit: 
 type Quality = { keep: number; rewrite: number; omit: number; distinct_keep: number; display_rate: number | null }
 type Judgment = {
   id: number
-  supported?: boolean
-  verdict?: keyof typeof qualityLabels
-  concept?: string
+  verdict: keyof typeof qualityLabels
   reason: string
   suggestion?: string | null
-  evidence?: { scene_id: string; quote: string }[]
 }
 type Cost = { usage: Record<string, number>; elapsed_s: number }
-type ComparisonRow = Judgment & { side: 'a' | 'b'; tag_name: string; exclusive: boolean }
+type SceneEvidence = { scene_id: string; description: string; start_ms: number; end_ms: number }
 type Item = {
-  comparison_cost?: Cost
-  comparison?: Cost & { rows: ComparisonRow[] }
-  discovery?: { vocabulary_before: number; vocabulary_after: number; candidates_after: number; added_labels: string[]; rescored: boolean; nli_pairs: number }
+  discovery?: {
+    vocabulary_before: number
+    vocabulary_after: number
+    candidates_after: number
+    added_labels: string[]
+    low_coverage_scenes?: string[]
+    rejected_keyword_count?: number
+    rescored: boolean
+    nli_pairs: number
+  }
   asset_id: string
   title: string
   status: string
   stage?: string
   error?: string
   generation_elapsed_s?: number
+  generation_timings_s?: Record<string, number>
   generation_tokens?: number | null
-  tags?: { tag_name: string; evidence: { scene_id: string; description: string; start_ms: number; end_ms: number }[] }[]
+  tags?: { tag_name: string; evidence: SceneEvidence[] }[]
   evaluation_cost?: Cost
   evaluation?: Cost & {
-    quality?: Quality
-    independent_count?: number
-    effective_rate?: number | null
-    unsupported_rate?: number | null
+    quality: Quality
     judgments: Judgment[]
   }
 }
 type Report = {
-  baseline_id?: string
   id: string
   algorithm: string
   status: string
@@ -53,24 +54,58 @@ type Report = {
     completed: number
     failed: number
     evaluated: number
-    quality?: Quality & { mean_distinct_keep: number | null }
-    mean_independent_count?: number | null
-    effective_rate?: number | null
-    unsupported_rate?: number | null
+    quality: Quality & { mean_distinct_keep: number | null }
     generation_tokens: number
     generation_elapsed_s: number
   }
 }
 const endpoint = '/api/v1/benchmarks'
 const percent = (value: number | null) => value == null ? '—' : `${(value * 100).toFixed(1)}%`
-const statuses: Record<string, string> = { queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', generating: '生成中', evaluating: '独立评估中', comparing: '跨算法盲评中', completed: '已完成' }
+const statuses: Record<string, string> = { queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', generating: '生成中', evaluating: '独立评估中', completed: '已完成' }
 const costText = (cost?: Cost) => {
   if (!cost) return '—'
   const tokens = cost.usage.total_tokens ?? (cost.usage.prompt_tokens != null && cost.usage.completion_tokens != null ? cost.usage.prompt_tokens + cost.usage.completion_tokens : null)
   return `${tokens ?? '未知'} / ${cost.elapsed_s}`
 }
 
+const generationPhases = [
+  ['recall_s', '向量召回'],
+  ['nli_model_load_s', 'NLI 模型加载'],
+  ['nli_initial_s', 'NLI 首轮打分'],
+  ['materials_s', '提词素材准备'],
+  ['llm_keywords_s', 'LLM 标签生成'],
+  ['llm_synonym_s', 'LLM 同义判断'],
+  ['nli_rescore_s', 'NLI 新词重评分'],
+  ['dedup_s', '最终标签去重（含向量和可能的 LLM 调用）'],
+  ['other_s', '其他生成开销'],
+]
+
+function GenerationTimings({ timings }: { timings: Record<string, number> }) {
+  const nliStages = ['nli_model_load_s', 'nli_initial_s', 'nli_rescore_s'].filter(stage => timings[stage] != null)
+  const nliTotal = nliStages.reduce((sum, stage) => sum + timings[stage], 0)
+  return <section aria-label="生成耗时明细">
+    <Typography.Text strong>生成耗时明细</Typography.Text>
+    {nliStages.length > 0 && <Typography.Text style={{ marginInlineStart: 12 }}>NLI 合计（含加载） {nliTotal.toFixed(2)} 秒</Typography.Text>}
+    <div><Space wrap size={[20, 4]}>
+      {generationPhases.filter(([stage]) => timings[stage] != null).map(([stage, label]) =>
+        <span key={stage}>{label} {timings[stage].toFixed(2)} 秒</span>)}
+    </Space></div>
+  </section>
+}
+
+function SceneEvidenceList({ evidence }: { evidence: SceneEvidence[] }) {
+  if (!evidence.length) return '—'
+  return <div style={{ display: 'grid', gap: 8 }}>
+    {evidence.map(e => <div key={e.scene_id} style={{ whiteSpace: 'pre-wrap' }}>
+      {`${e.scene_id} [${e.start_ms}–${e.end_ms}ms] ${e.description}`}
+    </div>)}
+  </div>
+}
+
 export default function Benchmarks() {
+  const isMtg = import.meta.env.VITE_BENCHMARK_ALGORITHM === 'mtg-v3'
+  const algorithm = isMtg ? 'mtg-v3' : 'x-mlclass-online-v1'
+  const name = isMtg ? 'mtg-v3' : '在线 X-MLClass'
   const [reports, setReports] = useState<Report[]>([])
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [selected, setSelected] = useState<string[]>([])
@@ -100,7 +135,7 @@ export default function Benchmarks() {
   async function create() {
     setBusy(true)
     try {
-      await apiFetch(endpoint, { method: 'POST', body: JSON.stringify({ asset_ids: selected, max_tags: limit, algorithm: 'x-mlclass-online-v1', evaluation_prompt: prompt }) })
+      await apiFetch(endpoint, { method: 'POST', body: JSON.stringify({ asset_ids: selected, max_tags: limit, algorithm, evaluation_prompt: prompt }) })
       setPrompt(promptSettings?.prompt ?? '')
       await refresh()
     } catch (e) { setError(String(e)) }
@@ -121,8 +156,8 @@ export default function Benchmarks() {
     } catch (e) { setError(String(e)) }
   }
   return <Space direction="vertical" size="large" style={{ width: '100%' }}>
-    <Card title="算法基准 · 在线 X-MLClass">
-      <Typography.Paragraph>在线 X-MLClass 生成后，glm-5.3-flash 会判断每条标签能否独立读懂，以及能否帮助观众了解或选择这部影片。</Typography.Paragraph>
+    <Card title={`算法基准 · ${name}`}>
+      <Typography.Paragraph>{name} 生成后，glm-5.3-flash 会判断每条标签能否独立读懂，以及能否帮助观众了解或选择这部影片。</Typography.Paragraph>
       <Space wrap>
         <Select mode="multiple" maxCount={50} optionFilterProp="label" aria-label="基准影片" placeholder="选择影片（按选择顺序运行）" style={{ minWidth: 320 }} value={selected} onChange={setSelected} options={assets.filter(a => a.has_content).map(a => ({ value: a.asset_id, label: a.title }))} />
         <InputNumber aria-label="统一标签上限" min={1} max={100} value={limit} onChange={v => setLimit(v ?? 15)} />
@@ -141,7 +176,6 @@ export default function Benchmarks() {
         <Typography.Text type="secondary">修改只用于本次批次并随报告保存。系统会保留可直接展示、建议改写、不建议展示三类输出格式。</Typography.Text>
       </div>
       <Typography.Paragraph type="secondary">可展示占比按每部片的可直接展示概念去重后计算。改写建议只用于评估查看。</Typography.Paragraph>
-      <Typography.Paragraph type="secondary">X-MLClass 在同一批次按片序积累候选，默认至少两部影片支持才加入实验词表。每个批次独立保存词表和评测结果。</Typography.Paragraph>
     </Card>
     {error && <Alert type="error" message={error} />}
     {reports.map(report => <Card key={report.id} title={`${report.algorithm} · ${report.created_at} · ${statuses[report.status] ?? report.status}`} extra={
@@ -156,68 +190,49 @@ export default function Benchmarks() {
       </Space>
     }>
       <Typography.Paragraph>批次：{report.id}；评估模型：{report.evaluation_model}；口径：{report.evaluation_version}{report.custom_evaluation_prompt && '（自定义提示词）'}；标签上限：{report.max_tags}</Typography.Paragraph>
-      {report.baseline_id && <Typography.Paragraph>对照基线：{report.baseline_id}；回放沿用基线保存的评估提示词。联合盲评展示两组全部判定，并标明独有的可展示概念。</Typography.Paragraph>}
       <Space wrap size="large" style={{ marginBottom: 16 }}>
-        {report.summary.quality ? <>
-          <Statistic title="每片可展示概念数（去重）" value={report.summary.quality.mean_distinct_keep ?? '—'} precision={2} />
-          <Statistic title="可展示占比（去重）" value={percent(report.summary.quality.display_rate)} />
-          <Statistic title="建议改写 / 不建议展示" value={`${report.summary.quality.rewrite} / ${report.summary.quality.omit}`} />
-        </> : <>
-          <Statistic title="每片证据支持概念数（旧口径）" value={report.summary.mean_independent_count ?? '—'} precision={2} />
-          <Statistic title="证据不支持比例" value={percent(report.summary.unsupported_rate ?? null)} />
-        </>}
+        <Statistic title="每片可展示概念数（去重）" value={report.summary.quality.mean_distinct_keep ?? '—'} precision={2} />
+        <Statistic title="可展示占比（去重）" value={percent(report.summary.quality.display_rate)} />
+        <Statistic title="建议改写 / 不建议展示" value={`${report.summary.quality.rewrite} / ${report.summary.quality.omit}`} />
         <Statistic title="已评估影片" value={`${report.summary.evaluated}/${report.items.length}`} />
       </Space>
       {report.error && <Alert type="error" message={report.error} />}
       <Typography.Paragraph>完成 {report.summary.completed}/{report.items.length} 部，失败 {report.summary.failed} 部。已记录生成成本 {report.summary.generation_tokens} token / {report.summary.generation_elapsed_s} 秒。</Typography.Paragraph>
-      <Table<Item> rowKey="asset_id" dataSource={report.items} pagination={false} scroll={{ x: 'max-content' }} columns={[
-        { title: '影片', dataIndex: 'title' }, { title: '状态', render: (_, i) => i.status === 'failed' ? `失败（${statuses[i.stage ?? ''] ?? '执行'}）` : statuses[i.stage ?? i.status] ?? i.status },
+      <Table<Item> rowKey="asset_id" dataSource={report.items} pagination={false} tableLayout="fixed" style={{ overflowWrap: 'anywhere' }} columns={[
+        { title: '影片', dataIndex: 'title', width: '14%' }, { title: '状态', render: (_, i) => i.status === 'failed' ? `失败（${statuses[i.stage ?? ''] ?? '执行'}）` : statuses[i.stage ?? i.status] ?? i.status },
         { title: '生成秒数', dataIndex: 'generation_elapsed_s' }, { title: '生成 token', render: (_, i) => i.generation_tokens ?? '未知' },
         { title: '最终标签数', render: (_, i) => i.tags?.length ?? '—' },
-        ...(report.summary.quality ? [
-          { title: '可展示 / 改写 / 不展示', render: (_: unknown, i: Item) => {
-            const quality = i.evaluation?.quality
-            return quality ? `${quality.keep} / ${quality.rewrite} / ${quality.omit}` : '—'
-          } },
-          { title: '可展示概念数（去重）', render: (_: unknown, i: Item) => i.evaluation?.quality?.distinct_keep ?? '—' },
-          { title: '可展示占比（去重）', render: (_: unknown, i: Item) => percent(i.evaluation?.quality?.display_rate ?? null) },
-        ] : [
-          { title: '证据支持概念数', render: (_: unknown, i: Item) => i.evaluation?.independent_count ?? '—' },
-          { title: '证据不支持比例', render: (_: unknown, i: Item) => percent(i.evaluation?.unsupported_rate ?? null) },
-        ]),
-        { title: '评估 token / 秒', render: (_, i) => {
-          const cost = i.evaluation ?? i.evaluation_cost
-          if (!cost) return '—'
-          const tokens = cost.usage.total_tokens ?? (cost.usage.prompt_tokens != null && cost.usage.completion_tokens != null ? cost.usage.prompt_tokens + cost.usage.completion_tokens : null)
-          return `${tokens ?? '未知'} / ${cost.elapsed_s}`
+        { title: '可展示 / 改写 / 不展示', render: (_, i) => {
+          const quality = i.evaluation?.quality
+          return quality ? `${quality.keep} / ${quality.rewrite} / ${quality.omit}` : '—'
         } },
-        ...(report.baseline_id ? [{ title: '对比 token / 秒', render: (_: unknown, i: Item) => costText(i.comparison ?? i.comparison_cost) }] : []),
+        { title: '可展示概念数（去重）', render: (_, i) => i.evaluation?.quality.distinct_keep ?? '—' },
+        { title: '可展示占比（去重）', render: (_, i) => percent(i.evaluation?.quality.display_rate ?? null) },
+        { title: '评估 token / 秒', render: (_, i) => costText(i.evaluation ?? i.evaluation_cost) },
         { title: '实验词表 / 待积累', render: (_, i) => i.discovery ? `${i.discovery.vocabulary_after} / ${i.discovery.candidates_after}` : '—' },
-        { title: '错误', dataIndex: 'error' },
-      ]} expandable={{ expandedRowRender: item => <Space direction="vertical" style={{ width: '100%' }}>
-      {item.discovery && <Typography.Paragraph>实验词表 {item.discovery.vocabulary_before} → {item.discovery.vocabulary_after}；本片新增 {item.discovery.added_labels.length} 个标签；{item.discovery.rescored ? '已重打分' : '无需重打分'}；NLI 判断 {item.discovery.nli_pairs} 对。</Typography.Paragraph>}
-      <Table rowKey="id" pagination={false} dataSource={(item.tags ?? []).map((t, id) => ({ ...t, id, judgment: item.evaluation?.judgments.find(j => j.id === id) }))} columns={[
-        { title: '标签', dataIndex: 'tag_name' },
-        { title: '场景证据', render: (_, t) => t.evidence.map(e => `${e.scene_id} [${e.start_ms}–${e.end_ms}ms] ${e.description}`).join('；') },
-        { title: '独立评估', render: (_, t) => {
+        { title: '错误', dataIndex: 'error', width: '16%' },
+      ]} expandable={{ expandedRowRender: item => <div style={{ display: 'grid', gap: 8 }}>
+      {item.generation_timings_s ? <GenerationTimings timings={item.generation_timings_s} /> :
+        report.algorithm === 'x-mlclass-online-v1' && item.generation_elapsed_s != null &&
+        <Typography.Text type="secondary">该报告未记录分段耗时。</Typography.Text>}
+      {item.discovery && <div>
+        实验词表 {item.discovery.vocabulary_before} → {item.discovery.vocabulary_after}；本片入表 {item.discovery.added_labels.length} 个标签；
+        {item.discovery.low_coverage_scenes && `低覆盖场景 ${item.discovery.low_coverage_scenes.length} 个；`}
+        待积累候选 {item.discovery.candidates_after} 个；
+        {!!item.discovery.rejected_keyword_count && `因引用无效跳过 ${item.discovery.rejected_keyword_count} 个关键词；`}
+        {item.discovery.rescored ? '已重打分' : '无需重打分'}；NLI 判断 {item.discovery.nli_pairs} 对。
+      </div>}
+      <Table rowKey="id" pagination={false} tableLayout="fixed" dataSource={(item.tags ?? []).map((t, id) => ({ ...t, id, judgment: item.evaluation?.judgments.find(j => j.id === id) }))} columns={[
+        { title: '标签', dataIndex: 'tag_name', width: '15%' },
+        { title: '场景证据', render: (_, t) => <SceneEvidenceList evidence={t.evidence} /> },
+        { title: '独立评估', width: '27%', render: (_, t) => {
           const judgment = t.judgment
           if (!judgment) return '尚无有效评估'
-          const label = judgment.verdict ? qualityLabels[judgment.verdict] : judgment.supported ? '支持' : '不支持'
-          return <><strong>{label}</strong><div>{judgment.reason}</div></>
+          return <><strong>{qualityLabels[judgment.verdict]}</strong><div>{judgment.reason}</div></>
         } },
-        { title: report.summary.quality ? '改写建议' : '评估原文引用', render: (_, t) => (
-          t.judgment?.suggestion || t.judgment?.evidence?.map(e => `${e.scene_id}：${e.quote}`).join('；') || '—'
-        ) },
+        { title: '改写建议', width: '23%', render: (_, t) => t.judgment?.suggestion || '—' },
       ]} />
-      {item.comparison && <Table<ComparisonRow> rowKey="id" pagination={false} dataSource={item.comparison.rows} locale={{ emptyText: '联合盲评未发现独有概念' }} columns={[
-        { title: '方案', render: (_, r) => r.side === 'a' ? 'mtg-v3' : 'X-MLClass' },
-        { title: '标签', dataIndex: 'tag_name' }, { title: '概念', dataIndex: 'concept' },
-        { title: report.summary.quality ? '展示判定' : '证据判定（旧口径）', render: (_, r) => r.verdict ? qualityLabels[r.verdict] : r.supported ? '支持' : '不支持' },
-        { title: report.summary.quality ? '独有可展示概念' : '独有概念（旧口径）', render: (_, r) => r.exclusive ? '是' : '—' },
-        { title: '理由', dataIndex: 'reason' },
-        { title: report.summary.quality ? '改写建议' : '原文引用', render: (_, r) => r.suggestion || r.evidence?.map(e => `${e.scene_id}：${e.quote}`).join('；') || '—' },
-      ]} />}
-      </Space> }} />
+      </div> }} />
     </Card>)}
   </Space>
 }

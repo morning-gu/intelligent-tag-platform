@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 from tagplatform.api import get_session
 from tagplatform.api.routers.generation import _resolve_target_asset
 from tagplatform.benchmark import (
-    delete_finished_report, load_report, run, save, public_report, DEFAULT_EVALUATION_MODEL,
-    EVALUATION_VERSION, EVALUATION_PROMPT, MAX_EVALUATION_PROMPT_LENGTH, CUSTOM_PROMPT_OUTPUT_FORMAT,
+    delete_finished_report, load_report, restore_prompt_evidence, run, save, public_report, DEFAULT_EVALUATION_MODEL,
+    EVALUATION_VERSION, EVALUATION_PROMPT, GENERATION_PROTOCOL, MAX_EVALUATION_PROMPT_LENGTH,
+    CUSTOM_PROMPT_OUTPUT_FORMAT,
 )
-from tagplatform.library import try_load_library, TagLibrary, Directory, TagDef
+from tagplatform.library import try_load_library
 from tagplatform.generation.xmlclass import XMLCLASS_VERSION
 from dataclasses import asdict
 
@@ -40,7 +41,10 @@ def listing(request: Request):
     reports = []
     for path in directory.glob('*.json'):
         try:
-            report = public_report(load_report(path))
+            snapshot = load_report(path)
+            if snapshot.get('evaluation_version') != EVALUATION_VERSION or 'baseline_id' in snapshot:
+                continue
+            report = public_report(restore_prompt_evidence(snapshot))
             if 'created_at' not in report or 'id' not in report:
                 raise ValueError('基准批次标识缺失')
             reports.append(report)
@@ -66,7 +70,7 @@ def _report_path(request: Request, report_id: str) -> Path:
 def detail(report_id: str, request: Request):
     path = _report_path(request, report_id)
     try:
-        return load_report(path)
+        return restore_prompt_evidence(load_report(path))
     except FileNotFoundError:
         raise HTTPException(404, '基准批次不存在') from None
     except (OSError, ValueError):
@@ -128,6 +132,7 @@ def new_report(settings, library, algorithm, max_tags, evaluation_prompt=None):
         raise HTTPException(422, '评估提示词不能为空')
     is_custom = prompt != EVALUATION_PROMPT
     return dict(id='bench_'+uuid.uuid4().hex, schema_version=2, algorithm=algorithm,
+                  generation_protocol=GENERATION_PROTOCOL,
                   created_at=datetime.now(timezone.utc).isoformat(), status='queued',
                   evaluation_model=DEFAULT_EVALUATION_MODEL, max_tags=max_tags,
                   evaluation_version=EVALUATION_VERSION,
@@ -139,40 +144,3 @@ def new_report(settings, library, algorithm, max_tags, evaluation_prompt=None):
                   settings={k: v for k, v in settings.model_dump(mode='json').items() if k.startswith(('mtg_', 'open_', 'xmlclass_'))},
                   library={'dirs': [asdict(d) for d in library.dirs()], 'tags': [asdict(t) for t in library.tags()]},
                   items=[])
-
-
-@router.post('/{report_id}/replay-xmlclass')
-def replay_xmlclass(report_id: str, request: Request, background: BackgroundTasks):
-    """Replay the immutable A snapshot; never re-read current assets or tag tables."""
-    baseline = detail(report_id, request)
-    settings = request.app.state.settings
-    validate_settings(settings, XMLCLASS_VERSION)
-    if baseline.get('algorithm') != 'mtg-v3' or baseline.get('status') != 'succeeded':
-        raise HTTPException(422, '请选择已全部完成的 mtg-v3 基准批次')
-    if (baseline.get('evaluation_version') != EVALUATION_VERSION
-            or baseline.get('evaluation_model') != DEFAULT_EVALUATION_MODEL
-            or not isinstance(baseline.get('evaluation_prompt'), str)
-            or not baseline['evaluation_prompt'].strip()):
-        raise HTTPException(422, '原批次评估口径不同，请先重新运行 mtg-v3')
-    if (baseline.get('generation_model') != settings.llm_model
-            or baseline.get('embedding_model') != settings.embedding_model
-            or baseline.get('generation_temperature') != settings.llm_temperature):
-        raise HTTPException(422, '生成模型、温度和嵌入模型须与原批次一致')
-    try:
-        snapshot = baseline['library']
-        library = TagLibrary([Directory(**{**d, 'aliases': tuple(d.get('aliases', []))}) for d in snapshot['dirs']],
-                             [TagDef(**{**t, 'aliases': tuple(t.get('aliases', []))}) for t in snapshot['tags']],
-                             version=baseline['library_version'])
-        if not library.tags() or not baseline['items']:
-            raise ValueError('empty snapshot')
-        report = new_report(settings, library, XMLCLASS_VERSION, baseline['max_tags'], baseline['evaluation_prompt'])
-        report['evaluation_format_instruction'] = baseline.get('evaluation_format_instruction', '')
-        report['custom_evaluation_prompt'] = baseline.get('custom_evaluation_prompt', False)
-        report['baseline_id'] = baseline['id']
-        report['items'] = [dict(asset_id=i['asset_id'], title=i['title'], content_json=i['content_json'],
-                                status='queued', baseline_tags=i['tags']) for i in baseline['items']]
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(422, '原批次快照不完整，无法回放') from None
-    save(root(request), report)
-    background.add_task(run, report, root(request), library, request.app)
-    return public_report(report)

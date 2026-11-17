@@ -6,6 +6,9 @@ import pytest
 
 from tagplatform.embed.embedding import MockEmbedder
 from tagplatform.generation.base import GenerationPolicy, GenerationSpec
+from tagplatform.generation.mtg import pipeline as mtg
+from tagplatform.generation.mtg.prompts import build_generation_messages
+from tagplatform.generation.xmlclass import timing
 from tagplatform.generation.xmlclass.nli import entailment_scores
 from tagplatform.generation.xmlclass.pipeline import (
     Candidate, DiscoveryState, Label, llm_tokens, rank_vote, run_generation,
@@ -24,11 +27,16 @@ class KeywordLLM:
         self.calls = []
 
     def complete(self, messages, run_id):
-        payload = json.loads(messages[1]['content'])
+        payload = request_payload(messages)
         self.calls.append(payload)
         data = ({'keywords': [{'term': self.term, 'description': '鸟类季节性迁徙', 'quote': TEXT}]}
-                if 'text' in payload else {'same': self.same, 'reason': '两个名称表达同一迁徙概念' if self.same else '不同概念'})
+                if 'scene_id' in payload else {'same': self.same, 'reason': '两个名称表达同一迁徙概念' if self.same else '不同概念'})
         return LLMResponse(json.dumps(data, ensure_ascii=False), {'total_tokens': 10}, {}, True)
+
+
+def request_payload(messages):
+    content = messages[1]['content']
+    return json.loads(content[-1]['text'] if isinstance(content, list) else content)
 
 
 class FakeNLI:
@@ -70,11 +78,15 @@ def test_distinct_films_accumulate_promote_rescore_and_keep_evidence(content_fix
     nli = FakeNLI()
     audit1 = {}
     tags1, first = run_generation(spec(content_fixture), initial, KeywordLLM(), MockEmbedder(), nli, settings(), audit1)
-    assert tags1 == []
+    assert [tag.tag_name for tag in tags1] == ['候鸟迁徙']
     assert len(initial.candidates) == 0  # input state is never mutated
     assert first.candidates[0].support == 1  # two scenes, one film
     assert len(first.candidates[0].occurrences) == 2
-    assert not audit1['rescored'] and len(nli.calls) == 1
+    assert len(first.labels) == 1 and audit1['added_labels'] == []
+    assert audit1['local_labels'] == [first.candidates[0].label.key]
+    assert audit1['rescored'] and len(nli.calls) == 2
+    assert audit1['nli_pairs'] == 2 and audit1['nli_reused_pairs'] == 4
+    assert set(nli.calls[0]).isdisjoint(nli.calls[1])
     # Reprocessing the same film must not inflate support.
     _, repeated = run_generation(spec(content_fixture), first, KeywordLLM(), MockEmbedder(), nli, settings())
     assert repeated.candidates[0].support == 1
@@ -95,6 +107,28 @@ def test_distinct_films_accumulate_promote_rescore_and_keep_evidence(content_fix
     assert not llm.calls and not third_audit['rescored']
 
 
+def test_first_nli_call_separates_model_loading_from_scoring(content_fixture, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(timing, 'monotonic', lambda: clock[0])
+
+    class TimedNLI(FakeNLI):
+        model_load_elapsed_s = 0.0
+
+        def score(self, pairs):
+            if not self.calls:
+                self.model_load_elapsed_s = 3.0
+                clock[0] += self.model_load_elapsed_s
+            clock[0] += 5.0
+            return super().score(pairs)
+
+    audit = {}
+    run_generation(spec(content_fixture), DiscoveryState([Label('old', '汽车追逐')]),
+                   KeywordLLM(), MockEmbedder(), TimedNLI(), settings(), audit)
+    assert audit['timings_s']['nli_model_load_s'] == 3.0
+    assert audit['timings_s']['nli_initial_s'] == 5.0
+    assert audit['timings_s']['nli_rescore_s'] == 5.0
+
+
 def test_candidate_synonyms_combine_document_support_not_scene_count(content_fixture):
     initial = DiscoveryState([Label('old', '汽车追逐')], [Candidate(Label('candidate', '鸟类迁徙'),
                                   [{'asset_id': 'movie0', 'scene_id': 's0', 'raw_term': '鸟类迁徙', 'quote': TEXT}])])
@@ -102,7 +136,7 @@ def test_candidate_synonyms_combine_document_support_not_scene_count(content_fix
     cfg = settings(xmlclass_synonym_cosine=-1)
     class Synonyms(KeywordLLM):
         def complete(self, messages, run_id):
-            payload = json.loads(messages[1]['content'])
+            payload = request_payload(messages)
             self.same = payload.get('representative', {}).get('name') == '鸟类迁徙'
             return super().complete(messages, run_id)
     audit = {}
@@ -129,15 +163,43 @@ def test_catalog_alias_does_not_enter_pool(content_fixture):
 def test_low_coverage_budget_skips_empty_content_and_orders_by_support(content_fixture):
     request = spec(content_fixture, scenes=3)
     request.content.content.scenes[0].description = ''
+    request.content.content.scenes[2].description += '远处还有一片湿地。'
     class Scores(FakeNLI):
         def score(self, pairs):
-            return [0.4, 0.1]
+            if len(pairs) == 2:
+                return [0.4, 0.1]
+            return super().score(pairs)
     audit = {}
     llm = KeywordLLM()
     run_generation(request, DiscoveryState([Label('old', '汽车追逐')]), llm, MockEmbedder(), Scores(),
                    settings(xmlclass_max_discovery_scenes=1), audit)
     assert audit['low_coverage_scenes'] == ['s2']
     assert len(llm.calls) == 1
+
+
+def test_discovery_receives_same_multimodal_materials_as_mtg(content_fixture, tmp_path, monkeypatch):
+    request = spec(content_fixture)
+    request.library = TagLibrary(
+        [Directory('d', '题材', dir_type='dir_dynamic')],
+        [TagDef('old', 'd', '汽车追逐')],
+    )
+    frame = tmp_path / 'frame.jpg'
+    frame.write_bytes(b'frame')
+    monkeypatch.setattr(mtg.keyframes_mod, 'plan_scene_frames', lambda *a, **kw: {'s1': (frame,)})
+    embedder = MockEmbedder()
+    cfg = settings(xmlclass_max_discovery_scenes=1)
+    frames, _, _, hints, dirs = mtg.prepare_generation_context(request, embedder, cfg)
+    expected = build_generation_messages(request.content, frames, library_hint=hints, dir_hint=dirs)
+
+    class CheckMaterials(KeywordLLM):
+        def complete(self, messages, run_id):
+            assert messages[1]['content'][:-1] == expected[0]['content'][:-1]
+            assert request_payload(messages) == {'scene_id': 's0', 'max_keywords': 3}
+            return super().complete(messages, run_id)
+
+    llm = CheckMaterials()
+    run_generation(request, DiscoveryState.from_library(request.library), llm, embedder, FakeNLI(), cfg)
+    assert hints and dirs and len(llm.calls) == 1
 
 
 def test_failure_does_not_commit_partial_candidates_and_retains_usage(content_fixture):
@@ -156,11 +218,24 @@ def test_failure_does_not_commit_partial_candidates_and_retains_usage(content_fi
 
 
 def test_reject_fabricated_keyword_quote(content_fixture):
-    request = spec(content_fixture)
-    for s in request.content.content.scenes:
-        s.description = '这个场景完全没有所声称的鸟类内容。'
-    with pytest.raises(ValueError, match='证据无效'):
-        run_generation(request, DiscoveryState([]), KeywordLLM(), MockEmbedder(), FakeNLI(), settings())
+    class MixedQuotes(KeywordLLM):
+        def complete(self, messages, run_id):
+            return LLMResponse(json.dumps({'keywords': [
+                {'term': '虚构概念', 'description': '虚构的概念', 'quote': '影片中没有出现的台词。'},
+                {'term': '候鸟迁徙', 'description': '鸟类季节性迁徙', 'quote': TEXT},
+            ]}), {'total_tokens': 10}, {}, True)
+
+    request = spec(content_fixture, scenes=1)
+    request.content.content.scenes[0].description = TEXT * 10
+    nli = FakeNLI()
+    audit = {}
+    tags, result = run_generation(request, DiscoveryState([]), MixedQuotes(), MockEmbedder(), nli,
+                                  settings(xmlclass_min_support_documents=1), audit)
+    assert [label.name for label in result.labels] == ['候鸟迁徙']
+    assert [k['raw_term'] for k in audit['rejected_keywords']] == ['虚构概念']
+    assert audit['rejected_keywords'][0]['reason'] == 'quote_not_in_scene'
+    assert nli.calls[0][0][0] == TEXT * 10
+    assert tags[0].evidence[0].description == (TEXT * 10)[:120] + '…'
 
 
 def test_rank_columns_vote_and_filter_unsupported():

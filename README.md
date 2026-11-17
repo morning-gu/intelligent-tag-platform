@@ -2,7 +2,7 @@
 
 面向影视内容的离线智能标签生产平台：标签库导入治理（阶段 1）+ LLM 标签生成引擎（阶段 2）+ 结果入库与人工审核支撑，统一存储于 SQLite，经 FastAPI 对外提供 API。
 
-算法实验：在「算法基准」对照 mtg-v3 与在线 X-MLClass，支持从 A 组快照回放 B 组、跨影片扩词和独立盲评。安装与使用见 [在线 X-MLClass 实验](docs/x-mlclass-online.md)。
+算法实验：在「算法基准」分别运行 mtg-v3 与在线 X-MLClass，对照独立评估结果。X-MLClass 支持新词直接参与本片评分，并跨任务累积影片证据。安装与使用见 [在线 X-MLClass 实验](docs/x-mlclass-online.md)。
 
 ## 快速启动
 
