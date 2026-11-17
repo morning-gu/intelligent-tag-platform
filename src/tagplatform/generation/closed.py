@@ -92,7 +92,6 @@ class ClosedTagProducer:
             # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
             if not resp.ok:
                 raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
-            print(f"ClosedTagProducer: raw response for dir_id={dir_id}:\n{resp.content}")
             # 5. 组内置信度门槛过滤 + 相关度降序截断（max_tags 为单目录
             #    上限；2026/11/17 由合并后全集改为组内执行，目录间互不挤占）
             kept = [it for it in parse_closed_output(resp.content) if it["confidence"] >= spec.policy.min_confidence]
