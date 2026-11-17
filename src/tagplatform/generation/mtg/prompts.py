@@ -68,42 +68,52 @@ def render_content(content: ContentJSON) -> str:
     if cast:
         lines.append("人物：" + "、".join(cast))
     for scene in content.content.scenes:
-        desc = scene.description[:_MAX_SCENE_DESC]
-        lines.append(
-            f"- {scene.scene_id}"
-            f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}] {desc}")
-        if scene.emotions:
-            lines.append("  氛围：" + "、".join(scene.emotions))
-        emotions = [f"{ce.character}（{ce.emotion}）"
-                    for ce in scene.character_emotions[:6]]
-        if not emotions:
-            seen: set[str] = set()
-            for dialogue in scene.dialogues:
-                tone = dialogue.emotion.text_emotion if dialogue.emotion else None
-                speaker = dialogue.speaker_name or dialogue.speaker
-                if tone and speaker and speaker not in seen:
-                    seen.add(speaker)
-                    emotions.append(f"{speaker}（{tone}）")
-                if len(emotions) >= 6:
-                    break
-        if emotions:
-            lines.append("  人物情绪：" + "、".join(emotions))
-        if scene.location:
-            lines.append(f"  地点：{scene.location}")
-        if scene.background_music:
-            lines.append(f"  音乐：{scene.background_music}")
-        for dialogue in scene.dialogues:
-            tone = (f"（{dialogue.emotion.text_emotion}）"
-                    if dialogue.emotion and dialogue.emotion.text_emotion else "")
-            lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
+        lines.extend(render_scene_lines(scene))
     return "\n".join(lines)
+
+
+def render_scene_description(scene) -> str:
+    return scene.description[:_MAX_SCENE_DESC]
+
+
+def render_scene_lines(scene) -> list[str]:
+    lines: list[str] = []
+    desc = render_scene_description(scene)
+    lines.append(
+        f"- {scene.scene_id}"
+        f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}] {desc}")
+    if scene.emotions:
+        lines.append("  氛围：" + "、".join(scene.emotions))
+    emotions = [f"{ce.character}（{ce.emotion}）"
+                for ce in scene.character_emotions[:6]]
+    if not emotions:
+        seen: set[str] = set()
+        for dialogue in scene.dialogues:
+            tone = dialogue.emotion.text_emotion if dialogue.emotion else None
+            speaker = dialogue.speaker_name or dialogue.speaker
+            if tone and speaker and speaker not in seen:
+                seen.add(speaker)
+                emotions.append(f"{speaker}（{tone}）")
+            if len(emotions) >= 6:
+                break
+    if emotions:
+        lines.append("  人物情绪：" + "、".join(emotions))
+    if scene.location:
+        lines.append(f"  地点：{scene.location}")
+    if scene.background_music:
+        lines.append(f"  音乐：{scene.background_music}")
+    for dialogue in scene.dialogues:
+        tone = (f"（{dialogue.emotion.text_emotion}）"
+                if dialogue.emotion and dialogue.emotion.text_emotion else "")
+        lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
+    return lines
 
 
 def _generation_instructions(with_dir: bool = False) -> str:
     dims = "\n".join(f"- {name}：{_DIMENSION_HINTS[name]}" for name in DIMENSIONS.values())
     dir_rule = (
         "\n5. dir 必须是「可以放新标签的目录」里出现过的**目录 id**，不能自造；"
-        "找不到合适目录的标签直接不要输出。" if with_dir else "")
+        "按标签本身的含义选目录，找不到合适目录的标签直接不要输出。" if with_dir else "")
     dir_field = '"dir":"目录 id",' if with_dir else ""
     return (
         "## 要求\n"
@@ -156,21 +166,15 @@ def _dir_hint_block(dirs: list[dict]) -> str:
         lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
     return (
         "## 可以放新标签的目录\n"
-        "每个标签都要落到下面某个目录里，用**目录 id** 填 `dir` 字段。"
-        "只能从这张表里选，不要自造 id（竖线后是目录全路径与挂载粒度）：\n"
+        "各条目依次给出目录 ID、全路径和挂载粒度。\n"
         + "\n".join(lines) + "\n"
-        "按标签本身的含义挑目录，不要看哪个目录空着就往哪塞；"
-        "一条标签实在没有合适的目录，就**不要输出它**——宁可少一条，"
-        "也不要放进不合适的目录。"
     )
 
 
-def build_generation_messages(content: ContentJSON,
-                              frames_by_scene: dict[str, tuple[Path, ...]],
-                              run_index: int = 0,
-                              library_hint: list[str] | None = None,
-                              dir_hint: list[dict] | None = None) -> list[dict]:
-    """构造一轮生成请求：内容 + 场景内联关键帧 +（可选）库内标签/目录 + 要求。"""
+def generation_materials(content: ContentJSON, frames_by_scene: dict[str, tuple[Path, ...]],
+                         library_hint: list[str] | None = None,
+                         dir_hint: list[dict] | None = None) -> list[dict]:
+    """生成模型共用的影片证据和标签库提示。"""
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
@@ -188,9 +192,18 @@ def build_generation_messages(content: ContentJSON,
         parts.append({"type": "text", "text": _library_hint_block(library_hint)})
     if dir_hint:
         parts.append({"type": "text", "text": _dir_hint_block(dir_hint)})
-    parts.append({"type": "text",
-                  "text": _generation_instructions(with_dir=bool(dir_hint))})
-    return [{"role": "user", "content": parts}]
+    return parts
+
+
+def build_generation_messages(content: ContentJSON,
+                              frames_by_scene: dict[str, tuple[Path, ...]],
+                              run_index: int = 0,
+                              library_hint: list[str] | None = None,
+                              dir_hint: list[dict] | None = None) -> list[dict]:
+    parts = generation_materials(content, frames_by_scene, library_hint, dir_hint)
+    return [{"role": "user", "content": [
+        *parts, {"type": "text", "text": _generation_instructions(with_dir=bool(dir_hint))},
+    ]}]
 
 
 def _library_hint_block(names: list[str]) -> str:

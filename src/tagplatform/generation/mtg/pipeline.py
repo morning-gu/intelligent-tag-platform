@@ -269,37 +269,38 @@ def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
     return evidence
 
 
+def prepare_generation_context(spec: GenerationSpec, embedder, settings: Settings):
+    """两种基准共用关键帧选择和初始标签库提示。"""
+    frames = keyframes_mod.plan_scene_frames(
+        spec.content, settings.dataset_root,
+        per_scene=settings.mtg_frames_per_scene,
+        max_frames=settings.mtg_max_frames,
+        movie_asset_root=settings.movie_asset_root,
+        extra_roots=settings.movie_asset_extra_roots,
+    )
+    tag_library = spec.library if settings.open_library_enabled else None
+    library = (library_index(tag_library, embedder, spec.policy.dir_ids)
+               if tag_library is not None else [])
+    hints: list[str] = []
+    if library and settings.open_library_hint_enabled:
+        hints = recall_library_hints(library, embedder, spec.content,
+                                     settings.open_library_hint_count)
+    # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
+    # 而不是等生成完再按向量猜。只列 dir_dynamic 且落在范围内的目录。
+    dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
+                if settings.open_dir_hint_max > 0 else [])
+    return frames, tag_library, library, hints, dir_hint
+
+
 def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                         judge_client=None, *, settings: Settings | None = None) -> list[ProducedTag]:
     """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
     settings = settings or get_settings()
     started = time.monotonic()
     contents = spec.content
-    frames = keyframes_mod.plan_scene_frames(
-        contents, settings.dataset_root,
-        per_scene=settings.mtg_frames_per_scene,
-        max_frames=settings.mtg_max_frames,
-        movie_asset_root=settings.movie_asset_root,
-        extra_roots=settings.movie_asset_extra_roots,
-    )
+    frames, tag_library, library, hints, dir_hint = prepare_generation_context(spec, embedder, settings)
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
-
-    # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
-    # 库来自 JSON 模拟（spec.library），按任务的目录范围过滤；向量按
-    # 库/模型/范围缓存，同一进程内不重复嵌入。
-    tag_library = spec.library if settings.open_library_enabled else None
-    library = (library_index(tag_library, embedder, spec.policy.dir_ids)
-               if tag_library is not None else [])
-    hints: list[str] = []
-    if library and settings.open_library_hint_enabled:
-        hints = recall_library_hints(library, embedder, contents,
-                                     settings.open_library_hint_count)
-    # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
-    # 而不是等生成完再按向量猜。只列 dir_dynamic 且落在范围内的目录。
-    dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
-                if settings.open_dir_hint_max > 0 else [])
-
     # ---- 1. 多轮生成 ----
     entries: list[dict] = []
     runs: list[dict] = []
