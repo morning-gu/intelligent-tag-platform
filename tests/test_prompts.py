@@ -1,9 +1,10 @@
 """Prompt 模板层测试：种子激活模板、缺模板报错、占位符渲染、迁移含种子。
 
 种子契约是阶段 2 生成流水线（Task 5 产出器 / Task 8 执行器）的咬合面：
-closed/open 两个 mode 各有一条 v1 激活模板，closed 含 {content}/{candidates}
-占位符，open 仅含 {content}。迁移测试以子进程真跑 alembic，验证种子确实
-随迁移落库（而非只存在于 ORM 元数据）。
+closed/open 两个 mode 各有一条 v1 激活模板，均只含 {content} 占位符
+（closed 的候选标签由 ClosedTagProducer 按目录分组注入，不经占位符）。
+迁移测试以子进程真跑 alembic，验证种子确实随迁移落库（而非只存在于
+ORM 元数据）。
 """
 
 import os
@@ -24,7 +25,7 @@ def test_get_active_prompt_seeded(session):
     for mode in ("closed", "open"):
         t = get_active_prompt(session, mode)
         assert t.version == 1 and t.is_active and "{content}" in t.template_text
-    assert "{candidates}" in get_active_prompt(session, "closed").template_text
+    assert "{candidates}" not in get_active_prompt(session, "closed").template_text
 
 
 def test_get_active_prompt_missing_mode(session):
@@ -34,9 +35,9 @@ def test_get_active_prompt_missing_mode(session):
 
 def test_render_prompt_fills_placeholders(session):
     text = render_prompt(
-        get_active_prompt(session, "closed"), content="内容X", candidates="候选Y"
+        get_active_prompt(session, "closed"), content="内容X"
     )
-    assert "内容X" in text and "候选Y" in text and "{" not in text.replace("{{", "")
+    assert "内容X" in text and "{" not in text.replace("{{", "")
 
 
 def test_migration_upgrades_with_seed(tmp_path):

@@ -12,8 +12,8 @@ import sqlite3
 
 import pytest
 
-# 各 mode 合法的新模板正文（占位符齐全）
-CLOSED_V2_TEXT = "内容：{content}\n候选清单：{candidates}\n只输出 JSON 数组。"
+# 各 mode 合法的新模板正文（占位符齐全；closed 候选由 producer 注入，无 {candidates}）
+CLOSED_V2_TEXT = "内容：{content}\n从候选标签分组中选出相关标签，只输出 JSON 数组。"
 OPEN_V2_TEXT = "内容：{content}\n自由生成 5 到 15 个标签。"
 
 
@@ -110,20 +110,16 @@ def test_create_422_empty_text(client, bad_text):
 
 
 def test_create_422_missing_placeholders(client):
-    """缺必需占位符 → 422（open 缺 {content}；closed 缺 {content}/{candidates}）。"""
+    """缺必需占位符 → 422（closed/open 均只缺 {content} 一种）。"""
     # open 缺 {content}
     assert client.post("/api/v1/prompts", json={
         "mode": "open", "template_text": "无占位符的模板正文"
     }).status_code == 422
-    # closed 有 {content} 但缺 {candidates}
-    assert client.post("/api/v1/prompts", json={
-        "mode": "closed", "template_text": "内容 {content}，无候选清单"
-    }).status_code == 422
-    # closed 连 {content} 也缺
+    # closed 缺 {content}
     assert client.post("/api/v1/prompts", json={
         "mode": "closed", "template_text": "只有正文没有占位符"
     }).status_code == 422
-    # 三次失败都不落库：closed 仍 v1 单行激活；open 仍 v1 激活 + v2 过时标注
+    # 两次失败都不落库：closed 仍 v1 单行激活；open 仍 v1 激活 + v2 过时标注
     closed = client.get("/api/v1/prompts?mode=closed").json()
     open_rows = client.get("/api/v1/prompts?mode=open").json()
     assert len(closed) == 1 and closed[0]["is_active"] is True
@@ -145,7 +141,7 @@ def test_create_422_unknown_placeholder_json_example(client):
     当作字段，一旦落库激活，该 mode 每个生成任务渲染步抛裸 KeyError——
     白名单校验在落库前拒绝（终审 Important 1）。
     """
-    text = ('内容：{content}\n候选清单：{candidates}\n'
+    text = ('内容：{content}\n'
             '输出示例：{"tag_id": "t1", "relevance": 0.9}')
     resp = client.post("/api/v1/prompts", json={
         "mode": "closed", "template_text": text})
@@ -171,7 +167,7 @@ def test_create_accepts_double_brace_escaped_literals(client):
     校验勿误伤：parse 对 {{ }} 转义段返回 field_name=None，不进白名单比对；
     转义形态逐字落库，渲染输出单花括号字面量。
     """
-    text = ('内容：{content}\n候选清单：{candidates}\n'
+    text = ('内容：{content}\n'
             '输出示例（字面花括号示例）：{{"tag_id": "t1"}}')
     resp = client.post("/api/v1/prompts", json={
         "mode": "closed", "template_text": text})
@@ -180,7 +176,7 @@ def test_create_accepts_double_brace_escaped_literals(client):
     assert body["version"] == 2 and body["is_active"] is True
     assert body["template_text"] == text  # 转义形态原样落库
     # 渲染语义直验：转义段输出单花括号字面量（生成任务的实参形状）
-    rendered = body["template_text"].format(content="内容X", candidates="候选Y")
+    rendered = body["template_text"].format(content="内容X")
     assert rendered.endswith('输出示例（字面花括号示例）：{"tag_id": "t1"}')
 
 

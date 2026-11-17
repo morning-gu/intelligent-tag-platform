@@ -389,7 +389,7 @@ def test_prompts_list(client):
     # template_text 直接随列表返回（运营侧新建版本预填依赖，阶段 4 审查轮 1）
     by_key = {(r["mode"], r["version"]): r for r in rows}
     assert "{content}" in by_key[("closed", 1)]["template_text"]
-    assert "{candidates}" in by_key[("closed", 1)]["template_text"]
+    assert "{candidates}" not in by_key[("closed", 1)]["template_text"]
     assert "{content}" in by_key[("open", 1)]["template_text"]
     # open v2 是"已过时"标注行：inactive，且正文写明不再被消费
     assert "已过时" in by_key[("open", 2)]["template_text"]
@@ -397,7 +397,7 @@ def test_prompts_list(client):
     closed = client.get("/api/v1/prompts?mode=closed").json()
     assert [(r["mode"], r["version"], r["is_active"]) for r in closed] == \
         [("closed", 1, True)]
-    assert "{candidates}" in closed[0]["template_text"]
+    assert "{candidates}" not in closed[0]["template_text"]
 
 
 # ---- 404：未知任务/资产 ----

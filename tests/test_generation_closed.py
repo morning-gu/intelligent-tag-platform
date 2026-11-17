@@ -19,8 +19,10 @@ from tagplatform.generation import GenerationPolicy, GenerationSpec
 from tagplatform.generation.closed import ClosedTagProducer
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.library import TagLibrary, try_load_library
+from tagplatform.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.prompts import get_active_prompt, render_prompt
+from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
 
 # 两个目录 × 各 3 条：dir_genre（静态）/ dir_mood（动态）
@@ -109,21 +111,12 @@ def test_closed_recall_respects_dir_scope():
 
 def _build_spec(session: Session, content_fixture, run_id: str,
                 policy=None) -> GenerationSpec:
-    """按 runner 职责模拟组装：库召回候选 → 渲染 closed prompt。"""
+    """按 runner 职责模拟组装：渲染 closed prompt（候选分组由 produce 注入）。"""
     library = try_load_library()
     policy = policy or GenerationPolicy()
-    cats = recall_candidates(
-        library, MOCK_EMBEDDER, embed_content_texts(content_fixture),
-        dir_ids=policy.dir_ids, top_k=50,
-    )
-    candidates_text = "## 候选标签\n" + "\n".join(
-        f"- {c.tag_id} | {c.tag_name} | {c.tag_type} | {c.description}"
-        for c in cats
-    )
     prompt_text = render_prompt(
         get_active_prompt(session, "closed"),
-        content=content_fixture.model_dump_json(),
-        candidates=candidates_text,
+        content=_render_content_text(content_fixture),
     )
     return GenerationSpec(
         task_id="t1", asset_id=content_fixture.asset.asset_id,
@@ -147,6 +140,98 @@ def test_closed_produce_end_to_end(session, content_fixture):
                == content_fixture.asset.asset_id for t in out)
     # 不编造目录外标签
     assert {t.tag_id for t in out} <= {tid for tid, *_ in _LIB_TAGS}
+
+
+def test_closed_produce_groups_by_directory(session, content_fixture):
+    """候选按目录分组、逐组调用 LLM：每组 prompt 含一个组对象 JSON，结果合并。
+
+    spy 记录每次 llm.complete 的 prompt：断言调用次数 = 目录组数、每组只含
+    本组标签、组 JSON 带目录名称/描述、prompts 首段都是渲染后的正文。
+    """
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r2")
+    library = try_load_library()
+
+    calls: list[str] = []
+
+    class _SpyLLM(MOCK_LLM.__class__):
+        def complete(self, messages, run_id):
+            calls.append(messages[0]["content"])
+            return super().complete(messages, run_id)
+
+    out = ClosedTagProducer().produce(spec, session, _SpyLLM(), MOCK_EMBEDDER)
+    assert out  # 合并各组结果非空
+
+    # 召回候选的目录集合 = 分组组数 = LLM 调用次数
+    candidates = recall_candidates(
+        library, MOCK_EMBEDDER, embed_content_texts(content_fixture),
+        top_k=50)
+    dir_ids = {c.dir_id for c in candidates}
+    assert len(calls) == len(dir_ids) >= 2
+
+    seen_tags: set[str] = set()
+    for prompt in calls:
+        body, _, tail = prompt.partition("\n\n## 候选标签分组\n")
+        assert body == spec.prompt_text  # 渲染正文在前、逐字不变
+        group = json.loads(tail)
+        directory = library.directory(group["dir_id"])
+        assert group["dir_name"] == directory.dir_name
+        assert group["dir_description"] == directory.description
+        member_ids = {t["tag_id"] for t in group["tags"]}
+        assert member_ids == {c.tag_id for c in candidates
+                              if c.dir_id == group["dir_id"]}
+        for tag in group["tags"]:
+            assert set(tag) == {"tag_id", "tag_name", "description"}
+        seen_tags |= member_ids
+    # 全部候选都恰好进了某一组
+    assert seen_tags == {c.tag_id for c in candidates}
+
+
+def test_closed_produce_filters_and_caps_per_group(session, content_fixture):
+    """组内完成过滤与截断：低置信度先滤掉，再按相关度降序取 max_tags 条。
+
+    max_tags=1 + min_confidence=0.5：dir_genre 的 tag_003 置信度 0.3 被滤
+    （即使 relevance 最高），余下取 relevance 最高的 tag_002；dir_mood 同理
+    取 tag_005。目录间互不挤占：两组各留 1 条，共 2 条。
+    """
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r3",
+                       policy=GenerationPolicy(max_tags=1, min_confidence=0.5))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "tag_name": "悬疑", "relevance": 0.4,
+             "confidence": 0.9, "evidence": []},
+            {"tag_id": "tag_002", "tag_name": "剧情", "relevance": 0.8,
+             "confidence": 0.9, "evidence": []},
+            {"tag_id": "tag_003", "tag_name": "动作", "relevance": 0.95,
+             "confidence": 0.3, "evidence": []},  # 置信度不过线：先被过滤
+        ],
+        "dir_mood": [
+            {"tag_id": "tag_004", "tag_name": "紧张", "relevance": 0.5,
+             "confidence": 0.6, "evidence": []},
+            {"tag_id": "tag_005", "tag_name": "温馨", "relevance": 0.7,
+             "confidence": 0.6, "evidence": []},
+        ],
+    }
+
+    class _ScriptedLLM:
+        """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。"""
+
+        def complete(self, messages, run_id):
+            tail = messages[0]["content"].partition(
+                "\n\n## 候选标签分组\n")[2]
+            dir_id = json.loads(tail)["dir_id"]
+            return LLMResponse(
+                content=json.dumps(responses[dir_id], ensure_ascii=False),
+                usage={}, raw={}, ok=True)
+
+    out = ClosedTagProducer().produce(spec, session, _ScriptedLLM(),
+                                      MOCK_EMBEDDER)
+    # 每组恰好留下各自 relevance 最高的过线行；tag_003 虽最高分但被滤掉
+    assert [t.tag_id for t in out] == ["tag_002", "tag_005"]
+    # 截断发生在组内：单目录上限 1，两组各 1 条（合并后不再二次截断）
+    assert len(out) == 2
+    assert {t.dir_id for t in out} == {"dir_genre", "dir_mood"}
 
 
 def test_closed_no_candidates_raises(session, content_fixture):
