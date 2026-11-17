@@ -1,14 +1,17 @@
-"""标签结果入库：ProducedTag → `pre_asset_tag` 的「删旧插新 + 自动判定」。
+"""标签结果入库：ProducedTag → `pre_asset_tag` 的「删旧插新 + 模式分流的审核门槛」。
 
-对应设计文档 §6.1（重跑与幂等）与 v2 的"重复不入审"口径：
+对应设计文档 §6.1（重跑与幂等）与 §3.3 的审核口径：
 
 - 任务写结果前，先删除该资产**同 origin** 的全部 `pending` 行（closed 重跑
   不清 open 的待审行，反之亦然）；
-- **命中库内标签**（`ProducedTag.origin == "catalog"`）的行不再进人工队列：
-  直接落 `review_status="approved"`、`reviewer_id="system"`。完全同名记
-  "自动通过"，相似并入（带 `alias_name`）记"相似并入，原名记为别名候选"；
-- **库外新词**（`origin == "generated"`）落 `pending`，带候选目录
-  （`candidate_dir_id`）与挂载点（`target_type/target_id`），等人工审核；
+- **closed 任务**（`origin == "closed"`）：产出全部落 `pending` 进人工审核
+  队列——闭环打分结果（相关度/置信度/证据）需人复审（doc §3.3 示例口径），
+  不做系统自动通过；
+- **open 任务**（`origin == "open"`）：库内命中（`ProducedTag.origin ==
+  "catalog"`）沿用 v2"重复不入审"口径，直接落 `review_status="approved"`、
+  `reviewer_id="system"` 并同步写正式挂载；库外新词（`origin ==
+  "generated"`）落 `pending`，带候选目录（`candidate_dir_id`）与挂载点，
+  等人工审核；
 - 已定稿行（approved / rejected）不动——重跑不得复活人工已定或已驳回的标签；
 - 去重边界是两个部分唯一索引：`ux_pre_tag_catalog`（asset×target×tag_id）
   与 `ux_pre_tag_candidate`（asset×target×candidate_name）。
@@ -36,7 +39,7 @@ SYSTEM_REVIEWER = "system"
 
 @dataclass
 class PersistSummary:
-    """入库结果：清掉的旧待审行 / 新插入行 / 系统自动通过 / 跳过已定稿。"""
+    """入库结果：清掉的旧待审行 / 新插入行 / open 侧自动通过 / 跳过已定稿。"""
 
     cleared: int
     inserted: int
@@ -49,11 +52,11 @@ class PersistSummary:
 def _mount_asset_tag(session: Session, *, asset_id: str, target_type: str,
                      target_id: str, tag_id: str, tag_name: str,
                      now: datetime) -> bool:
-    """自动通过的行同步写正式挂载（幂等：同键已挂则跳过）。
+    """open 侧自动通过的行同步写正式挂载（幂等：同键已挂则跳过）。
 
     `asset_tag` 才是"资产有哪些标签"的权威口径；审核人工那条路在
-    review 服务里写，系统自动通过（同名命中/相似并入）也必须写，否则
-    资产详情看不到这些标签。
+    review 服务里写，open 的系统自动通过（同名命中/相似并入）也必须写，
+    否则资产详情看不到这些标签。closed 已不走自动通过（全量入审）。
     """
     exists = (
         session.query(AssetTag.id)
@@ -119,7 +122,6 @@ def persist_tags(
     """
     if origin not in ("closed", "open"):
         raise ValueError(f"未知 origin: {origin!r}（合法取值 closed|open）")
-
     now = datetime.now(timezone.utc)
     cleared = session.execute(
         delete(PreAssetTag).where(
@@ -144,8 +146,14 @@ def persist_tags(
                 "candidate_description": None,
                 "candidate_alias": tag.alias_name,
             }
-            status = "approved"
-            comment = _auto_comment(tag)
+            if origin == "closed":
+                # 闭环产出全部入审（doc §3.3）：打分与证据需人复审，
+                # 不做系统自动通过，也不在入库时写正式挂载
+                status = "pending"
+                comment = None
+            else:
+                status = "approved"
+                comment = _auto_comment(tag)
         elif tag.origin == "generated":
             if not tag.dir_id:
                 raise ValueError(

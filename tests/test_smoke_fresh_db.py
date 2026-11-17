@@ -164,10 +164,9 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     assert len(results) >= 1
     first = results[0]
     assert first["origin"] == "closed"
-    # closed 生成从库内召回候选、产出即库内标签（tag_id 非空、名称同名）：
-    # 审核口径是"同名直接通过"，所以终态是 approved（无需人工再审）。
-    # 人工审核链路由 test_api_review / test_review_service 覆盖。
-    assert first["review_status"] == "approved"
+    # closed 生成从库内召回候选、产出即库内标签（tag_id 非空、名称同名），
+    # 但产出仍需人工复审：全部落 pending 进审核队列，不做系统自动通过。
+    assert first["review_status"] == "pending"
     assert first["tag_id"] and first["candidate_name"] is None
     assert 0.5 <= first["confidence"] <= 1.0
     assert 0.0 <= first["relevance_score"] <= 1.0
@@ -192,8 +191,23 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     # 产出 ⊆ 候选（同键闭合：LLM 只能从候选清单选择，不得编造）
     assert {r["tag_id"] for r in results} <= {c.tag_id for c in candidates}
 
-    # 5. 自动通过 → 正式挂载已出现在 /assets/{id}/tags（asset_tag 复制行），
+    # 5. 待审行出现在审核中心；pending 阶段不写正式挂载
+    #    （/assets/{id}/tags 为空，等审核通过后由 review 服务挂载）
+    tags = client.get(f"/api/v1/assets/{asset_id}/tags")
+    assert tags.status_code == 200
+    assert tags.json() == []
+    review = client.get(f"/api/v1/review/items?status=pending&asset_id={asset_id}")
+    assert review.status_code == 200
+    review_rows = review.json()["items"]
+    assert len(review_rows) == len(results)
+    assert all(r["review_status"] == "pending" for r in review_rows)
+
+    # 6. 人工批量审核通过 → 正式挂载出现在 /assets/{id}/tags，
     #    一条生成结果一条挂载，且挂载的 tag_id/tag_name 与结果一致
+    batch = {"ids": [r["id"] for r in review_rows], "action": "approve"}
+    reviewed = client.post("/api/v1/asset-tags/batch-review", json=batch)
+    assert reviewed.status_code == 200, reviewed.text
+    assert all(item["ok"] for item in reviewed.json()["results"])
     tags = client.get(f"/api/v1/assets/{asset_id}/tags")
     assert tags.status_code == 200
     mounted = tags.json()
@@ -205,12 +219,12 @@ def test_fresh_db_smoke_full_chain(smoke_client):
         assert row["origin"] == "closed"
         assert row["created_at"] is not None
 
-    # 6. metrics：summary 三键（终审分布 / 通过率 / 任务成功率）
+    # 7. metrics：summary 三键（终审分布 / 通过率 / 任务成功率）
     #    + 证据覆盖满值 + dir-coverage 非空且 approved 汇总一致
     metrics = client.get("/api/v1/metrics/summary")
     assert metrics.status_code == 200
     m = metrics.json()
-    assert m["pending_count"] == 0  # closed 行全部自动通过，无待审
+    assert m["pending_count"] == 0  # 审核后无待审
     assert m["review_stats"]["approved"]["count"] == len(results)
     assert m["generated_pass_rate"] == 1.0  # 全部终审行都是 approve
     assert m["evidence_coverage"] == 1.0    # 全部生成行带场景证据
@@ -222,7 +236,7 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     rows = coverage.json()
     assert rows  # 非空
     assert sum(row["total"] for row in rows) == len(results)
-    assert sum(row["approved"] for row in rows) == len(results)  # 全部自动通过
+    assert sum(row["approved"] for row in rows) == len(results)  # 审核通过
 
     # metrics 第三端点：confidence 分桶——非空、桶标签格式、与互锁风格一致
     # （各桶 count 之和 == 全部带置信度行数；本链全部行带 confidence）

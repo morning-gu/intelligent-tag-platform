@@ -131,8 +131,8 @@ def test_generation_e2e_closed_succeeded(client):
     assert first["origin"] == "closed"
     assert first["tag_name"].startswith(("类型标签", "情绪标签"))
     assert first["dir_id"] in {"dir_genre", "dir_mood"}
-    # 命中库内 → 系统自动通过（不进人工队列）
-    assert first["review_status"] == "approved"
+    # 闭环产出全部进人工审核队列（库内命中也不自动通过）
+    assert first["review_status"] == "pending"
     assert 0.5 <= first["confidence"] <= 1.0
     assert 0.0 <= first["relevance_score"] <= 1.0
     # MockLLM 场景证据（Task 6）：runner 渲染文本 prompt 含场景行 → 证据卡
@@ -141,18 +141,16 @@ def test_generation_e2e_closed_succeeded(client):
         "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
         "description": "两名人物在仓库中发生激烈争执"}]
 
-    # 自动通过的行直接进正式挂载（persist 同时写 asset_tag），无需人工动作
+    # pending 行不写正式挂载：等审核通过后由 review 服务挂载
     tags_resp = client.get("/api/v1/assets/movie_001/tags")
     assert tags_resp.status_code == 200
-    tags = tags_resp.json()
-    assert len(tags) == len(results)
-    assert all(tag["review_status"] == "approved" for tag in tags)
-    for row, res in zip(tags, results):
-        assert set(row.keys()) == ASSET_TAG_KEYS
-        assert row["tag_id"] is not None and row["candidate_name"] is None
-        assert row["tag_name"] == res["tag_name"]  # 同按入库行序，逐行对应
-        # id 是 asset_tag 主键（与 pre 行主键不同源），用 tag_id + 名字对账
-        assert row["tag_id"] == res["tag_id"]
+    assert tags_resp.json() == []
+    # 待审行出现在审核中心（reviewer_id 为空，不被 system 过滤掉）
+    review_resp = client.get("/api/v1/review/items?status=pending&asset_id=movie_001")
+    assert review_resp.status_code == 200
+    review_rows = review_resp.json()["items"]
+    assert len(review_rows) == len(results)
+    assert all(r["review_status"] == "pending" for r in review_rows)
 
 
 def test_generation_e2e_open_generated_rows(client):
