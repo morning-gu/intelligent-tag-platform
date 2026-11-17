@@ -13,11 +13,21 @@ from tagplatform.llm import MockLLMClient, OpenAIClient, make_llm_client
 from tagplatform.settings import Settings
 
 
-# ---------- MockLLMClient：模式 A（含 ## 候选标签 节） ----------
+# ---------- MockLLMClient：模式 A（含 ## 候选标签分组 JSON 节） ----------
+
+def _group_prompt(tags: list[dict]) -> str:
+    """组装单组模式 A prompt（ClosedTagProducer.produce 的追加格式）。"""
+    return ("## 候选标签分组\n" + json.dumps(
+        {"dir_id": "dir_genre", "dir_name": "主类型", "dir_description": "故事类型",
+         "tags": tags}, ensure_ascii=False, indent=2))
+
 
 def test_mock_closed_selects_from_candidates():
     llm = MockLLMClient()
-    msgs = [{"role": "user", "content": "## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心\n- tag_002 | 剧情 | genre | 叙事驱动"}]
+    msgs = [{"role": "user", "content": _group_prompt([
+        {"tag_id": "tag_001", "tag_name": "悬疑", "description": "以悬念为核心"},
+        {"tag_id": "tag_002", "tag_name": "剧情", "description": "叙事驱动"},
+    ])}]
     resp = llm.complete(msgs, "run_1")
     assert resp.ok and json.loads(resp.content)  # 列表，元素含 tag_id/relevance/confidence/evidence 键
     assert all(item["tag_id"] in {"tag_001", "tag_002"} for item in json.loads(resp.content))
@@ -25,14 +35,15 @@ def test_mock_closed_selects_from_candidates():
 
 def test_mock_closed_item_shape():
     """模式 A 元素键形与分值域（parse_closed_output 的输入契约）。"""
-    msgs = [{"role": "user", "content": "## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心"}]
+    msgs = [{"role": "user", "content": _group_prompt(
+        [{"tag_id": "tag_001", "tag_name": "悬疑", "description": "以悬念为核心"}])}]
     # run_1: _hash_unit("run_1tag_001")=0.2787 < 0.4 → 必选中（run_2 会零选中空转）
     items = json.loads(MockLLMClient().complete(msgs, "run_1").content)
     assert items != []  # 防哈希扰动再退化成空转通过（false-green）
     for it in items:
         assert {"tag_id", "tag_name", "relevance", "confidence", "evidence"} <= set(it)
         assert 0.5 <= it["relevance"] < 1.0 and 0.5 <= it["confidence"] < 1.0
-        # prompt 无场景行（仅候选节）→ evidence 兜底空列表（Task 6 兜底语义）
+        # prompt 无场景行（仅候选分组节）→ evidence 兜底空列表（Task 6 兜底语义）
         assert it["evidence"] == []
 
 
@@ -63,7 +74,8 @@ def test_mock_closed_scene_evidence():
     """模式 A 场景证据（Task 6）：选中标签 evidence 为一元素证据卡，取自按
     sha256(evidence|run_id|tag_id) 选中的场景行（scene_id/时间戳来自该行）。"""
     prompt = ("《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
-              + "\n## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心")
+              + "\n" + _group_prompt(
+                  [{"tag_id": "tag_001", "tag_name": "悬疑", "description": "以悬念为核心"}]))
     items = json.loads(MockLLMClient().complete(
         [{"role": "user", "content": prompt}], "run_1").content)
     assert len(items) == 1  # run_1: sha256(run_1tag_001) < 0.4 必选中
@@ -127,7 +139,8 @@ def test_mock_deterministic_same_run_id():
     prompt 带场景行：确定性同时覆盖场景证据字段（Task 6）。"""
     msgs = [{"role": "user", "content": "《示例电影》\n摘要：摘要\n"
              + "\n".join(_SCENE_LINES)
-             + "\n## 候选标签\n- tag_001 | 悬疑 | genre | 以悬念为核心"}]
+             + "\n" + _group_prompt(
+                 [{"tag_id": "tag_001", "tag_name": "悬疑", "description": "以悬念为核心"}])}]
     a = MockLLMClient().complete(msgs, "run_9")
     b = MockLLMClient().complete(msgs, "run_9")
     assert a.content == b.content and a.raw == b.raw

@@ -2,10 +2,10 @@
 
 与阶段 1 的 MockEmbedder 对应：无 random 模块、跨进程确定，全部行为由
 sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner 的组装咬合）：
-- 模式 A（封闭提取）：prompt 含 `## 候选标签` 节 → 解析候选行
-  `- {tag_id} | {tag_name} | {tag_type} | {description}`，按
-  sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的五键
-  （tag_id/tag_name/relevance/confidence/evidence）；
+- 模式 A（封闭提取）：prompt 含 `## 候选标签分组` 节（ClosedTagProducer
+  逐组追加的候选分组 JSON）→ 解析组对象的 tags 列表（tag_id/tag_name 取
+  JSON 键），按 sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的
+  五键（tag_id/tag_name/relevance/confidence/evidence）；
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
   不含 tag_id（模式 B 的 tag_id 由匹配层赋，LLM 不产出）。
 
@@ -28,14 +28,12 @@ import re
 
 from tagplatform.llm.client import LLMResponse
 
-# 候选行格式：`- {tag_id} | {tag_name} | {tag_type} | {description}`
-_CANDIDATE_LINE_RE = re.compile(r"^- (.+?) \| (.+?) \| (.+?) \| (.+)$", re.MULTILINE)
 # 场景行格式（runner._render_content_text 组装，逐字对齐）：
-# `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选行
-# 首词后跟 " |" 而非 " ["，两类行格式天然互斥，互不误配）
+# `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选
+# 行首词后跟 " |" 而非 " ["，两类行格式天然互斥，互不误配）
 _SCENE_LINE_RE = re.compile(r"^- (\S+) \[(\d+)-(\d+)\] (.+)$", re.MULTILINE)
-# 模式 A 标志节（任务 8 runner 组装 candidates 时的标题）
-_CLOSED_MARKER = "## 候选标签"
+# 模式 A 标志节（ClosedTagProducer.produce 逐组追加候选分组 JSON 的标题）
+_CLOSED_MARKER = "## 候选标签分组"
 # 开放式生成（mtg 流水线）的标志串：生成 / 审核两种请求靠它分流
 _MTG_GEN_MARKER = "## 标签生成任务"
 _MTG_JUDGE_MARKER = "## 审核任务"
@@ -105,17 +103,24 @@ def _pick_evidence(scenes: list[dict], hash_key: str) -> list[dict]:
 
 
 def _closed_output(text: str, run_id: str) -> list[dict]:
-    """模式 A：解析候选行，哈希采样选中项（确定性伪判定），逐标签附场景证据。"""
-    tail = text.split(_CLOSED_MARKER, 1)[1]
-    # 场景行在 content 节（候选标志节之前），对全文解析即可
+    """模式 A：解析候选分组 JSON，哈希采样选中项（确定性伪判定），逐标签附场景证据。
+
+    ClosedTagProducer 按目录分组、以 `## 候选标签分组` 节追加组对象
+    （dir_id/dir_name/dir_description/tags）；一组一次调用，本函数单次只解析
+    一个组对象——组内 tags 列表即该组候选。场景行在 content 节（标志节
+    之前），对全文解析即可。
+    """
+    tail = text.split(_CLOSED_MARKER, 1)[1].strip()
+    group = json.loads(tail)
     scenes = _parse_scenes(text)
     items = []
-    for tag_id, tag_name, _tag_type, _desc in _CANDIDATE_LINE_RE.findall(tail):
+    for tag in group.get("tags", []):
+        tag_id = str(tag["tag_id"])
         if _hash_unit(run_id + tag_id) >= _SELECT_PROB:
             continue
         items.append({
             "tag_id": tag_id,
-            "tag_name": tag_name,
+            "tag_name": tag.get("tag_name", tag_id),
             "relevance": _score(f"relevance|{run_id}|{tag_id}"),
             "confidence": _score(f"confidence|{run_id}|{tag_id}"),
             "evidence": _pick_evidence(scenes, f"evidence|{run_id}|{tag_id}"),

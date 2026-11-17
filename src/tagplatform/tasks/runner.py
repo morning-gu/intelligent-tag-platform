@@ -3,10 +3,10 @@
 把前序部件串成完整执行链（计划钉死的八步流程）：
 状态机（queued → running → succeeded|failed，running 置位先落库防长任务
 重复提交）→ 内容解析 → producer 分发（get_producer，closed/open 注册于
-tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用，
-candidates 文本仅 closed、行序 = 召回结果行序）→ policy 解析 → produce →
-persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量 → 终态一次性
-commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
+tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用；
+closed 的候选标签由 producer 在 produce 内部按目录分组注入）→ policy
+解析 → produce → persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量
+→ 终态一次性 commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
 
 事务语义：
 - 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist/回填的未提交
@@ -36,11 +36,6 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db.models import MediaAsset, TagGenerationTask
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
-from tagplatform.generation.recall import (
-    RecallCandidate,
-    embed_content_texts,
-    recall_candidates,
-)
 from tagplatform.filtering import FilterContext, run_filter_chain
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
@@ -48,7 +43,6 @@ from tagplatform.content_io import load_content
 from tagplatform.ingest import record_alias
 from tagplatform.library import try_load_library
 from tagplatform.schemas import ContentJSON, parse_content
-from tagplatform.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -139,21 +133,6 @@ def _render_content_text(content: ContentJSON) -> str:
     return "\n".join(parts)
 
 
-def _render_candidates_text(candidates: list[RecallCandidate]) -> str:
-    """召回候选 → prompt 的 candidates 文本（仅模式 A，行序 = 召回结果行序）。
-
-    每候选一行 `- {tag_id} | {tag_name} | {tag_type} | {description}`；
-    首行 "## 候选标签" 是模式 A 的标志节——MockLLM 按它识别模式 A 分支并
-    逐行解析候选（llm/mock.py _CLOSED_MARKER，与任务 5 测试的组装约定一致），
-    真模型下同样是有效的小节标题。
-    """
-    lines = [
-        f"- {c.tag_id} | {c.tag_name} | {c.tag_type} | {c.description}"
-        for c in candidates
-    ]
-    return "## 候选标签\n" + "\n".join(lines)
-
-
 def run_generation_task(task_id: str, session: Session, llm,
                         embedder) -> TagGenerationTask:
     """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
@@ -162,8 +141,8 @@ def run_generation_task(task_id: str, session: Session, llm,
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
     2. 资产或其 content_json 缺失 → failed + error、commit、返回 task；
     3. load_content(asset.content_json)；资产 id 即 task.asset_id（任务直绑资产）；
-    4. get_producer(task.mode)；closed 额外召回候选组装 candidates 文本，
-       render_prompt 渲染激活模板（open 模板无 candidates 占位符，只传 content）；
+    4. get_producer(task.mode)；render_prompt 渲染激活模板（closed/open 均
+       只传 content——closed 的候选标签由 produce 内部按目录分组注入）；
     5. policy_json 空 → 默认 GenerationPolicy，否则按 JSON 构造；
     6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
        写入后置 failed（error=str(e)、finished_at）、commit、返回 task
@@ -205,24 +184,14 @@ def run_generation_task(task_id: str, session: Session, llm,
                   if raw_policy else GenerationPolicy())
         # 4b. producer 分发与 prompt 组装渲染
         #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
-        #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板。
+        #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板
+        #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再组装）。
         producer = get_producer(task.mode)
         template = None
         prompt_text = ""
         if not getattr(producer, "builds_prompt", False):
             template = get_active_prompt(session, task.mode)
             fields: dict[str, str] = {"content": _render_content_text(content)}
-            if task.mode == "closed":
-                if library is None:
-                    raise ValueError("标签库未就绪，无法执行封闭式生成")
-                candidates = recall_candidates(
-                    library,
-                    embedder,
-                    embed_content_texts(content),
-                    dir_ids=policy.dir_ids,
-                    top_k=get_settings().recall_top_k_per_type,
-                )
-                fields["candidates"] = _render_candidates_text(candidates)
             prompt_text = render_prompt(template, **fields)
         # 6. 生成（run_id 含随机段：同任务重跑换 run_id，Mock 哈希采样随之变化）
         run_id = f"{task.task_id}:{uuid4().hex[:6]}"

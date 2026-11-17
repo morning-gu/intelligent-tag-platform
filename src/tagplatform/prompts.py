@@ -15,27 +15,27 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db.models import PromptTemplate
 
-# 各 mode 模板必须包含的占位符：closed 需内容 + 候选清单，open 仅内容
-# （渲染期 str.format 需实参齐全，缺占位符的模板会静默丢上下文）
+# 各 mode 模板必须包含的占位符：closed/open 均仅内容——closed 的候选标签
+# 分组 JSON 由 ClosedTagProducer 在 produce 内拼接（不再经占位符注入）
 _REQUIRED_PLACEHOLDERS = {
-    "closed": ("{content}", "{candidates}"),
+    "closed": ("{content}",),
     "open": ("{content}",),
 }
 
-# 占位符白名单：render_prompt 只以 content/candidates 两个关键字实参调用，
-# 之外的任何字段（如管理员贴入含 {"tag_id": ...} 的 JSON 输出示例、空的
-# {}）在渲染步抛裸 KeyError/IndexError——必须在落库前拒绝。字面花括号
-# 用 {{ }} 双写转义（parse 对转义段返回 field_name=None，不受白名单约束）。
-_ALLOWED_FIELDS = frozenset({"content", "candidates"})
+# 占位符白名单：render_prompt 只以 content 一个关键字实参调用，之外的任何
+# 字段（如管理员贴入含 {"tag_id": ...} 的 JSON 输出示例、空的 {}）在渲染步
+# 抛裸 KeyError/IndexError——必须在落库前拒绝。字面花括号用 {{ }} 双写转义
+# （parse 对转义段返回 field_name=None，不受白名单约束）。
+_ALLOWED_FIELDS = frozenset({"content"})
 
 
 def _validate_template_text(mode: str, template_text: str) -> str:
     """校验模板正文并返回 strip 后的正文；不合法抛 ValueError（路由层映射 422）。
 
     规则：strip 后非空；format 语法合法（花括号配对，parse 失败转人话）；
-    占位符白名单——字段只允许 content|candidates（防"带 JSON 示例的正文
-    落库激活、渲染步才炸"的误操作）；且包含该 mode 必需的占位符。mode
-    取值 closed|open 之外直接拒绝（表无 CHECK 约束，合法性由本服务层保证）。
+    占位符白名单——字段只允许 content（防"带 JSON 示例的正文落库激活、
+    渲染步才炸"的误操作）；且包含该 mode 必需的占位符。mode 取值
+    closed|open 之外直接拒绝（表无 CHECK 约束，合法性由本服务层保证）。
     """
     if mode not in _REQUIRED_PLACEHOLDERS:
         raise ValueError(f"未知 mode：{mode}")
@@ -52,7 +52,7 @@ def _validate_template_text(mode: str, template_text: str) -> str:
     for field in fields:
         if field is not None and field not in _ALLOWED_FIELDS:
             raise ValueError(
-                f"未知占位符 {{{field}}}——只允许 {{content}} 与 {{candidates}}，"
+                f"未知占位符 {{{field}}}——只允许 {{content}}，"
                 "字面花括号（JSON 示例等）请双写 {{ }} 转义"
             )
     for placeholder in _REQUIRED_PLACEHOLDERS[mode]:
