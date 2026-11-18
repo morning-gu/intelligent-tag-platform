@@ -390,6 +390,13 @@ def test_prompts_list(client):
     by_key = {(r["mode"], r["version"]): r for r in rows}
     assert "{content}" in by_key[("closed", 1)]["template_text"]
     assert "{candidates}" not in by_key[("closed", 1)]["template_text"]
+    closed_text = by_key[("closed", 1)]["template_text"]
+    assert "Applicability" in closed_text
+    assert "Evidence Strength" in closed_text
+    assert "applicability" in closed_text and "evidence_strength" in closed_text
+    assert "evidences" in closed_text
+    assert "1=完全不适用" in closed_text
+    assert "5=证据直接、充分且能够相互印证" in closed_text
     assert "{content}" in by_key[("open", 1)]["template_text"]
     # open v2 是"已过时"标注行：inactive，且正文写明不再被消费
     assert "已过时" in by_key[("open", 2)]["template_text"]

@@ -29,7 +29,7 @@ def test_mock_closed_selects_from_candidates():
         {"tag_id": "tag_002", "tag_name": "剧情", "description": "叙事驱动"},
     ])}]
     resp = llm.complete(msgs, "run_1")
-    assert resp.ok and json.loads(resp.content)  # 列表，元素含 tag_id/relevance/confidence/evidence 键
+    assert resp.ok and json.loads(resp.content)
     assert all(item["tag_id"] in {"tag_001", "tag_002"} for item in json.loads(resp.content))
 
 
@@ -41,10 +41,11 @@ def test_mock_closed_item_shape():
     items = json.loads(MockLLMClient().complete(msgs, "run_1").content)
     assert items != []  # 防哈希扰动再退化成空转通过（false-green）
     for it in items:
-        assert {"tag_id", "tag_name", "relevance", "confidence", "evidence"} <= set(it)
-        assert 0.5 <= it["relevance"] < 1.0 and 0.5 <= it["confidence"] < 1.0
+        assert {"tag_id", "applicability", "evidence_strength", "evidences"} <= set(it)
+        assert it["applicability"] in {4, 5}
+        assert it["evidence_strength"] in {4, 5}
         # prompt 无场景行（仅候选分组节）→ evidence 兜底空列表（Task 6 兜底语义）
-        assert it["evidence"] == []
+        assert it["evidences"] == []
 
 
 # ---------- MockLLMClient：场景证据（Task 6，runner 渲染文本路径） ----------
@@ -79,7 +80,10 @@ def test_mock_closed_scene_evidence():
     items = json.loads(MockLLMClient().complete(
         [{"role": "user", "content": prompt}], "run_1").content)
     assert len(items) == 1  # run_1: sha256(run_1tag_001) < 0.4 必选中
-    assert items[0]["evidence"] == _expected_evidence("run_1", "tag_001")
+    assert items[0]["evidences"] == [{
+        "scene_id": item["scene_id"],
+        "evidence": item["description"],
+    } for item in _expected_evidence("run_1", "tag_001")]
 
 
 # ---------- MockLLMClient：开放式生成（mtg）与 judge 两条分支 ----------
