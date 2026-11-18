@@ -354,8 +354,7 @@ def create_generation_tasks(
         created.append(task)
     session.commit()
 
-    for task in created:
-        executor.submit(task.task_id)
+    executor.submit_batch([task.task_id for task in created], mode=body.mode)
 
     # 重读执行状态（expire_on_commit=False 下对象属性不含线程内写入，须 refresh）
     items = []
@@ -452,7 +451,7 @@ def retry_generation_task(
     task.error = None
     task.finished_at = None
     session.commit()
-    executor.submit(task_id)
+    executor.submit_batch([task_id], mode=task.mode)
     return GenerationTaskRetryResponse(task_id=task_id, status="queued")
 
 

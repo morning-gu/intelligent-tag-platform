@@ -136,7 +136,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session.close()
         app.state.executor = TaskExecutor(
             app.state.session_factory, app.state.llm, app.state.embedder,
-            workers=settings.generation_workers)
+            workers=settings.generation_workers,
+            prompt_sample_dir=settings.mtg_prompt_sample_dir)
         session = app.state.session_factory()
         try:
             reset_orphan_running(session)

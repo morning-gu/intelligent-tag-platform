@@ -217,21 +217,34 @@ def build_generation_messages(content: ContentJSON,
     """
     active = _active(modalities)
     body = render_content(content, active)
-    parts: list[dict] = [{
-        "type": "text",
-        "text": (f"{GENERATION_MARKER}\n"
-                 "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
-                 "## 内容\n" + body),
-    }]
+    frame_parts: list[dict] = []
     if "video" not in active:
         frames_by_scene = {}
     for scene in content.content.scenes:
         frames = frames_by_scene.get(scene.scene_id) or ()
         for order, frame in enumerate(frames, 1):
-            parts.append({"type": "text",
-                          "text": f"〔关键帧〕{scene.scene_id} 第 {order}/{len(frames)} 张"})
-            parts.append({"type": "image_url",
-                          "image_url": {"url": _encode_image(frame)}})
+            frame_parts.extend(_frame_parts(scene.scene_id, order, len(frames),
+                                           _encode_image(frame)))
+    return _generation_messages(body, frame_parts, library_hint, dir_hint)
+
+
+def _frame_parts(scene_id: str, order: int | str, total: int | str,
+                 image_url: str) -> list[dict]:
+    return [
+        {"type": "text", "text": f"〔关键帧〕{scene_id} 第 {order}/{total} 张"},
+        {"type": "image_url", "image_url": {"url": image_url}},
+    ]
+
+
+def _generation_messages(body: str, frame_parts: list[dict],
+                         library_hint: list[str] | None,
+                         dir_hint: list[dict] | None) -> list[dict]:
+    parts: list[dict] = [{
+        "type": "text",
+        "text": (f"{GENERATION_MARKER}\n"
+                 "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
+                 "## 内容\n" + body),
+    }, *frame_parts]
     if library_hint:
         parts.append({"type": "text", "text": _library_hint_block(library_hint)})
     if dir_hint:
@@ -239,6 +252,19 @@ def build_generation_messages(content: ContentJSON,
     parts.append({"type": "text",
                   "text": _generation_instructions(with_dir=bool(dir_hint))})
     return [{"role": "user", "content": parts}]
+
+
+def build_generation_template() -> dict:
+    body = "{{影片标题、摘要、人物、场景描述与台词等按模态渲染的文本}}"
+    frames = _frame_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
+                          "{{关键帧的完整 data URL}}")
+    hints = ["{{召回的库内标签名，每个词一行}}"]
+    dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
+             "scope": "{{目录适用粒度}}"}]
+    return {
+        "messages": _generation_messages(body, frames, hints, dirs),
+        "instructions_without_directory_hint": _generation_instructions(),
+    }
 
 
 def _library_hint_block(names: list[str]) -> str:
@@ -274,14 +300,18 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict]) -> list[d
 
     candidates 每项：{tag, dimension, reason, scenes}
     """
-    lines = [f"- {c['tag']}｜{c.get('dimension') or '未分类'}｜"
-             f"{(c.get('reason') or '')[:40]}" for c in candidates]
+    lines = [candidate_line(c["tag"], c.get("dimension"), (c.get("reason") or "")[:40])
+             for c in candidates]
+    return render_judge_messages(_render_judge_content(content), "\n".join(lines))
+
+
+def render_judge_messages(body: str, candidate_lines: str) -> list[dict]:
     text = (
         f"{JUDGE_MARKER}\n"
         "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
         "请逐个判定候选标签是否被内容真实支持。\n\n"
-        "## 候选标签\n" + "\n".join(lines) + "\n\n"
-        "## 影片内容\n" + _render_judge_content(content) + "\n\n"
+        "## 候选标签\n" + candidate_lines + "\n\n"
+        "## 影片内容\n" + body + "\n\n"
         "## 判定标准\n"
         "- supported：内容中有明确依据（场景描述、氛围、人物情绪至少一处）；\n"
         "- insufficient：内容不足以判断（不要臆测）；\n"

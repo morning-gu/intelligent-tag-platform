@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db.models import MediaAsset, TagGenerationTask
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
+from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.filtering import FilterContext, run_filter_chain
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.results import persist_tags
@@ -133,8 +134,10 @@ def _render_content_text(content: ContentJSON) -> str:
     return "\n".join(parts)
 
 
-def run_generation_task(task_id: str, session: Session, llm,
-                        embedder) -> TagGenerationTask:
+def run_generation_task(
+    task_id: str, session: Session, llm, embedder, *,
+    prompt_samples: PromptSampleBatch | None = None,
+) -> TagGenerationTask:
     """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
 
     八步流程（计划钉死）：
@@ -199,6 +202,7 @@ def run_generation_task(task_id: str, session: Session, llm,
             task_id=task.task_id, asset_id=asset_id, content=content,
             policy=policy, prompt_text=prompt_text, run_id=run_id,
             library=library,
+            prompt_samples=prompt_samples,
         )
         tags = producer.produce(spec, session, llm, embedder)
         # 6.5 过滤责任链（合 main 的 filtering 能力）：质量评估 → 信息围栏，
@@ -267,27 +271,37 @@ class TaskExecutor:
     的钉死语义，测试与单步调试用）；shutdown 供应用退出时关池（T9 lifespan）。
     """
 
-    def __init__(self, session_factory, llm, embedder, workers: int = 2):
+    def __init__(self, session_factory, llm, embedder, workers: int = 2, *,
+                 prompt_sample_dir: str = ""):
         self._session_factory = session_factory
         self._llm = llm
         self._embedder = embedder
+        self._prompt_sample_dir = prompt_sample_dir
         self._pool = (None if workers <= 0 else
                       ThreadPoolExecutor(max_workers=workers,
                                          thread_name_prefix="generation"))
 
-    def submit(self, task_id: str) -> None:
+    def submit_batch(self, task_ids: list[str], *, mode: str) -> None:
+        """同一批开放任务共享提示词采集状态，包括并发执行的影片。"""
+        samples = (PromptSampleBatch(self._prompt_sample_dir)
+                   if mode == "open" and self._prompt_sample_dir else None)
+        for task_id in task_ids:
+            self.submit(task_id, prompt_samples=samples)
+
+    def submit(self, task_id: str, *,
+               prompt_samples: PromptSampleBatch | None = None) -> None:
         """提交任务执行；workers=0 时同步执行（submit 返回即完成）。"""
         if self._pool is None:
-            self._run(task_id)
+            self._run(task_id, prompt_samples)
             return
-        self._pool.submit(self._run, task_id)
+        self._pool.submit(self._run, task_id, prompt_samples)
 
     def shutdown(self) -> None:
         """关闭线程池并等待在途任务结束（同步模式无池，空操作）。"""
         if self._pool is not None:
             self._pool.shutdown(wait=True)
 
-    def _run(self, task_id: str) -> None:
+    def _run(self, task_id: str, prompt_samples: PromptSampleBatch | None) -> None:
         """工作线程体：线程内独立 session 执行单任务。
 
         异常吞并记日志：任务自身失败已由 run_generation_task 落库为 failed，
@@ -299,7 +313,8 @@ class TaskExecutor:
             # 会话工厂调用也在 try 内：工厂故障同样记日志（否则异常随被
             # 丢弃的 future 静默消失，无线索可查）
             session = self._session_factory()
-            run_generation_task(task_id, session, self._llm, self._embedder)
+            run_generation_task(task_id, session, self._llm, self._embedder,
+                                prompt_samples=prompt_samples)
         except Exception:
             logger.exception("生成任务线程执行异常 task_id=%s", task_id)
         finally:

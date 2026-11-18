@@ -127,6 +127,8 @@ class Settings(BaseSettings):
     mtg_judge_temperature: float = 0.0
     # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
     mtg_report_dir: str = "data/audit/mtg"
+    # 平台开放生成按批采集提示词样本；空字符串可关闭。
+    mtg_prompt_sample_dir: str = "docs/open-tag-prompts"
 
     @property
     def mtg_modality_set(self) -> frozenset[str]:

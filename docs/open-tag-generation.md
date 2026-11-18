@@ -186,3 +186,5 @@ flowchart TD
 `ProducedTag` 中，库内命中携带规范名和 `tag_id`，保留原候选名作为可选别名；库外新词携带原词、维度、目录和可选释义。两者都附置信度、场景证据和实际挂载点，有库内对齐时同时附向量最近项的相似度。
 
 定位某条词的去向，可在 `data/audit/mtg/<task_id>.json` 依次查 `runs[].tags`（逐轮名称）、`merged`（代表词与名称变体）、`verdicts`（判决及摘录）、`library.align`（分档理由与复核结果）、`library.truncated`（超出队列配额）、`dropped`（淘汰原因）和 `accepted`（最终候选及目录来源）。 [输出与报告字段](../src/tagplatform/generation/mtg/pipeline.py)
+
+查看四个模型阶段的模板、完整输入和原始响应。 [自动采集的提示词样本](open-tag-prompts/README.md)

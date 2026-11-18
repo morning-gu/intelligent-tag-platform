@@ -44,22 +44,25 @@ from tagplatform.generation.mtg.catalog_align import (
     summarize_bands,
 )
 from tagplatform.generation.mtg.descriptions import (
+    build_description_template,
     content_names,
     fill_descriptions,
     is_general,
 )
-from tagplatform.generation.mtg.judge import judge_candidates
+from tagplatform.generation.mtg.judge import build_judge_template, judge_candidates
 from tagplatform.generation.mtg.merge import (
     MergedCandidate,
     merge_candidates,
     normalize_tag,
 )
 from tagplatform.generation.mtg.parse import parse_generation_items
+from tagplatform.generation.mtg.prompt_samples import SampledPromptClient
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
+    build_generation_template,
     render_content,
 )
-from tagplatform.generation.mtg.verify import verify_pairs
+from tagplatform.generation.mtg.verify import build_verify_template, verify_pairs
 from tagplatform.library import (
     DirAssignment,
     library_index,
@@ -275,6 +278,12 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     settings = get_settings()
     started = time.monotonic()
     contents = spec.content
+
+    def sample(client, stage, template):
+        if spec.prompt_samples is None:
+            return client
+        return SampledPromptClient(client, spec.prompt_samples, stage, template)
+
     # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
     # 见 `eval/ablation.py` 的纪律说明。
     modalities = settings.mtg_modality_set
@@ -306,12 +315,13 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     # ---- 1. 多轮生成 ----
     entries: list[dict] = []
     runs: list[dict] = []
+    generation_client = sample(llm, "generation", build_generation_template)
     for run_index in range(max(1, settings.mtg_runs)):
         messages = build_generation_messages(contents, frames, run_index,
                                              library_hint=hints,
                                              dir_hint=dir_hint,
                                              modalities=modalities)
-        response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
+        response = generation_client.complete(messages, f"{spec.run_id}:r{run_index}")
         _add_usage(usage, response.usage)
         if not response.ok:
             raise RuntimeError(
@@ -343,7 +353,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
-        client = judge_client or _make_judge_client(settings, llm)
+        client = sample(judge_client or _make_judge_client(settings, llm),
+                        "judge", build_judge_template)
         payload = [{"tag": m.tag, "dimension": m.dimension,
                     "reason": m.reason, "scenes": list(m.scenes)}
                    for m in merged]
@@ -421,7 +432,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                      for name, item in alignment.items()
                      if item.band == BAND_SUSPECT and item.matched_name]
             if pairs:
-                client = _make_verify_client(settings, llm)
+                client = sample(_make_verify_client(settings, llm),
+                                "verify", build_verify_template)
                 verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
                                            usage=verify_usage, trace=verify_trace)
                 for name, same in verdict_map.items():
@@ -637,7 +649,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     desc_filled: dict[str, str] = {}
     if needs_desc:
         desc_filled = fill_descriptions(
-            llm,
+            sample(llm, "description", build_description_template),
             [{"tag": tag.tag_name,
               "dir": (" / ".join(tag_library.path_of(tag.dir_id))
                       if tag_library is not None and tag.dir_id else None)}

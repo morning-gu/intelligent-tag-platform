@@ -93,6 +93,7 @@ def client(tmp_path, request):
     db_path = tmp_path / "tagplatform.db"
     settings = Settings(database_path=str(db_path), use_mock_embedder=True,
                         use_mock_llm=True, generation_workers=0,
+                        mtg_prompt_sample_dir=str(tmp_path / "prompt-samples"),
                         # 数据集根指向空目录：上传不会误命中真实 MovieNet，
                         # 也避免测试去扫 /cache/MovieNet
                         dataset_root=str(tmp_path / "movienet"))

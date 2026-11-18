@@ -16,11 +16,14 @@ Evidence/ProducedTag）定义调度与审核两侧共享的契约；TagProducer 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy.orm import Session
 
 from tagplatform.schemas import ContentJSON
+
+if TYPE_CHECKING:
+    from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 
 
 @dataclass
@@ -104,6 +107,7 @@ class GenerationSpec:
     prompt_text: str
     run_id: str
     library: object | None = None
+    prompt_samples: PromptSampleBatch | None = None
 
 
 class TagProducer(Protocol):

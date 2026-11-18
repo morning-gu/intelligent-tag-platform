@@ -31,6 +31,8 @@ policy.min_confidence=0.5（MockLLM confidence 值域 [0.5,1) 恒过线）+
 import io
 import json
 import time
+from base64 import b64decode
+from copy import deepcopy
 from pathlib import Path
 
 import openpyxl
@@ -204,6 +206,93 @@ def test_create_task_empty_asset_ids_422(client):
     resp = client.post("/api/v1/generation/tasks",
                        json={"asset_ids": [], "mode": "closed"})
     assert resp.status_code == 422
+
+
+def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_path,
+                                                                   monkeypatch):
+    from tagplatform.generation.mtg import pipeline
+    from tagplatform.llm.mock import MockLLMClient
+    from tests.library_fixture import add_tags
+
+    _import_content(client)
+    movie = deepcopy(CONTENT_FIXTURE_DICT)
+    movie["asset"].update(asset_id="movie_002", title="第二部测试影片")
+    second = client.post("/api/v1/content/import", json={
+        "kind": "platform", "video_root": None, "data": movie,
+    })
+    assert second.status_code == 200, second.text
+    add_tags([{"tag_id": "tag_narration", "dir_id": "dir_theme", "tag_name": "叙事",
+               "tag_type": "val_fixed", "description": "叙事手法", "status": "active"}])
+
+    # 多模态请求的图片要按实际编码完整落盘。
+    image = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+             "x8AAwMCAO+aG7sAAAAASUVORK5CYII=")
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b64decode(image))
+    monkeypatch.setattr(pipeline.keyframes_mod, "plan_scene_frames",
+                        lambda *args, **kwargs: {"scene_001": (frame,)})
+    monkeypatch.setattr(pipeline, "get_settings", lambda: pipeline.Settings(
+        use_mock_llm=True, mtg_runs=3, mtg_report_dir=str(tmp_path / "audit")))
+
+    calls = []
+    original = MockLLMClient.complete
+
+    def record(self, messages, run_id):
+        response = original(self, messages, run_id)
+        if ":r" in run_id:
+            # 缺一条释义，确保本批走到补写模型调用。
+            candidates = json.loads(response.content)
+            candidates[0]["desc"] = ""
+            response.content = json.dumps(candidates, ensure_ascii=False)
+        calls.append((run_id, messages, response.content))
+        return response
+
+    monkeypatch.setattr(MockLLMClient, "complete", record)
+    sample_dir = tmp_path / "prompt-samples"
+
+    def submit_and_check(asset_ids):
+        calls.clear()
+        response = client.post("/api/v1/generation/tasks", json={
+            "asset_ids": asset_ids, "mode": "open",
+        })
+        assert response.status_code == 200, response.text
+        tasks = response.json()["tasks"]
+        assert all(task["status"] == "succeeded" for task in tasks)
+        for stage, suffix in {"generation": ":r0", "judge": ":judge",
+                              "verify": ":verify", "description": ":desc"}.items():
+            phase_calls = [call for call in calls if call[0].endswith(suffix)]
+            assert len(phase_calls) == len(asset_ids)
+            run_id, messages, result = phase_calls[0]
+            assert run_id.startswith(tasks[0]["task_id"] + ":")
+            example_path = sample_dir / f"{stage}_example.json"
+            example = json.loads(example_path.read_text(encoding="utf-8"))
+            assert example == {"run_id": run_id, "model": "mock-1", "messages": messages}
+            saved = (sample_dir / f"{stage}_result.txt").read_bytes().decode("utf-8")
+            assert saved == result
+            template = (sample_dir / f"{stage}_template.json").read_text(encoding="utf-8")
+            assert json.loads(template)["messages"] and "{{" in template
+            if stage == "generation":
+                frame_part = {"type": "image_url",
+                              "image_url": {"url": f"data:image/png;base64,{image}"}}
+                assert frame_part in messages[0]["content"]
+        assert len(calls) == 6 * len(asset_ids)
+        assert len(list(sample_dir.iterdir())) == 12
+
+    submit_and_check(["movie_001", "movie_002"])
+    submit_and_check(["movie_002"])
+
+
+def test_open_prompt_sample_write_failure_keeps_generation_result(client, tmp_path):
+    _import_content(client)
+    (tmp_path / "prompt-samples").write_text("路径已被文件占用", encoding="utf-8")
+
+    response = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": ["movie_001"], "mode": "open",
+    })
+    assert response.status_code == 200
+    task = response.json()["tasks"][0]
+    assert task["status"] == "succeeded"
+    assert client.get(f"/api/v1/generation/tasks/{task['task_id']}").json()["results"]
 
 
 def test_create_task_unknown_mode_422(client):

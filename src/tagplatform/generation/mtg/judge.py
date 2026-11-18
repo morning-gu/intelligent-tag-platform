@@ -17,7 +17,9 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 from __future__ import annotations
 
 from tagplatform.generation.mtg.parse import MTGParseError, parse_judge_items
-from tagplatform.generation.mtg.prompts import build_judge_messages
+from tagplatform.generation.mtg.prompts import (
+    build_judge_messages, candidate_line, render_judge_messages,
+)
 from tagplatform.schemas import ContentJSON
 
 _RETRY_HINT = (
@@ -26,6 +28,14 @@ _RETRY_HINT = (
     '"confidence":0.9,"scenes":["scene_id"],"reason":"依据"}。'
     "不要用对象包装、不要任何解释文字或 Markdown 代码块。"
 )
+
+
+def build_judge_template() -> dict:
+    line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
+    return {
+        "messages": render_judge_messages("{{影片内容，不含台词行}}", line),
+        "retry_suffix": _RETRY_HINT,
+    }
 
 
 class JudgeError(RuntimeError):
