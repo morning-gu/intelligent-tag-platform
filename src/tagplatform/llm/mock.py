@@ -206,6 +206,7 @@ def _quality_output(text: str) -> dict:
         "id": label["id"],
         "relevance": {"score": 2 if scenes else None, "reason": "模拟内容评分"},
         "semantics": {"score": 2 if label["desc"] else None, "reason": "模拟语义评分"},
+        "value": {"score": 2 if scenes else None, "reason": "模拟标签价值评分"},
         "evidence": scenes[:1],
     } for label in labels]}
 

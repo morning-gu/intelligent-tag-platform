@@ -55,7 +55,19 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
       { key: 'coverage', label: '评估覆盖率', children: percent(metrics.coverage) },
       { key: 'relevance', label: '内容相关性', children: <DimensionSummary dimension={metrics.relevance} /> },
       { key: 'semantics', label: '语义准确性', children: <DimensionSummary dimension={metrics.semantics} /> },
+      {
+        key: 'value', label: '标签价值',
+        children: metrics.value.evaluated_tags === 0 ? '未评估' : (
+          <Space direction="vertical" size={0}>
+            <DimensionSummary dimension={metrics.value} />
+            <Typography.Text type="secondary">
+              已评估 {metrics.value.evaluated_tags} / {metrics.total_tags} 条
+            </Typography.Text>
+          </Space>
+        ),
+      },
       { key: 'joint', label: '双维联合合格率', children: percent(metrics.joint_high_rate) },
+      { key: 'joint-three', label: '三维联合合格率', children: percent(metrics.three_dimension_high_rate) },
       {
         key: 'unknown', label: '任一维度无法判断',
         children: `${metrics.undetermined_tags} 条（${percent(metrics.undetermined_rate)}）`,
@@ -78,6 +90,7 @@ function LabelDetail({ label, assetId }: { label: QualityLabel; assetId: string 
       ...(score ? [
         { key: 'support', label: '相关性理由', children: score.relevance.reason },
         { key: 'meaning', label: '语义理由', children: score.semantics.reason },
+        { key: 'value', label: '标签价值理由', children: score.value?.reason ?? '该版本未评估' },
         ...(score.evidence.length ? [{
           key: 'evidence', label: '内容证据',
           children: (
@@ -125,6 +138,7 @@ function FilmEvaluation({ film, onRetry }: { film: FilmQuality; onRetry: () => v
               size="small"
               rowKey="id"
               pagination={film.labels.length > 15 ? { pageSize: 15, hideOnSinglePage: true } : false}
+              scroll={{ x: 'max-content' }}
               dataSource={film.labels}
               columns={[
                 { title: '标签', dataIndex: 'name' },
@@ -135,6 +149,12 @@ function FilmEvaluation({ film, onRetry }: { film: FilmQuality; onRetry: () => v
                 },
                 { title: '内容相关性', render: (_, label) => <ScoreTag result={label.score?.relevance} /> },
                 { title: '语义准确性', render: (_, label) => <ScoreTag result={label.score?.semantics} /> },
+                {
+                  title: '标签价值',
+                  render: (_, label) => label.score && label.score.value === null
+                    ? <Tag>未评估</Tag>
+                    : <ScoreTag result={label.score?.value ?? undefined} />,
+                },
               ]}
               expandable={{ expandedRowRender: (label) => <LabelDetail label={label} assetId={film.asset_id} /> }}
             />}

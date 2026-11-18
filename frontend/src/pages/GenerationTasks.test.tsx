@@ -448,11 +448,14 @@ describe('GenerationTasks 生产任务页', () => {
 
   it('展开质量评估可查批次覆盖率、标签依据与单片重试', async () => {
     const dimension = {
-      average: 2, high_rate: 1, distribution: [0, 0, 1], undetermined: 0, undetermined_rate: 0,
+      evaluated_tags: 1, average: 2, high_rate: 1, distribution: [0, 0, 1],
+      undetermined: 0, undetermined_rate: 0,
     }
     const metrics = {
       total_tags: 2, evaluated_tags: 1, coverage: 0.5, joint_high_rate: 1,
+      three_dimension_high_rate: 0,
       undetermined_tags: 0, undetermined_rate: 0, relevance: dimension, semantics: dimension,
+      value: { ...dimension, average: 0, high_rate: 0, distribution: [1, 0, 0] },
     }
     const report: QualityReport = {
       status: 'partial',
@@ -464,7 +467,7 @@ describe('GenerationTasks 生产任务页', () => {
       metrics,
       films: [{
         task_id: 'task-1', asset_id: 'a1', title: '评估影片', status: 'partial',
-        model: 'deepseek-v4.1-flash', prompt_version: 'tag-quality-v1',
+        model: 'deepseek-v4.1-flash', prompt_version: 'tag-quality-v2',
         error: '一个标签未返回评分', note: null, metrics,
         labels: [{
           id: 11, name: '快照标签', desc: '标签的通用释义', disposition: 'pending',
@@ -472,6 +475,7 @@ describe('GenerationTasks 生产任务页', () => {
           score: {
             relevance: { score: 2, reason: '场景支持标签' },
             semantics: { score: 2, reason: '名称与释义一致' },
+            value: { score: 0, reason: '只描述局部事件' },
             evidence: [{ scene_id: 's2', start_ms: 65_000, description: '评估场景证据' }],
           },
         }],
@@ -495,12 +499,15 @@ describe('GenerationTasks 生产任务页', () => {
     expect(await screen.findByText('标签质量评估')).toBeInTheDocument()
     expect(screen.getByText('汇总结果尚未完整')).toBeInTheDocument()
     expect(screen.getAllByText('50.0%')).toHaveLength(2)
+    expect(screen.getAllByText('三维联合合格率')).toHaveLength(2)
     fireEvent.click(screen.getByText('标签评分（1 条）'))
     const labelRow = (await screen.findByText('快照标签')).closest('tr')!
+    expect(within(labelRow).getByText('0 分')).toBeInTheDocument()
     fireEvent.click(labelRow.querySelector('.ant-table-row-expand-icon')!)
     expect(screen.getByText('标签的通用释义')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 's2' })).toHaveAttribute('href', '/assets/a1?scene=s2&t=65000')
     expect(screen.getByText('评估场景证据')).toBeInTheDocument()
+    expect(screen.getByText('只描述局部事件')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '重试评估' }))
     const model = await screen.findByRole('textbox', { name: '评估模型 ID' })
     expect(model).toHaveValue('deepseek-v4.1-flash')

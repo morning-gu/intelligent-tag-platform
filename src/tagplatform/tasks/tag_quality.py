@@ -112,8 +112,9 @@ def queue_retry(session: Session, task_id: str, model: str | None) -> bool:
     if evaluation is None or evaluation.status not in ("failed", "partial"):
         return False
     values = {"status": "queued", "error": None}
-    if model and model != evaluation.model:
-        values.update(model=model, scores={}, note=None, prompt_version=PROMPT_VERSION)
+    retry_model = model or evaluation.model
+    if retry_model != evaluation.model or evaluation.prompt_version != PROMPT_VERSION:
+        values.update(model=retry_model, scores={}, note=None, prompt_version=PROMPT_VERSION)
     # 比较读取时的终态，避免并发重试重复提交。
     updated = session.execute(update(TagQualityEvaluation).where(
         TagQualityEvaluation.task_id == task_id,
@@ -124,6 +125,7 @@ def queue_retry(session: Session, task_id: str, model: str | None) -> bool:
 
 
 class DimensionMetrics(BaseModel):
+    evaluated_tags: int
     average: float | None
     high_rate: float | None
     distribution: list[int]
@@ -136,10 +138,12 @@ class QualityMetrics(BaseModel):
     evaluated_tags: int
     coverage: float | None
     joint_high_rate: float | None
+    three_dimension_high_rate: float | None
     undetermined_tags: int
     undetermined_rate: float | None
     relevance: DimensionMetrics
     semantics: DimensionMetrics
+    value: DimensionMetrics
 
 
 class LabelQuality(BaseModel):
@@ -181,22 +185,30 @@ def _dimension_metrics(values: list[int | None]) -> DimensionMetrics:
     judged = sum(distribution)
     unknown = values.count(None)
     return DimensionMetrics(
+        evaluated_tags=len(values),
         average=_ratio(distribution[1] + 2 * distribution[2], judged),
         high_rate=_ratio(distribution[2], judged), distribution=distribution,
         undetermined=unknown, undetermined_rate=_ratio(unknown, len(values)),
     )
 
 
+def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...]) -> float | None:
+    ratings = [tuple(row.get(axis) for axis in axes) for row in rows]
+    return _ratio(ratings.count((2,) * len(axes)), sum(None not in rating for rating in ratings))
+
+
 def _metrics(total: int, scores: list[dict]) -> QualityMetrics:
-    pairs = [(score["relevance"]["score"], score["semantics"]["score"]) for score in scores]
-    jointly_judged = sum(left is not None and right is not None for left, right in pairs)
-    unknown = len(pairs) - jointly_judged
+    # 历史评分缺少 value 对象；显式的 score=null 才计入无法判断。
+    rows = [{axis: result["score"] for axis in DIMENSIONS
+             if (result := score.get(axis)) is not None} for score in scores]
+    unknown = sum(None in row.values() for row in rows)
     return QualityMetrics(
-        total_tags=total, evaluated_tags=len(pairs), coverage=_ratio(len(pairs), total),
-        joint_high_rate=_ratio(pairs.count((2, 2)), jointly_judged),
-        undetermined_tags=unknown, undetermined_rate=_ratio(unknown, len(pairs)),
-        **{dim: _dimension_metrics([pair[index] for pair in pairs])
-           for index, dim in enumerate(DIMENSIONS)},
+        total_tags=total, evaluated_tags=len(rows), coverage=_ratio(len(rows), total),
+        joint_high_rate=_joint_high_rate(rows, ("relevance", "semantics")),
+        three_dimension_high_rate=_joint_high_rate(rows, DIMENSIONS),
+        undetermined_tags=unknown, undetermined_rate=_ratio(unknown, len(rows)),
+        **{axis: _dimension_metrics([row[axis] for row in rows if axis in row])
+           for axis in DIMENSIONS},
     )
 
 

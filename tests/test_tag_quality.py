@@ -28,11 +28,12 @@ def _emit(items: list[dict]) -> LLMResponse:
     return LLMResponse(json.dumps({"tags": items}), {}, {}, True)
 
 
-def _item(label_id: int, relevance=2, semantics=2) -> dict:
+def _item(label_id: int, relevance=2, semantics=2, value=2) -> dict:
     return {
         "id": label_id,
         "relevance": {"score": relevance, "reason": "内容评分"},
         "semantics": {"score": semantics, "reason": "语义评分"},
+        "value": {"score": value, "reason": "标签价值评分"},
         "evidence": [{"scene_id": "scene_001", "description": "仓库争执"}],
     }
 
@@ -82,7 +83,12 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
         if asset == "movie_001" and len(requests[asset]) == 1:
             first_started.set()
             assert release_first.wait(10)
-            return _emit([_item(labels[0]["id"]), _item(labels[2]["id"], None)])
+            missing_value = _item(labels[1]["id"])
+            del missing_value["value"]
+            return _emit([
+                _item(labels[0]["id"], value=0), missing_value,
+                _item(labels[2]["id"], None, value=None),
+            ])
         if asset == "movie_bad" and self.model != "replacement":
             return LLMResponse("", {}, {"error": "评估端点超时"}, False)
         return _emit([_item(label["id"], 0, 1) for label in labels])
@@ -131,13 +137,17 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     assert report["metrics"]["total_tags"] == 5
     assert report["metrics"]["coverage"] == pytest.approx(3 / 5)
     assert report["metrics"]["joint_high_rate"] == pytest.approx(1 / 2)
+    assert report["metrics"]["three_dimension_high_rate"] == 0
     assert report["metrics"]["relevance"]["distribution"] == [1, 0, 1]
     assert report["metrics"]["semantics"]["average"] == 1.5
     assert report["metrics"]["undetermined_tags"] == 1
+    assert report["metrics"]["value"]["distribution"] == [1, 0, 1]
+    assert report["metrics"]["value"]["evaluated_tags"] == 3
     first = next(film for film in report["films"] if film["asset_id"] == "movie_001")
     assert [label["disposition"] for label in first["labels"]] == ["mounted", "pending", "pending"]
     assert first["labels"][0]["desc"] == "以打斗追逐为主要看点"
     assert first["labels"][0]["score"]["evidence"][0]["start_ms"] == 120000
+    assert first["labels"][0]["score"]["value"] == {"score": 0, "reason": "标签价值评分"}
     assert first["labels"][1]["name"] == "待审核原名"
     assert first["labels"][1]["score"] is None
     assert first["labels"][2]["score"]["semantics"]["score"] is None
@@ -149,9 +159,9 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     assert example["model"] == "custom-model"
     assert _request_payload(example["messages"])[1] == requests["movie_001"][0][2]
     raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
-    assert len(raw["tags"]) == 2
+    assert len(raw["tags"]) == 3
     template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
-    assert template["prompt_version"] == "tag-quality-v1"
+    assert template["prompt_version"] == "tag-quality-v2"
     assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
     assert isinstance(template["messages_without_keyframes"][1]["content"], str)
 
@@ -177,6 +187,46 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     retry_example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
     assert retry_example["run_id"] == f"{bad_id}:tag-quality"
     assert retry_example["model"] == "replacement"
+
+
+def test_legacy_and_current_scores_have_separate_value_coverage(client):
+    historical = _item(1)
+    del historical["value"]
+    results = {
+        "legacy": ("tag-quality-v1", [historical]),
+        "current": ("tag-quality-v2", [
+            _item(index, value=rating) for index, rating in enumerate([0, 1, 2, None], start=2)
+        ]),
+    }
+    with client.app.state.session_factory() as session:
+        for task_id, (version, items) in results.items():
+            session.add(MediaAsset(asset_id=task_id, asset_type="movie", title=task_id))
+            session.flush()
+            session.add(TagGenerationTask(task_id=task_id, asset_id=task_id, mode="open",
+                                          status="succeeded", batch_id="mixed"))
+            session.flush()
+            session.add(TagQualityEvaluation(
+                task_id=task_id, status="completed", model="test", prompt_version=version,
+                labels=[{"id": item["id"], "name": "标签", "desc": "释义",
+                         "dir_path": None, "disposition": "pending"} for item in items],
+                scores={str(item["id"]): item for item in items}, frame_paths={},
+            ))
+        session.commit()
+
+    report = _wait_report(client, "legacy", "completed")
+    assert report["metrics"]["evaluated_tags"] == 5
+    assert report["metrics"]["value"] == {
+        "evaluated_tags": 4, "average": 1.0, "high_rate": pytest.approx(1 / 3),
+        "distribution": [1, 1, 1], "undetermined": 1, "undetermined_rate": 0.25,
+    }
+    assert report["metrics"]["joint_high_rate"] == 1
+    assert report["metrics"]["three_dimension_high_rate"] == pytest.approx(1 / 3)
+    assert report["metrics"]["undetermined_tags"] == 1
+    legacy = next(film for film in report["films"] if film["task_id"] == "legacy")
+    assert legacy["labels"][0]["score"]["value"] is None
+    assert legacy["metrics"]["value"]["evaluated_tags"] == 0
+    assert legacy["metrics"]["value"]["undetermined"] == 0
+    assert legacy["metrics"]["three_dimension_high_rate"] is None
 
 
 def test_migration_preserves_existing_production_results(tmp_path, monkeypatch):

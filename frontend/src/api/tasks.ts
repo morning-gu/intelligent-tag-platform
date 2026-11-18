@@ -57,6 +57,7 @@ export type QualityStatus =
   | 'not_needed' | 'generation_failed' | 'unavailable'
 
 export interface QualityDimension {
+  evaluated_tags: number
   average: number | null
   high_rate: number | null
   distribution: number[]
@@ -69,10 +70,12 @@ export interface QualityMetrics {
   evaluated_tags: number
   coverage: number | null
   joint_high_rate: number | null
+  three_dimension_high_rate: number | null
   undetermined_tags: number
   undetermined_rate: number | null
   relevance: QualityDimension
   semantics: QualityDimension
+  value: QualityDimension
 }
 
 export interface QualityScore {
@@ -89,6 +92,7 @@ export interface QualityLabel {
   score: {
     relevance: QualityScore
     semantics: QualityScore
+    value: QualityScore | null
     evidence: { scene_id: string | null; start_ms: number | null; description: string }[]
   } | null
 }
