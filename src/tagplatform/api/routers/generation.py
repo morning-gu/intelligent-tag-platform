@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_session
+from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.generation import list_producers
@@ -90,8 +91,8 @@ class GenerationTaskOut(BaseModel):
     model_version: str | None = None
     prompt_version: str | None = None
     error: str | None = None
-    created_at: datetime | None = None
-    finished_at: datetime | None = None
+    created_at: UtcDatetime | None = None
+    finished_at: UtcDatetime | None = None
 
 
 class EvidenceOut(BaseModel):
@@ -166,7 +167,7 @@ class AssetTagOut(BaseModel):
     dir_name: str | None = None
     dir_path: str | None = None
     evidence: list[EvidenceOut] = []
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
 
 
 # ---------- 组装辅助 ----------

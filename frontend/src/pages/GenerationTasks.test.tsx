@@ -217,8 +217,7 @@ afterEach(() => {
 // ---------- 用例 ----------
 
 describe('GenerationTasks 生产任务页', () => {
-  it('渲染任务行：状态/模式 Tag、错误列、时间与 null 兜底、failed 行重试按钮', async () => {
-    mockApis()
+  it('渲染任务行：状态/模式 Tag、错误列、时间与 null 兜底、failed 行重试按钮', async () => {    mockApis()
     renderGenerationTasks()
 
     const row1 = (await screen.findByText('task-1')).closest('tr')!
@@ -242,6 +241,32 @@ describe('GenerationTasks 生产任务页', () => {
 
     // 默认无筛选：不带查询串
     expect(listCallPaths()).toEqual(['/api/v1/generation/tasks'])
+  })
+
+  it('带 Z 的 UTC 时间戳按本地时区渲染（gen_4845957f9239 误读修复回归）', async () => {
+    // 后端 2026-11-19 起输出带 Z 的 UTC；期望值动态计算，任意时区跑均成立
+    const utcCreated = '2026-11-18T02:31:32Z' // UTC 02:31:32
+    mockApis({
+      tasks: [
+        {
+          ...TASKS[0],
+          task_id: 'task-utc',
+          created_at: utcCreated,
+          finished_at: '2026-11-18T02:35:37Z',
+        },
+      ],
+    })
+    renderGenerationTasks()
+
+    const row = (await screen.findByText('task-utc')).closest('tr')!
+    const expectLocal = (iso: string) => {
+      const d = new Date(iso)
+      const p = (n: number) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+        `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    }
+    expect(row).toHaveTextContent(expectLocal(utcCreated))
+    expect(row).toHaveTextContent(expectLocal('2026-11-18T02:35:37Z'))
   })
 
   it('状态筛选选已失败：携带 status=failed 重新拉取', async () => {

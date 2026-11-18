@@ -38,6 +38,7 @@ import {
   type ImportTaskDetail,
   type ImportTaskSummary,
 } from '../api/imports'
+import { formatTime } from '../api/time'
 
 /** 任务状态中文展示与 Tag 颜色（键集与后端 ImportTask.status 一致）。 */
 const BATCH_STATUS_LABELS: Record<string, string> = {
@@ -50,11 +51,6 @@ const BATCH_STATUS_COLORS: Record<string, string> = {
   processing: 'orange',
   completed: 'green',
   failed: 'red',
-}
-
-/** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
-function formatTime(v: string | null): string {
-  return v === null ? '—' : v.replace('T', ' ').slice(0, 19)
 }
 
 /** 结果摘要视图：total/inserted/skipped 统计 + 治理问题/解析失败折叠明细表。

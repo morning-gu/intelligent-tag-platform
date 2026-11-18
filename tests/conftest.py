@@ -95,7 +95,11 @@ def client(tmp_path, request):
                         use_mock_llm=True, generation_workers=0,
                         # 数据集根指向空目录：上传不会误命中真实 MovieNet，
                         # 也避免测试去扫 /cache/MovieNet
-                        dataset_root=str(tmp_path / "movienet"))
+                        dataset_root=str(tmp_path / "movienet"),
+                        # 上传落盘同样隔离进 tmp：缺这一项时默认
+                        # data/media/（相对仓库根），测试上传会污染真实
+                        # 工作区（2026-11-18 曾泄漏 26 个文件到 data/media）
+                        media_root=str(tmp_path / "media"))
     engine = create_engine_for(str(db_path))
     Base.metadata.create_all(engine)
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎

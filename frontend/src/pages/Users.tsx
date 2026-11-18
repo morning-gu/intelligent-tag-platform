@@ -20,6 +20,7 @@ import {
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { createUser, fetchUsers, type CreateUserPayload, type ManagedUser } from '../api/users'
+import { formatTime } from '../api/time'
 
 /** 角色 Tag 中文展示与颜色（键集与后端 role 取值一致）。 */
 const ROLE_LABELS: Record<string, string> = {
@@ -36,11 +37,6 @@ interface CreateFormValues {
   username: string
   password: string
   role: 'admin' | 'reviewer'
-}
-
-/** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
-function formatTime(v: string | null): string {
-  return v === null ? '—' : v.replace('T', ' ').slice(0, 19)
 }
 
 export default function Users() {

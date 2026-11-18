@@ -3,7 +3,9 @@
 流程（设计文档 §4.2）：按目录范围召回候选 → 空候选显式失败（提示先导入
 标签库）→ 候选**按目录分组**、每组以 JSON 追加到渲染后的 prompt 正文之后
 （组含目录名称/描述，标签含 id/名称/描述）→ 逐组调用 LLM 判定 → 契约校验
-解析 → applicability 门槛过滤 + 按 applicability 降序截断（max_tags 为单目录上限）→
+解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c = 0.2/0.5/0.3；
+Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1；G 为 Sapp≥0.5 门控，
+A≤2 整条丢弃）→ 门内按 Sf 降序截断（max_tags 为单目录上限）→
 合并各组结果 → ProducedTag(origin=
 "catalog")。producer 不写库：结果落库是执行器（Task 8）的职责。
 
@@ -15,6 +17,11 @@ v2 增量（2026-11）：
 v3 增量（2026-12）：候选不再由 runner 经 `{candidates}` 占位符注入
 prompt_text，改由本 producer 按目录分组、以 JSON 格式追加到正文末尾，逐组
 调用 LLM 后合并结果（分组规则：目录下有召回标签才建组）。
+
+v4 增量（2026-12）：LLM 判定改带 1–5 分的 applicability/evidence_strength；
+终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)，Semb 取召回候选自带的余弦
+分，Sf 与标签成对（落 ProducedTag.relevance_score）；confidence 仍为
+(E−1)/4，作为证据维度的独立读数随行保留。
 
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
@@ -69,7 +76,7 @@ class ClosedTagProducer:
             groups.setdefault(c.dir_id, []).append(c)
         # 4. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后，
         #    各组结果合并作为产出（run_id 沿用任务级 id，Mock 哈希采样键不变）
-        items: list[dict] = []
+        items: list[tuple[float, dict]] = []
         for dir_id, members in groups.items():
             directory = library.directory(dir_id)
             group_payload = {
@@ -95,16 +102,28 @@ class ClosedTagProducer:
             # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
             if not resp.ok:
                 raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
-            # 5. 适用性门槛过滤 + 适用性降序截断（max_tags 为单目录上限）
-            print(f"ClosedTagProducer: {dir_id} got {len(resp.content)} items")
-            kept = [it for it in parse_closed_output(resp.content) if it["applicability"] > 3] # 3为门控的判断条件
-            kept.sort(key=lambda it: -it["applicability"])
-            kept = kept[: spec.policy.max_tags]
-            items.extend(kept)
-        # 6. 映射为审核前中间态；catalog 来源 tag_id 必有，候选目录直接取库
+            # 5. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
+            #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦分；
+            #    G 为 Sapp≥0.5 的门控（A≥3 放行，A≤2 → Sf=0 整条丢弃）。
+            #    Sf 与标签成对保留，按 Sf 降序截断（max_tags 为单目录上限）
+            parsed = parse_closed_output(resp.content)
+            logger.debug("闭环目录 %s 解析出 %d 条判定", dir_id, len(parsed))
+            scored: list[tuple[float, dict]] = []
+            for it in parsed:
+                if it["applicability"] < 3:
+                    continue  # Sapp=(A−1)/4 < 0.5：门控关闭，G=0 → Sf=0
+                candidate = by_id.get(it["tag_id"])
+                s_emb = candidate.score if candidate is not None else 0.0
+                s_app = (it["applicability"] - 1) / 4
+                s_evi = (it["evidence_strength"] - 1) / 4
+                scored.append((0.2 * s_emb + 0.5 * s_app + 0.3 * s_evi, it))
+            scored.sort(key=lambda pair: -pair[0])
+            items.extend(scored[: spec.policy.max_tags])
+        # 6. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
+        #    catalog 来源 tag_id 必有，候选目录直接取库
         produced: list[ProducedTag] = []
         scenes_by_id = {scene.scene_id: scene for scene in spec.content.content.scenes}
-        for it in items:
+        for sf, it in items:
             candidate = by_id.get(it["tag_id"])
             if candidate is None:
                 continue  # 模型编了不存在的 tag_id：契约外，丢弃
@@ -132,7 +151,7 @@ class ClosedTagProducer:
                 tag_name=candidate.tag_name,
                 candidate_type=None,
                 candidate_description=None,
-                relevance_score=(it["applicability"] - 1) / 4,
+                relevance_score=sf,
                 confidence=(it["evidence_strength"] - 1) / 4,
                 evidence=evidence,
                 dir_id=candidate.dir_id,

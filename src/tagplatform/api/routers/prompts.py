@@ -10,7 +10,6 @@
 追加新版本 + 切换激活（改提示词零代码变更的运营闭环，阶段 4 Task 2）。
 """
 
-from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,6 +19,7 @@ from sqlalchemy.orm import Session
 from tagplatform import prompts as prompt_service
 from tagplatform.api import get_session
 from tagplatform.api.depends import require_admin
+from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import PromptTemplate, UserAccount
 
 router = APIRouter(prefix="/api/v1")
@@ -37,7 +37,7 @@ class PromptOut(BaseModel):
     version: int
     template_text: str
     is_active: bool
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
 
 
 class PromptActivateOut(BaseModel):

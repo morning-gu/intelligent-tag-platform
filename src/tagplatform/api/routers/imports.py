@@ -17,7 +17,6 @@ export 端点（GET /{task_id}/export）与 tags.py 共用 `_build_export_archiv
 """
 
 import json
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -26,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
+from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import (
     AssetTag,
     PreAssetTag,
@@ -44,7 +44,7 @@ class ImportTaskOut(BaseModel):
     task_id: str
     file_name: str
     status: str
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
 
 
 class ImportTaskDetailOut(ImportTaskOut):

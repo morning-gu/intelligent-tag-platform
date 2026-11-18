@@ -19,7 +19,6 @@ multipart 提取与错误映射：
 """
 
 import json
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -28,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
+from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import AssetBuildTask, MediaAsset
 from tagplatform.settings import Settings
 
@@ -59,7 +59,7 @@ class MediaMatchResponse(BaseModel):
     has_content: bool = False
     content_source: str | None = None
     scene_count: int = 0
-    built_at: datetime | None = None
+    built_at: UtcDatetime | None = None
     # 能否直接重新生成：只有经数据集索引命中（拿到 movie_id）才行；
     # 按资产标题兜底命中（match_how="asset_title"，中文名/改名/数据集不可读）
     # 只能提醒"已有同名资产"，重建得先把文件名改成含 IMDb id 或英文片名。
