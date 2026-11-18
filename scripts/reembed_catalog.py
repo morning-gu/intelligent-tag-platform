@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.db.models import TagCatalog
-from tagplatform.embed import make_embedder
+from tagplatform.embed import build_embedder
 from tagplatform.settings import get_settings
 from tagplatform.vectors import decode_vector, encode_vector
 
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         print("错误：当前配置是 mock embedder，重灌没有意义", file=sys.stderr)
         return 2
 
-    embedder = make_embedder(settings.embedding_model, mock=False)
+    embedder = build_embedder(settings)
     session = make_session_factory(create_engine_for(settings.database_path))()
     try:
         rows = session.query(TagCatalog).all()

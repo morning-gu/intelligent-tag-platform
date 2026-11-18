@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     semantic_similar_threshold: float = 0.85
     # True 时用确定性 MockEmbedder（测试专用，绝不触发模型下载）
     use_mock_embedder: bool = False
+    # 嵌入后端：local（默认，sentence-transformers 本地加载）/ remote
+    # （OpenAI 兼容 /v1/embeddings，如 http://9.15.87.193:8193/v1 的 bge-m3）。
+    # 两后端同模型同一语义空间（bge-m3 纯文本无前缀），阈值无需重校准；
+    # 切换后端后库内存量向量建议跑 scripts/reembed_catalog.py 重灌归一。
+    embedding_backend: str = "local"
+    # remote 后端服务地址（含 /v1 前缀，与 OPENAI_BASE_URL 口径一致）
+    embedding_api_base: str = ""
+    embedding_api_model: str = "bge-m3"
+    # 大目录分批请求上限（551 条目录标签 ≈ 18 批）
+    embedding_api_batch: int = 32
+    embedding_api_timeout: float = 60.0
     # 标签类型逗号分隔白名单；空 = 不校验
     allowed_tag_types: str = ""
 

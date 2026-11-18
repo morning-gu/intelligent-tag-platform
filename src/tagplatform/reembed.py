@@ -73,13 +73,12 @@ def reembed_all(session: Session, embedder) -> ReembedSummary:
 def main() -> None:
     """CLI 入口：按运行环境配置（.env / TAGPLT_*）连接库并执行重建。"""
     from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.embed import make_embedder
+    from tagplatform.embed import build_embedder
     from tagplatform.settings import get_settings
 
     settings = get_settings()
     engine = create_engine_for(settings.database_path)
-    embedder = make_embedder(settings.embedding_model,
-                             mock=settings.use_mock_embedder)
+    embedder = build_embedder(settings)
     try:
         factory = make_session_factory(engine)
         with factory() as session:

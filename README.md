@@ -81,6 +81,11 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_SESSION_SECRET`                | `dev-secret`          | 会话令牌 HMAC 密钥；**生产必改**（默认值仅供开发/测试，泄漏即可伪造任意用户登录态）       |
 | `TAGPLT_USE_MOCK_LLM`                  | `false`               | true = 确定性 MockLLMClient（零网络，测试/冒烟）                                                |
 | `TAGPLT_USE_MOCK_EMBEDDER`             | `false`               | true = 确定性 MockEmbedder（不下载模型）                                                        |
+| `TAGPLT_EMBEDDING_BACKEND`             | `local`               | 嵌入后端：`local`（sentence-transformers 本地）/ `remote`（OpenAI 兼容 /v1/embeddings）         |
+| `TAGPLT_EMBEDDING_API_BASE`            | 空                    | remote 后端服务地址（含 `/v1` 前缀，如 `http://9.15.87.193:8193/v1`）；backend=remote 时必填   |
+| `TAGPLT_EMBEDDING_API_MODEL`           | `bge-m3`              | remote 后端请求的 model 名                                                                      |
+| `TAGPLT_EMBEDDING_API_BATCH`           | `32`                  | remote 后端分批请求上限（大目录标签集按批编码）                                                 |
+| `TAGPLT_EMBEDDING_API_TIMEOUT`         | `60`                  | remote 后端单请求超时秒数                                                                       |
 | `TAGPLT_GENERATION_WORKERS`            | `2`                   | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成）                                       |
 | `TAGPLT_LLM_MODEL`                     | `qwen3.7-plus`        | LLM 模型名                                                                                      |
 | `TAGPLT_RECALL_TOP_K_PER_TYPE`         | `50`                  | 模式 A 每 tag_type 召回候选上限                                                                 |
