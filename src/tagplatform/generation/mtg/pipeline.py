@@ -483,6 +483,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                    if new_names else [])
     vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
     per_dir_count: dict[str, int] = {}
+    allowed_new_dirs = ({d.dir_id for d in tag_library.new_tag_dirs(spec.policy.dir_ids)}
+                        if tag_library is not None else set())
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
@@ -531,12 +533,15 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                              "evidence": [e.scene_id for e in evidence]})
             continue
 
-        # 新词：先看模型给的目录能不能用，再回退到向量归类
+        # 新词：拒绝显式指定的非开放目录；其余情形可回退到向量归类。
         if not spec.policy.allow_new_tags:
             dropped.append({"tag": candidate.tag, "why": "策略禁止产出新词"})
             continue
         if tag_library is None:
             dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
+            continue
+        if not allowed_new_dirs:
+            dropped.append({"tag": candidate.tag, "why": "生成范围内没有可扩展目录"})
             continue
         # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
         #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
@@ -548,6 +553,9 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
         if candidate.dir_raw and model_dir is None:
             reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
+        if model_dir and model_dir not in allowed_new_dirs:
+            dropped.append({"tag": candidate.tag, "why": "模型指定的目录不可扩展或不在生成范围内"})
+            continue
         if model_dir:
             assignment, mount, why = _validate_model_dir(
                 tag_library, model_dir, spec, contents, evidence, per_dir_count)
@@ -561,7 +569,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             for option in rank_dir_assignments(tag_library, embedder,
                                                vector_by_name.get(candidate.tag),
                                                spec.policy.dir_ids):
-                if option.dir_id is None:
+                if option.dir_id not in allowed_new_dirs:
                     reasons.append(f"无可归属目录（{option.reason}）")
                     continue
                 if (spec.policy.max_tags_per_dir
