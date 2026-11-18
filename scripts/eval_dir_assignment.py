@@ -73,7 +73,7 @@ from pathlib import Path
 import numpy as np
 
 from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import make_embedder
+from tagplatform.embed import build_embedder
 from tagplatform.eval import (
     GRADE_EXACT,
     GRADE_NONE,
@@ -316,8 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         library = library_from_session(session)
         n_dirs = len(library.dirs())
         n_dynamic = len(library.new_tag_dirs(None))
-        embedder = make_embedder(settings.embedding_model,
-                                 mock=settings.use_mock_embedder)
+        embedder = build_embedder(settings)
         samples, warnings = library_samples(library, embedder, None,
                                             args.limit, strict=args.strict)
         n_candidates = n_dynamic

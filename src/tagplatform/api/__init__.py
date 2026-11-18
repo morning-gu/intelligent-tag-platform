@@ -35,7 +35,7 @@ from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 from tagplatform.auth import bootstrap_admin
 from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import Embedder, make_embedder
+from tagplatform.embed import Embedder, build_embedder
 from tagplatform.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
@@ -155,8 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from tagplatform import library as library_module
 
     library_module.bind_engine(app.state.engine)
-    app.state.embedder = make_embedder(
-        settings.embedding_model, mock=settings.use_mock_embedder)
+    app.state.embedder = build_embedder(settings)
     app.state.llm = make_llm_client(settings)
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
