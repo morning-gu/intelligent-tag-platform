@@ -214,13 +214,16 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
     from tagplatform.llm.mock import MockLLMClient
     from tests.library_fixture import add_tags
 
-    _import_content(client)
     movie = deepcopy(CONTENT_FIXTURE_DICT)
-    movie["asset"].update(asset_id="movie_002", title="第二部测试影片")
-    second = client.post("/api/v1/content/import", json={
-        "kind": "platform", "video_root": None, "data": movie,
-    })
-    assert second.status_code == 200, second.text
+    scene = deepcopy(movie["content"]["scenes"][0])
+    scene["scene_id"] = "scene_002"
+    movie["content"]["scenes"].append(scene)
+    for asset_id, title in [("movie_001", "第一部测试影片"), ("movie_002", "第二部测试影片")]:
+        movie["asset"].update(asset_id=asset_id, title=title)
+        result = client.post("/api/v1/content/import", json={
+            "kind": "platform", "video_root": None, "data": movie,
+        })
+        assert result.status_code == 200, result.text
     add_tags([{"tag_id": "tag_narration", "dir_id": "dir_theme", "tag_name": "叙事",
                "tag_type": "val_fixed", "description": "叙事手法", "status": "active"}])
 
@@ -232,7 +235,7 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
     monkeypatch.setattr(pipeline.keyframes_mod, "plan_scene_frames",
                         lambda *args, **kwargs: {"scene_001": (frame,)})
     monkeypatch.setattr(pipeline, "get_settings", lambda: pipeline.Settings(
-        use_mock_llm=True, mtg_runs=3, mtg_report_dir=str(tmp_path / "audit")))
+        use_mock_llm=True, mtg_report_dir=str(tmp_path / "audit")))
 
     calls = []
     original = MockLLMClient.complete
@@ -241,10 +244,10 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
         response = original(self, messages, run_id)
         if run_id.endswith(":tag-quality"):
             return response
-        if ":r" in run_id:
+        if run_id.endswith(":film"):
             # 缺一条释义，确保本批走到补写模型调用。
             candidates = json.loads(response.content)
-            candidates[0]["desc"] = ""
+            candidates[-1]["desc"] = ""
             response.content = json.dumps(candidates, ensure_ascii=False)
         calls.append((run_id, messages, response.content))
         return response
@@ -260,10 +263,10 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
         assert response.status_code == 200, response.text
         tasks = response.json()["tasks"]
         assert all(task["status"] == "succeeded" for task in tasks)
-        for stage, suffix in {"generation": ":r0", "judge": ":judge",
-                              "verify": ":verify", "description": ":desc"}.items():
+        for stage, suffix in {"generation_scene": ":scene-001", "generation_film": ":film",
+                              "judge": ":judge", "verify": ":verify", "description": ":desc"}.items():
             phase_calls = [call for call in calls if call[0].endswith(suffix)]
-            assert len(phase_calls) == len(asset_ids)
+            assert len(phase_calls) == len(asset_ids), (stage, [call[0] for call in calls])
             run_id, messages, result = phase_calls[0]
             assert run_id.startswith(tasks[0]["task_id"] + ":")
             example_path = sample_dir / f"{stage}_example.json"
@@ -273,13 +276,13 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
             assert saved == result
             template = (sample_dir / f"{stage}_template.json").read_text(encoding="utf-8")
             assert json.loads(template)["messages"] and "{{" in template
-            if stage == "generation":
+            if stage.startswith("generation_"):
                 frame_part = {"type": "image_url",
                               "image_url": {"url": f"data:image/png;base64,{image}"}}
                 assert frame_part in messages[0]["content"]
         assert len(calls) == 6 * len(asset_ids)
         assert len([path for path in sample_dir.iterdir()
-                    if path.is_file() and not path.name.startswith("quality_")]) == 12
+                    if path.is_file() and not path.name.startswith("quality_")]) == 15
 
     submit_and_check(["movie_001", "movie_002"])
     submit_and_check(["movie_002"])
@@ -444,7 +447,7 @@ def test_task_list_filters_and_pagination(client):
     assert all(set(row.keys()) == TASK_KEYS for row in listing)
     # created_at 降序：后创建的 open 任务在前
     assert [row["task_id"] for row in listing] == [second["task_id"], first["task_id"]]
-    assert listing[0]["prompt_version"] == "mtg-v3"  # open 自拼 prompt 的口径版本
+    assert listing[0]["prompt_version"] == "mtg-v4"  # open 自拼 prompt 的口径版本
     assert listing[0]["asset_id"] == "movie_001"
 
     # status / mode / asset_id 过滤

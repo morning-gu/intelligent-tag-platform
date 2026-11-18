@@ -42,10 +42,10 @@ def _prompt_text(content) -> str:
 def test_generation_prompt_asks_for_grounded_reasons():
     text = _prompt_text(_content_with_dialogues(2))
 
-    assert "至少两个不同场景" in text
-    assert "按实际可支撑的数量输出" in text
+    assert "至少引用两个不同场景" in text
+    assert "证据不足可以少给或返回空 tags" in text
     assert "可跨影片复用的词典式释义" in text
-    assert "再说明这些细节为什么支持该标签" in text
+    assert "并说明这些细节如何支持标签" in text
     assert "20 字以内" not in text
 
 

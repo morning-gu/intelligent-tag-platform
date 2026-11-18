@@ -74,6 +74,8 @@ def extract_json_array(text: str) -> list:
         except json.JSONDecodeError as exc:
             raise MTGParseError(f"JSON 数组解析失败: {exc}") from None
     if isinstance(data, dict):
+        if data.get("tags") == []:
+            return []
         # 容错一：{"tags": [...]} / {"verdicts": [...]} 或更深一层包装
         found = _find_items(data)
         if found is not None:
@@ -114,8 +116,10 @@ def normalize_scope(value) -> str | None:
     return _SCOPE_ALIASES.get(value.strip().lower())
 
 
-def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
+def parse_generation_items(text: str, max_items: int | None = 20) -> list[dict]:
     """生成输出 → [{tag, scope, dimension, dir, scenes, reason, desc}]（非法项丢弃）。"""
+    if max_items is not None and max_items <= 0:
+        return []
     items: list[dict] = []
     seen: set[str] = set()
     for entry in extract_json_array(text):
@@ -128,8 +132,9 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        scenes = [s.strip() for s in entry.get("scenes") or []
-                  if isinstance(s, str) and s.strip()]
+        raw_scenes = entry.get("scenes")
+        scenes = [s.strip() for s in raw_scenes if isinstance(s, str) and s.strip()] \
+            if isinstance(raw_scenes, list) else []
         reason = str(entry.get("reason") or "").strip()
         items.append({
             "tag": tag,
@@ -145,7 +150,7 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
             # 是否"够通用"由 descriptions.is_general 判定，不在解析层猜）
             "desc": str(entry.get("desc") or entry.get("definition") or "").strip(),
         })
-        if len(items) >= max_items:
+        if max_items is not None and len(items) >= max_items:
             break
     return items
 

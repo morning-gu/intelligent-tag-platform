@@ -37,9 +37,8 @@
 一个必须写明的限制
 ==================
 
-`mtg_runs` 在默认配置下是 3，且**同一个 `run_id` 会在多轮里重复**——报告里
-`runs` 的轮数就是实际跑了几轮。少于 2 轮的报告无法算一致性（脚本会跳过并
-计数，不会把它当 0 分混进平均）。
+旧版默认重复采样 3 轮，报告保存实际采样轮数。少于 2 轮的报告无法计算一致性。
+新版场景轮与影片轮的输入和目标不同，脚本会跳过带有生成层级的报告。
 
 安全设计：本脚本**只读**审计目录，不连数据库、不调模型。
 
@@ -81,6 +80,9 @@ def load_reports(directory: Path, *, min_runs: int) -> tuple[list[dict], list[st
             problems.append(f"{path.name}: 生成本身失败（{data['error'][:60]}）")
             continue
         runs = [run for run in data.get("runs") or [] if run.get("tags") is not None]
+        if any(run.get("scope") in {"scene", "film"} for run in runs):
+            problems.append(f"{path.name}: 场景轮和影片轮分别生成，无法衡量重复采样一致性")
+            continue
         if len(runs) < min_runs:
             problems.append(
                 f"{path.name}: 只有 {len(runs)} 轮有标签记录"

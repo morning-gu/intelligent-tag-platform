@@ -250,29 +250,31 @@ def test_pipeline_marks_duplicate_and_keeps_generated(
 
 
 def test_pipeline_ranking_prefers_new_over_duplicate(
-        session, content_fixture, mtg_settings, monkeypatch):
-    """名额只有 1 时，新词占那个名额；命中的库内标签另算、不挤新词。"""
+        session, content_fixture, mtg_settings):
+    """同一任务内每个来源各有一个名额，结果仍先排新词。"""
     _seed_json("tag_cat_1", "多线叙事")
 
+    mtg_settings.mtg_max_final_tags = 1
     spec = _build_spec(content_fixture, run_id="align2",
-                       policy=GenerationPolicy(max_tags=1))
+                       policy=GenerationPolicy(max_tags=2))
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
-    # 新词 1 条占满名额，库内命中 1 条额外带出（不占名额）
+    # 各来源 1 条，合计满足任务总预算。
     assert len(out) == 2
     assert out[0].origin == "generated" and out[0].tag_name != "多线叙事"
     assert out[1].origin == "catalog" and out[1].tag_name == "多线叙事"
 
 
 def test_replaced_tags_do_not_consume_quota(
-        session, content_fixture, mtg_settings, monkeypatch):
-    """库内命中再多，也不把新词挤掉：新词始终按 limit 走自己的桶。"""
+        session, content_fixture, mtg_settings):
+    """总预算充足时，库内命中走独立的来源配额。"""
     for index in range(3):
         _seed_json(f"tag_fill_{index}", f"占位{index}")
     _seed_json("tag_cat_1", "多线叙事")
 
+    mtg_settings.mtg_max_final_tags = 2
     spec = _build_spec(content_fixture, run_id="align7",
-                       policy=GenerationPolicy(max_tags=2))
+                       policy=GenerationPolicy(max_tags=3))
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
     generated = [t for t in out if t.origin == "generated"]

@@ -129,23 +129,19 @@ def _closed_output(text: str, run_id: str) -> list[dict]:
 
 
 def _open_output(text: str, run_id: str) -> list[dict]:
-    """开放式生成（mtg）：固定三候选，按场景数轮转给一条场景证据。
-
-    三轮返回同样的三个候选（真实模型也会重复），用于覆盖跨轮合并路径：
-    归一化去重后 runs=3。
-    """
-    scenes = _parse_scenes(text)
-    items = []
-    for index, (name, dimension, desc) in enumerate(_OPEN_SEEDS):
-        scene = scenes[index % len(scenes)] if scenes else None
-        items.append({
-            "tag": name,
-            "dimension": dimension,
-            "scenes": [scene["scene_id"]] if scene else [],
-            "desc": desc,
-            "reason": f"模拟依据 #{index + 1}",
-        })
-    return items
+    """模拟单场或全片候选，使用对应数量的场景证据。"""
+    scene_ids = [scene["scene_id"] for scene in _parse_scenes(text)]
+    scope = "film" if run_id.endswith(":film") else "scene"
+    if not scene_ids:
+        scene_ids = re.findall(r"^场景 ID：(.+)$", text, re.MULTILINE)
+    if scope == "film" and not scene_ids:
+        scene_ids = re.findall(r'"scene_id": "([^"]+)"', text)
+    evidence = scene_ids[:2] if scope == "film" else scene_ids[:1]
+    return [
+        {"tag": name, "dimension": dimension, "scenes": evidence, "scope": scope,
+         "desc": desc, "reason": f"模拟依据 #{index + 1}"}
+        for index, (name, dimension, desc) in enumerate(_OPEN_SEEDS)
+    ]
 
 
 # 补写请求的候选行：`- {tag}（归属目录：{path}）`
@@ -185,14 +181,17 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     scene_id = scenes[0]["scene_id"] if scenes else None
     quote = scenes[0]["description"][:12] if scenes else ""
     items = []
-    for tag, _dimension, _reason in _JUDGE_LINE_RE.findall(text):
+    for tag, _dimension, reason in _JUDGE_LINE_RE.findall(text):
+        source = re.match(r"^〔(?:film|scene)｜依据场景 ([^〕]+)〕", reason)
+        evidence = source.group(1).split("、") if source else ([scene_id] if scene_id else [])
+        cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
             "tag": tag.strip(),
             "verdict": "supported",
             "importance": "core",
             "confidence": 0.9,
-            "scenes": [scene_id] if scene_id else [],
-            "quote": quote,
+            "scenes": evidence,
+            "quote": cited["description"][:12] if cited else quote,
             "reason": "模拟判定：所引原文支撑标签",
         })
     return items
