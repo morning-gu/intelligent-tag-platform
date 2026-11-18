@@ -155,6 +155,43 @@ def test_generation_e2e_closed_succeeded(client):
         assert row["tag_id"] == res["tag_id"]
 
 
+def test_timestamps_render_utc_with_z_suffix(client):
+    """时间戳契约（2026-11-19 起）：API 输出 ISO-8601 UTC 带 Z 后缀。
+
+    DB 存 naive UTC（写入点 datetime.now(timezone.utc) 经 SQLite 亲和剥
+    tzinfo），响应模型经 UtcDatetime 序列化补回 UTC。此前输出裸
+    "2026-11-18T10:31:32"，前端按本地时间读导致 UTC+8 用户误读 8 小时
+    （gen_4845957f9239 排查根因链）。
+    """
+    from datetime import datetime as dt
+
+    _import_catalog(client)
+    _import_content(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": ["movie_001"], "mode": "closed",
+        "policy": {"max_tags": 30, "min_confidence": 0.5}})
+    assert resp.status_code == 200
+    item = resp.json()["tasks"][0]
+    assert item["status"] == "succeeded"
+    task_id = item["task_id"]
+
+    # 任务详情端点：created_at/finished_at 带 Z 且为合法 RFC3339
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}").json()
+    for field in ("created_at", "finished_at"):
+        value = detail[field]
+        assert value is not None and value.endswith("Z")
+        dt.fromisoformat(value)  # 3.11+ 认 Z，解析失败即格式非法
+
+    # 列表端点同一契约（响应为裸数组）
+    listing = client.get("/api/v1/generation/tasks").json()
+    assert listing[0]["created_at"].endswith("Z")
+
+    # 资产标签行的 created_at 同契约（AssetTagOut 已挂 UtcDatetime）
+    tags = client.get("/api/v1/assets/movie_001/tags").json()
+    assert tags, "closed 成功路径应产出自动通过的挂载行"
+    assert all(tag["created_at"].endswith("Z") for tag in tags)
+
+
 def test_generation_e2e_open_generated_rows(client):
     """open 模式：MockLLM 固定三候选，目录归一未命中 → 全部 generated 行。"""
     _import_catalog(client)

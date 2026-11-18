@@ -46,6 +46,7 @@ import {
   type GenerationTaskResult,
   type GenerationTaskSummary,
 } from '../api/tasks'
+import { formatTime } from '../api/time'
 import EvidenceCard from '../components/EvidenceCard'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
@@ -122,11 +123,6 @@ function assetOptions(assets: AssetSummary[]) {
       return a.asset_id < b.asset_id ? -1 : 1
     })
     .map((a) => ({ value: a.asset_id, label: assetOptionLabel(a) }))
-}
-
-/** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
-function formatTime(v: string | null): string {
-  return v === null ? '—' : v.replace('T', ' ').slice(0, 19)
 }
 
 /** 结果行单条证据明细（详情面板证据列复用审核列表证据卡）。限宽：

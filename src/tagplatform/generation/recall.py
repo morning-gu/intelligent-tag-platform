@@ -8,7 +8,8 @@
    做余弦；同一标签跨 query 取最高分；
 3. **按目录分组**：每组（一个目录）取最高分的 top_k 条，再跨组按分数降序
    合并——这样"冷门目录"不会被热门目录整片挤掉；
-4. 候选带上目录与挂载粒度，供 prompt 展示和落库归属使用。
+4. 候选带上目录、挂载粒度与召回余弦，供 prompt 展示、落库归属与
+   closed 终分公式（Semb）使用。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -25,7 +26,11 @@ from tagplatform.schemas import ContentJSON
 
 @dataclass(frozen=True)
 class RecallCandidate:
-    """闭式召回的候选行（渲染 candidates 文本 / 生成 catalog 行都用它）。"""
+    """闭式召回的候选行（渲染 candidates 文本 / 生成 catalog 行都用它）。
+
+    `score` 是该标签与内容查询文本的最高余弦（closed 终分公式的 Semb
+    输入）；默认 0 兼容手构候选行。
+    """
 
     tag_id: str
     tag_name: str
@@ -33,6 +38,7 @@ class RecallCandidate:
     description: str
     dir_id: str
     scope: str
+    score: float = 0.0
 
 
 def embed_content_texts(content: ContentJSON) -> list[str]:
@@ -95,5 +101,6 @@ def recall_candidates(
             description=definition.description,
             dir_id=definition.dir_id,
             scope=library.scope_of(definition.dir_id),
+            score=score,
         ))
     return picked

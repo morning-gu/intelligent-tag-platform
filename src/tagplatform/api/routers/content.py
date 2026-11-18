@@ -8,7 +8,6 @@
 随 media_context 表退役，不再保留兼容路由。
 """
 
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
+from tagplatform.api.schemas import UtcDatetime
 import tagplatform.movie_import as movie_import
 from tagplatform.content_import import import_content as import_content_svc
 from tagplatform.content_template import template_from_stored
@@ -53,9 +53,9 @@ class AssetOut(BaseModel):
     video_uri: str | None = None
     # 是否已有内容（影片行 content_json 非空；场景行恒 False）
     has_content: bool = False
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
     # 最近一次写入内容的时间（没内容时等于上传时间）
-    updated_at: datetime | None = None
+    updated_at: UtcDatetime | None = None
 
 
 class AssetDetail(AssetOut):

@@ -38,6 +38,7 @@ import {
   type MediaUploadResult,
 } from '../api/media'
 import { formatTimestamp } from '../api/review'
+import { formatTime } from '../api/time'
 import {
   browseDirs,
   bulkImportMovieDirs,
@@ -368,10 +369,7 @@ export default function AssetList() {
     {
       title: '更新时间',
       dataIndex: 'updated_at',
-      render: (v: string | null) =>
-        v === null
-          ? '—'
-          : v.replace('T', ' ').slice(0, 19),
+      render: formatTime,
     },
   ]
 

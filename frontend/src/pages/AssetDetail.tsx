@@ -25,6 +25,7 @@ import {
 } from '../api/assets'
 import { ApiError } from '../api/client'
 import { formatTimestamp } from '../api/review'
+import { formatTime } from '../api/time'
 import SceneTimeline from '../components/SceneTimeline'
 import VideoPlayer, { type VideoPlayerHandle } from '../components/VideoPlayer'
 
@@ -164,7 +165,7 @@ export default function AssetDetail() {
     {
       title: '创建时间',
       dataIndex: 'created_at',
-      render: (v: string | null) => (v === null ? '—' : v.replace('T', ' ').slice(0, 19)),
+      render: formatTime,
     },
   ]
 

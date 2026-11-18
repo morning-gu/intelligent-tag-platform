@@ -38,6 +38,7 @@ import {
   type PromptCreatePayload,
   type PromptTemplateSummary,
 } from '../api/prompts'
+import { formatTime } from '../api/time'
 
 /** mode → Tab 展示名（语义与 db/models.py 注释一致：closed 目录内封闭生成）。 */
 const MODE_TABS = [
@@ -56,11 +57,6 @@ const MODE_PLACEHOLDER_HINTS: Record<PromptMode, string> = {
 /** 新建弹窗表单值：仅模板正文一项（mode 由当前 Tab 决定，不进表单）。 */
 interface CreateFormValues {
   template_text: string
-}
-
-/** ISO 时间 → "YYYY-MM-DD HH:mm:ss"；null → "—"。 */
-function formatTime(v: string | null): string {
-  return v === null ? '—' : v.replace('T', ' ').slice(0, 19)
 }
 
 /** 运行配置布尔字段的通用渲染：是/否 Tag。 */

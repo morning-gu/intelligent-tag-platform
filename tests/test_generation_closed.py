@@ -5,8 +5,10 @@
 - recall_candidates：按目录分组召回（组内跨 query 取最高分 top_k，跨组
   合并去重），排除 deprecate / 占位行，范围 dir_ids 生效，空库返回 []；
 - parse_closed_output：键集与分值域校验、坏结构抛 LLMParseError；
-- ClosedTagProducer：库缺失/空候选 → ValueError；结果是 catalog 行，
-  带目录与挂载点（目录 applicable_scope → content/scene/character）。
+- ClosedTagProducer：库缺失/空候选 → ValueError；终分 Sf = G·(0.2·Semb +
+  0.5·Sapp + 0.3·Sevi)（门控 Sapp≥0.5，组内按 Sf 降序截断），Sf 与标签
+  成对绑定（relevance_score）；结果是 catalog 行，带目录与挂载点（目录
+  applicable_scope → content/scene/character）。
 """
 
 import json
@@ -125,6 +127,21 @@ def _build_spec(session: Session, content_fixture, run_id: str,
     )
 
 
+class _ScriptedLLM:
+    """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。"""
+
+    def __init__(self, responses: dict[str, list[dict]]):
+        self._responses = responses
+
+    def complete(self, messages, run_id):
+        tail = messages[0]["content"].partition(
+            "\n\n## 候选标签分组\n")[2]
+        dir_id = json.loads(tail)["dir_id"]
+        return LLMResponse(
+            content=json.dumps(self._responses[dir_id], ensure_ascii=False),
+            usage={}, raw={}, ok=True)
+
+
 def test_closed_produce_end_to_end(session, content_fixture):
     _seed_library()
     spec = _build_spec(session, content_fixture, run_id="r2")
@@ -187,11 +204,15 @@ def test_closed_produce_groups_by_directory(session, content_fixture):
     assert seen_tags == {c.tag_id for c in candidates}
 
 
-def test_closed_produce_filters_and_caps_per_group(session, content_fixture):
-    """按 applicability > 3 过滤，再按 applicability 降序按目录截断。"""
+def test_closed_produce_scores_and_caps_per_group(session, content_fixture):
+    """终分 Sf 门内降序、组内截断 max_tags=1；Sf 与标签成对绑定。
+
+    期望值不手算 mock 余弦：用与 produce 同口径的镜像召回拿 Semb，按
+    Sf = 0.2·Semb + 0.5·Sapp + 0.3·Sevi 现算每组胜者（mock 确定性）。
+    """
     _seed_library()
     spec = _build_spec(session, content_fixture, run_id="r3",
-                       policy=GenerationPolicy(max_tags=1, min_confidence=0.5))
+                       policy=GenerationPolicy(max_tags=1))
     responses = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 3,
@@ -212,32 +233,75 @@ def test_closed_produce_filters_and_caps_per_group(session, content_fixture):
         ],
     }
 
-    class _ScriptedLLM:
-        """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。"""
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # 镜像召回：与 produce 同参数，拿每个候选的 Semb（mock 确定性）
+    candidates = recall_candidates(
+        try_load_library(), MOCK_EMBEDDER,
+        embed_content_texts(content_fixture), top_k=50)
+    semb = {c.tag_id: c.score for c in candidates}
+    group_order = list(dict.fromkeys(c.dir_id for c in candidates))
 
-        def complete(self, messages, run_id):
-            tail = messages[0]["content"].partition(
-                "\n\n## 候选标签分组\n")[2]
-            dir_id = json.loads(tail)["dir_id"]
-            return LLMResponse(
-                content=json.dumps(responses[dir_id], ensure_ascii=False),
-                usage={}, raw={}, ok=True)
+    def _sf(item: dict) -> float:
+        return (0.2 * semb[item["tag_id"]]
+                + 0.5 * (item["applicability"] - 1) / 4
+                + 0.3 * (item["evidence_strength"] - 1) / 4)
 
-    out = ClosedTagProducer().produce(spec, session, _ScriptedLLM(),
-                                      MOCK_EMBEDDER)
-    # applicability=3 被滤除；每组保留 applicability 最高的一条。
-    assert [t.tag_id for t in out] == ["tag_003", "tag_005"]
+    # A=3 恰过门控（Sapp=0.5 → G=1）参与排序；组内按 Sf 取最高，组序=召回序
+    expected = [
+        max((it for it in responses[d] if it["applicability"] >= 3), key=_sf)
+        for d in group_order
+    ]
+    assert [t.tag_id for t in out] == [it["tag_id"] for it in expected]
     # 截断发生在组内：单目录上限 1，两组各 1 条（合并后不再二次截断）
     assert len(out) == 2
     assert {t.dir_id for t in out} == {"dir_genre", "dir_mood"}
-    assert out[0].relevance_score == 1.0 and out[0].confidence == 0.25
+    # Sf 与标签成对（relevance_score）；confidence 仍为 (E−1)/4 独立读数
+    for row, it in zip(out, expected):
+        assert row.relevance_score == pytest.approx(_sf(it))
+        assert row.confidence == (it["evidence_strength"] - 1) / 4
     scene = content_fixture.content.scenes[0]
-    assert out[1].evidence == [Evidence(
+    by_tag = {t.tag_id: t for t in out}
+    assert by_tag["tag_005"].evidence == [Evidence(
         scene_id=scene.scene_id,
         start_ms=scene.time_range.start_ms,
         end_ms=scene.time_range.end_ms,
         description="场景摘要",
     )]
+
+
+def test_closed_produce_gate_drops_applicability_below_three(
+        session, content_fixture):
+    """门控 G：Sapp<0.5（A≤2）→ G=0 整条丢弃；A=3 恰在门线上保留。"""
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r4",
+                       policy=GenerationPolicy(max_tags=10))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 3,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "tag_002", "applicability": 2,
+             "evidence_strength": 5, "evidences": []},
+        ],
+        "dir_mood": [
+            {"tag_id": "tag_004", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "tag_005", "applicability": 1,
+             "evidence_strength": 5, "evidences": []},
+        ],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # max_tags=10 富余：A∈{1,2} 被丢只能因门控，A=3 恰好放行
+    assert {t.tag_id for t in out} == {"tag_001", "tag_004"}
+    semb = {c.tag_id: c.score for c in recall_candidates(
+        try_load_library(), MOCK_EMBEDDER,
+        embed_content_texts(content_fixture), top_k=50)}
+    by_tag = {t.tag_id: t for t in out}
+    # 权重算术显式展开：Sf = 0.2·Semb + 0.5·((3−1)/4) + 0.3·((5−1)/4)
+    assert by_tag["tag_001"].relevance_score == pytest.approx(
+        0.2 * semb["tag_001"] + 0.5 * 0.5 + 0.3 * 1.0)
+    assert by_tag["tag_001"].confidence == 1.0
 
 
 def test_closed_no_candidates_raises(session, content_fixture):

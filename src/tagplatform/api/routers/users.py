@@ -7,7 +7,6 @@ require_admin（非 admin 403）。登录门槛（get_current_user）由 create_
 include 时与其余业务 router 统一挂载。
 """
 
-from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.depends import require_admin
+from tagplatform.api.schemas import UtcDatetime
 from tagplatform.auth import create_user as create_user_account
 from tagplatform.db.models import UserAccount
 
@@ -28,7 +28,7 @@ class UserOut(BaseModel):
     user_id: str
     username: str
     role: str
-    created_at: datetime | None = None
+    created_at: UtcDatetime | None = None
 
 
 class UserListResponse(BaseModel):
