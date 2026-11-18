@@ -25,6 +25,8 @@ from tagplatform.settings import Settings
 # 避免单测往仓库里写文件、或误扫 /cache/MovieNet（零网络、零外部依赖红线）。
 os.environ.setdefault("TAGPLT_MTG_REPORT_DIR", tempfile.mkdtemp(prefix="mtg-audit-"))
 os.environ.setdefault("TAGPLT_DATASET_ROOT", tempfile.mkdtemp(prefix="mtg-dataset-"))
+# 只由显式指定临时目录的夹具采样，避免 Mock 流程覆盖本地实跑样本。
+os.environ.setdefault("TAGPLT_MTG_PROMPT_SAMPLE_DIR", "")
 
 # 治理流水线（Task 7）等测试共用的确定性 mock 嵌入器（零网络、零模型下载）
 MOCK_EMBEDDER = make_embedder("mock", mock=True)
