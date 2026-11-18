@@ -21,21 +21,35 @@ POST /api/v1/benchmarks
 
 ```mermaid
 flowchart TD
-    Start["影片场景 + 工作词表<br/>初始标签库与已累积的发现"] --> Score["向量召回 → 本地 NLI 评分"]
-    Score --> Gate{"有场景最高支持分低于 0.5，<br/>且开放发现已启用、有动态目录？"}
-    Gate -- 否 --> Rescore
-    Gate -- 是 --> Extract["大模型提词<br/>每片最多 5 个场景，每场景最多 3 个词"]
-    Extract --> Validate["校验场景引文与 dir_dynamic 目录<br/>归并同义词，按不同影片累计支持"]
-    Validate --> Rescore{"本片有候选词<br/>或本轮有新词入表？"}
-    Rescore -- 否 --> Vote["场景按排名投票<br/>仅使用支持分 ≥ 0.7 的标签"]
-    Rescore -- 是 --> Again["重新召回和本地 NLI 评分<br/>复用已有的文本对分数"]
-    Again --> Vote
-    Vote --> Exact["按归一化名称去重"]
-    Exact --> Similar{"有相似度达到 0.75 的标签对？"}
-    Similar -- 是 --> Review["大模型复核是否同义"]
-    Similar -- 否 --> Save["按上限截取标签<br/>保存结果和发现状态"]
-    Review --> Save
-    Save --> Eval["独立评估 glm-5.3-flash<br/>keep / rewrite / omit"]
+    Create["创建 X-MLClass 批次<br/>保存影片顺序、内容、初始标签库和参数"] --> Next["按提交顺序处理下一部影片"]
+    Next --> State["串行读取发现状态<br/>从保留的报告恢复候选池和共享词表"]
+    State --> Score["拼接场景文本，跳过不足 8 字符的场景<br/>每场景向量召回 Top 8，逐对计算 NLI 支持分"]
+    Score --> Gate{"已启用开放发现、有可用动态目录<br/>且有场景最高支持分低于 0.5？"}
+    Gate -- 是 --> Extract["用共享的全片文本、关键帧及标签和目录提示<br/>为最多 5 个低覆盖场景各提取最多 3 个词"]
+    Extract --> Check["校验目标场景引文和动态目录 ID<br/>跳过无效词，查重及归并同义候选"]
+    Check --> Admit["按不同影片累计支持<br/>达到 2 部且查重通过的词加入共享词表"]
+    Gate -- 否 --> Admit
+    Admit --> Again{"有新词入表，或候选池中<br/>有来自本片的候选词？"}
+    Again -- 是 --> Rescore["用更新后的词表与本片候选重打分<br/>新入表词和本片候选额外纳入，复用首轮 NLI 文本对分数"]
+    Again -- 否 --> Vote["保留支持分达到 0.7 的标签<br/>按场景名次投票，记录证据"]
+    Rescore --> Vote
+    Vote --> Dedup["按归一化名称去重<br/>相似度达到 0.75 的标签对由生成模型批量复核"]
+    Dedup --> Save["按每片上限截取标签<br/>保存标签、审计和发现状态"]
+    Save --> Eval{"本片有标签？"}
+    Eval -- 有 --> Review["用 glm-5.3-flash 独立评估展示价值<br/>keep / rewrite / omit"]
+    Eval -- 无 --> Empty["记录空结果的评估"]
+    Score -. 生成失败 .-> GenFail["记录失败和部分审计<br/>本片的发现变更不提交"]
+    Extract -. 提词失败 .-> GenFail
+    Check -. 同义复核失败 .-> GenFail
+    Rescore -. 重打分失败 .-> GenFail
+    Dedup -. 最终去重复核失败 .-> GenFail
+    Review -. 评估失败 .-> EvalFail["记录评估失败<br/>保留已保存的标签和发现状态"]
+    Review --> More{"还有待处理影片？"}
+    Empty --> More
+    GenFail --> More
+    EvalFail --> More
+    More -- 有 --> Next
+    More -- 无 --> Done["保存批次汇总<br/>任一影片失败则批次标为失败"]
 ```
 
 图中的阈值为默认值。同义归并仅在需要语义复核时调用大模型。整条生成路径没有调用大模型时，生成 token 为 0。独立评估的 token 单独统计。
