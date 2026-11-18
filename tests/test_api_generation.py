@@ -239,6 +239,8 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
 
     def record(self, messages, run_id):
         response = original(self, messages, run_id)
+        if run_id.endswith(":tag-quality"):
+            return response
         if ":r" in run_id:
             # 缺一条释义，确保本批走到补写模型调用。
             candidates = json.loads(response.content)

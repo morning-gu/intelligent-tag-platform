@@ -198,6 +198,18 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     return items
 
 
+def _quality_output(text: str) -> dict:
+    material, _, label_json = text.rpartition("\n\n## 待评估标签\n")
+    labels = json.loads(label_json)
+    scenes = _parse_scenes(material)
+    return {"tags": [{
+        "id": label["id"],
+        "relevance": {"score": 2 if scenes else None, "reason": "模拟内容评分"},
+        "semantics": {"score": 2 if label["desc"] else None, "reason": "模拟语义评分"},
+        "evidence": scenes[:1],
+    } for label in labels]}
+
+
 class MockLLMClient:
     """确定性伪 LLM：哈希即输出，测试与 mock 配置专用。"""
 
@@ -206,7 +218,9 @@ class MockLLMClient:
 
     def complete(self, messages: list[dict], run_id: str) -> LLMResponse:
         text = _extract_text(messages)
-        if _MTG_JUDGE_MARKER in text:
+        if str(messages[0]["content"]).startswith("## 标签质量评估"):
+            out = _quality_output(text)
+        elif _MTG_JUDGE_MARKER in text:
             out = _judge_output(text, run_id)
         elif _MTG_VERIFY_MARKER in text:
             out = _verify_output(text)

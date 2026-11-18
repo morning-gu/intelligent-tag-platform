@@ -39,6 +39,7 @@ from tagplatform.embed import Embedder, build_embedder
 from tagplatform.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
+from tagplatform.tasks.tag_quality import QualityExecutor
 
 
 def _configure_logging(settings: Settings) -> None:
@@ -79,6 +80,10 @@ def get_embedder(request: Request) -> Embedder:
 def get_executor(request: Request) -> TaskExecutor:
     """生成任务执行器依赖：lifespan 启动时构建的单例（见 create_app）。"""
     return request.app.state.executor
+
+
+def get_quality_executor(request: Request) -> QualityExecutor:
+    return request.app.state.quality_executor
 
 
 from tagplatform.api.depends import get_current_user, require_admin  # noqa: E402
@@ -134,17 +139,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 os.environ.get("TAGPLT_ADMIN_PASSWORD", "admin123"))
         finally:
             session.close()
+        app.state.quality_executor = QualityExecutor(app.state.session_factory, settings)
         app.state.executor = TaskExecutor(
             app.state.session_factory, app.state.llm, app.state.embedder,
             workers=settings.generation_workers,
-            prompt_sample_dir=settings.mtg_prompt_sample_dir)
-        session = app.state.session_factory()
+            prompt_sample_dir=settings.mtg_prompt_sample_dir,
+            quality_executor=app.state.quality_executor)
         try:
-            reset_orphan_running(session)
+            with app.state.session_factory() as session:
+                reset_orphan_running(session)
+            app.state.quality_executor.resume_pending()
+            yield
         finally:
-            session.close()
-        yield
-        app.state.executor.shutdown()
+            app.state.executor.shutdown()
+            app.state.quality_executor.shutdown()
 
     app = FastAPI(title="影视智能标签平台", lifespan=lifespan)
     app.state.settings = settings

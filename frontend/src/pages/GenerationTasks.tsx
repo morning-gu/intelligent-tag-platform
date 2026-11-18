@@ -20,6 +20,7 @@ import {
   Card,
   Descriptions,
   Form,
+  Input,
   InputNumber,
   Modal,
   Radio,
@@ -38,6 +39,7 @@ import { fetchAssets, type AssetSummary } from '../api/assets'
 import type { ReviewEvidence } from '../api/review'
 import {
   createGenerationTasks,
+  DEFAULT_QUALITY_MODEL,
   fetchGenerationTask,
   fetchGenerationTasks,
   retryGenerationTask,
@@ -47,6 +49,7 @@ import {
   type GenerationTaskSummary,
 } from '../api/tasks'
 import EvidenceCard from '../components/EvidenceCard'
+import TagQualityEvaluation from '../components/TagQualityEvaluation'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -97,6 +100,7 @@ const REVIEW_STATUS_COLORS: Record<string, string> = {
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
+  quality_model: string
   max_tags?: number
   min_confidence?: number
 }
@@ -148,25 +152,35 @@ function ResultEvidence({ assetId, evidence }: { assetId: string; evidence: Revi
 function TaskDetailPanel({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [refresh, setRefresh] = useState(0)
   const navigate = useNavigate()
 
   useEffect(() => {
-    // StrictMode 会双调 effect：以 cancelled 丢弃过期请求结果
     let cancelled = false
-    fetchGenerationTask(taskId).then(
-      (d) => {
-        if (!cancelled) setDetail(d)
-      },
-      (err) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : '任务详情加载失败')
-      },
-    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let polling = false
+    async function load() {
+      try {
+        const next = await fetchGenerationTask(taskId)
+        if (cancelled) return
+        setDetail(next)
+        setLoadError(null)
+        const status = next.quality_evaluation?.status
+        polling = status === 'queued' || status === 'running'
+      } catch (err) {
+        if (cancelled) return
+        setLoadError(err instanceof Error ? err.message : '任务详情加载失败')
+      }
+      if (polling) timer = setTimeout(() => void load(), 3000)
+    }
+    void load()
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
-  }, [taskId])
+  }, [taskId, refresh])
 
-  if (loadError !== null) {
+  if (loadError !== null && detail === null) {
     return <Alert type="error" showIcon message="任务详情加载失败" description={loadError} />
   }
   if (detail === null) {
@@ -246,6 +260,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {loadError && <Alert type="warning" showIcon message="任务详情刷新失败" description={loadError} />}
       <Descriptions
         size="small"
         column={3}
@@ -262,6 +277,9 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
         dataSource={detail.results}
         pagination={false}
       />
+      {detail.quality_evaluation && (
+        <TagQualityEvaluation report={detail.quality_evaluation} onRetry={() => setRefresh((value) => value + 1)} />
+      )}
     </div>
   )
 }
@@ -347,6 +365,7 @@ export default function GenerationTasks() {
       const res = await createGenerationTasks({
         asset_ids: values.asset_ids,
         mode: values.mode,
+        quality_model: values.quality_model.trim(),
         ...(Object.keys(policy).length > 0 ? { policy } : {}),
       })
       message.success(`已创建 ${res.tasks.length} 个任务`)
@@ -452,7 +471,8 @@ export default function GenerationTasks() {
           dataSource={tasks}
           loading={loading}
           expandable={{
-            expandedRowRender: (task) => <TaskDetailPanel taskId={task.task_id} />,
+            expandedRowRender: (task, _index, _indent, expanded) =>
+              expanded ? <TaskDetailPanel taskId={task.task_id} /> : null,
           }}
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
         />
@@ -491,6 +511,14 @@ export default function GenerationTasks() {
                 { value: 'closed', label: '闭环' },
               ]}
             />
+          </Form.Item>
+          <Form.Item
+            name="quality_model"
+            label="评估模型 ID"
+            initialValue={DEFAULT_QUALITY_MODEL}
+            rules={[{ required: true, whitespace: true, message: '请输入评估模型 ID' }]}
+          >
+            <Input maxLength={200} />
           </Form.Item>
           <Form.Item name="max_tags" label="最大标签数">
             <InputNumber min={1} placeholder="默认 30" style={{ width: '100%' }} />

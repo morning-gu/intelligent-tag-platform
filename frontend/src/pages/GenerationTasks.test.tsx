@@ -12,6 +12,7 @@ import type { AssetSummary } from '../api/assets'
 import type {
   GenerationTaskDetail,
   GenerationTaskSummary,
+  QualityReport,
 } from '../api/tasks'
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -328,6 +329,9 @@ describe('GenerationTasks 生产任务页', () => {
     // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
     fireEvent.change(screen.getByPlaceholderText('默认 30'), { target: { value: '20' } })
+    const modelInput = screen.getByRole('textbox', { name: '评估模型 ID' })
+    expect(modelInput).toHaveValue('deepseek-v4.1-flash')
+    fireEvent.change(modelInput, { target: { value: 'another-model' } })
 
     // 弹窗确定按钮为两字"创建"（antd 渲染为"创 建"），与触发按钮区分
     fireEvent.click(screen.getByRole('button', { name: /创\s*建$/ }))
@@ -336,6 +340,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie', 'a-scene'],
       mode: 'open',
+      quality_model: 'another-model',
       policy: { max_tags: 20 },
     })
     expect(await screen.findByText('已创建 1 个任务')).toBeInTheDocument()
@@ -376,6 +381,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie'],
       mode: 'open',
+      quality_model: 'deepseek-v4.1-flash',
     })
   })
 
@@ -438,6 +444,71 @@ describe('GenerationTasks 生产任务页', () => {
     expect(within(openRow).getByText('内容特征标签/细分题材')).toBeInTheDocument()
     expect(within(openRow).getByText('整片')).toBeInTheDocument()
     expect(within(closedRow).getByText('内容特征标签/主类型')).toBeInTheDocument()
+  })
+
+  it('展开质量评估可查批次覆盖率、标签依据与单片重试', async () => {
+    const dimension = {
+      average: 2, high_rate: 1, distribution: [0, 0, 1], undetermined: 0, undetermined_rate: 0,
+    }
+    const metrics = {
+      total_tags: 2, evaluated_tags: 1, coverage: 0.5, joint_high_rate: 1,
+      undetermined_tags: 0, undetermined_rate: 0, relevance: dimension, semantics: dimension,
+    }
+    const report: QualityReport = {
+      status: 'partial',
+      incomplete: true,
+      film_counts: {
+        queued: 0, running: 0, completed: 0, partial: 1, failed: 0,
+        not_needed: 0, generation_failed: 0, unavailable: 0,
+      },
+      metrics,
+      films: [{
+        task_id: 'task-1', asset_id: 'a1', title: '评估影片', status: 'partial',
+        model: 'deepseek-v4.1-flash', prompt_version: 'tag-quality-v1',
+        error: '一个标签未返回评分', note: null, metrics,
+        labels: [{
+          id: 11, name: '快照标签', desc: '标签的通用释义', disposition: 'pending',
+          dir_path: '细分题材',
+          score: {
+            relevance: { score: 2, reason: '场景支持标签' },
+            semantics: { score: 2, reason: '名称与释义一致' },
+            evidence: [{ scene_id: 's2', start_ms: 65_000, description: '评估场景证据' }],
+          },
+        }],
+      }],
+    }
+    let retryAccepted = false
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/generation/tasks') return TASKS
+      if (path === '/api/v1/generation/tasks/task-1/quality/retry') {
+        retryAccepted = true
+        return { task_id: 'task-1', status: 'queued' }
+      }
+      if (path === '/api/v1/generation/tasks/task-1') {
+        return { ...DETAIL, quality_evaluation: retryAccepted ? { ...report, status: 'queued' } : report }
+      }
+      throw new Error(`未预期的请求：${path}`)
+    })
+    renderGenerationTasks()
+    const taskRow = (await screen.findByText('task-1')).closest('tr')!
+    fireEvent.click(taskRow.querySelector('.ant-table-row-expand-icon')!)
+    expect(await screen.findByText('标签质量评估')).toBeInTheDocument()
+    expect(screen.getByText('汇总结果尚未完整')).toBeInTheDocument()
+    expect(screen.getAllByText('50.0%')).toHaveLength(2)
+    fireEvent.click(screen.getByText('标签评分（1 条）'))
+    const labelRow = (await screen.findByText('快照标签')).closest('tr')!
+    fireEvent.click(labelRow.querySelector('.ant-table-row-expand-icon')!)
+    expect(screen.getByText('标签的通用释义')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 's2' })).toHaveAttribute('href', '/assets/a1?scene=s2&t=65000')
+    expect(screen.getByText('评估场景证据')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试评估' }))
+    const model = await screen.findByRole('textbox', { name: '评估模型 ID' })
+    expect(model).toHaveValue('deepseek-v4.1-flash')
+    fireEvent.change(model, { target: { value: 'replacement' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /重\s*试/ }))
+    await waitFor(() => expect(postedBody('/api/v1/generation/tasks/task-1/quality/retry'))
+      .toBe('{"model":"replacement"}'))
+    expect(await screen.findByText('等待评估')).toBeInTheDocument()
   })
 
   it('详情里点标签名：跳资产详情并带首个证据场景位置', async () => {

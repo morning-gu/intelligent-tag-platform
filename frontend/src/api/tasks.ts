@@ -47,6 +47,71 @@ export interface GenerationTaskResult {
 /** 任务详情：列表字段之上附该任务全部结果摘要行（按入库行序）。 */
 export interface GenerationTaskDetail extends GenerationTaskSummary {
   results: GenerationTaskResult[]
+  quality_evaluation?: QualityReport
+}
+
+export const DEFAULT_QUALITY_MODEL = 'deepseek-v4.1-flash'
+
+export type QualityStatus =
+  | 'queued' | 'running' | 'completed' | 'partial' | 'failed'
+  | 'not_needed' | 'generation_failed' | 'unavailable'
+
+export interface QualityDimension {
+  average: number | null
+  high_rate: number | null
+  distribution: number[]
+  undetermined: number
+  undetermined_rate: number | null
+}
+
+export interface QualityMetrics {
+  total_tags: number
+  evaluated_tags: number
+  coverage: number | null
+  joint_high_rate: number | null
+  undetermined_tags: number
+  undetermined_rate: number | null
+  relevance: QualityDimension
+  semantics: QualityDimension
+}
+
+export interface QualityScore {
+  score: 0 | 1 | 2 | null
+  reason: string
+}
+
+export interface QualityLabel {
+  id: number
+  name: string
+  desc: string | null
+  disposition: 'mounted' | 'pending'
+  dir_path: string | null
+  score: {
+    relevance: QualityScore
+    semantics: QualityScore
+    evidence: { scene_id: string | null; start_ms: number | null; description: string }[]
+  } | null
+}
+
+export interface FilmQuality {
+  task_id: string
+  asset_id: string
+  title: string
+  status: QualityStatus
+  model: string | null
+  prompt_version: string | null
+  error: string | null
+  note: string | null
+  metrics: QualityMetrics | null
+  labels: QualityLabel[]
+}
+
+export interface QualityReport {
+  status: QualityStatus
+  incomplete: boolean
+  film_counts: Record<QualityStatus, number>
+  metrics: QualityMetrics
+  films: FilmQuality[]
 }
 
 /** 创建请求的生成策略：未填字段交由后端默认值（max_tags=30 /
@@ -61,6 +126,7 @@ export interface GenerationTaskCreatePayload {
   asset_ids: string[]
   mode: string
   policy?: GenerationPolicyPayload
+  quality_model?: string
 }
 
 /** 创建响应单条：任务标识 + 资产 + 提交后状态（同步模式即终态）。 */
@@ -118,4 +184,13 @@ export function retryGenerationTask(
     `/api/v1/generation/tasks/${taskId}/retry`,
     { method: 'POST' },
   )
+}
+
+export function retryQualityEvaluation(
+  taskId: string, model: string,
+): Promise<{ task_id: string; status: string }> {
+  return apiFetch(`/api/v1/generation/tasks/${taskId}/quality/retry`, {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  })
 }

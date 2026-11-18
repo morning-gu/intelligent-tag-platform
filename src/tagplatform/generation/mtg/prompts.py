@@ -53,7 +53,7 @@ _MAX_SUMMARY = 600
 # 台词是情绪与主题最直接的证据，按条数筛掉的往往正是关键那句。
 
 
-def _encode_image(path: Path) -> str:
+def encode_image(path: Path) -> str:
     """图片 → data URL（沿用资产生成链路的编码方式）。"""
     suffix = path.suffix.lower().lstrip(".") or "jpeg"
     return f"data:image/{suffix};base64,{base64.b64encode(path.read_bytes()).decode()}"
@@ -223,13 +223,13 @@ def build_generation_messages(content: ContentJSON,
     for scene in content.content.scenes:
         frames = frames_by_scene.get(scene.scene_id) or ()
         for order, frame in enumerate(frames, 1):
-            frame_parts.extend(_frame_parts(scene.scene_id, order, len(frames),
-                                           _encode_image(frame)))
+            frame_parts.extend(keyframe_parts(scene.scene_id, order, len(frames),
+                                             encode_image(frame)))
     return _generation_messages(body, frame_parts, library_hint, dir_hint)
 
 
-def _frame_parts(scene_id: str, order: int | str, total: int | str,
-                 image_url: str) -> list[dict]:
+def keyframe_parts(scene_id: str, order: int | str, total: int | str,
+                   image_url: str) -> list[dict]:
     return [
         {"type": "text", "text": f"〔关键帧〕{scene_id} 第 {order}/{total} 张"},
         {"type": "image_url", "image_url": {"url": image_url}},
@@ -256,7 +256,7 @@ def _generation_messages(body: str, frame_parts: list[dict],
 
 def build_generation_template() -> dict:
     body = "{{影片标题、摘要、人物、场景描述与台词等按模态渲染的文本}}"
-    frames = _frame_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
+    frames = keyframe_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
                           "{{关键帧的完整 data URL}}")
     hints = ["{{召回的库内标签名，每个词一行}}"]
     dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",

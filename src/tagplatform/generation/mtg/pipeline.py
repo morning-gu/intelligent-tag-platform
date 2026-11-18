@@ -294,6 +294,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         movie_asset_root=settings.movie_asset_root,
         extra_roots=settings.movie_asset_extra_roots,
     ) if "video" in modalities else {})
+    spec.frames_by_scene = frames
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
@@ -535,7 +536,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 tag_name=item.matched_name or candidate.tag,
                 candidate_type=None, candidate_description=None,
                 relevance_score=item.cosine, confidence=confidence,
-                evidence=evidence, level=level,
+                evidence=evidence, level=level, generation_reason=candidate.reason,
                 dir_id=matched.dir_id if matched else None,
                 target_type=mount.target_type, target_id=mount.target_id,
                 # 相似命中：模型原词将来写进 tag_define.aliases
@@ -617,7 +618,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             # 或本条没参与对齐时才是 None。
             relevance_score=(item.cosine if item is not None else None),
             confidence=confidence,
-            evidence=evidence, level=level,
+            evidence=evidence, level=level, generation_reason=candidate.reason,
             dir_id=assignment.dir_id,
             target_type=mount.target_type, target_id=mount.target_id,
         ))
