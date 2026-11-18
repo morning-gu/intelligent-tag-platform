@@ -1,4 +1,4 @@
-"""记录同一批开放生成中，每个模型阶段的首个成功请求与原始回答。"""
+"""记录同一批生产中，每个模型阶段的首个成功请求与原始回答。"""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class PromptSampleBatch:
                     for name in files:
                         (staging / name).replace(self._directory / name)
             except (OSError, TypeError, ValueError) as exc:
-                logger.warning("开放生成提示词样本写入失败 stage=%s run=%s: %s",
+                logger.warning("生产提示词样本写入失败 stage=%s run=%s: %s",
                                stage, run_id, exc)
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, undefer
 
 from tagplatform.db.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.eval.tag_quality import DIMENSIONS, PROMPT_VERSION, ScoreDetails, evaluate
+from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.llm import MockLLMClient, OpenAIClient
 from tagplatform.settings import Settings
 
@@ -40,25 +41,35 @@ class QualityExecutor:
             session.execute(update(TagQualityEvaluation)
                             .where(TagQualityEvaluation.status == "running")
                             .values(status="queued"))
-            pending = session.scalars(select(TagQualityEvaluation.task_id)
-                                      .where(TagQualityEvaluation.status == "queued")).all()
+            pending = session.execute(
+                select(TagQualityEvaluation.task_id, TagGenerationTask.batch_id)
+                .join(TagGenerationTask, TagGenerationTask.task_id == TagQualityEvaluation.task_id)
+                .where(TagQualityEvaluation.status == "queued")
+            ).all()
             session.commit()
-        for task_id in pending:
-            self.submit(task_id)
+        samples_by_batch: dict[str, PromptSampleBatch] = {}
+        directory = self._settings.mtg_prompt_sample_dir
+        for task_id, batch_id in pending:
+            key = batch_id or task_id
+            if directory and key not in samples_by_batch:
+                samples_by_batch[key] = PromptSampleBatch(directory)
+            self.submit(task_id, prompt_samples=samples_by_batch.get(key))
 
-    def submit(self, task_id: str) -> None:
-        self._pool.submit(self._run, task_id)
+    def submit(self, task_id: str, *, prompt_samples: PromptSampleBatch | None = None) -> None:
+        if prompt_samples is None and self._settings.mtg_prompt_sample_dir:
+            prompt_samples = PromptSampleBatch(self._settings.mtg_prompt_sample_dir)
+        self._pool.submit(self._run, task_id, prompt_samples)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=True)
 
-    def _run(self, task_id: str) -> None:
+    def _run(self, task_id: str, prompt_samples: PromptSampleBatch | None) -> None:
         try:
-            self._evaluate_task(task_id)
+            self._evaluate_task(task_id, prompt_samples)
         except Exception:
             logger.exception("标签质量评估线程异常 task_id=%s", task_id)
 
-    def _evaluate_task(self, task_id: str) -> None:
+    def _evaluate_task(self, task_id: str, prompt_samples: PromptSampleBatch | None) -> None:
         with self._session_factory() as session:
             claimed = session.execute(update(TagQualityEvaluation).where(
                 TagQualityEvaluation.task_id == task_id,
@@ -76,7 +87,9 @@ class QualityExecutor:
         if evaluation.prompt_version != PROMPT_VERSION:
             evaluation.scores, evaluation.note = {}, None
         try:
-            scores, error, note = evaluate(self._client(evaluation.model), evaluation)
+            scores, error, note = evaluate(
+                self._client(evaluation.model), evaluation, prompt_samples=prompt_samples,
+            )
         except Exception as exc:
             logger.exception("标签质量评估失败 task_id=%s", task_id)
             scores, error, note = evaluation.scores, str(exc)[:1000], evaluation.note

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from tagplatform.content_io import load_content
 from tagplatform.db.models import TagDefine, TagGenerationTask, TagQualityEvaluation
 from tagplatform.generation.base import GenerationSpec
+from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch, SampledPromptClient
 from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, render_content
 from tagplatform.library import TagLibrary
 from tagplatform.results import PersistSummary
@@ -170,16 +171,28 @@ def _load_frame_parts(frame_paths: dict[str, list[str]]) -> tuple[list[dict], bo
     return parts, missing
 
 
-def _request(client, task_id: str, text: str, labels: list[dict], frames: list[dict]):
+def _build_messages(text: str, labels_json: str, frames: list[dict]) -> list[dict]:
     material = text if frames else text + "\n\n本次提供的影片材料仅含文本。"
-    candidates = "\n\n## 待评估标签\n" + json.dumps(labels, ensure_ascii=False)
+    candidates = "\n\n## 待评估标签\n" + labels_json
     user_input = ([{"type": "text", "text": material}, *frames,
                    {"type": "text", "text": candidates}]
                   if frames else material + candidates)
-    return client.complete([
+    return [
         {"role": "system", "content": _PROMPT},
         {"role": "user", "content": user_input},
-    ], f"{task_id}:tag-quality")
+    ]
+
+
+def build_quality_template() -> dict:
+    text = "{{影片摘要、人物、场景描述、台词与人物挂载点资料}}"
+    labels = "{{分流后最终标签列表 JSON}}"
+    frames = keyframe_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
+                           "{{关键帧 data URL}}")
+    return {
+        "prompt_version": PROMPT_VERSION,
+        "messages": _build_messages(text, labels, frames),
+        "messages_without_keyframes": _build_messages(text, labels, []),
+    }
 
 
 def _render_material(content: ContentJSON, labels: list[dict]) -> str:
@@ -212,8 +225,12 @@ def _image_rejected(error: str) -> bool:
     )
 
 
-def evaluate(client, evaluation: TagQualityEvaluation) -> tuple[dict, str | None, str | None]:
+def evaluate(
+    client, evaluation: TagQualityEvaluation, *, prompt_samples: PromptSampleBatch | None = None,
+) -> tuple[dict, str | None, str | None]:
     """默认一片一请求，长度超限才切分；保留成功批次及其分数。"""
+    if prompt_samples is not None:
+        client = SampledPromptClient(client, prompt_samples, "quality", build_quality_template)
     content = load_content(evaluation.content_json)
     text = _render_material(content, evaluation.labels)
     scene_starts = {scene.scene_id: scene.time_range.start_ms for scene in content.content.scenes}
@@ -224,9 +241,10 @@ def evaluate(client, evaluation: TagQualityEvaluation) -> tuple[dict, str | None
     if missing:
         notes.append("部分生成关键帧已无法读取。")
 
-    def batch(labels: list[dict], material: str, images: list[dict]) -> None:
+    def batch(labels: list[dict], images: list[dict]) -> None:
         try:
-            response = _request(client, evaluation.task_id, material, labels, images)
+            messages = _build_messages(text, json.dumps(labels, ensure_ascii=False), images)
+            response = client.complete(messages, f"{evaluation.task_id}:tag-quality")
         except Exception as exc:
             errors.append(f"评估调用失败：{exc}")
             return
@@ -235,18 +253,18 @@ def evaluate(client, evaluation: TagQualityEvaluation) -> tuple[dict, str | None
         if images and not response.ok and _image_rejected(error.lower()):
             notes.append("评估模型未接受关键帧，已使用文本材料评分。")
             frames.clear()
-            batch(labels, material, [])
+            batch(labels, [])
             return
         choices = response.raw.get("choices") or [{}]
         truncated = response.ok and choices[0].get("finish_reason") == "length"
         if (truncated or input_limit) and len(labels) > 1:
             middle = len(labels) // 2
-            batch(labels[:middle], material, images)
-            batch(labels[middle:], material, images)
+            batch(labels[:middle], images)
+            batch(labels[middle:], images)
             return
         if input_limit and images:
             notes.append("部分标签因请求超出长度限制，使用文本材料评分。")
-            batch(labels, material, [])
+            batch(labels, [])
             return
         if not response.ok or truncated:
             errors.append("模型输出超出长度限制" if truncated else f"评估调用失败：{error}")
@@ -256,8 +274,7 @@ def evaluate(client, evaluation: TagQualityEvaluation) -> tuple[dict, str | None
         except ValueError as exc:
             errors.append(f"评估响应无法解析：{exc}")
 
-    batch([label for label in evaluation.labels if str(label["id"]) not in scores],
-          text, frames)
+    batch([label for label in evaluation.labels if str(label["id"]) not in scores], frames)
     missing_scores = len(evaluation.labels) - len(scores)
     if missing_scores:
         errors.insert(0, f"{missing_scores} 个标签未返回有效评分")

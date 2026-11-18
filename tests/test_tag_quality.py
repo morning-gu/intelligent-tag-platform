@@ -14,6 +14,7 @@ from tagplatform.db import create_engine_for
 from tagplatform.db.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.eval.tag_quality import evaluate
 from tagplatform.generation.base import ProducedTag
+from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.open_gen import OpenTagProducer
 from tagplatform.llm.client import LLMResponse
 from tagplatform.llm.mock import MockLLMClient
@@ -56,7 +57,7 @@ def _wait_report(client, task_id, status):
         time.sleep(0.025)
 
 
-def test_production_snapshot_async_review_and_retry(client, monkeypatch):
+def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_path):
     first_started, release_first = Event(), Event()
     requests = {}
 
@@ -142,6 +143,18 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch):
     assert first["labels"][2]["score"]["semantics"]["score"] is None
     assert requests["movie_001"][0][0] == "custom-model"
 
+    sample_dir = tmp_path / "prompt-samples"
+    example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
+    assert example["run_id"] == f"{task_id}:tag-quality"
+    assert example["model"] == "custom-model"
+    assert _request_payload(example["messages"])[1] == requests["movie_001"][0][2]
+    raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
+    assert len(raw["tags"]) == 2
+    template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
+    assert template["prompt_version"] == "tag-quality-v1"
+    assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
+    assert isinstance(template["messages_without_keyframes"][1]["content"], str)
+
     assert client.post(f"{task_url}/quality/retry").status_code == 200
     deadline = time.monotonic() + 5
     while True:
@@ -161,6 +174,9 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch):
     assert report["metrics"]["coverage"] == 1
     assert report["incomplete"] is False
     assert requests["movie_bad"][-1][0] == "replacement"
+    retry_example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
+    assert retry_example["run_id"] == f"{bad_id}:tag-quality"
+    assert retry_example["model"] == "replacement"
 
 
 def test_migration_preserves_existing_production_results(tmp_path, monkeypatch):
@@ -217,13 +233,16 @@ def test_label_batches_split_after_truncation_and_retry_without_unsupported_fram
                 assert any(part["type"] == "image_url" for part in messages[1]["content"])
                 return LLMResponse("", {}, {"error": "image_url is not supported"}, False)
             if len(labels) == 3:
-                return LLMResponse("", {}, {"choices": [{"finish_reason": "length"}]}, True)
+                return LLMResponse('{"tags":[', {}, {"choices": [{"finish_reason": "length"}]}, True)
             if ids == [0]:
                 return _emit([_item(0, False), _item(99)])
             return _emit([_item(1), _item(1), _item(2)])
 
-    scores, error, note = evaluate(Client(), evaluation)
+    scores, error, note = evaluate(Client(), evaluation, prompt_samples=PromptSampleBatch(str(tmp_path)))
     assert calls == [(True, [0, 1, 2]), (False, [0, 1, 2]), (False, [0]), (False, [1, 2])]
     assert set(scores) == {"2"}
     assert error == "2 个标签未返回有效评分"
     assert "未接受关键帧" in note
+    example = json.loads((tmp_path / "quality_example.json").read_text(encoding="utf-8"))
+    assert _request_payload(example["messages"])[1] == evaluation.labels
+    assert (tmp_path / "quality_result.txt").read_text(encoding="utf-8") == '{"tags":['

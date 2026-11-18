@@ -278,7 +278,8 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
                               "image_url": {"url": f"data:image/png;base64,{image}"}}
                 assert frame_part in messages[0]["content"]
         assert len(calls) == 6 * len(asset_ids)
-        assert len(list(sample_dir.iterdir())) == 12
+        assert len([path for path in sample_dir.iterdir()
+                    if path.is_file() and not path.name.startswith("quality_")]) == 12
 
     submit_and_check(["movie_001", "movie_002"])
     submit_and_check(["movie_002"])

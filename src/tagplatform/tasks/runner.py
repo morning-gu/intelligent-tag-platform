@@ -286,9 +286,11 @@ class TaskExecutor:
                                          thread_name_prefix="generation"))
 
     def submit_batch(self, task_ids: list[str], *, mode: str) -> None:
-        """同一批开放任务共享提示词采集状态，包括并发执行的影片。"""
+        """同一批影片共享生成和质量评估的提示词采集状态。"""
         samples = (PromptSampleBatch(self._prompt_sample_dir)
-                   if mode == "open" and self._prompt_sample_dir else None)
+                   if self._prompt_sample_dir
+                   and (mode == "open" or self._quality_executor is not None)
+                   else None)
         for task_id in task_ids:
             self.submit(task_id, prompt_samples=samples)
 
@@ -318,7 +320,7 @@ class TaskExecutor:
                                            prompt_samples=prompt_samples)
                 if task.status != "succeeded" or self._quality_executor is None:
                     return
-            self._quality_executor.submit(task_id)
+            self._quality_executor.submit(task_id, prompt_samples=prompt_samples)
         except Exception:
             logger.exception("生成任务线程执行异常 task_id=%s", task_id)
 
