@@ -18,7 +18,7 @@ from tests.test_xmlclass import FakeNLI, KeywordLLM, spec
 
 
 def library():
-    return TagLibrary([Directory('d', '题材')], [TagDef('old', 'd', '汽车追逐')], version='frozen')
+    return TagLibrary([Directory('d', '题材', dir_type='dir_dynamic')], [TagDef('old', 'd', '汽车追逐')], version='frozen')
 
 
 class Evaluator:
@@ -157,7 +157,7 @@ def test_first_new_job_inherits_candidates_from_old_report(tmp_path, content_fix
     occurrence = dict(asset_id='a', scene_id='s0', raw_term='候鸟迁徙', quote='历史引文')
     old.update(status='succeeded', discovery_state={
         'labels': [],
-        'candidates': [{'label': {'key': 'old-candidate', 'name': '候鸟迁徙'},
+        'candidates': [{'label': {'key': 'old-candidate', 'name': '候鸟迁徙', 'dir_id': 'd'},
                         'occurrences': [occurrence]}],
         'processed_assets': ['a'],
     })

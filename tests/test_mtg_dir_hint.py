@@ -192,18 +192,14 @@ def test_model_chosen_dir_is_used(session, content_fixture, dir_settings, tmp_pa
     assert accepted["dir_id"] == "dir_theme"
 
 
-def test_static_dir_is_rejected_and_falls_back(session, content_fixture,
-                                               dir_settings, tmp_path):
-    """静态目录不允许新增 → 打回，回退向量归类；原始选择留在审计里。"""
+def test_static_dir_is_rejected_without_reassignment(session, content_fixture,
+                                                      dir_settings, tmp_path):
     content = _two_scene_content(content_fixture)
 
     out = _run(session, content, "d2", [{**_ITEM, "dir": "dir_genre"}])
 
-    assert len(out) == 1
-    assert out[0].dir_id != "dir_genre"
-    accepted = _report(tmp_path, "d2")["accepted"][0]
-    assert accepted["dir_source"] == "fallback"
-    assert accepted["dir_model_raw"] == "dir_genre"
+    assert out == []
+    assert "不可扩展" in _report(tmp_path, "d2")["dropped"][0]["why"]
 
 
 def test_unknown_dir_falls_back(session, content_fixture, dir_settings, tmp_path):

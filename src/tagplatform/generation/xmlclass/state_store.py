@@ -60,7 +60,7 @@ def _discovery_from_reports(root, library, min_documents):
         admitted.update(shared_keys)
         assets.update(dict.fromkeys(processed))
         for label, occurrence in findings:
-            if normalize(label.name) in catalog_names:
+            if not library.allows_new_tags(label.dir_id) or normalize(label.name) in catalog_names:
                 continue
             candidate = candidates.setdefault(label.key, Candidate(label))
             if occurrence not in candidate.occurrences:

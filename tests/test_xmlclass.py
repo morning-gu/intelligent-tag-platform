@@ -29,7 +29,7 @@ class KeywordLLM:
     def complete(self, messages, run_id):
         payload = request_payload(messages)
         self.calls.append(payload)
-        data = ({'keywords': [{'term': self.term, 'description': '鸟类季节性迁徙', 'quote': TEXT}]}
+        data = ({'keywords': [{'term': self.term, 'description': '鸟类季节性迁徙', 'dir_id': 'd', 'quote': TEXT}]}
                 if 'scene_id' in payload else {'same': self.same, 'reason': '两个名称表达同一迁徙概念' if self.same else '不同概念'})
         return LLMResponse(json.dumps(data, ensure_ascii=False), {'total_tokens': 10}, {}, True)
 
@@ -53,7 +53,8 @@ def spec(content_fixture, asset_id='movie1', scenes=2):
     content = content_fixture.model_copy(deep=True)
     content.content.scenes = [Scene(scene_id=f's{i}', time_range=TimeRange(start_ms=i*100, end_ms=i*100+99),
                                     description=TEXT) for i in range(scenes)]
-    return GenerationSpec(asset_id, asset_id, content, GenerationPolicy(), '', asset_id)
+    library = TagLibrary([Directory('d', '题材', dir_type='dir_dynamic')], [])
+    return GenerationSpec(asset_id, asset_id, content, GenerationPolicy(), '', asset_id, library)
 
 
 def settings(**kwargs):
@@ -66,6 +67,8 @@ def test_pair_scores_independent_of_candidate_set_and_label_order():
     batch = entailment_scores([[0, 1, 3], [1000, 1001, 1002]], mapping)
     assert batch[0] == single
     assert 0 < batch[1] < 1
+    binary = entailment_scores([[3, 1]], {"entailment": 0, "not_entailment": 1})
+    assert binary == pytest.approx([0.880797])
     assert entailment_scores([[3, 1, 0]], {'entailment': 0, 'neutral': 1, 'contradiction': 2})[0] == single
     with pytest.raises(ValueError, match='entailment'):
         entailment_scores([[1, 2, 3]], {'LABEL_0': 0})
@@ -74,7 +77,7 @@ def test_pair_scores_independent_of_candidate_set_and_label_order():
 
 
 def test_distinct_films_accumulate_promote_rescore_and_keep_evidence(content_fixture):
-    initial = DiscoveryState([Label('old', '汽车追逐')])
+    initial = DiscoveryState([Label('old', '汽车追逐', tag_id='old')])
     nli = FakeNLI()
     audit1 = {}
     tags1, first = run_generation(spec(content_fixture), initial, KeywordLLM(), MockEmbedder(), nli, settings(), audit1)
@@ -122,7 +125,7 @@ def test_first_nli_call_separates_model_loading_from_scoring(content_fixture, mo
             return super().score(pairs)
 
     audit = {}
-    run_generation(spec(content_fixture), DiscoveryState([Label('old', '汽车追逐')]),
+    run_generation(spec(content_fixture), DiscoveryState([Label('old', '汽车追逐', tag_id='old')]),
                    KeywordLLM(), MockEmbedder(), TimedNLI(), settings(), audit)
     assert audit['timings_s']['nli_model_load_s'] == 3.0
     assert audit['timings_s']['nli_initial_s'] == 5.0
@@ -130,7 +133,7 @@ def test_first_nli_call_separates_model_loading_from_scoring(content_fixture, mo
 
 
 def test_candidate_synonyms_combine_document_support_not_scene_count(content_fixture):
-    initial = DiscoveryState([Label('old', '汽车追逐')], [Candidate(Label('candidate', '鸟类迁徙'),
+    initial = DiscoveryState([Label('old', '汽车追逐', tag_id='old')], [Candidate(Label('candidate', '鸟类迁徙', dir_id='d'),
                                   [{'asset_id': 'movie0', 'scene_id': 's0', 'raw_term': '鸟类迁徙', 'quote': TEXT}])])
     # Force the representative into shortlist; the semantic decision still controls merging.
     cfg = settings(xmlclass_synonym_cosine=-1)
@@ -147,7 +150,7 @@ def test_candidate_synonyms_combine_document_support_not_scene_count(content_fix
 
 
 def test_similarity_without_synonym_confirmation_does_not_merge(content_fixture):
-    state = DiscoveryState([Label('old', '汽车追逐')])
+    state = DiscoveryState([Label('old', '汽车追逐', tag_id='old')])
     _, result = run_generation(spec(content_fixture), state, KeywordLLM(same=False), MockEmbedder(), FakeNLI(),
                                settings(xmlclass_synonym_cosine=-1))
     assert result.candidates[0].label.name == '候鸟迁徙'
@@ -171,7 +174,7 @@ def test_low_coverage_budget_skips_empty_content_and_orders_by_support(content_f
             return super().score(pairs)
     audit = {}
     llm = KeywordLLM()
-    run_generation(request, DiscoveryState([Label('old', '汽车追逐')]), llm, MockEmbedder(), Scores(),
+    run_generation(request, DiscoveryState([Label('old', '汽车追逐', tag_id='old')]), llm, MockEmbedder(), Scores(),
                    settings(xmlclass_max_discovery_scenes=1), audit)
     assert audit['low_coverage_scenes'] == ['s2']
     assert len(llm.calls) == 1
@@ -221,8 +224,8 @@ def test_reject_fabricated_keyword_quote(content_fixture):
     class MixedQuotes(KeywordLLM):
         def complete(self, messages, run_id):
             return LLMResponse(json.dumps({'keywords': [
-                {'term': '虚构概念', 'description': '虚构的概念', 'quote': '影片中没有出现的台词。'},
-                {'term': '候鸟迁徙', 'description': '鸟类季节性迁徙', 'quote': TEXT},
+                {'term': '虚构概念', 'description': '虚构的概念', 'dir_id': 'd', 'quote': '影片中没有出现的台词。'},
+                {'term': '候鸟迁徙', 'description': '鸟类季节性迁徙', 'dir_id': 'd', 'quote': TEXT},
             ]}), {'total_tokens': 10}, {}, True)
 
     request = spec(content_fixture, scenes=1)
@@ -255,7 +258,7 @@ def test_empty_scene_and_library_and_invalid_nli(content_fixture):
         def score(self, pairs):
             return [float('nan')] * len(pairs)
     with pytest.raises(ValueError, match='NLI'):
-        run_generation(spec(content_fixture), DiscoveryState([Label('old', '汽车追逐')]), KeywordLLM(), MockEmbedder(), BadNLI(), settings())
+        run_generation(spec(content_fixture), DiscoveryState([Label('old', '汽车追逐', tag_id='old')]), KeywordLLM(), MockEmbedder(), BadNLI(), settings())
 
 
 def test_initial_vocabulary_uses_active_tags_and_original_ids():
@@ -279,9 +282,44 @@ def test_vocabulary_embeddings_reused_within_batch(content_fixture):
             return super().embed(texts, role=role)
     embedder = RecordingEmbedder()
     cache = {}
-    state = DiscoveryState([Label('known', '候鸟迁徙')])
+    state = DiscoveryState([Label('known', '候鸟迁徙', tag_id='known')])
     for asset_id in ('first', 'second'):
         _, state = run_generation(spec(content_fixture, asset_id), state, KeywordLLM(), embedder,
                                   FakeNLI(), settings(), vector_cache=cache)
     assert len(embedder.calls) == 2  # label passages and scene queries, once each
     assert embedder.calls[0] == (['候鸟迁徙'], 'passage')
+
+
+
+@pytest.mark.parametrize('dir_id', ['static', 'unknown', None])
+def test_open_discovery_rejects_disallowed_directories(content_fixture, dir_id):
+    request = spec(content_fixture, scenes=1)
+    request.library = TagLibrary(
+        [Directory('d', '题材', dir_type='dir_dynamic'), Directory('static', '固定', dir_type='dir_static')],
+        [],
+    )
+
+    class CandidateLLM:
+        def complete(self, messages, run_id):
+            data = {'keywords': [{'term': '候鸟迁徙', 'description': '鸟类迁徙',
+                                  'dir_id': dir_id, 'quote': TEXT}]}
+            return LLMResponse(json.dumps(data), {'total_tokens': 1}, {}, True)
+
+    audit = {}
+    tags, state = run_generation(request, DiscoveryState([]), CandidateLLM(),
+                                 MockEmbedder(), FakeNLI(), settings(), audit)
+    assert tags == [] and not state.candidates
+    assert audit['rejected_keywords'][0]['reason'] == 'directory_not_allowed'
+
+
+def test_static_only_still_matches_existing_tags_without_discovery(content_fixture):
+    request = spec(content_fixture)
+    request.library = TagLibrary(
+        [Directory('static', '固定', dir_type='dir_static')],
+        [TagDef('match', 'static', '候鸟迁徙')],
+    )
+    llm = KeywordLLM()
+    tags, _ = run_generation(request, DiscoveryState.from_library(request.library), llm,
+                             MockEmbedder(), FakeNLI(), settings())
+    assert [(tag.origin, tag.tag_id) for tag in tags] == [('catalog', 'match')]
+    assert not llm.calls

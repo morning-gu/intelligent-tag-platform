@@ -155,7 +155,9 @@ def _normalize_scope(raw: str | None) -> str:
 
 
 def _normalize_dir_type(raw: str | None) -> str:
-    """目录 dir_type 归一：非法/缺省回退 dir_dynamic。"""
+    """属性目录归为不可扩展；其余未知值沿用原默认值。"""
+    if raw == "dir_asset":
+        return "dir_static"
     return raw if raw in _DIR_TYPES else _DEFAULT_DIR_TYPE
 
 
