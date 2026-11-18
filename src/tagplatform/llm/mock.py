@@ -5,20 +5,19 @@ sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner �
 - 模式 A（封闭提取）：prompt 含 `## 候选标签分组` 节（ClosedTagProducer
   逐组追加的候选分组 JSON）→ 解析组对象的 tags 列表（tag_id/tag_name 取
   JSON 键），按 sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的
-  五键（tag_id/tag_name/relevance/confidence/evidence）；
+  四键（tag_id/applicability/evidence_strength/evidences）；
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
   不含 tag_id（模式 B 的 tag_id 由匹配层赋，LLM 不产出）。
 
 场景证据（Task 6）：两模式均解析 prompt 中的场景行（runner
 _render_content_text 组装的 `- {scene_id} [{start_ms}-{end_ms}] {description}`），
 每个输出标签按 sha256(evidence|{run_id}|{tag_id 或 tag_name}) 确定性选一条
-场景行附为一元素证据卡（scene_id/start_ms/end_ms/description 取该行值）——
+场景行并将其描述作为 evidence 摘要——时间区间由 producer 从内容中补齐；
 演示/冒烟模式下证据链完整、evidence_coverage 非零；prompt 无场景行
 （如 title-only 空内容测试）时兜底为空列表。
 
 哈希风格与 MockEmbedder 一致（前 8 hex / 0x100000000）；选中、打分与证据
-选取用不同哈希键——若复用选中哈希，被选中的标签分数恒 < 0.7，会与任务 5
-的 min_confidence=0.7 过滤耦合退化为空结果。
+选取用不同哈希键。
 """
 from __future__ import annotations
 
@@ -74,9 +73,9 @@ def _hash_unit(key: str) -> float:
     return int(h[:8], 16) / 0x1_0000_0000
 
 
-def _score(key: str) -> float:
-    """哈希 → [0.5, 1.0) 分值（relevance/confidence 共用映射）。"""
-    return 0.5 + _hash_unit(key) * 0.5
+def _score_five_point(key: str) -> int:
+    """哈希 → 4 或 5 分，确保 mock 闭环结果通过适用性门槛。"""
+    return 4 + int(_hash_unit(key) * 2)
 
 
 def _parse_scenes(text: str) -> list[dict]:
@@ -118,12 +117,17 @@ def _closed_output(text: str, run_id: str) -> list[dict]:
         tag_id = str(tag["tag_id"])
         if _hash_unit(run_id + tag_id) >= _SELECT_PROB:
             continue
+        evidence = _pick_evidence(scenes, f"evidence|{run_id}|{tag_id}")
         items.append({
             "tag_id": tag_id,
-            "tag_name": tag.get("tag_name", tag_id),
-            "relevance": _score(f"relevance|{run_id}|{tag_id}"),
-            "confidence": _score(f"confidence|{run_id}|{tag_id}"),
-            "evidence": _pick_evidence(scenes, f"evidence|{run_id}|{tag_id}"),
+            "applicability": _score_five_point(
+                f"applicability|{run_id}|{tag_id}"),
+            "evidence_strength": _score_five_point(
+                f"evidence_strength|{run_id}|{tag_id}"),
+            "evidences": [
+                {"scene_id": item["scene_id"], "evidence": item["description"]}
+                for item in evidence
+            ],
         })
     return items
 

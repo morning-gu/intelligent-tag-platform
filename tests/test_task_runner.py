@@ -20,9 +20,8 @@
   完成）——T9 钉死的 generation_workers=0 测试模式所依赖的语义。
 
 Mock 技巧（与 llm/mock.py 咬合）：
-- MockLLM 模式 A 按 sha256(run_id + tag_id) < 0.4 独立采样选中，confidence
-  哈希值域 [0.5,1)；run_id 由 runner 内部 uuid 生成不可控——成功路径测试
-  把 min_confidence 降到 0.5（confidence 恒过线）并播种 30 枚候选，零选中
+- MockLLM 模式 A 按 sha256(run_id + tag_id) < 0.4 独立采样选中，分值为
+  4 或 5；run_id 由 runner 内部 uuid 生成不可控——成功路径测试播种 30 枚候选，零选中
   概率 0.6^30 ≈ 2e-7，构造上消除 flake；默认 policy 解析路径由失败类测试
   覆盖（produce 异常前 policy 已解析）。
 """
@@ -94,8 +93,8 @@ def _seed_catalog(session: Session, per_type: int = 15) -> None:
     """播种 per_type × 2（genre/mood）枚目录标签，embedding 由 MockEmbedder 现算。
 
     数量取 30：MockLLM 模式 A 按 sha256(run_id+tag_id) < 0.4 独立采样
-    （run_id 随机不可控），候选越多零选中概率越低，配合成功路径测试的
-    min_confidence=0.5（confidence 恒过线）把 flake 概率压到 0.6^30 ≈ 2e-7。
+    （run_id 随机不可控），候选越多零选中概率越低，把 flake 概率压到
+    0.6^30 ≈ 2e-7。
     """
     from tests.library_fixture import library_root, write_library
 
@@ -126,8 +125,7 @@ def _seed_catalog(session: Session, per_type: int = 15) -> None:
 
 def test_run_task_success_writes_tags(session):
     _seed_catalog(session)
-    # min_confidence=0.5：MockLLM confidence 哈希恒过线，消采样零产出 flake
-    # （0.6^30 ≈ 2e-7），顺带覆盖 policy_json 解析路径
+    # 顺带覆盖 policy_json 解析路径；Mock applicability 恒大于 3
     t = _make_task(session, policy_json='{"min_confidence": 0.5}')
     done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert done is t
@@ -194,7 +192,7 @@ def test_orphan_running_reset(session):
 
 
 class _PartialPersistLLM:
-    """桩 LLM：返回一枚合法 + 一枚空 tag_id 的目录标签。
+    """桩 LLM：返回一枚合法 + 一枚库外 tag_id 的目录标签。
 
     第一枚在 persist 中已 add 未提交，第二枚在 persist 契约校验处抛
     ValueError——验证 runner 异常路径把半截写入一并回滚。
@@ -204,10 +202,10 @@ class _PartialPersistLLM:
 
     def complete(self, messages, run_id):
         content = json.dumps([
-            {"tag_id": "tag_g_00", "tag_name": "类型标签0", "relevance": 0.9,
-             "confidence": 0.9, "evidence": []},
-            {"tag_id": "", "tag_name": "空id候选", "relevance": 0.9,
-             "confidence": 0.9, "evidence": []},
+            {"tag_id": "tag_g_00", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "unknown-tag", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
         ], ensure_ascii=False)
         return LLMResponse(content=content, usage={}, raw={}, ok=True)
 
@@ -215,7 +213,7 @@ class _PartialPersistLLM:
 def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch):
     """persist 抛错：任务 failed，且 persist 里已 add 的行随事务回滚。
 
-    闭环生产器会先滤掉未知候选（旧桩"空 tag_id 行"走不到 persist），所以
+    闭环生产器会先滤掉未知候选，所以
     这里直接替换 persist_tags 制造"已写一半再失败"。
     """
     from tagplatform.db.models import PreAssetTag

@@ -3,7 +3,7 @@
 流程（设计文档 §4.2）：按目录范围召回候选 → 空候选显式失败（提示先导入
 标签库）→ 候选**按目录分组**、每组以 JSON 追加到渲染后的 prompt 正文之后
 （组含目录名称/描述，标签含 id/名称/描述）→ 逐组调用 LLM 判定 → 契约校验
-解析 → 组内置信度过滤 + 相关度降序截断（max_tags 为单目录上限）→
+解析 → applicability 门槛过滤 + 按 applicability 降序截断（max_tags 为单目录上限）→
 合并各组结果 → ProducedTag(origin=
 "catalog")。producer 不写库：结果落库是执行器（Task 8）的职责。
 
@@ -23,6 +23,7 @@ prompt_text，改由本 producer 按目录分组、以 JSON 格式追加到正�
 from __future__ import annotations
 
 import json
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -36,6 +37,8 @@ from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.llm.parsing import parse_closed_output
 from tagplatform.mounting import resolve_mount
 from tagplatform.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class ClosedTagProducer:
@@ -92,19 +95,33 @@ class ClosedTagProducer:
             # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
             if not resp.ok:
                 raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
-            # 5. 组内置信度门槛过滤 + 相关度降序截断（max_tags 为单目录
-            #    上限；2026/11/17 由合并后全集改为组内执行，目录间互不挤占）
-            kept = [it for it in parse_closed_output(resp.content) if it["confidence"] >= spec.policy.min_confidence]
-            kept.sort(key=lambda it: -it["relevance"])
+            # 5. 适用性门槛过滤 + 适用性降序截断（max_tags 为单目录上限）
+            print(f"ClosedTagProducer: {dir_id} got {len(resp.content)} items")
+            kept = [it for it in parse_closed_output(resp.content) if it["applicability"] > 3] # 3为门控的判断条件
+            kept.sort(key=lambda it: -it["applicability"])
             kept = kept[: spec.policy.max_tags]
             items.extend(kept)
         # 6. 映射为审核前中间态；catalog 来源 tag_id 必有，候选目录直接取库
         produced: list[ProducedTag] = []
+        scenes_by_id = {scene.scene_id: scene for scene in spec.content.content.scenes}
         for it in items:
             candidate = by_id.get(it["tag_id"])
             if candidate is None:
                 continue  # 模型编了不存在的 tag_id：契约外，丢弃
-            evidence = [Evidence(**e) for e in it["evidence"]]
+            evidence = []
+            for item in it["evidences"]:
+                scene = scenes_by_id.get(item["scene_id"])
+                if scene is None:
+                    logger.warning(
+                        "闭环标签 %s 的证据引用未知场景 %s，已忽略该证据",
+                        it["tag_id"], item["scene_id"])
+                    continue
+                evidence.append(Evidence(
+                    scene_id=scene.scene_id,
+                    start_ms=scene.time_range.start_ms,
+                    end_ms=scene.time_range.end_ms,
+                    description=item["evidence"],
+                ))
             mount = resolve_mount(candidate.scope, spec.asset_id,
                                   spec.content, evidence)
             if mount is None:
@@ -115,8 +132,8 @@ class ClosedTagProducer:
                 tag_name=candidate.tag_name,
                 candidate_type=None,
                 candidate_description=None,
-                relevance_score=it["relevance"],
-                confidence=it["confidence"],
+                relevance_score=(it["applicability"] - 1) / 4,
+                confidence=(it["evidence_strength"] - 1) / 4,
                 evidence=evidence,
                 dir_id=candidate.dir_id,
                 target_type=mount.target_type,

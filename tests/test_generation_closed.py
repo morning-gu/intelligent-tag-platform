@@ -15,7 +15,7 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.generation import GenerationPolicy, GenerationSpec
+from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
 from tagplatform.generation.closed import ClosedTagProducer
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.library import TagLibrary, try_load_library
@@ -188,29 +188,27 @@ def test_closed_produce_groups_by_directory(session, content_fixture):
 
 
 def test_closed_produce_filters_and_caps_per_group(session, content_fixture):
-    """组内完成过滤与截断：低置信度先滤掉，再按相关度降序取 max_tags 条。
-
-    max_tags=1 + min_confidence=0.5：dir_genre 的 tag_003 置信度 0.3 被滤
-    （即使 relevance 最高），余下取 relevance 最高的 tag_002；dir_mood 同理
-    取 tag_005。目录间互不挤占：两组各留 1 条，共 2 条。
-    """
+    """按 applicability > 3 过滤，再按 applicability 降序按目录截断。"""
     _seed_library()
     spec = _build_spec(session, content_fixture, run_id="r3",
                        policy=GenerationPolicy(max_tags=1, min_confidence=0.5))
     responses = {
         "dir_genre": [
-            {"tag_id": "tag_001", "tag_name": "悬疑", "relevance": 0.4,
-             "confidence": 0.9, "evidence": []},
-            {"tag_id": "tag_002", "tag_name": "剧情", "relevance": 0.8,
-             "confidence": 0.9, "evidence": []},
-            {"tag_id": "tag_003", "tag_name": "动作", "relevance": 0.95,
-             "confidence": 0.3, "evidence": []},  # 置信度不过线：先被过滤
+            {"tag_id": "tag_001", "applicability": 3,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "tag_002", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+            {"tag_id": "tag_003", "applicability": 5,
+             "evidence_strength": 2, "evidences": []},
         ],
         "dir_mood": [
-            {"tag_id": "tag_004", "tag_name": "紧张", "relevance": 0.5,
-             "confidence": 0.6, "evidence": []},
-            {"tag_id": "tag_005", "tag_name": "温馨", "relevance": 0.7,
-             "confidence": 0.6, "evidence": []},
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence_strength": 3, "evidences": []},
+            {"tag_id": "tag_005", "applicability": 5,
+             "evidence_strength": 4, "evidences": [{
+                 "scene_id": content_fixture.content.scenes[0].scene_id,
+                 "evidence": "场景摘要",
+             }]},
         ],
     }
 
@@ -227,11 +225,19 @@ def test_closed_produce_filters_and_caps_per_group(session, content_fixture):
 
     out = ClosedTagProducer().produce(spec, session, _ScriptedLLM(),
                                       MOCK_EMBEDDER)
-    # 每组恰好留下各自 relevance 最高的过线行；tag_003 虽最高分但被滤掉
-    assert [t.tag_id for t in out] == ["tag_002", "tag_005"]
+    # applicability=3 被滤除；每组保留 applicability 最高的一条。
+    assert [t.tag_id for t in out] == ["tag_003", "tag_005"]
     # 截断发生在组内：单目录上限 1，两组各 1 条（合并后不再二次截断）
     assert len(out) == 2
     assert {t.dir_id for t in out} == {"dir_genre", "dir_mood"}
+    assert out[0].relevance_score == 1.0 and out[0].confidence == 0.25
+    scene = content_fixture.content.scenes[0]
+    assert out[1].evidence == [Evidence(
+        scene_id=scene.scene_id,
+        start_ms=scene.time_range.start_ms,
+        end_ms=scene.time_range.end_ms,
+        description="场景摘要",
+    )]
 
 
 def test_closed_no_candidates_raises(session, content_fixture):
@@ -261,31 +267,35 @@ def test_parse_closed_bad_structure():
     with pytest.raises(LLMParseError):
         parse_closed_output('[{"tag_id": "x"}]')  # 缺键
     with pytest.raises(LLMParseError):
-        parse_closed_output('[{"tag_id":"x","tag_name":"n","relevance":2.0,'
-                            '"confidence":0.5,"evidence":[]}]')  # relevance 越界
+        parse_closed_output('[{"tag_id":"x","applicability":6,'
+                            '"evidence_strength":4,"evidences":[]}]')
+    with pytest.raises(LLMParseError):
+        parse_closed_output('[{"tag_id":"x","applicability":4.5,'
+                            '"evidence_strength":4,"evidences":[]}]')
+    with pytest.raises(LLMParseError):
+        parse_closed_output('[{"tag_id":"x","applicability":4,'
+                            '"evidence_strength":4,"evidences":[{"scene_id":"s1"}]}]')
     with pytest.raises(LLMParseError):
         parse_closed_output("not json at all")  # 非 JSON 文本
 
 
 def test_parse_closed_happy_path():
     items = parse_closed_output(json.dumps([
-        {"tag_id": "tag_001", "tag_name": "悬疑", "relevance": 0.9,
-         "confidence": 0.8,
-         "evidence": [{"scene_id": "s1", "start_ms": 0, "end_ms": 100,
-                       "description": "开场悬念"}]},
-        # 边界值 [0,1] 双侧含端点
-        {"tag_id": "tag_002", "tag_name": "剧情", "relevance": 1.0,
-         "confidence": 0, "evidence": []},
+        {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 4,
+         "evidences": [{"scene_id": "s1", "evidence": "开场悬念"}]},
+        # 边界值 [1,5] 双侧含端点
+        {"tag_id": "tag_002", "applicability": 1, "evidence_strength": 1,
+         "evidences": []},
     ], ensure_ascii=False))
     assert items[0]["tag_id"] == "tag_001"
-    assert items[0]["evidence"][0]["scene_id"] == "s1"
-    assert items[1]["relevance"] == 1.0 and items[1]["confidence"] == 0
+    assert items[0]["evidences"][0]["scene_id"] == "s1"
+    assert items[1]["applicability"] == 1
 
 
 def test_parse_closed_error_message_has_position():
     bad = json.dumps([
-        {"tag_id": "t", "tag_name": "n", "relevance": 0.5, "confidence": 0.5,
-         "evidence": []},
+        {"tag_id": "t", "applicability": 4, "evidence_strength": 4,
+         "evidences": []},
         {"tag_id": "x"},  # 第 1 个（0 起）元素缺键
     ], ensure_ascii=False)
     with pytest.raises(LLMParseError) as exc_info:
@@ -299,8 +309,8 @@ def test_parse_closed_accepts_wrapped_array():
     2026-11 线上实测：deepseek 在 JSON 模式下偶发返回包装对象，直接判
     "不是数组"会让整个任务失败；对象里恰好一个列表值即可安全解包。
     """
-    item = {"tag_id": "tag_001", "tag_name": "悬疑", "relevance": 0.9,
-            "confidence": 0.8, "evidence": []}
+    item = {"tag_id": "tag_001", "applicability": 4,
+            "evidence_strength": 4, "evidences": []}
     items = parse_closed_output(json.dumps({"tags": [item]}, ensure_ascii=False))
     assert items == [item]
     # 多个列表值无法判断哪个是结果 → 仍然报错（不猜）
