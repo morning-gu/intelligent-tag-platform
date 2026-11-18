@@ -110,7 +110,7 @@ def test_prompt_carries_dir_block_and_dir_field(content_fixture):
     assert "## 可以放新标签的目录" in text
     assert "- dir_theme｜内容特征标签/细分题材｜整片" in text
     assert '"dir":"目录 id"' in text
-    assert "找不到合适目录的标签直接不要输出" in text
+    assert "选择语义和适用粒度匹配的一项，填写其目录 id" in text
 
 
 def test_prompt_without_dirs_keeps_old_contract(content_fixture):
@@ -190,6 +190,18 @@ def test_model_chosen_dir_is_used(session, content_fixture, dir_settings, tmp_pa
     accepted = _report(tmp_path, "d1")["accepted"][0]
     assert accepted["dir_source"] == "model"
     assert accepted["dir_id"] == "dir_theme"
+
+
+def test_generated_reason_reaches_output_intact(session, content_fixture, dir_settings):
+    content = _two_scene_content(content_fixture)
+    reason = ("第一次分别时两人约定在旧码头重逢，多年后他们各自回到码头并主动认出对方。"
+              "两场戏以同一地点和约定串起他们长期未断的情感联系。")
+
+    out = _run(session, content, "reason", [
+        {**_ITEM, "dir": "dir_theme", "reason": f"  {reason}  "},
+    ])
+
+    assert [tag.generation_reason for tag in out] == [reason]
 
 
 def test_static_dir_is_rejected_and_falls_back(session, content_fixture,

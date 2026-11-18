@@ -39,6 +39,16 @@ def _prompt_text(content) -> str:
                    if part["type"] == "text")
 
 
+def test_generation_prompt_asks_for_grounded_reasons():
+    text = _prompt_text(_content_with_dialogues(2))
+
+    assert "至少两个不同场景" in text
+    assert "按实际可支撑的数量输出" in text
+    assert "可跨影片复用的词典式释义" in text
+    assert "再说明这些细节为什么支持该标签" in text
+    assert "20 字以内" not in text
+
+
 def test_all_dialogues_reach_the_prompt():
     """6 条台词全部进 prompt（旧行为只渲染前 3 条）。"""
     text = _prompt_text(_content_with_dialogues(6))
@@ -67,6 +77,19 @@ def test_judge_prompt_has_no_dialogues():
 
     assert "台词：" not in text
     assert "第1句台词" not in text
+
+
+def test_judge_prompt_keeps_complete_candidate_reason_on_one_line():
+    content = _content_with_dialogues(1)
+    sentences = (
+        "分别和重逢两场都回到旧码头，两人用相同的称呼确认对方依然记得当初的约定。",
+        "地点与称呼的呼应表明这段关系跨越了多年的分别。",
+    )
+    text = build_judge_messages(content, [{
+        "tag": "命运羁绊", "dimension": "主题", "reason": "\n".join(sentences),
+    }])[0]["content"]
+
+    assert f"- 命运羁绊｜主题｜{' '.join(sentences)}" in text.splitlines()
 
 
 def test_judge_prompt_keeps_scene_shape():

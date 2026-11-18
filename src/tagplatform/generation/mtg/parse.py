@@ -6,7 +6,7 @@
 
 清洗规则（与提示词契约对齐）：
 - 生成项：tag 去空白后非空且 ≤20 字；dimension 归一成五维中文名（未知或无
-  则 None，交给合并层统计）；scenes 只留字符串；reason 截断 40 字。
+  则 None，交给合并层统计）；scenes 只留字符串；reason 去首尾空白后完整保留。
 - 审核项：verdict 只认 supported/insufficient/contradicted（其余按
   insufficient 处理——保守，不放行）；confidence 夹到 [0,1]；importance 只认
   三档，未知按 secondary；scenes 只留字符串。
@@ -140,7 +140,7 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
             "dir": _clean_dir(entry.get("dir") or entry.get("dir_id")
                               or entry.get("catalog_id")),
             "scenes": scenes,
-            "reason": reason[:40],
+            "reason": reason,
             # 通用释义（旧口径里模型只给 reason；这里兼容 description 字段，
             # 是否"够通用"由 descriptions.is_general 判定，不在解析层猜）
             "desc": str(entry.get("desc") or entry.get("definition") or "").strip(),
