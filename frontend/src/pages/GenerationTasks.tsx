@@ -261,6 +261,9 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {loadError && <Alert type="warning" showIcon message="任务详情刷新失败" description={loadError} />}
+      {detail.quality_evaluation && (
+        <TagQualityEvaluation report={detail.quality_evaluation} onRetry={() => setRefresh((value) => value + 1)} />
+      )}
       <Descriptions
         size="small"
         column={3}
@@ -277,9 +280,6 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
         dataSource={detail.results}
         pagination={false}
       />
-      {detail.quality_evaluation && (
-        <TagQualityEvaluation report={detail.quality_evaluation} onRetry={() => setRefresh((value) => value + 1)} />
-      )}
     </div>
   )
 }
