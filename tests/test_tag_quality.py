@@ -155,11 +155,11 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
 
     sample_dir = tmp_path / "prompt-samples"
     example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
-    assert example["run_id"] == f"{task_id}:tag-quality"
+    assert example["run_id"] == f"{created['movie_other']['task_id']}:tag-quality"
     assert example["model"] == "custom-model"
-    assert _request_payload(example["messages"])[1] == requests["movie_001"][0][2]
+    assert _request_payload(example["messages"])[1] == requests["movie_other"][0][2]
     raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
-    assert len(raw["tags"]) == 3
+    assert raw["tags"] == [_item(requests["movie_other"][0][2][0]["id"], 0, 1)]
     template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
     assert template["prompt_version"] == "tag-quality-v2"
     assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
@@ -293,6 +293,32 @@ def test_label_batches_split_after_truncation_and_retry_without_unsupported_fram
     assert set(scores) == {"2"}
     assert error == "2 个标签未返回有效评分"
     assert "未接受关键帧" in note
+    assert not list(tmp_path.glob("quality_*"))
+
+
+def test_prompt_sample_uses_first_complete_response_after_split(tmp_path):
+    evaluation = TagQualityEvaluation(
+        task_id="task", content_json=json.dumps(CONTENT_FIXTURE_DICT),
+        labels=[{"id": i, "desc": "释义"} for i in range(4)], frame_paths={}, scores={},
+    )
+    responses = []
+
+    class Client:
+        model = "test-model"
+
+        def complete(self, messages, run_id):
+            _, labels = _request_payload(messages)
+            if len(labels) == 4:
+                return LLMResponse('{"tags":[', {}, {"choices": [{"finish_reason": "length"}]}, True)
+            response = _emit([_item(label["id"]) for label in labels])
+            responses.append((messages, response.content))
+            return response
+
+    scores, error, _ = evaluate(Client(), evaluation,
+                               prompt_samples=PromptSampleBatch(str(tmp_path)))
+    assert error is None
+    assert set(scores) == {"0", "1", "2", "3"}
+    assert len(responses) == 2
     example = json.loads((tmp_path / "quality_example.json").read_text(encoding="utf-8"))
-    assert _request_payload(example["messages"])[1] == evaluation.labels
-    assert (tmp_path / "quality_result.txt").read_text(encoding="utf-8") == '{"tags":['
+    assert example["messages"] == responses[0][0]
+    assert (tmp_path / "quality_result.txt").read_text(encoding="utf-8") == responses[0][1]

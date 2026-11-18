@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from tagplatform.content_io import load_content
 from tagplatform.db.models import TagDefine, TagGenerationTask, TagQualityEvaluation
 from tagplatform.generation.base import GenerationSpec
-from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch, SampledPromptClient
+from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, render_content
 from tagplatform.library import TagLibrary
 from tagplatform.results import PersistSummary
@@ -124,7 +124,9 @@ def snapshot(
     return evaluation
 
 
-def _parse_scores(raw: str, labels: list[dict], scene_starts: dict[str, int]) -> dict[str, dict]:
+def _parse_scores(
+    raw: str, labels: list[dict], scene_starts: dict[str, int],
+) -> tuple[dict[str, dict], bool]:
     raw = raw.strip()
     first, separator, rest = raw.partition("\n")
     if separator and first.lower() in ("```json", "```") and rest.endswith("```"):
@@ -168,7 +170,7 @@ def _parse_scores(raw: str, labels: list[dict], scene_starts: dict[str, int]) ->
             if item.scene_id is None or item.scene_id in scene_starts
         ]
         results[key] = score.model_dump(exclude={"id"})
-    return results
+    return results, len(results) == len(labels) == len(data["tags"])
 
 
 def _load_frame_parts(frame_paths: dict[str, list[str]]) -> tuple[list[dict], bool]:
@@ -243,8 +245,6 @@ def evaluate(
     client, evaluation: TagQualityEvaluation, *, prompt_samples: PromptSampleBatch | None = None,
 ) -> tuple[dict, str | None, str | None]:
     """默认一片一请求，长度超限才切分；保留成功批次及其分数。"""
-    if prompt_samples is not None:
-        client = SampledPromptClient(client, prompt_samples, "quality", build_quality_template)
     content = load_content(evaluation.content_json)
     text = _render_material(content, evaluation.labels)
     scene_starts = {scene.scene_id: scene.time_range.start_ms for scene in content.content.scenes}
@@ -252,13 +252,14 @@ def evaluate(
     scores = dict(evaluation.scores)
     errors: list[str] = []
     notes = [evaluation.note] if evaluation.note else []
+    run_id = f"{evaluation.task_id}:tag-quality"
     if missing:
         notes.append("部分生成关键帧已无法读取。")
 
     def batch(labels: list[dict], images: list[dict]) -> None:
         try:
             messages = _build_messages(text, json.dumps(labels, ensure_ascii=False), images)
-            response = client.complete(messages, f"{evaluation.task_id}:tag-quality")
+            response = client.complete(messages, run_id)
         except Exception as exc:
             errors.append(f"评估调用失败：{exc}")
             return
@@ -284,9 +285,13 @@ def evaluate(
             errors.append("模型输出超出长度限制" if truncated else f"评估调用失败：{error}")
             return
         try:
-            scores.update(_parse_scores(response.content, labels, scene_starts))
+            batch_scores, complete = _parse_scores(response.content, labels, scene_starts)
         except ValueError as exc:
             errors.append(f"评估响应无法解析：{exc}")
+            return
+        scores.update(batch_scores)
+        if complete and prompt_samples is not None:
+            prompt_samples.capture("quality", build_quality_template, client, messages, run_id, response)
 
     batch([label for label in evaluation.labels if str(label["id"]) not in scores], frames)
     missing_scores = len(evaluation.labels) - len(scores)
