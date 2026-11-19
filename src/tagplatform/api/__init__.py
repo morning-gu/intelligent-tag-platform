@@ -8,6 +8,8 @@
   `settings.use_mock_embedder` 构建一次，mock 路径零模型下载）；
 - `get_executor`：app 级生成任务执行器单例（lifespan 启动时按
   `settings.generation_workers` 构建，0 = 同步执行，Task 9）；
+- `get_closed_eval`：app 级闭环评测服务单例（create_app 构建此后常驻，
+  评测对业务表只读、产物只写 settings.eval_output_root，Task 6）；
 - `get_current_user` / `require_admin`（api/depends.py）：会话认证两级
   门槛（阶段 3 B2）。
 
@@ -34,6 +36,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 from tagplatform.auth import bootstrap_admin
+from tagplatform.closed_eval import ClosedEvalService
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, build_embedder
 from tagplatform.llm import make_llm_client
@@ -86,6 +89,12 @@ def get_quality_executor(request: Request) -> QualityExecutor:
     return request.app.state.quality_executor
 
 
+def get_closed_eval(request: Request) -> ClosedEvalService:
+    """闭环评测服务依赖：create_app 构建的 app 级单例（同 get_executor 模式，
+    Task 6）。"""
+    return request.app.state.closed_eval
+
+
 from tagplatform.api.depends import get_current_user, require_admin  # noqa: E402
 
 from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
@@ -104,6 +113,7 @@ from tagplatform.api.routers import (  # noqa: E402  (须在依赖定义之后)
     users,
     video,
 )
+from tagplatform.api.routers import eval as eval_router  # noqa: E402
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -166,6 +176,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     library_module.bind_engine(app.state.engine)
     app.state.embedder = build_embedder(settings)
     app.state.llm = make_llm_client(settings)
+    # 闭环评测服务（Task 6）：app 级单例——评测对业务表只读（DB 零写入
+    # 红线），产物只写 settings.eval_output_root
+    app.state.closed_eval = ClosedEvalService(
+        app.state.session_factory, app.state.llm, app.state.embedder, settings)
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）
@@ -183,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(video.router, dependencies=protected_deps)
     app.include_router(metrics.router, dependencies=protected_deps)
     app.include_router(config.router, dependencies=protected_deps)
+    app.include_router(eval_router.router, dependencies=protected_deps)
     # auth router：login 必须开放（见模块 docstring），/me 端点级自保护
     app.include_router(auth.router)
     return app

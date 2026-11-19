@@ -102,7 +102,12 @@ def client(tmp_path, request):
                         # 上传落盘同样隔离进 tmp：缺这一项时默认
                         # data/media/（相对仓库根），测试上传会污染真实
                         # 工作区（2026-11-18 曾泄漏 26 个文件到 data/media）
-                        media_root=str(tmp_path / "media"))
+                        media_root=str(tmp_path / "media"),
+                        # 评测根同理隔离：数据集根指向空目录（评测 API 测试
+                        # 往这里写迷你 MovieTags，绝不扫真实 /cache/MovieTags），
+                        # 产物根指向 tmp（报告/meta 落盘不污染 data/eval）
+                        eval_dataset_root=str(tmp_path / "eval-ds"),
+                        eval_output_root=str(tmp_path / "eval-out"))
     engine = create_engine_for(str(db_path))
     Base.metadata.create_all(engine)
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎

@@ -77,6 +77,16 @@ npm run dev
 历史两维记录的标签价值显示「未评估」，没有评估记录的历史任务显示「无评估记录」。
 具体分档见 [标签质量评估设计](docs/open-tag-quality-evaluation.md)。
 
+### 闭环评测（admin）
+
+「闭环评测」页（仅 admin）以 `/cache/MovieTags` 银标准基准做干跑排序评测：
+选数据集与影片（preset30 固定抽样 / all / custom）起跑 → 进度轮询与取消 →
+θ×K 网格报告（P/R/nDCG ± 自举 CI，附先验基线、覆盖率与样本核算），产物
+（report.md / metrics.csv / raw_results.json 等）可下载。单进程同时只允许
+一个 run（重复起跑 409）。数据集根与产物根由 `TAGPLT_EVAL_DATASET_ROOT` /
+`TAGPLT_EVAL_OUTPUT_ROOT` 配置；评测全程对业务库只读（DB 零写入），产物只
+落 `TAGPLT_EVAL_OUTPUT_ROOT`。
+
 ### 生产部署（同源反代）
 
 生产部署采用 **venv + systemd + nginx** 直接部署（无 Docker 依赖）：nginx 托管
@@ -108,6 +118,8 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_CLOSED_BATCH_SIZE`             | `1`                   | 模式 A 目录组内分批上限：每批一次 LLM 调用（防输出截断），组内批次全部完成后合并再门控截断      |
 | `TAGPLT_OPEN_MATCH_THRESHOLD`          | `0.85`                | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog                                       |
 | `TAGPLT_MEDIA_ROOT`                    | `data/media/`         | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录）                                      |
+| `TAGPLT_EVAL_DATASET_ROOT`             | `/cache/MovieTags`    | 闭环评测基准数据集根（`gt/*.csv` 三列 gt + `data/<ttID>/content.json`，全程只读；换数据集 = 改本变量，不接受前端提交路径） |
+| `TAGPLT_EVAL_OUTPUT_ROOT`              | `data/eval/closed`    | 闭环评测产物落盘根（meta/进度/报告三件套；评测代码唯一的写盘位置）                              |
 | `TAGPLT_LOG_LEVEL`                     | `INFO`                | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。
