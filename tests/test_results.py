@@ -1,10 +1,13 @@
 """标签结果入库服务测试：ProducedTag → pre_asset_tag（v2 语义）。
 
 覆盖契约：
-- **命中库内**（origin=catalog）→ 直接 approved + reviewer_id="system"，
-  不进入人工队列；同名写"自动通过"，带 alias_name 写"相似并入"；
-- **库外新词**（origin=generated）→ pending，必须带 dir_id（候选目录）与
-  挂载点（content → asset_id；scene → scene_id；character → character_id）；
+- **closed 任务**：产出（含库内命中 origin=catalog）全部落 `pending` 进
+  人工审核队列，reviewer_id 为空、不写正式挂载（闭环打分需人复审）；
+- **open 任务**：命中库内（origin=catalog）→ 直接 approved +
+  reviewer_id="system"，不进入人工队列；同名写"自动通过"，带 alias_name
+  写"相似并入"；库外新词（origin=generated）→ pending，必须带 dir_id
+  （候选目录）与挂载点（content → asset_id；scene → scene_id；
+  character → character_id）；
 - 重跑替换：同 origin 的 pending 行先被清掉再插新（不叠行、值刷新）；
 - 已定稿保留：approved / rejected 行重跑跳过（不覆盖、不复活）；
 - origin 隔离：closed 重跑不清 open 的待审行，反之亦然；
@@ -45,27 +48,48 @@ def _seed_fk_parents(session):
     session.commit()
 
 
-def test_catalog_hit_is_auto_approved(session):
+def test_closed_catalog_lands_pending(session):
+    """closed 任务库内命中也入审：pending、无审核人、不写正式挂载。"""
     s = persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作")], "closed")
+    row = session.query(PreAssetTag).one()
+    assert s == PersistSummary(cleared=0, inserted=1, skipped_finalized=0,
+                               auto_approved=0, mounted=0)
+    assert row.review_status == "pending"
+    assert row.reviewer_id is None and row.review_comment is None
+    assert row.target_type == "content" and row.target_id == "a1"
+    assert row.origin == "closed" and row.tag_id == "tag_action"
+    assert row.candidate_name is None and row.candidate_alias is None
+    # 未写正式挂载：等审核通过后由 review 服务写 asset_tag
+    assert session.query(AssetTag).count() == 0
+
+
+def test_closed_catalog_keeps_alias_preview(session):
+    """closed 相似并入的别名预览保留在候选行，等审核时参考。"""
+    s = persist_tags(session, "a1", "t1",
+                     [_ptag("tag_revenge", "复仇", alias="报仇雪恨")], "closed")
+    row = session.query(PreAssetTag).one()
+    assert s.inserted == 1 and s.auto_approved == 0
+    assert row.review_status == "pending"
+    assert row.candidate_alias == "报仇雪恨"
+
+
+def test_open_catalog_hit_is_auto_approved(session):
+    """open 任务库内命中沿用 v2 口径：系统自动通过并同步挂载。"""
+    s = persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作")], "open")
     row = session.query(PreAssetTag).one()
     assert s == PersistSummary(cleared=0, inserted=1, skipped_finalized=0,
                                auto_approved=1, mounted=1)
     assert row.review_status == "approved"
     assert row.reviewer_id == "system"
     assert "同名" in (row.review_comment or "")
-    assert row.target_type == "content" and row.target_id == "a1"
-    assert row.origin == "closed" and row.tag_id == "tag_action"
-    assert row.candidate_name is None and row.candidate_alias is None
     # 自动通过同时写正式挂载（资产详情读 asset_tag，不能只靠 pre 行）
     mount = session.query(AssetTag).one()
-    assert (mount.asset_id, mount.target_type, mount.target_id) == \
-        ("a1", "content", "a1")
     assert mount.tag_id == "tag_action" and mount.tag_name == "动作"
 
 
-def test_catalog_similar_records_alias(session):
+def test_open_catalog_similar_records_alias(session):
     s = persist_tags(session, "a1", "t1",
-                     [_ptag("tag_revenge", "复仇", alias="报仇雪恨")], "closed")
+                     [_ptag("tag_revenge", "复仇", alias="报仇雪恨")], "open")
     row = session.query(PreAssetTag).one()
     assert s.auto_approved == 1
     assert row.candidate_alias == "报仇雪恨"
@@ -111,12 +135,37 @@ def test_rerun_replaces_pending_generated(session):
     assert row.confidence == 0.5 and row.task_id == "t2"
 
 
-def test_rerun_keeps_auto_approved(session):
-    """系统自动通过的行是定稿行：重跑不覆盖（避免置信度来回跳）。"""
+def test_rerun_replaces_pending_catalog(session):
+    """closed 重跑替换 pending 行：值刷新（closed 全量入审后的重跑语义）。"""
     persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作", conf=0.95)],
                  "closed")
     s = persist_tags(session, "a1", "t2", [_ptag("tag_action", "动作", conf=0.5)],
                      "closed")
+    row = session.query(PreAssetTag).one()
+    assert s.cleared == 1 and s.inserted == 1
+    assert row.review_status == "pending"
+    assert row.confidence == 0.5 and row.task_id == "t2"
+
+
+def test_rerun_keeps_finalized_catalog(session):
+    """人工已定稿的 closed 行重跑不覆盖：approved/rejected 都跳过。"""
+    persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作", conf=0.95)],
+                 "closed")
+    session.query(PreAssetTag).one().review_status = "approved"
+    session.commit()
+    s = persist_tags(session, "a1", "t2", [_ptag("tag_action", "动作", conf=0.5)],
+                     "closed")
+    row = session.query(PreAssetTag).one()
+    assert s.skipped_finalized == 1
+    assert row.confidence == 0.95 and row.task_id == "t1"
+
+
+def test_open_rerun_keeps_auto_approved(session):
+    """open 系统自动通过的行是定稿行：重跑不覆盖（避免置信度来回跳）。"""
+    persist_tags(session, "a1", "t1", [_ptag("tag_action", "动作", conf=0.95)],
+                 "open")
+    s = persist_tags(session, "a1", "t2", [_ptag("tag_action", "动作", conf=0.5)],
+                     "open")
     row = session.query(PreAssetTag).one()
     assert s.skipped_finalized == 1
     assert row.confidence == 0.95 and row.task_id == "t1"
@@ -156,7 +205,7 @@ def test_duplicate_in_batch_lands_once(session):
     s = persist_tags(session, "a1", "t1",
                      [_ptag("tag_action", "动作"),
                       _ptag("tag_action", "动作", conf=0.4)], "closed")
-    assert s.inserted == 1 and s.skipped_finalized == 1
+    assert s.inserted == 1
     assert session.query(PreAssetTag).count() == 1
 
 
