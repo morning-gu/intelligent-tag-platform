@@ -18,12 +18,14 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
 from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
+from tagplatform.generation import closed as closed_module
 from tagplatform.generation.closed import ClosedTagProducer
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.prompts import get_active_prompt, render_prompt
+from tagplatform.settings import Settings
 from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
 
@@ -159,13 +161,18 @@ def test_closed_produce_end_to_end(session, content_fixture):
     assert {t.tag_id for t in out} <= {tid for tid, *_ in _LIB_TAGS}
 
 
-def test_closed_produce_groups_by_directory(session, content_fixture):
+def test_closed_produce_groups_by_directory(session, content_fixture,
+                                            monkeypatch):
     """候选按目录分组、逐组调用 LLM：每组 prompt 含一个组对象 JSON，结果合并。
 
     spy 记录每次 llm.complete 的 prompt：断言调用次数 = 目录组数、每组只含
     本组标签、组 JSON 带目录名称/描述、prompts 首段都是渲染后的正文。
+    批大小固定放大（50 > 组成员数），每组只发一批——本测聚焦分组语义，
+    分批切分由 test_closed_produce_batches_within_group 专测。
     """
     _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
     spec = _build_spec(session, content_fixture, run_id="r2")
     library = try_load_library()
 
@@ -179,7 +186,7 @@ def test_closed_produce_groups_by_directory(session, content_fixture):
     out = ClosedTagProducer().produce(spec, session, _SpyLLM(), MOCK_EMBEDDER)
     assert out  # 合并各组结果非空
 
-    # 召回候选的目录集合 = 分组组数 = LLM 调用次数
+    # 召回候选的目录集合 = 分组组数 = LLM 调用数（批大小 50 → 每组一批）
     candidates = recall_candidates(
         library, MOCK_EMBEDDER, embed_content_texts(content_fixture),
         top_k=50)
@@ -202,6 +209,95 @@ def test_closed_produce_groups_by_directory(session, content_fixture):
         seen_tags |= member_ids
     # 全部候选都恰好进了某一组
     assert seen_tags == {c.tag_id for c in candidates}
+
+
+def test_closed_produce_batches_within_group(session, content_fixture,
+                                             monkeypatch):
+    """组内分批（v5）：批大小 2 下每目录按召回序连续切片、逐批调用。
+
+    批次感知 scripted LLM：按 prompt 尾部组 JSON 的 tags 子集查表回放
+    （_ScriptedLLM 按 dir_id 回放、不感知批次，无法验证切分）。断言：
+    每目录调用数 = ceil(成员数/2)、各批目录信息一致且 tags 为连续切片、
+    并集 = 组成员；批只切调用，组级合并门控截断语义不变。
+    """
+    _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=2))
+    spec = _build_spec(session, content_fixture, run_id="r5",
+                       policy=GenerationPolicy(max_tags=1))
+    # dir_genre 3 条 → 2 批；dir_mood 3 条 → 2 批。tag_001/tag_005 的 Sf
+    # 组内最高（A=5,E=5 拉满）；6 条全过门控，正确实现组级合并后每目录
+    # 只留 1 条胜者。若错做成"逐批截断"，3 条分 2 批、每批都有过门控的
+    # 标签 → 每目录至少多漏 1 条，下面的输出断言即可分辨
+    responses = {
+        "tag_001": [{"tag_id": "tag_001", "applicability": 5,
+                     "evidence_strength": 5, "evidences": []}],
+        "tag_002": [{"tag_id": "tag_002", "applicability": 3,
+                     "evidence_strength": 3, "evidences": []}],
+        "tag_003": [{"tag_id": "tag_003", "applicability": 3,
+                     "evidence_strength": 3, "evidences": []}],
+        "tag_004": [{"tag_id": "tag_004", "applicability": 3,
+                     "evidence_strength": 3, "evidences": []}],
+        "tag_005": [{"tag_id": "tag_005", "applicability": 5,
+                     "evidence_strength": 5, "evidences": []}],
+        "tag_006": [{"tag_id": "tag_006", "applicability": 3,
+                     "evidence_strength": 3, "evidences": []}],
+    }
+
+    class _BatchScriptedLLM:
+        """按批内首个 tag_id 回放（批次感知）：记录 prompt 供切分断言。"""
+
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def complete(self, messages, run_id):
+            prompt = messages[0]["content"]
+            self.calls.append(prompt)
+            tail = prompt.partition("\n\n## 候选标签分组\n")[2]
+            group = json.loads(tail)
+            items = [dict(row) for tag in group["tags"]
+                     for row in responses[tag["tag_id"]]]
+            return LLMResponse(content=json.dumps(items, ensure_ascii=False),
+                               usage={}, raw={}, ok=True)
+
+    llm = _BatchScriptedLLM()
+    out = ClosedTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
+    library = try_load_library()
+    candidates = recall_candidates(
+        library, MOCK_EMBEDDER, embed_content_texts(content_fixture),
+        top_k=50)
+    group_order = list(dict.fromkeys(c.dir_id for c in candidates))
+
+    # 每目录调用数 = ceil(成员数/2)，全局总调用数 = 各目录批数之和
+    calls_by_dir: dict[str, list[dict]] = {d: [] for d in group_order}
+    for prompt in llm.calls:
+        body, _, tail = prompt.partition("\n\n## 候选标签分组\n")
+        assert body == spec.prompt_text
+        group = json.loads(tail)
+        directory = library.directory(group["dir_id"])
+        assert group["dir_name"] == directory.dir_name
+        assert group["dir_description"] == directory.description
+        assert len(group["tags"]) <= 2
+        calls_by_dir[group["dir_id"]].append(group)
+    for dir_id in group_order:
+        members = [c for c in candidates if c.dir_id == dir_id]
+        batches = calls_by_dir[dir_id]
+        assert len(batches) == -(-len(members) // 2)  # ceil
+        # 各批 tags 为召回序连续切片，并集恰为组成员
+        sliced = [t["tag_id"] for b in batches for t in b["tags"]]
+        assert sliced == [c.tag_id for c in members]
+        for batch in batches:
+            for tag in batch["tags"]:
+                assert set(tag) == {"tag_id", "tag_name", "description"}
+
+    # 合并后门控：两组各留全场 Sf 最高的 tag_001/tag_005（跨批竞争胜出，
+    # 证明截断发生在组级合并之后而非逐批）；期望值用镜像召回 Semb 现算
+    semb = {c.tag_id: c.score for c in candidates}
+    for tid in ("tag_001", "tag_005"):
+        expected_sf = 0.2 * semb[tid] + 0.5 * 1.0 + 0.3 * 1.0
+        row = next(t for t in out if t.tag_id == tid)
+        assert row.relevance_score == pytest.approx(expected_sf)
+    assert [t.tag_id for t in out] == ["tag_001", "tag_005"]
 
 
 def test_closed_produce_scores_and_caps_per_group(session, content_fixture):

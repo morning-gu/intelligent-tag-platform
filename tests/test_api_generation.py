@@ -184,9 +184,18 @@ def test_timestamps_render_utc_with_z_suffix(client):
     listing = client.get("/api/v1/generation/tasks").json()
     assert listing[0]["created_at"].endswith("Z")
 
-    # 资产标签行的 created_at 同契约（AssetTagOut 已挂 UtcDatetime）
+    # 资产标签行的 created_at 同契约（AssetTagOut 已挂 UtcDatetime）。
+    # closed 产出自 852ab7a 起全量入审，pending 阶段不写正式挂载——
+    # 先批量审核通过，再断言挂载行的时间戳（契约断言语义不变）
+    review = client.get("/api/v1/review/items?status=pending&asset_id=movie_001")
+    assert review.status_code == 200
+    ids = [r["id"] for r in review.json()["items"]]
+    assert ids, "closed 成功路径应产出待审行"
+    reviewed = client.post("/api/v1/asset-tags/batch-review",
+                           json={"ids": ids, "action": "approve"})
+    assert reviewed.status_code == 200, reviewed.text
     tags = client.get("/api/v1/assets/movie_001/tags").json()
-    assert tags, "closed 成功路径应产出自动通过的挂载行"
+    assert tags, "审核通过后应写出正式挂载行"
     assert all(tag["created_at"].endswith("Z") for tag in tags)
 
 
