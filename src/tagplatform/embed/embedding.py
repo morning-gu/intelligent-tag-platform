@@ -127,7 +127,11 @@ class LocalEmbedder:
         if self._model is None:
             # 懒导入：mock/测试路径不需要安装后首次 import 的开销，更不触发下载
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name, device=self.device)
+            # local_files_only=True：内网环境 huggingface.co 被 403/断连，
+            # 每次加载都刷 "Server disconnected" 警告并白等数秒退避；
+            # 模型已缓存，直接走本地即可
+            self._model = SentenceTransformer(
+                self.model_name, device=self.device, local_files_only=True)
         return self._model
 
     def embed(self, texts: list[str], *, role: str) -> np.ndarray:

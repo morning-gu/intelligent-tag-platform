@@ -58,14 +58,29 @@ class OpenAIClient:
                       response_format: dict | None, extra_body: dict | None,
                       max_tokens: int | None = None) -> dict:
             kwargs: dict = {"model": model, "messages": messages,
-                            "temperature": temperature}
+                            "temperature": temperature, "stream": True}
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
             if response_format is not None:
                 kwargs["response_format"] = response_format
             if extra_body:
                 kwargs["extra_body"] = extra_body
-            return sdk.chat.completions.create(**kwargs).model_dump()
+            # fuyao 网关即使非流式也返回 SSE chunk，故显式 stream=True 并累积
+            content_parts: list[str] = []
+            usage: dict = {}
+            for chunk in sdk.chat.completions.create(**kwargs):
+                d = chunk.model_dump() if hasattr(chunk, "model_dump") else {}
+                choices = d.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    c = delta.get("content")
+                    if c:
+                        content_parts.append(c)
+                if d.get("usage"):
+                    usage = d["usage"]
+            content = "".join(content_parts)
+            return {"choices": [{"message": {"content": content}}],
+                    "usage": usage, "model": model}
 
         return transport
 

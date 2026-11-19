@@ -32,17 +32,27 @@ def _bad_element(index: int, reason: str) -> LLMParseError:
     return LLMParseError(f"LLM 输出第 {index} 个元素非法：{reason}")
 
 
-def _parse_array(content: str) -> list:
+def _parse_array(content: str, required: tuple[str, ...] = ()) -> list:
     """json.loads → 顶层数组；容忍模型把数组包在单键对象里（{"tags": [...]}）。
 
     Qwen/DeepSeek 在 JSON 模式下常把结果包成对象；只要对象里恰好有一个
     列表值就按该列表解析，多个列表/无列表才判为结构不符。
+
+    单元素直返兜底：json_object 模式下模型若只选一个标签，可能直接返回
+    该标签对象（而非 [{...}]）。此时对象内唯一的列表值是 evidences，
+    旧逻辑会误把 evidences 列表当结果数组，导致校验看到证据卡缺全部键。
+    若 dict 本身含任意 required 键 → 判定为单元素直返，包成 [data] 返回。
+    空 dict {} 视为"模型未选中任何标签"，返回空列表。
     """
     try:
         data = json.loads(content)
     except json.JSONDecodeError as e:
         raise LLMParseError(f"LLM 输出不是合法 JSON: {e}") from None
     if isinstance(data, dict):
+        if required and any(key in data for key in required):
+            return [data]
+        if not data:
+            return []
         lists = [value for value in data.values() if isinstance(value, list)]
         if len(lists) == 1:
             return lists[0]
@@ -71,7 +81,14 @@ def _validate_closed_items(data: list) -> list[dict]:
         missing = [key for key in _CLOSED_REQUIRED if key not in item]
         if missing:
             raise _bad_element(index, f"缺少键: {missing}")
-        if not isinstance(item["tag_id"], str) or not item["tag_id"].strip():
+        tag_id = item["tag_id"]
+        # LLM 常把数字型 tag_id（如 571）返回为 int 而非 str，自动转换
+        if isinstance(tag_id, bool) or not isinstance(tag_id, (str, int)):
+            raise _bad_element(index, f"tag_id 不是字符串或整数（{type(tag_id).__name__}）")
+        if isinstance(tag_id, int):
+            tag_id = str(tag_id)
+            item["tag_id"] = tag_id
+        if not tag_id.strip():
             raise _bad_element(index, "tag_id 不是非空字符串")
         _check_five_point_score(item, "applicability", index)
         _check_five_point_score(item, "evidence_strength", index)
@@ -98,4 +115,4 @@ def _validate_closed_items(data: list) -> list[dict]:
 
 def parse_closed_output(content: str) -> list[dict]:
     """模式 A 解析：返回通过新评分和证据摘要契约校验的元素。"""
-    return _validate_closed_items(_parse_array(content))
+    return _validate_closed_items(_parse_array(content, _CLOSED_REQUIRED))

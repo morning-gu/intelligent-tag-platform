@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     `Settings(database_path=":memory:")` 覆盖默认值。
     """
 
-    model_config = SettingsConfigDict(env_prefix="TAGPLT_")
+    model_config = SettingsConfigDict(env_prefix="TAGPLT_", env_file=".env",
+                                     extra="ignore")
 
     # SQLite 数据库文件路径
     database_path: str = "data/tagplatform.db"
