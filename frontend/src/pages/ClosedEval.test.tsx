@@ -5,7 +5,7 @@
 // 起跑禁用+提示（挂载从历史发现 running 行 → getRun 接管轮询——Review
 // Focus 6 的前端半边）、取消按钮调 cancelRun、2s 轮询推进 running→succeeded
 // （终态清定时器+刷新历史+起跑恢复）、卸载清定时器、行点击取报告（404 毫秒
-// 级窗口优雅提示不崩页面/成功渲染占位）、数据集加载失败提示。
+// 级窗口优雅提示不崩页面/成功渲染 Task 9 报告视图）、数据集加载失败提示。
 // 轮询用例以 vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
 // 只伪造 interval（setTimeout/Date/rAF 保持真实——antd 渲染与 RTL waitFor
 // 不受影响），用 advanceTimersByTimeAsync 推进 tick 并以 act 包裹刷新。
@@ -441,7 +441,7 @@ describe('ClosedEval 闭环评测页', () => {
     expect(mockedGetReport).toHaveBeenCalledWith('run-20261119-100000-ab12')
   })
 
-  it('行点击取报告成功：渲染占位区（Task 9 替换为报告视图组件）', async () => {
+  it('行点击取报告成功：渲染报告视图（Task 9 组件）——note 与下载链接就位', async () => {
     mockIdleApis()
     mockedGetReport.mockResolvedValue(REPORT)
     render(<ClosedEval />)
@@ -450,7 +450,14 @@ describe('ClosedEval 闭环评测页', () => {
     fireEvent.click(within(screen.getByText('2026-11-19 10:00:00').closest('tr')!).getByText('已成功'))
 
     expect(await screen.findByText(/评测报告：run-20261119-100000-ab12/)).toBeInTheDocument()
-    expect(screen.getByText(/报告数据已就绪/)).toBeInTheDocument()
+    // 报告视图内容（Task 9 组件接管占位区）：银标准 note 原文与产物下载链接
+    expect(
+      await screen.findByText('genome relevance 是模型输出非人工标注'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'metrics.csv' })).toHaveAttribute(
+      'href',
+      '/api/v1/eval/closed/runs/run-20261119-100000-ab12/files/metrics.csv',
+    )
     expect(mockedGetReport).toHaveBeenCalledWith('run-20261119-100000-ab12')
   })
 

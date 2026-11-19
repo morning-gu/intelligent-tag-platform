@@ -13,8 +13,8 @@
 // 并刷新历史；卸载清定时器。清定时器时 bump 会话号——在途响应回来对不上号
 // 即丢弃，防卸载后/换 run 后把旧响应写进新状态。
 // 行点击取报告：GET report 在终态落盘（meta→raw→report）非原子的毫秒级窗口
-// 可能 404（后端 Task 6 披露）——优雅提示重试，不崩页面。报告渲染组件是
-// Task 9 的交付物，本页只负责取数与占位。
+// 可能 404（后端 Task 6 披露）——优雅提示重试，不崩页面。报告视图渲染委托给
+// Task 9 的 ClosedEvalReport 组件，本页只负责取数与 runId 透传。
 import {
   Alert,
   Button,
@@ -51,6 +51,7 @@ import {
   type StartRunRequest,
 } from '../api/eval'
 import { formatTime } from '../api/time'
+import ClosedEvalReportView from '../components/ClosedEvalReport'
 
 /** 轮询间隔：单片 1–3 分钟量级的进度节奏，2s 足够跟手（spec §6）。 */
 const POLL_INTERVAL_MS = 2000
@@ -506,10 +507,7 @@ export default function ClosedEval() {
 
       {report !== null && (
         <Card title={`评测报告：${report.runId}`}>
-          {/* Task 9 接入位：<ClosedEvalReport report={report.data} />——本页只负责取数 */}
-          <Typography.Text type="secondary">
-            报告数据已就绪，报告视图组件由 Task 9 接入。
-          </Typography.Text>
+          <ClosedEvalReportView report={report.data} runId={report.runId} />
         </Card>
       )}
     </div>
