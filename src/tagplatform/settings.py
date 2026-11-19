@@ -181,6 +181,15 @@ class Settings(BaseSettings):
     # 0 = 不注入目录，回到"生成后再按向量归类"的老路径。
     open_dir_hint_max: int = 60
 
+    # ---------- 阶段 8：闭环评测（2026-11） ----------
+    # MovieTags 基准数据集根（gt/*.csv 三列 movieId,tagId,relevance +
+    # data/<ttID>/content.json），全程只读。不支持前端提交任意路径
+    # （防误指）——换数据集根 = 改 .env（TAGPLT_EVAL_DATASET_ROOT）。
+    eval_dataset_root: str = "/cache/MovieTags"
+    # 评测产物落盘根（报告/meta/进度），评测代码唯一的写盘位置
+    # （DB 零写入红线；TAGPLT_EVAL_OUTPUT_ROOT 可覆盖）
+    eval_output_root: str = "data/eval/closed"
+
 
 @lru_cache
 def get_settings() -> Settings:
