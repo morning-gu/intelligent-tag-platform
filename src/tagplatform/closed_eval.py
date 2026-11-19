@@ -1,4 +1,4 @@
-"""闭环评测的数据集层：MovieTags 基准的发现、gt 加载与选片。
+"""闭环评测：数据集层（发现/加载/选片）+ 干跑运行器服务层。
 
 为什么需要这个模块
 ==================
@@ -18,6 +18,26 @@
 3. **评哪些片**：`select_movies` 三种模式（preset30 固定 seed 抽样 /
    all / custom 越权显式拒绝）。
 
+干跑运行器（ClosedEvalService，Task 4）
+=====================================
+
+起跑校验（spec 钉死顺序）→ daemon worker 持线程池逐片生成 → 终态落盘。
+每片走与正式生成**零漂移**的路径：`assemble_spec`（同一组装段，读激活
+closed 模板）→ `ClosedTagProducer.produce`（producer 本就不落库——落库
+是正式执行器的职责），所以干跑全程对业务表只读（DB 零写入红线），评测
+产物只写 `settings.eval_output_root/<run_id>/` 三个文件：起跑即写
+meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
+每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片）、
+终态由 worker 主线程写 meta + raw_results（gt 向量并入）。
+
+容错语义：每片共 1+RETRY_PER_MOVIE 次尝试（异常兜底记 error，单片失败
+不断跑）；**完成序**连续 ABORT_CONSECUTIVE 次失败 → 中止余量（系统性
+故障保险丝：网关整体挂掉时别把 131 部全烧完）；`cancel` 置事件后不再
+提交新片（在途片跑完，已完成结果保留）。提交按 tt 序滑动补位（在途数
+< concurrency 才提交下一部）——停止判定发生在提交之前，5 连败/取消后
+的余量片从未进池，done<total 由此可判；一次性全量提交做不到这一点
+（主线取消余量与池线程取任务存在竞态，并发>1 时不可判）。
+
 缓存纪律
 ========
 
@@ -26,32 +46,54 @@
 - 片名（content.json 的 asset.title）按路径进程内缓存：评测期间数据集
   根只读，同名路径不会变。
 
-分层红线：本模块不 import fastapi（设计文档 §9.4）；数据集根只读，
-评测产物只写 `settings.eval_output_root`。后续任务（干跑运行器、报告
-组装）在本模块追加，数据集层保持自包含。
+分层红线：本模块不 import fastapi（设计文档 §9.4），不 import/call
+persist_tags（落库走正式执行器，评测只读）；数据集根只读，评测产物只
+写 `settings.eval_output_root`。报告组装（后续任务）在本模块追加。
 """
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import logging
 import os
 import random
-from collections.abc import Collection
-from dataclasses import dataclass
+import secrets
+import threading
+import time
+from collections.abc import Collection, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
 
 from tagplatform.content_io import load_content
+from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
+from tagplatform.generation import get_producer
+from tagplatform.library import try_load_library
+from tagplatform.prompts import get_active_prompt
 from tagplatform.schemas import ContentJSON
+from tagplatform.settings import Settings
+from tagplatform.tasks.runner import assemble_spec
 
 __all__ = [
-    "PRESET_SEED",
-    "PRESET_SIZE",
+    "ABORT_CONSECUTIVE",
+    "DEFAULT_CONCURRENCY",
+    "RETRY_PER_MOVIE",
     "DatasetInfo",
+    "EvalValidationError",
+    "MovieResult",
+    "RunBusyError",
+    "RunState",
+    "ClosedEvalService",
     "load_gt",
     "load_movie_content",
     "movie_entries",
     "scan_datasets",
     "select_movies",
 ]
+
+logger = logging.getLogger(__name__)
 
 # 试点 30 部：seed 钉死保证换机器重跑抽到同一批片（spec §6）
 PRESET_SIZE = 30
@@ -264,3 +306,460 @@ def select_movies(usable: list[str], mode: str,
             raise ValueError(f"custom 选片含 usable 之外的影片 id：{unknown}")
         return sorted(chosen)
     raise ValueError(f"未知选片模式：{mode!r}（支持 preset30 / all / custom）")
+
+
+# ---------------------------------------------------------------- 干跑运行器（服务层）
+
+# 单进程默认并发：与主模型网关的批处理并发（4）对齐，131 部全量评测不压垮网关
+DEFAULT_CONCURRENCY = 4
+# 每片重试次数（含首发共 1+2=3 次尝试）：单片偶发失败（超时/解析抖动）不断跑
+RETRY_PER_MOVIE = 2
+# 完成序连续失败达该数 → 中止余量：系统性故障保险丝（网关整体不可用时
+# 别把整批烧完），单片失败远达不到该阈值
+ABORT_CONSECUTIVE = 5
+
+
+class RunBusyError(RuntimeError):
+    """已有评测 run 进行中（单进程同时只允许一个 run，重复起跑显式拒绝）。"""
+
+
+class EvalValidationError(ValueError):
+    """评测起跑校验失败：数据集不存在 / 选片越权或为空 / 库未就绪 / 库∩gt 零交集。"""
+
+
+@dataclass
+class MovieResult:
+    """单片干跑结果（评测的原子产出，报告组装的输入）。
+
+    - `produced` 行按 (-sf, tag_id) 排序：`{tag_id, tag_name, sf,
+      confidence, evidence_count}`——sf 是终分（relevance_score），
+      confidence 是证据维独立读数（(E−1)/4），语义不同，都随行保留；
+    - `ok=False` 时 `error` 记最后一次异常（含异常类型名），`produced`
+      清空（半截产出不可信）；
+    - `elapsed_ms` 覆盖该片的全部尝试（含重试）。
+    """
+
+    tt: str
+    title: str
+    ok: bool
+    error: str | None
+    produced: list[dict]
+    elapsed_ms: int
+
+
+@dataclass
+class RunState:
+    """一次 run 的进度快照（`get` 返回副本，读方无锁安全）。"""
+
+    run_id: str
+    status: str
+    done: int
+    total: int
+    failed: int
+    started_at: str
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _EvalJob:
+    """一次 run 的不可变上下文（start 时快照，worker 线程消费）。
+
+    `gt` 与 `tag_universe`（库∩gt，排序）随 job 持有：终态写
+    raw_results 时并入 gt 向量；报告组装按 universe 限口径（后续任务）。
+    库/模板版本在 start 时定格——run 中途换库/换模板不影响本 run 的
+    口径记录（meta 记的是起跑时快照）。
+    """
+
+    run_id: str
+    movies: list[str]
+    gt: dict[str, dict[str, float]]
+    tag_universe: list[str]
+    concurrency: int
+    started_at: str
+    meta: dict
+
+
+def _now_iso() -> str:
+    """UTC ISO 时间戳（含微秒：历史按 started_at 排序需可分辨同秒 run）。"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _dump_json(path: Path, payload) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+
+
+def _produced_rows(tags: list) -> list[dict]:
+    """ProducedTag 列表 → produced 行（五键，按 (-sf, tag_id) 排序）。"""
+    rows = [
+        {"tag_id": tag.tag_id or "", "tag_name": tag.tag_name,
+         "sf": float(tag.relevance_score or 0.0),
+         "confidence": float(tag.confidence or 0.0),
+         "evidence_count": len(tag.evidence or [])}
+        for tag in tags
+    ]
+    rows.sort(key=lambda row: (-row["sf"], row["tag_id"]))
+    return rows
+
+
+class ClosedEvalService:
+    """闭环评测干跑运行器：起跑校验 → 线程池逐片生成 → 终态落盘。
+
+    DB 零写入红线（spec §5/§9）：`_run_movie` 只调 `assemble_spec`（读激
+    活模板）与 `ClosedTagProducer.produce`（producer 不落库——落库是正
+    式执行器的事），全程对业务表只读；评测唯一的写盘位置是
+    `settings.eval_output_root/<run_id>/`。与正式生成复用同一组装段与
+    producer，评测结果因此可直接对照生产口径。
+
+    线程模型：`start` 起 daemon worker；worker 主线程持
+    ThreadPoolExecutor 按 tt 序滑动提交 `_run_movie`（每片独立会话）并
+    在完成序上收敛——每片完成即锁内更新注册表 + 追加 progress.jsonl；
+    完成序连续 `ABORT_CONSECUTIVE` 次失败 → status=aborted（余量
+    future.cancel，在途片跑完）；`cancel` 置事件后不再提交（在途片照常
+    跑完，status=cancelled）。终态（succeeded/cancelled/aborted，failed
+    为 worker 意外兜底）由 worker 主线程写 meta.json 与 raw_results.json。
+    注册表更新、cancel、progress 追加都在 `threading.Lock` 内。
+    """
+
+    def __init__(self, session_factory, llm, embedder, settings: Settings) -> None:
+        self.settings = settings
+        self._session_factory = session_factory
+        self._llm = llm
+        self._embedder = embedder
+        self._lock = threading.Lock()
+        self._runs: dict[str, RunState] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._active_run_id: str | None = None
+
+    # ---------------------------------------------------------------- 对外接口
+
+    def start(self, dataset_id: str, movies: dict,
+              thetas: Sequence[float] = DEFAULT_THETAS,
+              ks: Sequence[int] = DEFAULT_KS,
+              concurrency: int = DEFAULT_CONCURRENCY, *,
+              wait: bool = False) -> str:
+        """起一次评测 run（校验 → 注册 → 骨架 → daemon worker）→ run_id。
+
+        校验序（spec 钉死）：数据集存在 → 影片集（select_movies，custom
+        越权/未知模式在此报错）→ gt 可读 → 库就绪 → 库∩gt 非空 →
+        Busy。校验失败抛 `EvalValidationError`（不占 busy 位）；已有
+        run 在跑抛 `RunBusyError`。`wait=True` 供测试同步等完（join
+        worker 线程后返回）。
+        """
+        root = self.settings.eval_dataset_root
+        info = next((i for i in scan_datasets(root, set())
+                     if i.id == dataset_id), None)
+        if info is None:
+            raise EvalValidationError(
+                f"评测数据集不存在或不可解析：{dataset_id!r}（{root}）")
+        try:
+            selected = select_movies(info.usable_movies,
+                                     (movies or {}).get("mode"),
+                                     (movies or {}).get("ids"))
+        except ValueError as exc:
+            raise EvalValidationError(str(exc)) from None
+        if not selected:
+            raise EvalValidationError("评测影片集为空：选片结果 0 部")
+        if concurrency < 1:
+            raise EvalValidationError(f"concurrency 必须 ≥ 1（收到 {concurrency}）")
+        try:
+            gt = load_gt(root, dataset_id)
+        except ValueError as exc:
+            raise EvalValidationError(str(exc)) from None
+        library = try_load_library()
+        if library is None:
+            raise EvalValidationError("标签库未就绪，无法启动闭环评测")
+        gt_tags = {tag for tags in gt.values() for tag in tags}
+        library_ids = {tag.tag_id for tag in library.tags()}
+        if not gt_tags & library_ids:
+            raise EvalValidationError(
+                f"标签库与 gt 零交集（gt {len(gt_tags)} 标签 ∩ 库 "
+                f"{len(library_ids)} 标签）——先换库或换数据集，绝不产出"
+                "全 0 指标的假报告")
+
+        # run 上下文快照（口径起跑时定格；纯读，失败前置到校验段）
+        gt_path = _gt_path(root, dataset_id)
+        n_rows = sum(len(row) for row in gt.values())
+        try:
+            with open(gt_path, "rb") as f:
+                gt_sha8 = hashlib.sha256(f.read()).hexdigest()[:8]
+        except OSError:
+            gt_sha8 = ""
+        prompt_version = self._active_prompt_version()
+
+        # Busy 检查 + 注册（同一锁内原子完成：并发 start 只放行一个）
+        with self._lock:
+            if self._active_run_id is not None:
+                raise RunBusyError(f"已有评测 run 进行中：{self._active_run_id}")
+            run_id = self._new_run_id()
+            started_at = _now_iso()
+            self._runs[run_id] = RunState(
+                run_id=run_id, status="running", done=0, total=len(selected),
+                failed=0, started_at=started_at)
+            self._cancel_events[run_id] = threading.Event()
+            self._active_run_id = run_id
+
+        meta = {
+            "run_id": run_id,
+            "dataset": {"id": dataset_id, "gt_path": gt_path,
+                        "gt_sha8": gt_sha8, "n_rows": n_rows},
+            "library": {"version": library.version,
+                        "n_dirs": len(library.dirs()),
+                        "n_tags": len(library.tags())},
+            "prompt": {"mode": "closed", "version": prompt_version},
+            "llm_model": getattr(self._llm, "model", ""),
+            "embedding_model": getattr(self._embedder, "name", ""),
+            "movies": {"mode": (movies or {}).get("mode"),
+                       "ids": list(selected)},
+            "thetas": list(thetas),
+            "ks": list(ks),
+            "concurrency": concurrency,
+        }
+        job = _EvalJob(run_id=run_id, movies=list(selected), gt=gt,
+                       tag_universe=sorted(library_ids & gt_tags),
+                       concurrency=concurrency, started_at=started_at,
+                       meta=meta)
+
+        # run 目录骨架：meta 先行落盘 status=running（进程中断后可被历史
+        # 扫描识别为 interrupted，不留无名目录）
+        run_dir = Path(self.settings.eval_output_root) / run_id
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _dump_json(run_dir / "meta.json",
+                       {**meta, "status": "running", "done": 0,
+                        "total": len(selected), "failed": 0,
+                        "started_at": started_at, "finished_at": None})
+            thread = threading.Thread(target=self._worker, args=(job,),
+                                      name=f"closed-eval-{run_id}", daemon=True)
+            thread.start()
+        except Exception as exc:
+            with self._lock:
+                state = self._runs.get(run_id)
+                if state is not None:
+                    state.status = "failed"
+                    state.error = f"run 启动失败：{exc}"
+                self._cancel_events.pop(run_id, None)
+                if self._active_run_id == run_id:
+                    self._active_run_id = None
+            raise
+        if wait:
+            thread.join()
+        return run_id
+
+    def get(self, run_id: str) -> RunState | None:
+        """run 进度快照（副本）；未知 run_id → None。"""
+        with self._lock:
+            state = self._runs.get(run_id)
+            return None if state is None else replace(state)
+
+    def cancel(self, run_id: str) -> bool:
+        """请求取消：置事件后 worker 不再提交新片（在途片跑完）。
+
+        返回是否受理（run 不存在或已终态 → False）。幂等：重复取消
+        已终态的 run 返回 False，不影响已落盘结果。
+        """
+        with self._lock:
+            state = self._runs.get(run_id)
+            event = self._cancel_events.get(run_id)
+            if state is None or event is None or state.status != "running":
+                return False
+        event.set()
+        return True
+
+    def active_run_id(self) -> str | None:
+        """当前进行中的 run_id（无 → None）。"""
+        with self._lock:
+            return self._active_run_id
+
+    # ---------------------------------------------------------------- worker
+
+    def _worker(self, job: _EvalJob) -> None:
+        """daemon worker 线程体：收敛 → 终态落盘 → 释放 busy 位。
+
+        任何意外（含收敛循环自身异常）都落终态、不滞留 running：
+        status=failed + error 留痕，已完成的结果照常写盘。
+        """
+        results: list[MovieResult] = []
+        status, error = "failed", None
+        try:
+            status = self._converge(job, results)
+        except Exception as exc:  # noqa: BLE001 —— worker 兜底：不滞留 running
+            error = f"{type(exc).__name__}: {exc}"
+        state = self._runs.get(job.run_id)
+        with self._lock:
+            if state is not None:
+                state.status = status
+                if error is not None:
+                    state.error = error
+        try:
+            self._write_artifacts(job, results, status, error)
+        except Exception as exc:  # noqa: BLE001 —— 终态已在注册表，落盘失败只记日志
+            logger.warning("评测 run %s 终态落盘失败：%s", job.run_id, exc)
+        finally:
+            with self._lock:
+                if self._active_run_id == job.run_id:
+                    self._active_run_id = None
+
+    def _converge(self, job: _EvalJob, results: list[MovieResult]) -> str:
+        """主收敛循环：滑动提交 + 完成序收敛，返回终态 status。
+
+        停止条件（停止后余量片从未进池、在途片跑完、结果照记）：
+        - 完成序连续 `ABORT_CONSECUTIVE` 失败 → aborted；
+        - cancel 事件置位 → cancelled。
+        停止后到达的结果仍记入（增量落盘：停/崩不丢已完成片），但不再
+        参与连败计数（终态已定，计数无意义）。
+        """
+        event = self._cancel_events[job.run_id]
+        order = job.movies
+        inflight: dict[Future, str] = {}
+        next_index = 0
+        consecutive = 0
+        aborted = False
+        with ThreadPoolExecutor(max_workers=job.concurrency,
+                                thread_name_prefix="closed-eval") as pool:
+            while True:
+                stopping = aborted or event.is_set()
+                if not stopping:
+                    # 按 tt 序滑动补位：停止判定先于提交，余量片不进池
+                    while (next_index < len(order)
+                           and len(inflight) < job.concurrency):
+                        future = pool.submit(self._run_movie, job.run_id,
+                                             order[next_index])
+                        inflight[future] = order[next_index]
+                        next_index += 1
+                elif inflight:
+                    self._cancel_pending(inflight)
+                if not inflight:
+                    break
+                done, _not_done = wait(set(inflight),
+                                       return_when=FIRST_COMPLETED)
+                # 同刻多完成按 tt 序处理：完成序语义对任何合法完成序成立，
+                # 固定序只为输出可复现
+                for future in sorted(done, key=lambda f: inflight[f]):
+                    inflight.pop(future)
+                    if future.cancelled():
+                        continue  # 余量取消：未启动的片不算完成
+                    result = future.result()
+                    results.append(result)
+                    self._record_result(job.run_id, result)
+                    if aborted or event.is_set():
+                        continue
+                    consecutive = 0 if result.ok else consecutive + 1
+                    if consecutive >= ABORT_CONSECUTIVE:
+                        aborted = True
+                        self._cancel_pending(inflight)
+        if aborted:
+            return "aborted"
+        if event.is_set():
+            return "cancelled"
+        return "succeeded"
+
+    @staticmethod
+    def _cancel_pending(inflight: dict[Future, str]) -> None:
+        """取消未启动的余量 future（已取消/在途的留在 inflight 由循环收敛）。"""
+        for future in list(inflight):
+            if future.cancel():
+                inflight.pop(future)
+
+    def _run_movie(self, run_id: str, tt: str) -> MovieResult:
+        """单片干跑（线程池内执行）：共 1+RETRY_PER_MOVIE 次尝试。
+
+        每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
+        （mode="closed"，读激活模板）→ produce（不写库）→ 产出按
+        (-sf, tag_id) 排序。异常兜底：重试耗尽记 error、produced 清空。
+        """
+        started = time.perf_counter()
+        title = ""
+        error: str | None = None
+        produced: list[dict] = []
+        for _attempt in range(1 + RETRY_PER_MOVIE):
+            try:
+                with self._session_factory() as session:
+                    content = load_movie_content(
+                        self.settings.eval_dataset_root, tt)
+                    title = content.asset.title
+                    spec, _template = assemble_spec(
+                        session, mode="closed", content=content,
+                        task_id=f"eval-{run_id}", asset_id=tt,
+                        run_id=f"{run_id}:{tt}")
+                    tags = get_producer("closed").produce(
+                        spec, session, self._llm, self._embedder)
+                produced = _produced_rows(tags)
+                error = None
+                break
+            except Exception as exc:  # noqa: BLE001 —— 单片失败兜底：记 error 继续收敛
+                error = f"{type(exc).__name__}: {exc}"
+                produced = []
+        return MovieResult(tt=tt, title=title, ok=error is None, error=error,
+                           produced=produced,
+                           elapsed_ms=int((time.perf_counter() - started) * 1000))
+
+    def _record_result(self, run_id: str, result: MovieResult) -> None:
+        """锁内更新注册表并追加 progress.jsonl 一行（增量落盘）。"""
+        state = self._runs.get(run_id)
+        if state is None:
+            return
+        line = {"tt": result.tt, "ok": result.ok,
+                "produced": result.produced, "elapsed_ms": result.elapsed_ms}
+        if result.error is not None:
+            line["error"] = result.error
+        payload = json.dumps(line, ensure_ascii=False)
+        with self._lock:
+            state.done += 1
+            if not result.ok:
+                state.failed += 1
+            with open(self._progress_path(run_id), "a", encoding="utf-8") as f:
+                f.write(payload + "\n")
+
+    def _write_artifacts(self, job: _EvalJob, results: list[MovieResult],
+                         status: str, error: str | None) -> None:
+        """终态写盘（worker 主线程）：meta.json + raw_results.json。"""
+        run_dir = Path(self.settings.eval_output_root) / job.run_id
+        meta = dict(job.meta)
+        meta.update({
+            "status": status,
+            "done": len(results),
+            "total": len(job.movies),
+            "failed": sum(1 for r in results if not r.ok),
+            "started_at": job.started_at,
+            "finished_at": _now_iso(),
+        })
+        if error is not None:
+            meta["error"] = error
+        rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
+                 "produced": r.produced, "gt": job.gt.get(r.tt, {}),
+                 "elapsed_ms": r.elapsed_ms}
+                for r in results]
+        _dump_json(run_dir / "meta.json", meta)
+        _dump_json(run_dir / "raw_results.json", rows)
+
+    def _progress_path(self, run_id: str) -> str:
+        return os.path.join(self.settings.eval_output_root, run_id,
+                            "progress.jsonl")
+
+    def _active_prompt_version(self) -> int | None:
+        """读激活 closed 模板版本（meta 口径记录）；读不到返回 None。
+
+        不放进 start 校验段——模板缺失时每片会在 assemble_spec 失败并走
+        单片失败/中止路径，起跑校验保持 spec 钉死的五步。
+        """
+        try:
+            with self._session_factory() as session:
+                return get_active_prompt(session, "closed").version
+        except Exception:  # noqa: BLE001 —— 口径缺失不拦截起跑，记 None
+            return None
+
+    def _new_run_id(self) -> str:
+        """`run-YYYYMMDD-HHMMSS-xxxx`：时间戳人读 + 2 字节随机防同秒撞名。
+
+        输出根已有同名目录（撞名/残留）时换 token 重试，8 次仍撞 →
+        EvalValidationError（多半是输出根异常，显式失败优于静默并入）。
+        """
+        for _ in range(8):
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            run_id = f"run-{stamp}-{secrets.token_hex(2)}"
+            if not os.path.isdir(
+                    os.path.join(self.settings.eval_output_root, run_id)):
+                return run_id
+        raise EvalValidationError(
+            "run_id 生成重试 8 次仍撞名，请检查 eval_output_root")
