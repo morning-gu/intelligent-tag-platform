@@ -109,10 +109,13 @@ def _validate_closed_items(data: list) -> list[dict]:
         evidences = item["evidences"]
         if not isinstance(evidences, list):
             raise _bad_element(index, "evidences 不是列表")
+        clean_evidences: list[dict] = []
         for evidence_index, evidence in enumerate(evidences):
+            # 非对象证据项（模型偶发在数组里插裸 scene_id 字符串——728 批次
+            # 全量重放实锤的唯一 parse 失败模式）降级为丢弃：单条畸形不应
+            # 让整任务失败，与 runner 对未知 scene_id 证据的忽略语义一致
             if not isinstance(evidence, dict):
-                raise _bad_element(
-                    index, f"evidences[{evidence_index}] 不是对象")
+                continue
             if "scene_id" not in evidence or "evidence" not in evidence:
                 raise _bad_element(
                     index, f"evidences[{evidence_index}] 缺少 scene_id/evidence")
@@ -124,6 +127,8 @@ def _validate_closed_items(data: list) -> list[dict]:
                     not evidence["evidence"].strip():
                 raise _bad_element(
                     index, f"evidences[{evidence_index}].evidence 不是非空字符串")
+            clean_evidences.append(evidence)
+        item["evidences"] = clean_evidences
     return data
 
 

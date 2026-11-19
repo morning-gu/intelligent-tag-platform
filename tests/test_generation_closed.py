@@ -471,6 +471,31 @@ def test_parse_closed_strips_markdown_code_fence():
     assert parse_closed_output(padded)[0]["tag_id"] == "tag_001"
 
 
+def test_parse_closed_drops_bare_string_evidence_entries():
+    # 728 批次全量重放实锤（2026-11-20，147.3 vLLM 温度 0）：725 过 2 挂，
+    # 唯一 parse 失败模式 = 模型在 evidences 数组里插裸 scene_id 字符串
+    # （紧跟一条已描述过同场景的对象，重复引用的畸形产物）。旧契约整条
+    # 抛错 → 21 分钟的 728 调用任务全军覆没。非对象证据项降级为丢弃，
+    # 与 runner 对未知 scene_id 证据的忽略语义一致。
+    items = parse_closed_output(json.dumps([
+        {"tag_id": "452", "applicability": 5, "evidence_strength": 5,
+         "evidences": [
+             {"scene_id": "scene_001", "evidence": "黑白转彩色"},
+             "scene_002",
+             {"scene_id": "scene_002", "evidence": "魔幻国度"},
+         ]},
+    ], ensure_ascii=False))
+    assert items[0]["tag_id"] == "452"
+    assert len(items[0]["evidences"]) == 2
+    assert items[0]["evidences"][1]["scene_id"] == "scene_002"
+    # 全部证据都被丢弃时项仍合法（evidences 空数组本就是合法契约）
+    items2 = parse_closed_output(json.dumps([
+        {"tag_id": "709", "applicability": 1, "evidence_strength": 5,
+         "evidences": ["scene_001", "scene_002"]},
+    ], ensure_ascii=False))
+    assert items2[0]["evidences"] == []
+
+
 def test_parse_closed_error_message_has_position():
     bad = json.dumps([
         {"tag_id": "t", "applicability": 4, "evidence_strength": 4,
