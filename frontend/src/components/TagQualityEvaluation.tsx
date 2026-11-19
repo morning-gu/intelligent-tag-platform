@@ -1,17 +1,15 @@
-import { Alert, Button, Card, Descriptions, Input, Modal, Space, Table, Tag, Typography } from 'antd'
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Alert, Button, Card, Collapse, Descriptions, Input, Modal, Space, Tag, Typography } from 'antd'
+import { useState, type ReactNode } from 'react'
 import {
   DEFAULT_QUALITY_MODEL,
   retryQualityEvaluation,
   type FilmQuality,
   type QualityDimension,
-  type QualityLabel,
   type QualityMetrics,
   type QualityReport,
-  type QualityScore,
   type QualityStatus,
 } from '../api/tasks'
+import TaskTagResults from './TaskTagResults'
 
 const statuses: Record<QualityStatus, { color: string; label: string }> = {
   queued: { color: 'default', label: '等待评估' },
@@ -35,7 +33,7 @@ function percent(value: number | null): string {
 
 function DimensionSummary({ dimension }: { dimension: QualityDimension }) {
   return (
-    <Space direction="vertical" size={0}>
+    <Space orientation="vertical" size={0}>
       <span>均分 {dimension.average?.toFixed(2) ?? '—'} · 高分率 {percent(dimension.high_rate)}</span>
       <Typography.Text type="secondary">
         0 / 1 / 2 分各 {dimension.distribution.join(' / ')} 条 ·
@@ -58,7 +56,7 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
       {
         key: 'value', label: '标签价值',
         children: metrics.value.evaluated_tags === 0 ? '未评估' : (
-          <Space direction="vertical" size={0}>
+          <Space orientation="vertical" size={0}>
             <DimensionSummary dimension={metrics.value} />
             <Typography.Text type="secondary">
               已评估 {metrics.value.evaluated_tags} / {metrics.total_tags} 条
@@ -76,104 +74,63 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
   )
 }
 
-function ScoreTag({ result }: { result?: QualityScore }) {
-  if (result === undefined) return <Tag>未完成</Tag>
-  const color = result.score === null ? 'default' : ['error', 'warning', 'success'][result.score]
-  return <Tag color={color}>{result.score === null ? '无法判断' : `${result.score} 分`}</Tag>
-}
-
-function LabelDetail({ label, assetId }: { label: QualityLabel; assetId: string }) {
-  const score = label.score
+function MetricsSummary({ metrics }: { metrics: QualityMetrics }) {
+  const items = [
+    ['已评估 / 最终标签', `${metrics.evaluated_tags} / ${metrics.total_tags} 条`],
+    ['内容相关性均分', metrics.relevance.average?.toFixed(2) ?? '—'],
+    ['语义准确性均分', metrics.semantics.average?.toFixed(2) ?? '—'],
+    ['标签价值均分', metrics.value.average?.toFixed(2) ?? '—'],
+  ]
   return (
-    <Descriptions size="small" column={1} items={[
-      { key: 'desc', label: '最终释义', children: label.desc || '暂无释义' },
-      ...(score ? [
-        { key: 'support', label: '相关性理由', children: score.relevance.reason },
-        { key: 'meaning', label: '语义理由', children: score.semantics.reason },
-        { key: 'value', label: '标签价值理由', children: score.value?.reason ?? '该版本未评估' },
-        ...(score.evidence.length ? [{
-          key: 'evidence', label: '内容证据',
-          children: (
-            <Space direction="vertical" size={2}>
-              {score.evidence.map(({ scene_id, start_ms, description }, index) => (
-                <span key={index}>
-                  {scene_id && start_ms !== null && (
-                    <>
-                      <Link to={`/assets/${assetId}?scene=${encodeURIComponent(scene_id)}&t=${start_ms}`}>{scene_id}</Link>{' '}
-                    </>
-                  )}
-                  {description}
-                </span>
-              ))}
-            </Space>
-          ),
-        }] : []),
-      ] : []),
-    ]} />
+    <dl className="task-quality-summary">
+      {items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+    </dl>
   )
 }
 
-function FilmEvaluation({ film, onRetry }: { film: FilmQuality; onRetry: () => void }) {
-  const [showLabels, setShowLabels] = useState(false)
+function FilmEvaluation({ film, onRetry, children }: {
+  film: FilmQuality
+  onRetry: () => void
+  children: ReactNode
+}) {
   return (
-    <Card
-      size="small"
-      title={<Space wrap><span>{film.title}</span><EvaluationStatus status={film.status} /></Space>}
-      extra={['failed', 'partial'].includes(film.status) && (
-        <Button size="small" onClick={onRetry}>重试评估</Button>
-      )}
-    >
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+    <div className="task-quality-body">
+      <Space wrap>
+        <Typography.Text strong>{film.title}</Typography.Text>
+        <EvaluationStatus status={film.status} />
         {film.model && <Typography.Text type="secondary">
-          模型 {film.model}{film.prompt_version && ` · 提示词 ${film.prompt_version}`}
+          评估模型 {film.model}{film.prompt_version && ` · ${film.prompt_version}`}
         </Typography.Text>}
-        {film.error && <Alert type="error" showIcon message={film.error} />}
-        {film.note && <Alert type="info" showIcon message={film.note} />}
-        {film.metrics && <Metrics metrics={film.metrics} />}
-        {film.status === 'not_needed' && <Typography.Text type="secondary">最终标签 0 条</Typography.Text>}
-        {film.labels.length > 0 && (
-          <details onToggle={(event) => setShowLabels(event.currentTarget.open)}>
-            <summary style={{ cursor: 'pointer' }}>标签评分（{film.labels.length} 条）</summary>
-            {showLabels && <Table<QualityLabel>
-              size="small"
-              rowKey="id"
-              pagination={film.labels.length > 15 ? { pageSize: 15, hideOnSinglePage: true } : false}
-              scroll={{ x: 'max-content' }}
-              dataSource={film.labels}
-              columns={[
-                { title: '标签', dataIndex: 'name' },
-                { title: '目录', dataIndex: 'dir_path', render: (path) => path || '—' },
-                {
-                  title: '生产分流',
-                  render: (_, label) => label.disposition === 'mounted' ? '直接挂载' : '进入审核',
-                },
-                { title: '内容相关性', render: (_, label) => <ScoreTag result={label.score?.relevance} /> },
-                { title: '语义准确性', render: (_, label) => <ScoreTag result={label.score?.semantics} /> },
-                {
-                  title: '标签价值',
-                  render: (_, label) => label.score && label.score.value === null
-                    ? <Tag>未评估</Tag>
-                    : <ScoreTag result={label.score?.value ?? undefined} />,
-                },
-              ]}
-              expandable={{ expandedRowRender: (label) => <LabelDetail label={label} assetId={film.asset_id} /> }}
-            />}
-          </details>
+        {['failed', 'partial'].includes(film.status) && (
+          <Button size="small" onClick={onRetry}>重试评估</Button>
         )}
       </Space>
-    </Card>
+      {film.error && <Alert type="error" showIcon title={film.error} />}
+      {film.note && <Alert type="info" showIcon title={film.note} />}
+      {film.metrics && (
+        <>
+          <MetricsSummary metrics={film.metrics} />
+          <details className="task-quality-metrics">
+            <summary>评分统计</summary>
+            <div><Metrics metrics={film.metrics} /></div>
+          </details>
+        </>
+      )}
+      {children}
+    </div>
   )
 }
 
-export default function TagQualityEvaluation({ report, onRetry }: {
+export default function TagQualityEvaluation({ report, taskId, onRetry, children }: {
   report: QualityReport
+  taskId: string
   onRetry: () => void
+  children: ReactNode
 }) {
   const [retryFilm, setRetryFilm] = useState<FilmQuality | null>(null)
   const [model, setModel] = useState(DEFAULT_QUALITY_MODEL)
   const [retrying, setRetrying] = useState(false)
   const [retryError, setRetryError] = useState<string | null>(null)
-  const counts = report.film_counts
 
   async function retry() {
     if (retryFilm === null || !model.trim()) return
@@ -189,28 +146,49 @@ export default function TagQualityEvaluation({ report, onRetry }: {
       setRetrying(false)
     }
   }
+  const current = report.films.find((film) => film.task_id === taskId)
+  const siblings = report.films.filter((film) => film.task_id !== taskId)
+
+  function openRetry(film: FilmQuality) {
+    setRetryFilm(film)
+    setModel(film.model ?? DEFAULT_QUALITY_MODEL)
+    setRetryError(null)
+  }
 
   return (
-    <Card size="small" title="标签质量评估" extra={<EvaluationStatus status={report.status} />}>
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        <Space wrap>
-          <Typography.Text strong>任务汇总（{report.films.length} 部影片）</Typography.Text>
-          {Object.entries(counts)
-            .filter(([, count]) => count > 0)
-            .map(([status, count]) => (
-              <span key={status}>{statuses[status as QualityStatus].label} {count}</span>
-            ))}
-          {report.incomplete && <Typography.Text type="secondary">汇总结果尚未完整</Typography.Text>}
-        </Space>
-        {report.status !== 'unavailable' && <Metrics metrics={report.metrics} />}
-        {report.films.map((film) => (
-          <FilmEvaluation key={film.task_id} film={film} onRetry={() => {
-            setRetryFilm(film)
-            setModel(film.model ?? DEFAULT_QUALITY_MODEL)
-            setRetryError(null)
-          }} />
-        ))}
-      </Space>
+    <Card size="small" title="标签产出与评分">
+      <div className="task-quality-body">
+        {current ? <FilmEvaluation film={current} onRetry={() => openRetry(current)}>
+          {children}
+        </FilmEvaluation> : children}
+        {siblings.length > 0 && (
+          <Collapse size="small" items={[{
+            key: 'batch',
+            label: `同批次任务（另 ${siblings.length} 部影片）`,
+            children: (
+              <div className="task-quality-body">
+                <Space wrap>
+                  <Typography.Text strong>任务汇总（{report.films.length} 部影片）</Typography.Text>
+                  <EvaluationStatus status={report.status} />
+                  {Object.entries(report.film_counts).filter(([, count]) => count > 0)
+                    .map(([status, count]) => <span key={status}>{statuses[status as QualityStatus].label} {count}</span>)}
+                  {report.incomplete && <Typography.Text type="secondary">汇总结果尚未完整</Typography.Text>}
+                </Space>
+                {report.status !== 'unavailable' && <Metrics metrics={report.metrics} />}
+                <Collapse size="small" items={siblings.map((film) => ({
+                  key: film.task_id,
+                  label: <Space wrap>{film.title}<EvaluationStatus status={film.status} /></Space>,
+                  children: <FilmEvaluation film={film} onRetry={() => openRetry(film)}>
+                    {film.labels.length > 0 && (
+                      <TaskTagResults assetId={film.asset_id} labels={film.labels} results={[]} />
+                    )}
+                  </FilmEvaluation>,
+                }))} />
+              </div>
+            ),
+          }]} />
+        )}
+      </div>
       <Modal
         title="重试影片评估"
         open={retryFilm !== null}
@@ -228,7 +206,7 @@ export default function TagQualityEvaluation({ report, onRetry }: {
           maxLength={200}
           onChange={(event) => setModel(event.target.value)}
         />
-        {retryError && <Alert type="error" showIcon message={retryError} />}
+        {retryError && <Alert type="error" showIcon title={retryError} />}
       </Modal>
     </Card>
   )
