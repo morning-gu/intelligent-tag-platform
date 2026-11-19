@@ -10,6 +10,7 @@ from tagplatform.generation.mtg.prompts import (
     build_scene_generation_messages,
 )
 from tagplatform.schemas import parse_content
+from tagplatform.schemas.content import Character
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(
@@ -44,9 +45,10 @@ def test_generation_prompt_asks_for_grounded_reasons():
 
 
 def test_scene_prompt_uses_catalog_and_search_goal():
-    scene = _content_with_dialogues(2).content.scenes[0]
+    content = _content_with_dialogues(2)
+    scene = content.content.scenes[0]
     messages = build_scene_generation_messages(
-        scene, (), max_tags=1,
+        scene, (), content=content, max_tags=1,
         dir_hint=[{"dir_id": "dir_event", "path": "情节事件", "scope": "scene"}],
     )
     body, directory, instructions = [part["text"] for part in messages[0]["content"]]
@@ -55,6 +57,36 @@ def test_scene_prompt_uses_catalog_and_search_goal():
     assert "为场景搜索提炼标签" in instructions
     assert "五个维度" not in instructions
     assert '"dimension"' not in instructions
+
+
+def test_generation_adds_relevant_cast_only_to_the_current_scene():
+    content = _content_with_dialogues(1)
+    content.content.characters.extend(
+        Character(character_id=f"added_{index}", name=f"额外人物{index}")
+        for index in range(10)
+    )
+    content.content.characters[-1].aliases = ["人物1"]
+    scene = content.content.scenes[0]
+    scene.character_ids = ["added_8"]
+    other_scene = scene.model_copy(
+        update={"scene_id": "other_scene", "description": "另一场特有描述", "dialogues": []})
+    content.content.scenes.append(other_scene)
+
+    local = build_scene_generation_messages(
+        scene, (), content=content, max_tags=1, dir_hint=[])
+    local_body = local[0]["content"][0]["text"]
+    background, _, scene_body = local_body.partition("### 当前场景")
+    assert content.asset.title in background
+    assert "额外人物8" in background and "额外人物9" in background
+    assert "额外人物0" not in background
+    assert "第1句台词" not in background
+    assert "第1句台词" in scene_body
+    assert "另一场特有描述" not in local_body
+    assert all(name in _prompt_text(content) for name in ("额外人物0", "额外人物9", "另一场特有描述"))
+
+    visual_only = build_scene_generation_messages(
+        scene, (), content=content, max_tags=1, dir_hint=[], modalities={"video"})
+    assert content.asset.title not in visual_only[0]["content"][0]["text"]
 
 
 def test_all_dialogues_reach_the_prompt():

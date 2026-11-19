@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v5-scene-search`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v5-scene-context`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部判 supported、confidence=0.9；`MOCK_EMBEDDER`
@@ -129,7 +129,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v5-scene-search"
+    assert producer.prompt_version == "mtg-v5-scene-context"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -147,7 +147,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v5-scene-search"
+    assert report["version"] == "mtg-v5-scene-context"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
@@ -344,7 +344,8 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
             elif ":scene-" in run_id:
                 index = int(run_id.rsplit("-", 1)[1]) - 1
                 assert scenes[index].description in text
-                assert content.asset.title not in text
+                assert content.asset.title in text
+                assert content.content.summary in text
                 assert all(s.description not in text for s in scenes if s != scenes[index])
                 assert sum(p["type"] == "image_url" for p in parts) == (1 if index == 0 else 0)
                 assert "最多 1 条" in parts[-1]["text"]

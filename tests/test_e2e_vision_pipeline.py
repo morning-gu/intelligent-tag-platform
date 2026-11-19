@@ -87,7 +87,7 @@ def test_upstream_to_pending_tags(session):
     run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     session.refresh(task)
     assert task.status == "succeeded", task.error
-    assert task.prompt_version == "mtg-v5-scene-search"
+    assert task.prompt_version == "mtg-v5-scene-context"
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
     rows = session.query(PreAssetTag).filter(

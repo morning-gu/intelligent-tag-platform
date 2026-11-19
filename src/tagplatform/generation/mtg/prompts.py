@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 
 from tagplatform.schemas import ContentJSON
-from tagplatform.schemas.content import Scene
+from tagplatform.schemas.content import Character, Scene
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
 DIMENSIONS: dict[str, str] = {
@@ -86,17 +86,39 @@ def render_content(content: ContentJSON, modalities=None, *, full_cast: bool = F
     active = _active(modalities)
     if "script" not in active:
         return ""
-    lines: list[str] = [f"电影：《{content.asset.title}》",
-                        f"摘要：{content.content.summary[:_MAX_SUMMARY]}"]
     characters = content.content.characters
     if not full_cast:
         characters = characters[:_MAX_CAST]
+    return "\n".join([
+        _render_film_context(content, characters),
+        *(render_scene(scene, active) for scene in content.content.scenes),
+    ])
+
+
+def _render_film_context(content: ContentJSON, characters: list[Character]) -> str:
+    """渲染片名、摘要和选定人物。场景内容由调用方按粒度附加。"""
+    lines = [f"电影：《{content.asset.title}》",
+             f"摘要：{content.content.summary[:_MAX_SUMMARY]}"]
     cast = [f"{ch.name}（{ch.description}）" if ch.description else ch.name
             for ch in characters]
     if cast:
         lines.append("人物：" + "、".join(cast))
-    lines.extend(render_scene(scene, active) for scene in content.content.scenes)
     return "\n".join(lines)
+
+
+def _scene_cast(content: ContentJSON, scene: Scene) -> list[Character]:
+    """用出场关系、说话人及人物情绪定位本场相关人物，兼容名称和别名。"""
+    references = set(scene.character_ids)
+    for dialogue in scene.dialogues:
+        references.update((dialogue.speaker_id, dialogue.speaker_name, dialogue.speaker))
+    for emotion in scene.character_emotions:
+        references.update((emotion.character_id, emotion.character))
+    names = {name.strip().casefold() for name in references if name and name.strip()}
+    return [
+        character for character in content.content.characters
+        if any(name.strip().casefold() in names
+               for name in (character.character_id, character.name, *character.aliases))
+    ]
 
 
 def render_scene(scene: Scene, active: frozenset[str]) -> str:
@@ -197,11 +219,16 @@ def _dir_hint_block(dirs: list[dict]) -> str:
 
 
 def build_scene_generation_messages(scene: Scene, frames: tuple[Path, ...], *,
-                                    max_tags: int, dir_hint: list[dict],
+                                    content: ContentJSON, max_tags: int, dir_hint: list[dict],
                                     modalities=None) -> list[dict]:
     active = _active(modalities)
+    body = render_scene(scene, active)
+    if "script" in active:
+        context = _render_film_context(content, _scene_cast(content, scene))
+        body = ("### 影片背景（用于理解人物和剧情）\n" + context
+                + "\n\n### 当前场景（标签证据）\n" + body)
     return _generation_messages(
-        render_scene(scene, active),
+        body,
         _scene_frame_parts(scene, frames) if "video" in active else [],
         None, dir_hint, scope="scene", max_tags=max_tags,
     )
@@ -227,7 +254,7 @@ def build_generation_messages(content: ContentJSON,
         })
         if "video" in active:
             frame_parts.extend(_scene_frame_parts(scene, frames_by_scene.get(scene.scene_id, ())))
-    body = render_content(content, active)
+    body = render_content(content, active, full_cast=True)
     body += "\n\n## 第一轮逐场候选\n" + json.dumps(per_scene, ensure_ascii=False, indent=2)
     return _generation_messages(body, frame_parts, library_hint, dir_hint,
                                 scope="film", max_tags=max_tags)
@@ -270,10 +297,13 @@ def _generation_messages(body: str, frame_parts: list[dict],
 
 def build_generation_template(scope: str) -> dict:
     if scope == "scene":
-        body = "{{单场景 ID、描述、氛围、人物情绪、地点、音乐及台词}}"
+        body = ("### 影片背景（用于理解人物和剧情）\n"
+                "{{影片标题、摘要及当前场景相关人物介绍}}\n\n"
+                "### 当前场景（标签证据）\n"
+                "{{当前场景 ID、时间、描述、氛围、人物情绪、地点、音乐及台词}}")
         hints = None
     else:
-        body = ("{{影片标题、摘要、人物和按片序排列的场景文本}}\n\n"
+        body = ("{{影片标题、摘要、完整人物表和按片序排列的场景文本及台词}}\n\n"
                 "## 第一轮逐场候选\n"
                 "{{每场的 scene_id 和 tags，候选含 tag、reason、desc}}")
         hints = ["{{召回的库内标签名，每个词一行}}"]

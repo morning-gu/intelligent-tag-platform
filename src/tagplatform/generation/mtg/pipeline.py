@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 # v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
 # v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
-MTG_VERSION = "mtg-v5-scene-search"
+MTG_VERSION = "mtg-v5-scene-context"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -367,7 +367,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     per_scene = {}
     for index, scene in enumerate(scenes):
         messages = build_scene_generation_messages(
-            scene, frames.get(scene.scene_id, ()), max_tags=scene_request_limit,
+            scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
             dir_hint=dir_hint, modalities=modalities)
         per_scene[scene.scene_id] = generate(
             scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
