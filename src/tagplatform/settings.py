@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     llm_api_key_env: str = "OPENAI_API_KEY"
     # 采样温度
     llm_temperature: float = 0.7
+    # 请求体额外字段（JSON 对象，经 OpenAI SDK extra_body 合并进请求顶层）：
+    # 端点专属开关的通用出口，如 vLLM 的
+    # {"chat_template_kwargs": {"enable_thinking": false}}（qwen3 系默认
+    # 模板开思维链，思维链后输出形态漂移——closed 判定实测从数组漂成单
+    # 对象；transformers serving 忽略未知字段不受影响）。空 = 不附加
+    llm_extra_body: dict | None = None
     # 相邻 LLM 请求最小间隔秒数（限速）
     llm_request_interval: float = 0.5
     # True 时用确定性 MockLLMClient（测试专用，零网络）
