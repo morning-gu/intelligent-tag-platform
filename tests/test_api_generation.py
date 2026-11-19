@@ -162,6 +162,10 @@ def test_timestamps_render_utc_with_z_suffix(client):
     tzinfo），响应模型经 UtcDatetime 序列化补回 UTC。此前输出裸
     "2026-11-18T10:31:32"，前端按本地时间读导致 UTC+8 用户误读 8 小时
     （gen_4845957f9239 排查根因链）。
+
+    挂载行由审核链路产出（PR #16 起 closed 全量入审不再自动通过）：
+    closed 产出 pending 行 → 人工 approve → 写正式挂载，再验资产标签
+    行的 created_at 同契约。
     """
     from datetime import datetime as dt
 
