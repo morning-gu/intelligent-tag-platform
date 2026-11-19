@@ -25,10 +25,11 @@
 每片走与正式生成**零漂移**的路径：`assemble_spec`（同一组装段，读激活
 closed 模板）→ `ClosedTagProducer.produce`（producer 本就不落库——落库
 是正式执行器的职责），所以干跑全程对业务表只读（DB 零写入红线），评测
-产物只写 `settings.eval_output_root/<run_id>/` 三个文件：起跑即写
+产物只写 `settings.eval_output_root/<run_id>/` 六个文件：起跑即写
 meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
 每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片）、
-终态由 worker 主线程写 meta + raw_results（gt 向量并入）。
+终态由 worker 主线程写 meta + raw_results（gt 向量并入）+ 报告三件套
+（report.json / report.md / metrics.csv，Task 5）。
 
 容错语义：每片共 1+RETRY_PER_MOVIE 次尝试（异常兜底记 error，单片失败
 不断跑）；**完成序**连续 ABORT_CONSECUTIVE 次失败 → 中止余量（系统性
@@ -42,6 +43,21 @@ meta.json 骨架（status=running——进程中断可被历史扫描标 interru
 连「停止后不再有片进池」都保不住：主线取消余量与池线程取任务存在竞态，
 停止后仍会有片被取走执行。
 
+报告组装与历史扫描（Task 5）
+============================
+
+`assemble_report` 把 ok 片构造成 ClosedSample 喂 `evaluate_closed`：
+`ranked` = 产出行限「库∩gt」交集、防御性再排 (-sf, tag_id)；交集外
+产出条目剔除、只计 `sample_accounting.no_gt`（spec §5 保护原则——白给
+precision / 冤枉 recall 都不要）；先验基线（tag_universe 按 gt 全影片
+均值降序、并列 tag_id 字典序）用同一机制并排给出，格值才可比。部分
+口径响亮：status != succeeded 或 done < total → banner 明写「部分运行」；
+失败率 > 10% → 小样本警示；样本核算（total/ok/failed/invalid/no_gt）
+永远随报告落盘。`history()` 扫 `eval_output_root/*/meta.json` 出历史行：
+meta.status=running 且不在进程内注册表 → interrupted（进程死亡在磁盘
+上可辨认）；读侧对缺失/截断的 report.json 一律按「该 run 无报告」处理
+，不抛异常（meta→raw→report 写序的非原子窗口）。
+
 缓存纪律
 ========
 
@@ -52,7 +68,7 @@ meta.json 骨架（status=running——进程中断可被历史扫描标 interru
 
 分层红线：本模块不 import fastapi（设计文档 §9.4），不 import/call
 persist_tags（落库走正式执行器，评测只读）；数据集根只读，评测产物只
-写 `settings.eval_output_root`。报告组装（后续任务）在本模块追加。
+写 `settings.eval_output_root`（报告层只读写文件，DB 零写入不变）。
 """
 from __future__ import annotations
 
@@ -72,7 +88,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tagplatform.content_io import load_content
-from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
+from tagplatform.eval.closed_ranking import (
+    DEFAULT_KS,
+    DEFAULT_THETAS,
+    ClosedSample,
+    evaluate_closed,
+    spearman,
+)
 from tagplatform.generation import get_producer
 from tagplatform.library import try_load_library
 from tagplatform.prompts import get_active_prompt
@@ -90,11 +112,14 @@ __all__ = [
     "RunBusyError",
     "RunState",
     "ClosedEvalService",
+    "assemble_report",
     "load_gt",
     "load_movie_content",
     "movie_entries",
+    "render_report_md",
     "scan_datasets",
     "select_movies",
+    "write_report",
 ]
 
 logger = logging.getLogger(__name__)
@@ -418,10 +443,13 @@ class ClosedEvalService:
     线程模型：`start` 起 daemon worker；worker 主线程持
     ThreadPoolExecutor 按 tt 序滑动提交 `_run_movie`（每片独立会话）并
     在完成序上收敛——每片完成即锁内更新注册表 + 追加 progress.jsonl；
-    完成序连续 `ABORT_CONSECUTIVE` 次失败 → status=aborted（余量
-    future.cancel，在途片跑完）；`cancel` 置事件后不再提交（在途片照常
-    跑完，status=cancelled）。终态（succeeded/cancelled/aborted，failed
-    为 worker 意外兜底）由 worker 主线程写 meta.json 与 raw_results.json。
+    完成即锁内更新注册表 + 追加 progress.jsonl；完成序连续
+    `ABORT_CONSECUTIVE` 次失败 → status=aborted（余量 future.cancel，
+    在途片跑完）；`cancel` 置事件后不再提交（在途片照常跑完，已完成
+    结果保留，status=cancelled）。终态（succeeded/cancelled/aborted，
+    failed 为 worker 意外兜底）由 worker 主线程写 meta.json、
+    raw_results.json 与报告三件套（assemble_report + write_report）；
+    `history()` 扫磁盘出历史行（interrupted 推断见其 docstring）。
     注册表更新、cancel、progress 追加都在 `threading.Lock` 内。
     """
 
@@ -575,6 +603,83 @@ class ClosedEvalService:
         with self._lock:
             return self._active_run_id
 
+    def history(self) -> list[dict]:
+        """历史扫描：`eval_output_root/*/meta.json` → 摘要行（started_at 降序）。
+
+        磁盘是持久层、注册表是进程内存：meta.status=running 且不在注册表 →
+        进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
+        读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过；report.json 缺失或
+        截断（meta→raw→report 写序的非原子窗口）→ 摘要四键为 None，不抛
+        异常。摘要取 θ=0.4、K=10/20 档（无该档 → None，coverage 中位与 θ
+        无关照常读）。
+        """
+        root = Path(self.settings.eval_output_root)
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            return []
+        rows = []
+        for name in names:
+            try:
+                meta = json.loads((root / name / "meta.json")
+                                  .read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            run_id = meta.get("run_id") or name
+            status = meta.get("status")
+            if status == "running":
+                with self._lock:
+                    state = self._runs.get(run_id)
+                    # 在注册表 → 用注册表现值（终态落盘前的窄窗口）；
+                    # 不在 → 进程死亡残留，标 interrupted
+                    status = state.status if state is not None else "interrupted"
+            rows.append({
+                "run_id": run_id,
+                "dataset_id": (meta.get("dataset") or {}).get("id"),
+                "status": status,
+                "done": meta.get("done"),
+                "total": meta.get("total"),
+                "failed": meta.get("failed"),
+                "started_at": meta.get("started_at"),
+                "error": meta.get("error"),
+                **self._read_summary(root / name),
+            })
+        rows.sort(key=lambda row: row.get("started_at") or "", reverse=True)
+        return rows
+
+    @staticmethod
+    def _read_summary(run_dir: Path) -> dict:
+        """report.json → 历史摘要四键（θ=0.4、K=10/20；无报告/无该档 → None）。"""
+        summary = {"ndcg10": None, "p10": None, "r20": None,
+                   "coverage_median": None}
+        try:
+            report = json.loads((run_dir / "report.json")
+                                .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return summary
+        if not isinstance(report, dict):
+            return summary
+        grid = report.get("grid")
+        if isinstance(grid, list):
+            for point in grid:
+                if not isinstance(point, dict):
+                    continue
+                theta = point.get("theta")
+                if (not isinstance(theta, (int, float))
+                        or abs(theta - 0.4) > 1e-9):
+                    continue
+                if point.get("k") == 10:
+                    summary["ndcg10"] = point.get("ndcg")
+                    summary["p10"] = point.get("precision")
+                elif point.get("k") == 20:
+                    summary["r20"] = point.get("recall")
+        coverage = report.get("coverage")
+        if isinstance(coverage, dict):
+            summary["coverage_median"] = coverage.get("median")
+        return summary
+
     # ---------------------------------------------------------------- worker
 
     def _worker(self, job: _EvalJob) -> None:
@@ -717,7 +822,13 @@ class ClosedEvalService:
 
     def _write_artifacts(self, job: _EvalJob, results: list[MovieResult],
                          status: str, error: str | None) -> None:
-        """终态写盘（worker 主线程）：meta.json + raw_results.json。"""
+        """终态写盘（worker 主线程）：meta.json → raw_results.json → 报告三件套。
+
+        写序非原子（meta 先行、报告最后）：读侧（history）对缺失/截断的
+        report.json 按「该 run 无报告」容错。报告口径用 job 携带的
+        gt/tag_universe（起跑时定格，run 中途换库不影响本 run）与终态
+        meta（banner/warning 需要终态 status/done/total/failed）。
+        """
         run_dir = Path(self.settings.eval_output_root) / job.run_id
         meta = dict(job.meta)
         meta.update({
@@ -736,6 +847,11 @@ class ClosedEvalService:
                 for r in results]
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)
+        report = assemble_report(results, job.gt, job.tag_universe,
+                                 job.meta.get("thetas") or DEFAULT_THETAS,
+                                 job.meta.get("ks") or DEFAULT_KS,
+                                 meta=meta)
+        write_report(run_dir, report)
 
     def _progress_path(self, run_id: str) -> str:
         return os.path.join(self.settings.eval_output_root, run_id,
@@ -767,3 +883,281 @@ class ClosedEvalService:
                 return run_id
         raise EvalValidationError(
             "run_id 生成重试 8 次仍撞名，请检查 eval_output_root")
+
+
+# ---------------------------------------------------------------- 报告组装与历史扫描
+
+# 部分运行口径（banner 文案；eval.md §4 同口径）
+BANNER_PARTIAL = "部分运行：指标仅覆盖完成影片，与全量口径不可直接横比"
+# 银标准警示（MovieTags README §6.5 同口径）：gt 是相关性模型输出非人工标注
+NOTE_SILVER = (
+    "银标准警示：genome relevance 是相关性模型输出，近似而非人工标注"
+    "（MovieTags README §6.5 同口径）——指标衡量的是系统与该模型口径的一致"
+    "性，不是与人工真理的一致；不同口径（LLM/嵌入/模板/标签库/数据集）的"
+    "分数不可跨组比较。")
+
+# metrics.csv 长表列（spec §8：Excel/后续分析消费）
+_CSV_HEADER = ("theta", "k", "metric", "macro", "ci_low", "ci_high",
+               "random_baseline")
+
+
+def _grid_rows(grid) -> list[dict]:
+    """ClosedReport.grid → report.json 格列表（CI 元组 → [lo, hi] 列表）。"""
+    def _ci(value):
+        return None if value is None else [value[0], value[1]]
+
+    return [{"theta": gp.theta, "k": gp.k, "n_valid": gp.n_valid,
+             "precision": gp.precision, "recall": gp.recall,
+             "ndcg": gp.ndcg,
+             "precision_ci": _ci(gp.precision_ci),
+             "recall_ci": _ci(gp.recall_ci), "ndcg_ci": _ci(gp.ndcg_ci),
+             "precision_random": gp.precision_random,
+             "recall_random": gp.recall_random}
+            for gp in grid]
+
+
+def _prior_ranking(gt: dict[str, dict[str, float]],
+                   tag_universe: Sequence[str]
+                   ) -> tuple[tuple[str, ...], dict[str, float]]:
+    """先验序：tag_universe 按 gt 全影片均值降序（并列 tag_id 字典序）。
+
+    均值用 gt **全表**（数据集全部影片，非仅选片/成功片——spec 决定清单
+    #7：先验基线衡量「不看电影只看先验」能到哪）。按「有分的影片」取
+    均值：genome 矩阵稠密无缺失，两种算法同数；稀疏 gt 里缺行 = 没评过
+    ，不是「不相关」（None≠0 的均值版）。universe ⊆ gt 标签集，均值分母
+    恒 ≥ 1。
+    """
+    means: dict[str, float] = {}
+    for tag in tag_universe:
+        values = [scores[tag] for scores in gt.values() if tag in scores]
+        means[tag] = sum(values) / len(values) if values else 0.0
+    order = tuple(sorted(tag_universe, key=lambda tag: (-means[tag], tag)))
+    return order, means
+
+
+def assemble_report(results: list[MovieResult],
+                    gt: dict[str, dict[str, float]],
+                    tag_universe: Sequence[str],
+                    thetas: Sequence[float],
+                    ks: Sequence[int], *, meta: dict) -> dict:
+    """干跑结果 → report.json 结构（前端 Task 7 契约，report.md 同数据）。
+
+    样本构造（spec §5/§7 钉死）：每部 ok 片一条 ClosedSample——
+
+    - `ranked` = 产出行中 tag_universe 内的条目，防御性再排
+      (-sf, tag_id)（produced 本已排好，但本函数是公共入口，不信任输入序）；
+      交集外产出条目剔除、计入 `sample_accounting.no_gt`（白给 precision /
+      冤枉 recall 都不要）；失败片 produced 已清空，只进 failed_movies；
+    - `relevance` = gt 影片向量限 tag_universe（空表 → evaluate_closed 记
+      invalid，不进任何平均）；
+    - `system_scores` = {tag_id: sf}（Spearman 里未产出的交集标签按 0 分
+      补位）。
+
+    先验基线（钉死）：先验序 = `_prior_ranking`，每部 ok 片用**同一
+    ranked** 构造先验样本、同机制喂 `evaluate_closed`——基线与系统吃完全
+    相同的指标管线，格值才可比。
+
+    banner / warning 语义：status != succeeded 或 done < total → 部分运行
+    banner（取消/中止/缩量跑都不可与全量横比）；失败率（failed/total）
+    > 10% → 小样本警示，否则 None。
+    """
+    universe = set(tag_universe)
+    n_failed = sum(1 for r in results if not r.ok)
+    no_gt = 0
+    samples: list[ClosedSample] = []
+    per_movie: list[dict] = []
+    for result in results:
+        if not result.ok:
+            continue
+        rows = [row for row in result.produced
+                if row.get("tag_id") in universe]
+        no_gt += len(result.produced) - len(rows)
+        rows.sort(key=lambda row: (-float(row.get("sf", 0.0)),
+                                   row["tag_id"]))
+        system_scores = {row["tag_id"]: float(row.get("sf", 0.0))
+                         for row in rows}
+        relevance = {tag: score for tag, score
+                     in gt.get(result.tt, {}).items() if tag in universe}
+        samples.append(ClosedSample(
+            ranked=tuple(row["tag_id"] for row in rows),
+            relevance=relevance, system_scores=system_scores,
+            label=result.tt))
+        if relevance:  # 无交集影片 Spearman 算不出，不入 per_movie
+            keys = sorted(relevance)
+            per_movie.append({"tt": result.tt, "spearman": spearman(
+                [system_scores.get(tag, 0.0) for tag in keys],
+                [relevance[tag] for tag in keys])})
+    closed = evaluate_closed(samples, thetas, ks)
+
+    prior_ranked, prior_means = _prior_ranking(gt, tag_universe)
+    prior_closed = evaluate_closed(
+        [ClosedSample(ranked=prior_ranked, relevance=s.relevance,
+                      system_scores={tag: prior_means[tag]
+                                     for tag in s.relevance},
+                      label=s.label)
+         for s in samples], thetas, ks)
+
+    total = meta.get("total")
+    if not isinstance(total, int):
+        total = len(results)
+    done = meta.get("done")
+    if not isinstance(done, int):
+        done = len(results)
+    banner = (None
+              if meta.get("status") == "succeeded" and done >= total
+              else BANNER_PARTIAL)
+    warning = None
+    if total and n_failed / total > 0.1:
+        warning = (f"失败率 {n_failed / total:.0%}（{n_failed}/{total}）超过"
+                   " 10%：成功样本少，指标波动大，勿单独引用；失败影片见"
+                   " failed_movies")
+    return {
+        "banner": banner,
+        "sample_accounting": {"total": total, "ok": len(samples),
+                              "failed": n_failed,
+                              "invalid": closed.n_invalid, "no_gt": no_gt},
+        "grid": _grid_rows(closed.grid),
+        "baselines": {"prior": _grid_rows(prior_closed.grid)},
+        "coverage": {"min": closed.coverage_min,
+                     "median": closed.coverage_median,
+                     "max": closed.coverage_max,
+                     "values": closed.coverage},
+        "spearman": {"macro": closed.spearman_macro, "per_movie": per_movie},
+        "failed_movies": [{"tt": r.tt, "error": r.error}
+                          for r in results if not r.ok],
+        "warning": warning,
+        "calibre": {
+            "llm_model": meta.get("llm_model", ""),
+            "embedding_model": meta.get("embedding_model", ""),
+            "prompt_version": (meta.get("prompt") or {}).get("version"),
+            "library_version": (meta.get("library") or {}).get("version"),
+            "dataset_id": (meta.get("dataset") or {}).get("id"),
+            "gt_sha8": (meta.get("dataset") or {}).get("gt_sha8"),
+        },
+        "note": NOTE_SILVER,
+    }
+
+
+def _fmt(value) -> str:
+    """md 数值格：None → 暂无（None≠0 纪律的报表侧），浮点保留三位。"""
+    return "暂无" if value is None else f"{value:.3f}"
+
+
+def _fmt_ci(ci) -> str:
+    """md 置信区间格：[lo, hi]；None → 暂无。"""
+    return "暂无" if not ci else f"[{ci[0]:.3f}, {ci[1]:.3f}]"
+
+
+def _fmt_cal(value) -> str:
+    """md 口径格：None / 空串 → 暂无，其余原样。"""
+    return "暂无" if value is None or value == "" else str(value)
+
+
+def render_report_md(report: dict) -> str:
+    """report dict → 人读 markdown（report.md，与 report.json 同数据）。
+
+    头部固定渲染 banner / warning（部分口径不藏在正文里）与口径三件套
+    （calibre）+ 银标准警示（note）；θ×K 网格与先验基线并排两张表，
+    覆盖率/Spearman/失败清单各一节。None 一律「暂无」。
+    """
+    lines: list[str] = ["# 闭环排序评测报告", ""]
+    if report.get("banner"):
+        lines += [f"> ⚠ {report['banner']}", ""]
+    if report.get("warning"):
+        lines += [f"> ⚠ {report['warning']}", ""]
+    acc = report["sample_accounting"]
+    lines += [
+        (f"样本核算：共 {acc['total']} 部——成功 {acc['ok']}、失败"
+         f" {acc['failed']}、无交集不可评 {acc['invalid']}；产出行落在"
+         f" 库∩gt 交集外 {acc['no_gt']} 条（不计分只计数）。"),
+        "",
+        "## θ×K 网格（宏平均 ± 95% 自举 CI）",
+        "",
+        "| θ | K | n | P@K | R@K | nDCG@K | 随机P | 随机R |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for g in report["grid"]:
+        lines.append(
+            f"| {g['theta']} | {g['k']} | {g['n_valid']} | "
+            f"{_fmt(g['precision'])} {_fmt_ci(g['precision_ci'])} | "
+            f"{_fmt(g['recall'])} {_fmt_ci(g['recall_ci'])} | "
+            f"{_fmt(g['ndcg'])} {_fmt_ci(g['ndcg_ci'])} | "
+            f"{_fmt(g['precision_random'])} | {_fmt(g['recall_random'])} |")
+    lines += [
+        "",
+        "## 先验基线（tag_universe 按 gt 全影片均值降序，同机制并排）",
+        "",
+        "| θ | K | n | P@K | R@K | nDCG@K |",
+        "|---|---|---|---|---|---|",
+    ]
+    for g in report["baselines"]["prior"]:
+        lines.append(
+            f"| {g['theta']} | {g['k']} | {g['n_valid']} | "
+            f"{_fmt(g['precision'])} | {_fmt(g['recall'])} | "
+            f"{_fmt(g['ndcg'])} |")
+    coverage = report["coverage"]
+    lines += [
+        "",
+        "## 覆盖率（产出行数 / 交集标签数）",
+        "",
+        (f"- min {_fmt(coverage['min'])} / 中位 {_fmt(coverage['median'])}"
+         f" / max {_fmt(coverage['max'])}"
+         f"（{len(coverage['values'])} 部有交集）——R@K 上限被产出行数封顶，"
+         "读召回必须同读覆盖率。"),
+        "",
+        "## Spearman 秩相关（系统分 vs gt 分，未产出交集标签按 0 分补位）",
+        "",
+        f"- 宏平均：{_fmt(report['spearman']['macro'])}",
+        "",
+        "| tt | Spearman |",
+        "|---|---|",
+    ]
+    for row in report["spearman"]["per_movie"]:
+        lines.append(f"| {row['tt']} | {_fmt(row['spearman'])} |")
+    if report["failed_movies"]:
+        lines += ["", f"## 失败影片（{len(report['failed_movies'])} 部）", "",
+                  "| tt | 错误 |", "|---|---|"]
+        for row in report["failed_movies"]:
+            lines.append(f"| {row['tt']} | {row['error']} |")
+    cal = report["calibre"]
+    lines += [
+        "",
+        "## 口径",
+        "",
+        (f"- LLM `{_fmt_cal(cal['llm_model'])}`；嵌入"
+         f" `{_fmt_cal(cal['embedding_model'])}`；prompt"
+         f" v{_fmt_cal(cal['prompt_version'])}；标签库"
+         f" v{_fmt_cal(cal['library_version'])}"),
+        (f"- 数据集 `{_fmt_cal(cal['dataset_id'])}`（gt sha8"
+         f" `{_fmt_cal(cal['gt_sha8'])}`）"),
+        "",
+        f"> {report['note']}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_report(run_dir: Path, report: dict) -> None:
+    """报告三件套落盘：report.json / report.md / metrics.csv。
+
+    长表行 `theta,k,metric,macro,ci_low,ci_high,random_baseline`（系统
+    网格；None → 空格，ndcg 无解析随机基线）。写序在 meta/raw 之后
+    （worker 终态序）；读侧（history）对缺失/截断的 report.json 容错。
+    """
+    _dump_json(run_dir / "report.json", report)
+    (run_dir / "report.md").write_text(render_report_md(report),
+                                       encoding="utf-8")
+    with open(run_dir / "metrics.csv", "w", encoding="utf-8",
+              newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(_CSV_HEADER)
+        for g in report["grid"]:
+            for metric, random_key in (("precision", "precision_random"),
+                                       ("recall", "recall_random"),
+                                       ("ndcg", None)):
+                ci = g.get(f"{metric}_ci")
+                writer.writerow([
+                    g["theta"], g["k"], metric, g[metric],
+                    ci[0] if ci else "", ci[1] if ci else "",
+                    g[random_key] if random_key else "",
+                ])

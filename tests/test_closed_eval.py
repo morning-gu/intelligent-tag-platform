@@ -14,7 +14,13 @@
    库∩gt 交集→busy）、每片 3 次尝试、完成序 5 连败中止、取消保留已完成
    片、终态 meta/raw_results + 增量 progress.jsonl 落盘、DB 零写入红线
    （Review Focus 3）。测试一律文件 DB（SQLite 文件库跨线程可见，
-   :memory: 每连接独立、工作线程看不到主线程数据）。
+   :memory: 每连接独立、工作线程看不到主线程数据）；
+6. **报告组装 + 历史扫描（Task 5）**——assemble_report 的格值与
+   `evaluate_closed` 直算同数（服务层只做样本构造）、先验基线钉死
+   （tag_universe 按 gt 全影片均值降序）、universe 过滤（交集外条目
+   不计分只计 no_gt）、部分运行 banner / 失败率警示、report 三件套
+   落盘、history 磁盘扫描 + interrupted 推断 + 读侧容错（Review
+   Focus 4/5）。
 """
 
 from __future__ import annotations
@@ -33,15 +39,20 @@ from tagplatform.closed_eval import (
     RETRY_PER_MOVIE,
     ClosedEvalService,
     EvalValidationError,
+    MovieResult,
     PRESET_SEED,
     PRESET_SIZE,
     RunBusyError,
+    assemble_report,
     load_gt,
     load_movie_content,
     movie_entries,
+    render_report_md,
     scan_datasets,
     select_movies,
+    write_report,
 )
+from tagplatform.eval.closed_ranking import ClosedSample, evaluate_closed
 from tagplatform.llm import MockLLMClient
 
 
@@ -456,3 +467,259 @@ def test_cancel_keeps_completed_results(eval_setup, root6):
     assert rows and rows[0]["ok"] is True and rows[0]["gt"]  # 已完成片保留
     meta = _read_meta(service, run_id)
     assert meta["status"] == "cancelled" and meta["done"] < meta["total"]
+
+
+# ---------------------------------------------------------------- 报告组装（Task 5）
+
+_GT2 = {
+    "m1": {"t1": 0.9, "t2": 0.5, "t3": 0.1},
+    "m2": {"t1": 0.2, "t2": 0.8, "t3": 0.6},
+    "m3": {"t5": 0.7},  # gt∩universe 为空 → invalid 样本
+}
+_UNIVERSE = ["t1", "t2", "t3"]
+
+
+def _movie(tt, produced, *, ok=True, error=None):
+    """手构 MovieResult（报告组装单测不需要服务/DB/LLM）。"""
+    return MovieResult(tt=tt, title=f"title-{tt}", ok=ok, error=error,
+                       produced=produced, elapsed_ms=1)
+
+
+def _prow(tag_id, sf):
+    """produced 行（五键契约；sf 可乱序——assemble 需防御性再排）。"""
+    return {"tag_id": tag_id, "tag_name": f"名-{tag_id}", "sf": sf,
+            "confidence": 0.5, "evidence_count": 1}
+
+
+def _meta(**extra):
+    base = {"status": "succeeded", "done": 3, "total": 3, "failed": 0}
+    base.update(extra)
+    return base
+
+
+def test_report_grid_matches_metrics_module():
+    # 同一批 MovieResult 喂 assemble_report，与手工构造 ClosedSample 喂
+    # evaluate_closed：格值必须同数（服务层只做样本构造，指标只属于指标模块）
+    results = [
+        _movie("m1", [_prow("t1", 0.9), _prow("t2", 0.5)]),
+        _movie("m2", [_prow("t2", 0.8), _prow("t1", 0.2), _prow("t3", 0.55)]),  # 乱序
+        _movie("m3", [_prow("t5", 0.8)]),  # t5 交集外 → no_gt；gt∩universe 空 → invalid
+    ]
+    report = assemble_report(results, _GT2, _UNIVERSE, (0.5,), (5,),
+                             meta=_meta())
+    samples = [
+        ClosedSample(ranked=("t1", "t2"), relevance=_GT2["m1"],
+                     system_scores={"t1": 0.9, "t2": 0.5}, label="m1"),
+        ClosedSample(ranked=("t2", "t3", "t1"), relevance=_GT2["m2"],
+                     system_scores={"t2": 0.8, "t1": 0.2, "t3": 0.55}, label="m2"),
+        ClosedSample(ranked=(), relevance={}, system_scores={}, label="m3"),
+    ]
+    expected = evaluate_closed(samples, thetas=(0.5,), ks=(5,))
+    cell = next(g for g in report["grid"]
+                if g["theta"] == 0.5 and g["k"] == 5)
+    exp = expected.grid[0]
+    assert cell["precision"] == pytest.approx(exp.precision)
+    assert cell["recall"] == pytest.approx(exp.recall)
+    assert cell["ndcg"] == pytest.approx(exp.ndcg)
+    assert cell["precision_random"] == pytest.approx(exp.precision_random)
+    assert cell["recall_random"] == pytest.approx(exp.recall_random)
+    # 聚合侧同口径：coverage/Spearman 与 ClosedReport 一致；核算含 invalid/no_gt
+    assert report["coverage"]["median"] == pytest.approx(expected.coverage_median)
+    assert report["spearman"]["macro"] == pytest.approx(expected.spearman_macro)
+    assert report["sample_accounting"] == {"total": 3, "ok": 3, "failed": 0,
+                                           "invalid": 1, "no_gt": 1}
+
+
+def test_prior_baseline_present():
+    # 先验序钉死：tag_universe 按 gt 全影片均值降序（并列 tag_id 字典序）。
+    # 均值（gt 全表）：t1=0.55、t2=0.65、t3=0.35 → 先验序 (t2, t1, t3)
+    results = [
+        _movie("m1", [_prow("t1", 0.9)]),
+        _movie("m2", [_prow("t3", 0.3)]),
+    ]
+    report = assemble_report(results, _GT2, _UNIVERSE, (0.5,), (5,),
+                             meta=_meta(done=2, total=2))
+    prior = report["baselines"]["prior"]
+    assert prior  # 非空：先验样本与系统同机制算出的完整网格
+    prior_samples = [
+        ClosedSample(ranked=("t2", "t1", "t3"), relevance=_GT2[m],
+                     system_scores={"t2": 0.65, "t1": 0.55, "t3": 0.35},
+                     label=m)
+        for m in ("m1", "m2")
+    ]
+    expected = evaluate_closed(prior_samples, thetas=(0.5,), ks=(5,))
+    cell = next(g for g in prior if g["theta"] == 0.5 and g["k"] == 5)
+    exp = expected.grid[0]
+    assert cell["precision"] == pytest.approx(exp.precision)
+    assert cell["recall"] == pytest.approx(exp.recall)
+    assert cell["ndcg"] == pytest.approx(exp.ndcg)
+
+
+def test_universe_filtering_no_gt_counted():  # spec §5 保护原则
+    # 产出行含 tag_universe 外的标签（且 sf 更高）：该行不进 ranked
+    # （P 值与"从未产出过它"完全相同——白给 precision/冤枉 recall 都不要），
+    # 只计入 sample_accounting.no_gt
+    with_outside = [_movie("m1", [_prow("tX", 0.95), _prow("t1", 0.9)])]
+    without = [_movie("m1", [_prow("t1", 0.9)])]
+    meta = _meta(done=1, total=1)
+    a = assemble_report(with_outside, _GT2, _UNIVERSE, (0.5,), (5,), meta=meta)
+    b = assemble_report(without, _GT2, _UNIVERSE, (0.5,), (5,), meta=meta)
+    assert a["sample_accounting"]["no_gt"] == 1
+    assert b["sample_accounting"]["no_gt"] == 0
+    assert a["grid"] == b["grid"]  # tX 不占 K 位、不进任何指标
+    assert a["coverage"] == b["coverage"]
+    assert a["spearman"] == b["spearman"]
+
+
+def test_partial_run_banner():  # Review Focus 5
+    results = [_movie("m1", [_prow("t1", 0.9)])]
+    cancelled = assemble_report(results, _GT2, _UNIVERSE, (0.5,), (5,),
+                                meta=_meta(status="cancelled", done=1, total=2))
+    assert cancelled["banner"] is not None and "部分运行" in cancelled["banner"]
+    # 样本核算响亮：成功 1 / 总 2（不允许悄悄缩水）
+    acc = cancelled["sample_accounting"]
+    assert acc["ok"] < acc["total"] and (acc["total"], acc["ok"]) == (2, 1)
+    # succeeded 但 done<total（取消/中止后仍有未跑余量）同样不可横比
+    shrank = assemble_report(results, _GT2, _UNIVERSE, (0.5,), (5,),
+                             meta=_meta(done=1, total=2))
+    assert shrank["banner"] is not None
+    # 全量成功 → 无 banner
+    full = assemble_report([_movie("m1", [_prow("t1", 0.9)]),
+                            _movie("m2", [_prow("t2", 0.8)])],
+                           _GT2, _UNIVERSE, (0.5,), (5,),
+                           meta=_meta(done=2, total=2))
+    assert full["banner"] is None
+
+
+def test_failure_rate_warning():
+    gt10 = {f"m{i}": dict(_GT2["m1"]) for i in range(10)}
+    results = ([_movie(f"m{i}", [_prow("t1", 0.9)]) for i in range(8)]
+               + [_movie("m8", [], ok=False, error="RuntimeError: 注入甲"),
+                  _movie("m9", [], ok=False, error="RuntimeError: 注入乙")])
+    report = assemble_report(results, gt10, _UNIVERSE, (0.5,), (5,),
+                             meta=_meta(done=10, total=10, failed=2))
+    assert report["warning"] is not None  # 2/10 = 20% > 10%
+    assert report["failed_movies"] == [
+        {"tt": "m8", "error": "RuntimeError: 注入甲"},
+        {"tt": "m9", "error": "RuntimeError: 注入乙"}]
+    clean = assemble_report(results[:8], gt10, _UNIVERSE, (0.5,), (5,),
+                            meta=_meta(done=8, total=8))
+    assert clean["warning"] is None and clean["failed_movies"] == []
+
+
+def test_report_md_and_csv_written(tmp_path):
+    results = [_movie("m1", [_prow("t1", 0.9), _prow("t2", 0.5)]),
+               _movie("m2", [_prow("t2", 0.8), _prow("t3", 0.55)])]
+    meta = {"status": "succeeded", "done": 2, "total": 2, "failed": 0,
+            "llm_model": "mock-1", "embedding_model": "mock",
+            "prompt": {"mode": "closed", "version": 1},
+            "library": {"version": 7, "n_dirs": 1, "n_tags": 4},
+            "dataset": {"id": "emotion", "gt_sha8": "abcd1234"}}
+    report = assemble_report(results, _GT2, _UNIVERSE, (0.5,), (5,), meta=meta)
+    assert report["calibre"] == {"llm_model": "mock-1",
+                                 "embedding_model": "mock",
+                                 "prompt_version": 1, "library_version": 7,
+                                 "dataset_id": "emotion", "gt_sha8": "abcd1234"}
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    write_report(run_dir, report)
+    assert all((run_dir / name).exists()
+               for name in ("report.json", "report.md", "metrics.csv"))
+    md = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert md == render_report_md(report)
+    assert "| θ |" in md and "银标准" in md and "mock-1" in md
+    lines = (run_dir / "metrics.csv").read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "theta,k,metric,macro,ci_low,ci_high,random_baseline"
+    assert len(lines) - 1 == 3  # 格数（θ1×K1）× 指标数（P/R/nDCG）
+    assert {line.split(",")[2] for line in lines[1:]} == {
+        "precision", "recall", "ndcg"}
+
+
+# ---------------------------------------------------------------- 历史扫描（Task 5）
+
+def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
+    out = Path(svc.settings.eval_output_root)
+    assert svc.history() == []  # 输出根不存在 → []
+    # run-old：终态 + 报告齐全（θ=0.4 的 K=10/20 摘要档都在）
+    old = out / "run-old"
+    old.mkdir(parents=True)
+    (old / "meta.json").write_text(json.dumps({
+        "run_id": "run-old", "status": "succeeded", "done": 2, "total": 2,
+        "failed": 0, "started_at": "2026-11-19T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (old / "report.json").write_text(json.dumps({
+        "grid": [
+            {"theta": 0.4, "k": 10, "n_valid": 2, "precision": 0.5,
+             "recall": 0.6, "ndcg": 0.7, "precision_random": 0.2,
+             "recall_random": 0.4},
+            {"theta": 0.4, "k": 20, "n_valid": 2, "precision": 0.4,
+             "recall": 0.5, "ndcg": 0.6, "precision_random": 0.2,
+             "recall_random": 0.9},
+        ],
+        "coverage": {"min": 0.1, "median": 0.8, "max": 0.9,
+                     "values": [0.8]},
+    }, ensure_ascii=False), encoding="utf-8")
+    # run-new：meta 残留 running 且不在进程内注册表 → interrupted
+    new = out / "run-new"
+    new.mkdir()
+    (new / "meta.json").write_text(json.dumps({
+        "run_id": "run-new", "status": "running", "done": 1, "total": 3,
+        "failed": 0, "started_at": "2026-11-20T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    # run-wrongtheta：报告只有 θ=0.6 档 → 摘要无该档 → None（覆盖率照读）
+    wrong = out / "run-wrongtheta"
+    wrong.mkdir()
+    (wrong / "meta.json").write_text(json.dumps({
+        "run_id": "run-wrongtheta", "status": "succeeded", "done": 1,
+        "total": 1, "failed": 0, "started_at": "2026-11-18T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (wrong / "report.json").write_text(json.dumps({
+        "grid": [{"theta": 0.6, "k": 10, "precision": 0.9, "recall": 0.9,
+                  "ndcg": 0.9}],
+        "coverage": {"median": 0.5}}, ensure_ascii=False), encoding="utf-8")
+    # run-trunc：report.json 截断（meta→raw→report 写序的非原子窗口）
+    # → 按"该 run 无报告"处理，不抛异常
+    trunc = out / "run-trunc"
+    trunc.mkdir()
+    (trunc / "meta.json").write_text(json.dumps({
+        "run_id": "run-trunc", "status": "succeeded", "done": 1, "total": 1,
+        "failed": 0, "started_at": "2026-11-17T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (trunc / "report.json").write_text('{"grid": [ 截断', encoding="utf-8")
+
+    rows = svc.history()
+    # started_at 降序；状态推断与摘要容错一次钉死
+    assert [r["run_id"] for r in rows] == ["run-new", "run-old",
+                                           "run-wrongtheta", "run-trunc"]
+    assert rows[0]["status"] == "interrupted"
+    assert rows[0]["ndcg10"] is None and rows[0]["r20"] is None
+    assert rows[1]["status"] == "succeeded"
+    assert (rows[1]["ndcg10"], rows[1]["p10"], rows[1]["r20"],
+            rows[1]["coverage_median"]) == (0.7, 0.5, 0.5, 0.8)
+    assert rows[2]["ndcg10"] is None and rows[2]["p10"] is None
+    assert rows[2]["coverage_median"] == 0.5  # 覆盖率与 θ 无关，照常读出
+    assert rows[3]["ndcg10"] is None and rows[3]["coverage_median"] is None
+    assert all(r["dataset_id"] == "emotion" for r in rows)
+
+
+def test_service_end_to_end_writes_report(svc, root):
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    d = _run_dir(svc, run_id)
+    report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+    # 前端契约键齐全（Task 7 消费）
+    assert {"banner", "sample_accounting", "grid", "baselines", "coverage",
+            "spearman", "failed_movies", "warning", "calibre", "note"} \
+        <= set(report)
+    assert report["banner"] is None and report["warning"] is None
+    assert report["sample_accounting"]["total"] == 2
+    assert report["sample_accounting"]["ok"] == 2
+    assert report["sample_accounting"]["no_gt"] == 0  # 库标签全在 gt 内
+    assert report["baselines"]["prior"]  # 先验基线随 run 落盘
+    assert report["calibre"]["llm_model"] == "mock-1"
+    assert report["calibre"]["dataset_id"] == "emotion"
+    assert len(report["calibre"]["gt_sha8"]) == 8
+    assert "银标准" in report["note"]
+    assert (d / "report.md").exists() and (d / "metrics.csv").exists()
+    # 历史扫描随即能看到该 run（含 θ=0.4、K=10 摘要档）
+    mine = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert mine["status"] == "succeeded" and mine["ndcg10"] is not None
