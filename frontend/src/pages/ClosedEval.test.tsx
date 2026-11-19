@@ -4,7 +4,8 @@
 // 留空不携带走服务端默认网格、并发默认 4、custom 选片 ids）、活跃 run 的
 // 起跑禁用+提示（挂载从历史发现 running 行 → getRun 接管轮询——Review
 // Focus 6 的前端半边）、取消按钮调 cancelRun、2s 轮询推进 running→succeeded
-// （终态清定时器+刷新历史+起跑恢复）、卸载清定时器、行点击取报告（404 毫秒
+// 与 running→failed（终态清定时器+刷新历史+起跑恢复；failed 是后端第五终态
+// worker 兜底）、卸载清定时器、行点击取报告（404 毫秒
 // 级窗口优雅提示不崩页面/成功渲染 Task 9 报告视图）、数据集加载失败提示。
 // 轮询用例以 vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
 // 只伪造 interval（setTimeout/Date/rAF 保持真实——antd 渲染与 RTL waitFor
@@ -160,6 +161,28 @@ const SUCCEEDED_STATUS: RunStatus = {
   status: 'succeeded',
   done: 30,
   failed: 2,
+}
+
+/** getRun 的 failed 终态快照（worker 收敛异常兜底态，closed_eval.py:692——
+ * 后端第五终态，轮询必须同样收束）。 */
+const FAILED_STATUS: RunStatus = {
+  ...RUNNING_STATUS,
+  status: 'failed',
+  done: 12,
+  error: 'RuntimeError: 收敛循环异常',
+}
+
+/** failed 终态的历史摘要行（终态刷新后进入历史表，done=14 与 cancelled 行
+ * 的 12/30 区分定位）。 */
+const FAILED_SUMMARY: RunSummary = {
+  ...RUNNING_SUMMARY,
+  status: 'failed',
+  done: 14,
+  error: 'RuntimeError: 收敛循环异常',
+  ndcg10: null,
+  p10: null,
+  r20: null,
+  coverage_median: null,
 }
 
 /** getReport 成功夹具（与后端 report.json 组装结构同形，banner/warning 无）。 */
@@ -395,6 +418,47 @@ describe('ClosedEval 闭环评测页', () => {
       expect(screen.queryByText(/已完成\s*8\s*\/\s*30/)).not.toBeInTheDocument()
       expect(mockedListRuns).toHaveBeenCalledTimes(2)
       expect(screen.getByRole('button', { name: /起\s*跑/ })).not.toBeDisabled()
+
+      // 终态后定时器已清：继续推进不产生新轮询
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000)
+      })
+      expect(mockedGetRun).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('轮询收到 failed 终态（worker 兜底第五终态）：停止轮询、渲染「已失败」、起跑恢复', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      mockIdleApis()
+      mockedStartRun.mockResolvedValue({ run_id: RUNNING_STATUS.run_id })
+      mockedGetRun.mockResolvedValueOnce(RUNNING_STATUS).mockResolvedValue(FAILED_STATUS)
+      render(<ClosedEval />)
+      await screen.findByText('2026-11-19 10:00:00')
+
+      await selectDataset('genome-scores（交集 83）')
+      fireEvent.click(screen.getByRole('button', { name: /起\s*跑/ }))
+
+      // 受理后立即首拉（running）→ 进行中卡片
+      await waitFor(() => expect(mockedGetRun).toHaveBeenCalledTimes(1))
+      expect(await screen.findByText(/已完成\s*8\s*\/\s*30/)).toBeInTheDocument()
+
+      // 终态刷新的历史补一行 failed 摘要（挂载那次已消费默认桩，Once 供终态刷新）
+      mockedListRuns.mockResolvedValueOnce([...RUNS_HISTORY, FAILED_SUMMARY])
+
+      // 2s tick → failed 终态：卡片收起、起跑恢复
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(mockedGetRun).toHaveBeenCalledTimes(2)
+      expect(screen.queryByText(/已完成\s*8\s*\/\s*30/)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /起\s*跑/ })).not.toBeDisabled()
+
+      // 历史表渲染「已失败」Tag（中文文案而非英文原文）
+      const failedRow = screen.getByText('已失败').closest('tr')!
+      expect(failedRow).toHaveTextContent('14/30')
 
       // 终态后定时器已清：继续推进不产生新轮询
       await act(async () => {

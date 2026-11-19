@@ -57,8 +57,15 @@ import ClosedEvalReportView from '../components/ClosedEvalReport'
 const POLL_INTERVAL_MS = 2000
 
 /** run 终态集合（后端状态机：running → succeeded | cancelled | aborted |
- * interrupted；interrupted 是磁盘推断的进程死亡态）。 */
-const TERMINAL_STATUSES = new Set(['succeeded', 'cancelled', 'aborted', 'interrupted'])
+ * interrupted | failed——interrupted 是磁盘推断的进程死亡态，failed 是
+ * worker 收敛异常/起跑失败的兜底终态，closed_eval.py:692/:571）。 */
+const TERMINAL_STATUSES = new Set([
+  'succeeded',
+  'cancelled',
+  'aborted',
+  'interrupted',
+  'failed',
+])
 
 /** run 状态中文文案（键集与后端状态机一致）。 */
 const STATUS_LABELS: Record<string, string> = {
@@ -67,16 +74,18 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: '已取消',
   aborted: '已中止',
   interrupted: '已中断',
+  failed: '已失败',
 }
 
 /** run 状态 Tag 颜色（running 蓝/succeeded 绿/cancelled 橙/aborted 红/
- * interrupted 灰）。 */
+ * interrupted 灰/failed 橙红——与 aborted 同族红系）。 */
 const STATUS_COLORS: Record<string, string> = {
   running: 'blue',
   succeeded: 'green',
   cancelled: 'orange',
   aborted: 'red',
   interrupted: 'default',
+  failed: 'volcano',
 }
 
 /** 表单值：dataset 必选；movieMode 三态；ids 仅 custom 需要；θ/K 是原始
