@@ -6,7 +6,7 @@
 
 清洗规则（与提示词契约对齐）：
 - 生成项：tag 去空白后非空且 ≤20 字；dimension 归一成五维中文名（未知或无
-  则 None，交给合并层统计）；scenes 只留字符串；reason 截断 40 字。
+  则 None，交给合并层统计）；scenes 只留字符串；reason 去首尾空白后完整保留。
 - 审核项：verdict 只认 supported/insufficient/contradicted（其余按
   insufficient 处理——保守，不放行）；confidence 夹到 [0,1]；importance 只认
   三档，未知按 secondary；scenes 只留字符串。
@@ -74,6 +74,8 @@ def extract_json_array(text: str) -> list:
         except json.JSONDecodeError as exc:
             raise MTGParseError(f"JSON 数组解析失败: {exc}") from None
     if isinstance(data, dict):
+        if data.get("tags") == []:
+            return []
         # 容错一：{"tags": [...]} / {"verdicts": [...]} 或更深一层包装
         found = _find_items(data)
         if found is not None:
@@ -114,8 +116,10 @@ def normalize_scope(value) -> str | None:
     return _SCOPE_ALIASES.get(value.strip().lower())
 
 
-def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
+def parse_generation_items(text: str, max_items: int | None = 20) -> list[dict]:
     """生成输出 → [{tag, scope, dimension, dir, scenes, reason, desc}]（非法项丢弃）。"""
+    if max_items is not None and max_items <= 0:
+        return []
     items: list[dict] = []
     seen: set[str] = set()
     for entry in extract_json_array(text):
@@ -128,8 +132,9 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        scenes = [s.strip() for s in entry.get("scenes") or []
-                  if isinstance(s, str) and s.strip()]
+        raw_scenes = entry.get("scenes")
+        scenes = [s.strip() for s in raw_scenes if isinstance(s, str) and s.strip()] \
+            if isinstance(raw_scenes, list) else []
         reason = str(entry.get("reason") or "").strip()
         items.append({
             "tag": tag,
@@ -140,12 +145,12 @@ def parse_generation_items(text: str, max_items: int = 20) -> list[dict]:
             "dir": _clean_dir(entry.get("dir") or entry.get("dir_id")
                               or entry.get("catalog_id")),
             "scenes": scenes,
-            "reason": reason[:40],
+            "reason": reason,
             # 通用释义（旧口径里模型只给 reason；这里兼容 description 字段，
             # 是否"够通用"由 descriptions.is_general 判定，不在解析层猜）
             "desc": str(entry.get("desc") or entry.get("definition") or "").strip(),
         })
-        if len(items) >= max_items:
+        if max_items is not None and len(items) >= max_items:
             break
     return items
 

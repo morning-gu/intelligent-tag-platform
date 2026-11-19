@@ -6,12 +6,11 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v3`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v5-scene-context`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部判 supported、confidence=0.9；`MOCK_EMBEDDER`
-是哈希伪向量，不同标签近似正交，所以语义合并不额外合并——跨轮合并靠
-归一化去重（同一标签三轮出现 → runs=3）。
+是哈希伪向量，不同标签近似正交，所以语义合并不额外合并——归一化去重负责合并同名词。
 """
 
 import json
@@ -130,11 +129,11 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v3"
+    assert producer.prompt_version == "mtg-v5-scene-context"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
-    """三轮同名候选 → 合并成 3 条 → judge 全过 → 3 条 generated 带证据。"""
+    """单场资产只生成场景级标签，judge 全过后输出带证据的候选。"""
     spec = _build_spec(session, content_fixture, run_id="r1")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
@@ -146,11 +145,12 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
     scene_ids = {s.scene_id for s in content_fixture.content.scenes}
     assert all(e.scene_id in scene_ids for t in out for e in t.evidence)
 
-    # 审计报告：三轮、合并 runs=3、judge 判决齐全
+    # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v3"
-    assert len(report["runs"]) == 3
-    assert {m["runs"] for m in report["merged"]} == {3}
+    assert report["version"] == "mtg-v5-scene-context"
+    assert [run["scope"] for run in report["runs"]] == ["scene"]
+    assert {m["runs"] for m in report["merged"]} == {1}
+    assert {tag.level for tag in out} == {"scene"}
     assert len(report["accepted"]) == 3
 
 
@@ -233,8 +233,8 @@ def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
         assert len(out) == 3
 
 
-def test_open_evidence_prefers_judge_scenes(session, content_fixture, mtg_settings):
-    """judge 给了场景就只用它，不并生成侧场景（证据卡只留判定依据）。"""
+def test_open_scene_evidence_stays_with_source(session, content_fixture, mtg_settings):
+    """场景级标签只挂原候选的证据场景。"""
     content = _scene_content(content_fixture, "tt0000003", 2)
     generated = _FixedGenLLM([{
         "tag": "多线叙事", "dimension": "叙事",
@@ -247,7 +247,7 @@ def test_open_evidence_prefers_judge_scenes(session, content_fixture, mtg_settin
         spec, session, generated, MOCK_EMBEDDER,
         judge_client=_JudgeClient(scenes=["tt0000003_story_001"]))
     assert len(out) == 1
-    assert [e.scene_id for e in out[0].evidence] == ["tt0000003_story_001"]
+    assert [e.scene_id for e in out[0].evidence] == ["tt0000003_story_000"]
 
 
 def test_open_without_valid_evidence_dropped(session, content_fixture, mtg_settings):
@@ -307,6 +307,66 @@ def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings
     assert names == {"开场旁白", "家族权力更迭"}
     levels = {tag.tag_name: tag.level for tag in out}
     assert levels == {"开场旁白": "scene", "家族权力更迭": "film"}
+
+
+def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
+        session, content_fixture, mtg_settings, tmp_path, monkeypatch):
+    content = _scene_content(content_fixture, "tt0000018", 3)
+    for index, scene in enumerate(content.content.scenes):
+        scene.description = f"仅属于场景{index}的独立识别文字"
+    scenes = content.content.scenes
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"test frame")
+    monkeypatch.setattr(keyframes_mod, "plan_scene_frames",
+                        lambda *args, **kwargs: {scenes[0].scene_id: (frame,)})
+    spec = _build_spec(session, content, "two-rounds", GenerationPolicy(max_tags=3))
+    calls = []
+
+    class TwoRoundLLM:
+        def complete(self, messages, run_id):
+            parts = messages[0]["content"]
+            text = parts[0]["text"]
+            calls.append(run_id)
+            if run_id.endswith(":film"):
+                assert content.asset.title in text
+                assert all(scene.description in text for scene in scenes)
+                context = json.loads(text.split("## 第一轮逐场候选\n")[1])
+                assert [item["scene_id"] for item in context] == [s.scene_id for s in scenes]
+                assert [len(item["tags"]) for item in context] == [1, 1, 0]
+                assert context[0]["tags"][0]["tag"] == "开场冲突"
+                assert context[0]["tags"][0]["reason"] == "场景理由"
+                assert "最多 2 条" in parts[-1]["text"]
+                items = [
+                    {"tag": "伪跨场", "scope": "film", "scenes": [scenes[0].scene_id, "ghost"]},
+                    *[{"tag": tag, "scope": "film", "scenes": [s.scene_id for s in scenes]}
+                      for tag in ("秩序崩解", "人物蜕变", "超出预算")],
+                ]
+            elif ":scene-" in run_id:
+                index = int(run_id.rsplit("-", 1)[1]) - 1
+                assert scenes[index].description in text
+                assert content.asset.title in text
+                assert content.content.summary in text
+                assert all(s.description not in text for s in scenes if s != scenes[index])
+                assert sum(p["type"] == "image_url" for p in parts) == (1 if index == 0 else 0)
+                assert "最多 1 条" in parts[-1]["text"]
+                tags = ["开场冲突", "孤立处境"]
+                items = ([{"tag": "错场景", "scope": "scene", "scenes": ["ghost"]},
+                          {"tag": tags[index], "scope": "scene",
+                           "scenes": [scenes[index].scene_id], "reason": "场景理由"}]
+                         if index < 2 else [])
+            else:
+                return MOCK_LLM.complete(messages, run_id)
+            return LLMResponse(content=json.dumps({"tags": items}), usage={}, raw={}, ok=True)
+
+    out = OpenTagProducer().produce(spec, session, TwoRoundLLM(), MOCK_EMBEDDER,
+                                    judge_client=_JudgeClient())
+    assert [call.rsplit(":", 1)[1] for call in calls[:4]] == [
+        "scene-001", "scene-002", "scene-003", "film"]
+    assert [(tag.tag_name, tag.level) for tag in out] == [
+        ("秩序崩解", "film"), ("人物蜕变", "film"), ("开场冲突", "scene")]
+    report = json.loads((tmp_path / "audit" / "t-two-rounds.json").read_text(encoding="utf-8"))
+    assert [(run["scope"], run["calls"], run["items"]) for run in report["runs"]] == [
+        ("scene", 3, 2), ("film", 1, 2)]
 
 
 # ---- 队列治理：judge 引用原文 + 重要度排序 ----

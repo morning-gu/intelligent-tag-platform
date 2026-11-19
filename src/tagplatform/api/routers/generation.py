@@ -28,19 +28,25 @@ queued（提交受理语义），实际终态经 GET 查询。
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy.orm import Session
 
-from tagplatform.api import get_executor, get_session
+from tagplatform.api import get_executor, get_quality_executor, get_session
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.eval.tag_quality import DEFAULT_MODEL
 from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.generation import list_producers
 from tagplatform.tasks import TaskExecutor
+from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry
 
 router = APIRouter(prefix="/api/v1")
+QualityModelId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+]
 
 
 # ---------- 响应模型 ----------
@@ -65,6 +71,11 @@ class GenerationTaskCreateRequest(BaseModel):
     asset_ids: list[str] = Field(min_length=1)
     mode: str
     policy: GenerationPolicyIn | None = None
+    quality_model: QualityModelId = DEFAULT_MODEL
+
+
+class QualityRetryRequest(BaseModel):
+    model: QualityModelId | None = None
 
 
 class GenerationTaskItemOut(BaseModel):
@@ -132,6 +143,7 @@ class GenerationTaskDetail(GenerationTaskOut):
     """任务详情：在列表字段之上附该任务全部结果摘要行。"""
 
     results: list[GenerationResultOut]
+    quality_evaluation: QualityReport
 
 
 class GenerationTaskRetryResponse(BaseModel):
@@ -338,6 +350,7 @@ def create_generation_tasks(
         assets.append(asset)
 
     now = datetime.now(timezone.utc)
+    batch_id = f"batch_{uuid.uuid4().hex}"
     # 策略序列化持久化（执行器按 JSON 解析 GenerationPolicy）；未传则
     # policy_json 置空，执行器回退默认策略（缺省值与 GenerationPolicyIn 一致）
     policy_json = body.policy.model_dump_json() if body.policy is not None else None
@@ -347,6 +360,8 @@ def create_generation_tasks(
             task_id=f"gen_{uuid.uuid4().hex[:12]}",
             asset_id=asset.asset_id,
             mode=body.mode,
+            batch_id=batch_id,
+            quality_model=body.quality_model,
             policy_json=policy_json,
             status="queued",
             created_at=now,
@@ -355,8 +370,7 @@ def create_generation_tasks(
         created.append(task)
     session.commit()
 
-    for task in created:
-        executor.submit(task.task_id)
+    executor.submit_batch([task.task_id for task in created], mode=body.mode)
 
     # 重读执行状态（expire_on_commit=False 下对象属性不含线程内写入，须 refresh）
     items = []
@@ -431,7 +445,24 @@ def get_generation_task(
         created_at=task.created_at,
         finished_at=task.finished_at,
         results=[_result_out(row, info) for row in rows],
+        quality_evaluation=quality_report(session, task),
     )
+
+
+@router.post("/generation/tasks/{task_id}/quality/retry",
+             response_model=GenerationTaskRetryResponse)
+def retry_quality_evaluation(
+    task_id: str,
+    body: QualityRetryRequest | None = None,
+    session: Session = Depends(get_session),
+    executor: QualityExecutor = Depends(get_quality_executor),
+) -> GenerationTaskRetryResponse:
+    if session.get(TagGenerationTask, task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
+    if not queue_retry(session, task_id, body.model if body else None):
+        raise HTTPException(status_code=409, detail="仅失败或部分完成的影片评估可重试")
+    executor.submit(task_id)
+    return GenerationTaskRetryResponse(task_id=task_id, status="queued")
 
 
 @router.post("/generation/tasks/{task_id}/retry",
@@ -453,7 +484,7 @@ def retry_generation_task(
     task.error = None
     task.finished_at = None
     session.commit()
-    executor.submit(task_id)
+    executor.submit_batch([task_id], mode=task.mode)
     return GenerationTaskRetryResponse(task_id=task_id, status="queued")
 
 

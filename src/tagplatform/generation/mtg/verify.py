@@ -33,8 +33,24 @@ logger = logging.getLogger(__name__)
 
 def build_verify_messages(pairs: list[tuple[str, str, float]]) -> list[dict]:
     """构造复核请求：每行一对（候选｜库标签｜相似度）。"""
-    lines = "\n".join(f"- {cand}｜{lib}｜{cos:.2f}"
-                      for cand, lib, cos in pairs[:_MAX_PAIRS])
+    lines = "\n".join(_pair_line(candidate, library, f"{cosine:.2f}")
+                      for candidate, library, cosine in pairs[:_MAX_PAIRS])
+    return _verify_messages(lines)
+
+
+def build_verify_template() -> dict:
+    return {
+        "messages": _verify_messages(_pair_line(
+            "{{候选标签}}", "{{库内标签}}", "{{余弦相似度，两位小数}}")),
+        "retry_suffix": _RETRY_HINT,
+    }
+
+
+def _pair_line(candidate: str, library: str, score: str) -> str:
+    return f"- {candidate}｜{library}｜{score}"
+
+
+def _verify_messages(lines: str) -> list[dict]:
     text = (
         f"{VERIFY_MARKER}\n"
         "下面每行是一组「候选标签｜已有标签｜相似度」。\n"

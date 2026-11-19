@@ -67,7 +67,8 @@ def test_local_prefixes_texts_per_role(monkeypatch):
     encoded: list[list[str]] = []
 
     class _FakeModel:
-        def __init__(self, name, device="cpu"):
+        def __init__(self, name, device="cpu", *, local_files_only: bool):
+            assert local_files_only is True
             self.loaded = (name, device)
 
         def encode(self, texts, convert_to_numpy=True,
@@ -105,7 +106,8 @@ def test_local_plain_models_get_no_prefix(monkeypatch):
     encoded: list[list[str]] = []
 
     class _FakeModel:
-        def __init__(self, name, device="cpu"):
+        def __init__(self, name, device="cpu", *, local_files_only: bool):
+            assert local_files_only is True
             self.name = name
 
         def encode(self, texts, convert_to_numpy=True,

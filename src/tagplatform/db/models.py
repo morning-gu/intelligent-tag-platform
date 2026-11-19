@@ -9,6 +9,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     REAL,
     Boolean,
     CheckConstraint,
@@ -174,6 +175,7 @@ class TagGenerationTask(Base):
         ),
         Index("idx_gen_task_asset", "asset_id"),
         Index("idx_gen_task_status", "status"),
+        Index("idx_gen_task_batch", "batch_id"),
     )
 
     task_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -190,6 +192,34 @@ class TagGenerationTask(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    batch_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TagQualityEvaluation(Base):
+    """一次影片生成分流的快照与独立评估结果。"""
+
+    __tablename__ = "tag_quality_evaluation"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'partial', 'failed', 'not_needed')",
+            name="ck_tag_quality_status",
+        ),
+        Index("idx_tag_quality_status", "status"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tag_generation_task.task_id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    labels: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    scores: Mapped[dict] = mapped_column(JSON, nullable=False)
+    content_json: Mapped[str | None] = mapped_column(Text, nullable=True, deferred=True)
+    frame_paths: Mapped[dict] = mapped_column(JSON, nullable=False, deferred=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PreAssetTag(Base):

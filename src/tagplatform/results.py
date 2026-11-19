@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import delete
@@ -47,6 +47,9 @@ class PersistSummary:
     auto_approved: int = 0
     # 自动通过同时写进 asset_tag 的挂载行数（人工审核那条路在 review 服务里写）
     mounted: int = 0
+    inserted_tags: list[tuple[PreAssetTag, ProducedTag]] = field(
+        default_factory=list, compare=False, repr=False,
+    )
 
 
 def _mount_asset_tag(session: Session, *, asset_id: str, target_type: str,
@@ -180,7 +183,7 @@ def persist_tags(
             summary.skipped_finalized += 1
             continue
 
-        session.add(PreAssetTag(
+        row = PreAssetTag(
             asset_id=asset_id,
             target_type=target_type,
             target_id=target_id,
@@ -195,7 +198,9 @@ def persist_tags(
             created_at=now,
             updated_at=now,
             **values,
-        ))
+        )
+        session.add(row)
+        summary.inserted_tags.append((row, tag))
         summary.inserted += 1
         if status == "approved":
             summary.auto_approved += 1

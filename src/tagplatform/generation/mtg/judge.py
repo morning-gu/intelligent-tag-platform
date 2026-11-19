@@ -17,7 +17,9 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 from __future__ import annotations
 
 from tagplatform.generation.mtg.parse import MTGParseError, parse_judge_items
-from tagplatform.generation.mtg.prompts import build_judge_messages
+from tagplatform.generation.mtg.prompts import (
+    build_judge_messages, candidate_line, render_judge_messages,
+)
 from tagplatform.schemas import ContentJSON
 
 _RETRY_HINT = (
@@ -26,6 +28,14 @@ _RETRY_HINT = (
     '"confidence":0.9,"scenes":["scene_id"],"reason":"依据"}。'
     "不要用对象包装、不要任何解释文字或 Markdown 代码块。"
 )
+
+
+def build_judge_template() -> dict:
+    line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
+    return {
+        "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line),
+        "retry_suffix": _RETRY_HINT,
+    }
 
 
 class JudgeError(RuntimeError):
@@ -62,6 +72,7 @@ def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
 
 def judge_candidates(client, content: ContentJSON, candidates: list[dict],
                      *, run_id: str, retries: int = 1,
+                     include_dialogue: bool = True,
                      usage: dict | None = None) -> dict[str, dict]:
     """候选 → {归一化标签名: 判决 dict}（未返回的候选由上层按未判处理）。
 
@@ -69,7 +80,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
     """
     if not candidates:
         return {}
-    messages = build_judge_messages(content, candidates)
+    messages = build_judge_messages(content, candidates, include_dialogue=include_dialogue)
     last_error: Exception | None = None
     last_raw = ""
     for attempt in range(retries + 1):

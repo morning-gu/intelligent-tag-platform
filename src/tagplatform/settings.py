@@ -105,8 +105,6 @@ class Settings(BaseSettings):
     asset_infer: bool = True
 
     # ---------- 阶段 6：MovieTagGen 移植的开放式生成（2026-11） ----------
-    # 生成轮数（跨轮并集，1 = 单轮）；轮数越高覆盖越好、成本线性上涨
-    mtg_runs: int = 3
     # 喂给模型的输入模态（逗号分隔）：video=关键帧 / script=场景文本 /
     # dialogue=台词。默认三种全开（full）；关掉某项即对应消融变体，其余
     # 参数不动——这是 `eval/ablation.py` 的前提，别在这里顺手改别的默认值。
@@ -118,7 +116,7 @@ class Settings(BaseSettings):
     # 反推：同一批候选里 e5≥0.90 有 31 对，BGE-M3 上对应 0.75（13 对）——
     # 刻意偏保守，宁可留两条相似候选让人看，也不要把不同的词合掉。
     mtg_merge_threshold: float = 0.75
-    # 单轮输出上限（模型被要求 15-20 个，这里兜底截断）
+    # 生成预算上限，用于计算给全片综合轮的候选数（兼容已有环境变量）
     mtg_max_candidates_per_run: int = 20
     # judge 通过后的最终产出上限（用户口径 10-15 条）
     mtg_max_final_tags: int = 15
@@ -128,6 +126,8 @@ class Settings(BaseSettings):
     mtg_judge_temperature: float = 0.0
     # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
     mtg_report_dir: str = "data/audit/mtg"
+    # 平台开放生成按批采集提示词样本；空字符串可关闭。
+    mtg_prompt_sample_dir: str = "docs/open-tag-prompts"
 
     @property
     def mtg_modality_set(self) -> frozenset[str]:

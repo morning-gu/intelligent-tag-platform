@@ -2,7 +2,8 @@
 // 覆盖：列表渲染（状态/模式 Tag、错误列、时间与 null 兜底、failed 行重试按钮）、
 // 状态与模式筛选传参、失败行重试 POST 与刷新（含 422 错误透出不刷新）、
 // 创建弹窗预载资产与提交载荷（policy 按填写组装/未填省略）、行展开详情
-// results 渲染（含证据卡与 null 兜底）。
+// 统一标签表、评分和证据侧栏。
+import { ConfigProvider } from 'antd'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -12,6 +13,7 @@ import type { AssetSummary } from '../api/assets'
 import type {
   GenerationTaskDetail,
   GenerationTaskSummary,
+  QualityReport,
 } from '../api/tasks'
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -198,11 +200,13 @@ function postedBody(path: string): string | undefined {
 
 function renderGenerationTasks() {
   return render(
-    <MemoryRouter initialEntries={['/tasks']}>
-      <Routes>
-        <Route path="/tasks" element={<GenerationTasks />} />
-      </Routes>
-    </MemoryRouter>,
+    <ConfigProvider theme={{ token: { motion: false } }}>
+      <MemoryRouter initialEntries={['/tasks']}>
+        <Routes>
+          <Route path="/tasks" element={<GenerationTasks />} />
+        </Routes>
+      </MemoryRouter>
+    </ConfigProvider>,
   )
 }
 
@@ -353,6 +357,9 @@ describe('GenerationTasks 生产任务页', () => {
     // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
     fireEvent.change(screen.getByPlaceholderText('默认 30'), { target: { value: '20' } })
+    const modelInput = screen.getByRole('textbox', { name: '评估模型 ID' })
+    expect(modelInput).toHaveValue('deepseek-v4.1-flash')
+    fireEvent.change(modelInput, { target: { value: 'another-model' } })
 
     // 弹窗确定按钮为两字"创建"（antd 渲染为"创 建"），与触发按钮区分
     fireEvent.click(screen.getByRole('button', { name: /创\s*建$/ }))
@@ -361,6 +368,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie', 'a-scene'],
       mode: 'open',
+      quality_model: 'another-model',
       policy: { max_tags: 20 },
     })
     expect(await screen.findByText('已创建 1 个任务')).toBeInTheDocument()
@@ -401,6 +409,7 @@ describe('GenerationTasks 生产任务页', () => {
     expect(JSON.parse(postedBody('/api/v1/generation/tasks')!)).toEqual({
       asset_ids: ['a-movie'],
       mode: 'open',
+      quality_model: 'deepseek-v4.1-flash',
     })
   })
 
@@ -442,18 +451,20 @@ describe('GenerationTasks 生产任务页', () => {
       ).toBe(true)
     })
     // open 行：标签名/来源/审核状态/置信度/相关度/证据描述与时间戳
-    // （来源 Tag 词表与列表模式列同为"开放"，以结果行作用域定位避免歧义）
     expect(await screen.findByText('主角争执')).toBeInTheDocument()
     const openRow = screen.getByText('主角争执').closest('tr')!
-    expect(within(openRow).getByText('开放')).toBeInTheDocument()
     expect(within(openRow).getByText('待审核')).toBeInTheDocument()
     expect(screen.getByText('0.92')).toBeInTheDocument()
     expect(screen.getByText('0.87')).toBeInTheDocument()
-    expect(screen.getByText('主角争执推搡')).toBeInTheDocument()
-    expect(screen.getByText('01:05 - 01:11')).toBeInTheDocument()
-    // closed 行：闭环/已通过，relevance/confidence 双 null 兜底
+    expect(screen.queryByText('主角争执推搡')).not.toBeInTheDocument()
+    fireEvent.click(within(openRow).getByRole('button', { name: '查看主角争执的 1 段场景证据' }))
+    const drawer = await screen.findByRole('dialog')
+    expect(within(drawer).getByText('主角争执推搡')).toBeInTheDocument()
+    expect(within(drawer).getByText('01:05 - 01:11')).toBeInTheDocument()
+    expect(within(drawer).getByText('开放')).toBeInTheDocument()
+    expect(within(openRow).queryByText('主角争执推搡')).not.toBeInTheDocument()
+    // closed 行：已通过，relevance/confidence 双 null 兜底
     const closedRow = screen.getByText('犯罪').closest('tr')!
-    expect(within(closedRow).getByText('闭环')).toBeInTheDocument()
     expect(within(closedRow).getByText('已通过')).toBeInTheDocument()
     expect(screen.getAllByText('暂无')).toHaveLength(2)
     // 详情头部：模型/Prompt 版本展示
@@ -463,6 +474,112 @@ describe('GenerationTasks 生产任务页', () => {
     expect(within(openRow).getByText('内容特征标签/细分题材')).toBeInTheDocument()
     expect(within(openRow).getByText('整片')).toBeInTheDocument()
     expect(within(closedRow).getByText('内容特征标签/主类型')).toBeInTheDocument()
+  })
+
+  it.each([2, 4] as const)('按 %i 分满分显示评分、标准和单片重试', async (maxScore) => {
+    const dimension = {
+      evaluated_tags: 1, average: maxScore, high_rate: 1,
+      distribution: Array.from({ length: maxScore + 1 }, (_, score) => Number(score === maxScore)),
+      undetermined: 0, undetermined_rate: 0,
+    }
+    const metrics = {
+      total_tags: 2, evaluated_tags: 1, max_score: maxScore, coverage: 0.5, joint_high_rate: 1,
+      three_dimension_high_rate: 0,
+      undetermined_tags: 0, undetermined_rate: 0, relevance: dimension, semantics: dimension,
+      value: { ...dimension, average: 0, high_rate: 0, distribution: dimension.distribution.toReversed() },
+    }
+    const report: QualityReport = {
+      status: 'partial',
+      incomplete: true,
+      film_counts: {
+        queued: 0, running: 0, completed: 0, partial: 1, failed: 0,
+        not_needed: 0, generation_failed: 0, unavailable: 0,
+      },
+      metrics,
+      films: [{
+        task_id: 'task-1', asset_id: 'a1', title: '评估影片', status: 'partial',
+        model: 'deepseek-v4.1-flash', prompt_version: maxScore === 4 ? 'tag-quality-v4' : 'tag-quality-v2',
+        error: '一个标签未返回评分', note: null, metrics,
+        labels: [{
+          id: 11, name: '快照标签', desc: '标签的通用释义', disposition: 'pending',
+          dir_path: '细分题材',
+          score: {
+            relevance: { score: 2, reason: '场景支持标签' },
+            semantics: { score: maxScore, reason: '名称与释义一致' },
+            value: { score: 0, reason: '只描述局部事件' },
+            evidence: [{ scene_id: 's2', start_ms: 65_000, description: '评估场景证据' }],
+          },
+        }, {
+          id: 99, name: '历史保留标签', desc: null, disposition: 'pending',
+          dir_path: null, score: null,
+        }],
+      }],
+    }
+    let retryAccepted = false
+    mockedApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/generation/tasks') return TASKS
+      if (path === '/api/v1/generation/tasks/task-1/quality/retry') {
+        retryAccepted = true
+        return { task_id: 'task-1', status: 'queued' }
+      }
+      if (path === '/api/v1/generation/tasks/task-1') {
+        return {
+          ...DETAIL,
+          quality_evaluation: retryAccepted
+            ? {
+              ...report,
+              status: 'queued',
+              films: report.films.map((film) => ({ ...film, status: 'queued' })),
+            }
+            : report,
+        }
+      }
+      throw new Error(`未预期的请求：${path}`)
+    })
+    renderGenerationTasks()
+    const taskRow = (await screen.findByText('task-1')).closest('tr')!
+    fireEvent.click(taskRow.querySelector('.ant-table-row-expand-icon')!)
+    expect(await screen.findByText('标签产出与评分')).toBeInTheDocument()
+    expect(screen.getByText(maxScore === 4 ? '五档 0–4' : '三档 0–2')).toBeInTheDocument()
+    expect(screen.getByText('评分统计')).toBeInTheDocument()
+    if (maxScore === 4) {
+      fireEvent.click(screen.getByRole('button', { name: '评分标准' }))
+      const standards = await screen.findByRole('dialog')
+      expect(within(standards).getByText('五档标签评分标准')).toBeInTheDocument()
+      expect(within(standards).getByText(/至少两个独立剧情或视听段落/)).toBeInTheDocument()
+      fireEvent.click(within(standards).getByRole('tab', { name: '标签价值' }))
+      expect(within(standards).getByText(/至少两项可核查的独立限定/)).toBeInTheDocument()
+      fireEvent.click(within(standards).getByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(standards).not.toBeInTheDocument())
+    }
+    expect(screen.getByText('50.0%')).toBeInTheDocument()
+    expect(screen.getByText('三维同时满分率')).toBeInTheDocument()
+    const archived = screen.getByText('历史保留标签').closest('tr')!
+    expect(within(archived).getByText('评分快照')).toBeInTheDocument()
+    const labelRow = (await screen.findByText('主角争执')).closest('tr')!
+    expect(within(labelRow).getByText('0 分')).toBeInTheDocument()
+    expect(within(labelRow).getAllByText(`${maxScore} 分`)[0].closest('.ant-tag')).toHaveClass('ant-tag-success')
+    if (maxScore === 4) expect(within(labelRow).getByText('2 分').closest('.ant-tag')).toHaveClass('ant-tag-warning')
+    expect(screen.queryByText('只描述局部事件')).not.toBeInTheDocument()
+    fireEvent.click(within(labelRow).getByRole('button', { name: '查看主角争执详情' }))
+    const drawer = await screen.findByRole('dialog')
+    expect(within(drawer).getByText('快照标签')).toBeInTheDocument()
+    expect(within(drawer).getByText('标签的通用释义')).toBeInTheDocument()
+    expect(within(drawer).getByRole('link', { name: 's2' })).toHaveAttribute('href', '/assets/a1?scene=s2&t=65000')
+    expect(within(drawer).getByText('评估场景证据')).toBeInTheDocument()
+    expect(within(drawer).getByText('只描述局部事件')).toBeInTheDocument()
+    expect(within(labelRow).getByText('0 分')).toBeInTheDocument()
+    expect(within(labelRow).queryByText('只描述局部事件')).not.toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: '重试评估' }))
+    const model = await screen.findByRole('textbox', { name: '评估模型 ID' })
+    expect(model).toHaveValue('deepseek-v4.1-flash')
+    fireEvent.change(model, { target: { value: 'replacement' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /重\s*试/ }))
+    await waitFor(() => expect(postedBody('/api/v1/generation/tasks/task-1/quality/retry'))
+      .toBe('{"model":"replacement"}'))
+    expect(await screen.findByText('等待评估')).toBeInTheDocument()
   })
 
   it('详情里点标签名：跳资产详情并带首个证据场景位置', async () => {

@@ -36,6 +36,10 @@ _SCENE_ID = re.compile(r"scene_\d+", re.I)
 _WRAP = "`'\"“”‘’《》〈〉"
 # 库内词条不带句末标点（"以…为特征的犯罪题材类型"），补写的句子结尾统一去掉
 _TAIL = "。．.；;，,、 "
+_RETRY_HINT = (
+    "\n\n上一版不合格：出现了具体影片信息、专名或长度越界。"
+    "请严格照要求重写，只输出 JSON。"
+)
 
 
 class DescriptionError(RuntimeError):
@@ -116,6 +120,11 @@ def build_description_messages(items: Sequence[dict]) -> list[dict]:
     }]
 
 
+def build_description_template() -> dict:
+    items = [{"tag": "{{候选标签}}", "dir": "{{归属目录全路径}}"}]
+    return {"messages": build_description_messages(items), "retry_suffix": _RETRY_HINT}
+
+
 def _parse_items(content: str) -> list[dict]:
     try:
         entries = extract_json_array(content)
@@ -144,9 +153,7 @@ def fill_descriptions(client, items: Sequence[dict], *, names: Iterable[str] = (
     for attempt in range(retries + 1):
         request = messages if attempt == 0 else [{
             "role": "user",
-            "content": messages[0]["content"] + (
-                "\n\n上一版不合格：出现了具体影片信息、专名或长度越界。"
-                "请严格照要求重写，只输出 JSON。"),
+            "content": messages[0]["content"] + _RETRY_HINT,
         }]
         try:
             response = client.complete(

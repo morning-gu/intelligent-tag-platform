@@ -2,9 +2,7 @@
 // - 任务 Table：状态 Tag 色映射（queued 蓝/running 橙/succeeded 绿/failed 红）、
 //   模式 Tag、错误列 Tooltip 展示、创建/完成时间；created_at 降序由后端保证，
 //   列表一次拉默认 100 条（前端分页仅做展示分页）。
-// - 行展开任务详情：GET /generation/tasks/{id} 的结果行列表（行形状与审核
-//   列表一致：标签名/来源/相关度/置信度/审核状态/证据卡），附模型与 Prompt
-//   版本（Prompt 内容管理属阶段 4，此处仅展示版本号）。
+// - 行展开任务详情：标签产出、评分和证据在同一张表浏览，明细在侧栏查看。
 // - failed 行"重试"：POST retry → 成功提示 + 刷新列表；422（非 failed）/
 //   404 透出后端 detail。
 // - 创建任务 Modal：资产多选（GET /assets，选完即收起下拉）+ mode 单选
@@ -20,6 +18,7 @@ import {
   Card,
   Descriptions,
   Form,
+  Input,
   InputNumber,
   Modal,
   Radio,
@@ -33,21 +32,20 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../api/assets'
-import type { ReviewEvidence } from '../api/review'
 import {
   createGenerationTasks,
+  DEFAULT_QUALITY_MODEL,
   fetchGenerationTask,
   fetchGenerationTasks,
   retryGenerationTask,
   type GenerationPolicyPayload,
   type GenerationTaskDetail,
-  type GenerationTaskResult,
   type GenerationTaskSummary,
 } from '../api/tasks'
 import { formatTime } from '../api/time'
-import EvidenceCard from '../components/EvidenceCard'
+import TaskTagResults from '../components/TaskTagResults'
+import TagQualityEvaluation from '../components/TagQualityEvaluation'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -69,35 +67,11 @@ const TASK_STATUS_COLORS: Record<string, string> = {
 const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
 const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
-/** 结果行的来源中文展示与 Tag 颜色（origin 词表 closed|open，与审核中心
- * 同规：闭环蓝 / 开放紫；v1 generated/catalog 词表退役）。 */
-const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
-
-/** 挂载粒度中文展示（目录 applicable_scope 的落库结果，与审核中心同表）。 */
-const TARGET_TYPE_LABELS: Record<string, string> = {
-  content: '整片',
-  scene: '单场景',
-  character: '人物',
-}
-
-/** 结果行的审核状态中文展示与 Tag 颜色（三态，与审核中心一致；
- * merged 随"修改即通过"语义退役）。 */
-const REVIEW_STATUS_LABELS: Record<string, string> = {
-  pending: '待审核',
-  approved: '已通过',
-  rejected: '已拒绝',
-}
-const REVIEW_STATUS_COLORS: Record<string, string> = {
-  pending: 'gold',
-  approved: 'green',
-  rejected: 'red',
-}
-
 /** 创建弹窗表单值：资产非空多选 + mode（默认开放）+ 可选策略两项。 */
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
+  quality_model: string
   max_tags?: number
   min_confidence?: number
 }
@@ -125,139 +99,67 @@ function assetOptions(assets: AssetSummary[]) {
     .map((a) => ({ value: a.asset_id, label: assetOptionLabel(a) }))
 }
 
-/** 结果行单条证据明细（详情面板证据列复用审核列表证据卡）。限宽：
- * table-layout:auto 下列宽按内容 preferred 宽度分配，不限宽时证据列
- * 会抢占绝大部分宽度，把标签名/目录挤成逐字换行（竖排观感）。 */
-function ResultEvidence({ assetId, evidence }: { assetId: string; evidence: ReviewEvidence[] }) {
-  if (evidence.length === 0) {
-    return <Typography.Text type="secondary">暂无证据</Typography.Text>
-  }
-  return (
-    <div style={{ maxWidth: 480 }}>
-      <EvidenceCard assetId={assetId} evidence={evidence} />
-    </div>
-  )
-}
-
 /** 行展开的任务详情面板：按 task_id 拉取详情，展示模型/Prompt 版本与
  * 结果行列表；详情加载失败透出错误文案（不影响外层列表）。 */
 function TaskDetailPanel({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const navigate = useNavigate()
+  const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
-    // StrictMode 会双调 effect：以 cancelled 丢弃过期请求结果
     let cancelled = false
-    fetchGenerationTask(taskId).then(
-      (d) => {
-        if (!cancelled) setDetail(d)
-      },
-      (err) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : '任务详情加载失败')
-      },
-    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let polling = false
+    async function load() {
+      try {
+        const next = await fetchGenerationTask(taskId)
+        if (cancelled) return
+        setDetail(next)
+        setLoadError(null)
+        const status = next.quality_evaluation?.status
+        polling = status === 'queued' || status === 'running'
+      } catch (err) {
+        if (cancelled) return
+        setLoadError(err instanceof Error ? err.message : '任务详情加载失败')
+      }
+      if (polling) timer = setTimeout(() => void load(), 3000)
+    }
+    void load()
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
-  }, [taskId])
+  }, [taskId, refresh])
 
-  if (loadError !== null) {
+  if (loadError !== null && detail === null) {
     return <Alert type="error" showIcon message="任务详情加载失败" description={loadError} />
   }
   if (detail === null) {
     return <Typography.Text type="secondary">详情加载中…</Typography.Text>
   }
 
-  const resultColumns: TableProps<GenerationTaskResult>['columns'] = [
-    {
-      title: '标签名',
-      dataIndex: 'tag_name',
-      // 点标签名跳资产详情并定位到这条标签的首个证据场景（与证据卡同一落点：
-      // 审核要在内容里看依据，不能只给一个标签字符串）。
-      render: (v: string, record) => {
-        const first = record.evidence[0]
-        if (detail.asset_id === null || first === undefined) {
-          return v
-        }
-        return (
-          <Typography.Link
-            onClick={() => {
-              navigate(
-                `/assets/${detail.asset_id}?scene=${first.scene_id}&t=${first.start_ms}`,
-              )
-            }}
-          >
-            {v}
-          </Typography.Link>
-        )
-      },
-    },
-    {
-      title: '目录',
-      dataIndex: 'dir_path',
-      render: (v: string | null, record) => v ?? record.dir_name ?? '未归属',
-    },
-    {
-      title: '粒度',
-      dataIndex: 'target_type',
-      render: (v: string) => (
-        <Tag color={v === 'content' ? 'default' : 'cyan'}>
-          {TARGET_TYPE_LABELS[v] ?? v}
-        </Tag>
-      ),
-    },
-    {
-      title: '来源',
-      dataIndex: 'origin',
-      render: (v: string) => (
-        <Tag color={ORIGIN_COLORS[v] ?? 'default'}>{ORIGIN_LABELS[v] ?? v}</Tag>
-      ),
-    },
-    {
-      title: '相关度',
-      dataIndex: 'relevance_score',
-      render: (v: number | null) => (v === null ? '暂无' : v.toFixed(2)),
-    },
-    {
-      title: '置信度',
-      dataIndex: 'confidence',
-      render: (v: number | null) => (v === null ? '暂无' : v.toFixed(2)),
-    },
-    {
-      title: '审核状态',
-      dataIndex: 'review_status',
-      render: (v: string) => (
-        <Tag color={REVIEW_STATUS_COLORS[v] ?? 'default'}>{REVIEW_STATUS_LABELS[v] ?? v}</Tag>
-      ),
-    },
-    {
-      title: '证据',
-      dataIndex: 'evidence',
-      render: (v: ReviewEvidence[]) => (
-        <ResultEvidence assetId={detail.asset_id} evidence={v} />
-      ),
-    },
-  ]
+  const report = detail.quality_evaluation
+  const film = report?.films.find((item) => item.task_id === detail.task_id)
+  const tags = <TaskTagResults assetId={detail.asset_id} results={detail.results} labels={film?.labels}
+    maxScore={film?.metrics?.max_score ?? 2} />
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+      {loadError && <Alert type="warning" showIcon message="任务详情刷新失败" description={loadError} />}
       <Descriptions
         size="small"
-        column={3}
+        column={{ xs: 1, sm: 3 }}
         items={[
-          { key: 'model', label: '模型版本', children: detail.model_version ?? '暂无' },
-          { key: 'prompt', label: 'Prompt 版本', children: detail.prompt_version ?? '暂无' },
-          { key: 'count', label: '结果数', children: detail.results.length },
+          { key: 'model', label: '生成模型', children: detail.model_version ?? '暂无' },
+          { key: 'prompt', label: '生成提示词', children: detail.prompt_version ?? '暂无' },
+          { key: 'count', label: '当前结果', children: `${detail.results.length} 条` },
         ]}
       />
-      <Table<GenerationTaskResult>
-        rowKey="id"
-        size="small"
-        columns={resultColumns}
-        dataSource={detail.results}
-        pagination={false}
-      />
+      {report ? (
+        <TagQualityEvaluation report={report} taskId={detail.task_id} onRetry={() => setRefresh((value) => value + 1)}>
+          {tags}
+        </TagQualityEvaluation>
+      ) : tags}
     </div>
   )
 }
@@ -343,6 +245,7 @@ export default function GenerationTasks() {
       const res = await createGenerationTasks({
         asset_ids: values.asset_ids,
         mode: values.mode,
+        quality_model: values.quality_model.trim(),
         ...(Object.keys(policy).length > 0 ? { policy } : {}),
       })
       message.success(`已创建 ${res.tasks.length} 个任务`)
@@ -448,7 +351,8 @@ export default function GenerationTasks() {
           dataSource={tasks}
           loading={loading}
           expandable={{
-            expandedRowRender: (task) => <TaskDetailPanel taskId={task.task_id} />,
+            expandedRowRender: (task, _index, _indent, expanded) =>
+              expanded ? <TaskDetailPanel taskId={task.task_id} /> : null,
           }}
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
         />
@@ -487,6 +391,14 @@ export default function GenerationTasks() {
                 { value: 'closed', label: '闭环' },
               ]}
             />
+          </Form.Item>
+          <Form.Item
+            name="quality_model"
+            label="评估模型 ID"
+            initialValue={DEFAULT_QUALITY_MODEL}
+            rules={[{ required: true, whitespace: true, message: '请输入评估模型 ID' }]}
+          >
+            <Input maxLength={200} />
           </Form.Item>
           <Form.Item name="max_tags" label="最大标签数">
             <InputNumber min={1} placeholder="默认 30" style={{ width: '100%' }} />

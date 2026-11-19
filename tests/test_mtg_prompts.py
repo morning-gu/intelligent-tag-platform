@@ -1,11 +1,4 @@
-"""开放式生成 prompt 的内容渲染：台词全量进生成 prompt，不进 judge prompt。
-
-2026-11 口径调整：
-- 台词按条数截断（3 条）改成全用——资产侧已经把每场景台词控在
-  asset_dialogue_limit（8 条），prompt 再筛一次只会丢掉关键证据；
-- judge 输入去掉台词（A/B 实测判定 0 变化，prompt 省 24%-36%）；
-- 事件描述两侧都不进（与场景描述语义重合 0.84）。
-"""
+"""开放式生成与 Judge 的材料渲染、模态门控和输出契约。"""
 import json
 from pathlib import Path
 
@@ -14,8 +7,10 @@ import pytest
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
     build_judge_messages,
+    build_scene_generation_messages,
 )
 from tagplatform.schemas import parse_content
+from tagplatform.schemas.content import Character
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(
@@ -39,6 +34,61 @@ def _prompt_text(content) -> str:
                    if part["type"] == "text")
 
 
+def test_generation_prompt_asks_for_grounded_reasons():
+    text = _prompt_text(_content_with_dialogues(2))
+
+    assert "至少引用两个不同场景" in text
+    assert "证据不足可以少给或返回空 tags" in text
+    assert "可跨影片复用的词典式释义" in text
+    assert "并说明这些细节如何支持标签" in text
+    assert "20 字以内" not in text
+
+
+def test_scene_prompt_uses_catalog_and_search_goal():
+    content = _content_with_dialogues(2)
+    scene = content.content.scenes[0]
+    messages = build_scene_generation_messages(
+        scene, (), content=content, max_tags=1,
+        dir_hint=[{"dir_id": "dir_event", "path": "情节事件", "scope": "scene"}],
+    )
+    body, directory, instructions = [part["text"] for part in messages[0]["content"]]
+    assert "第1句台词" in body
+    assert "dir_event｜情节事件｜单场景" in directory
+    assert "为场景搜索提炼标签" in instructions
+    assert "五个维度" not in instructions
+    assert '"dimension"' not in instructions
+
+
+def test_generation_adds_relevant_cast_only_to_the_current_scene():
+    content = _content_with_dialogues(1)
+    content.content.characters.extend(
+        Character(character_id=f"added_{index}", name=f"额外人物{index}")
+        for index in range(10)
+    )
+    content.content.characters[-1].aliases = ["人物1"]
+    scene = content.content.scenes[0]
+    scene.character_ids = ["added_8"]
+    other_scene = scene.model_copy(
+        update={"scene_id": "other_scene", "description": "另一场特有描述", "dialogues": []})
+    content.content.scenes.append(other_scene)
+
+    local = build_scene_generation_messages(
+        scene, (), content=content, max_tags=1, dir_hint=[])
+    local_body = local[0]["content"][0]["text"]
+    background, _, scene_body = local_body.partition("### 当前场景")
+    assert content.asset.title in background
+    assert "额外人物8" in background and "额外人物9" in background
+    assert "额外人物0" not in background
+    assert "第1句台词" not in background
+    assert "第1句台词" in scene_body
+    assert "另一场特有描述" not in local_body
+    assert all(name in _prompt_text(content) for name in ("额外人物0", "额外人物9", "另一场特有描述"))
+
+    visual_only = build_scene_generation_messages(
+        scene, (), content=content, max_tags=1, dir_hint=[], modalities={"video"})
+    assert content.asset.title not in visual_only[0]["content"][0]["text"]
+
+
 def test_all_dialogues_reach_the_prompt():
     """6 条台词全部进 prompt（旧行为只渲染前 3 条）。"""
     text = _prompt_text(_content_with_dialogues(6))
@@ -60,13 +110,29 @@ def test_event_descriptions_stay_out_of_the_prompt():
     assert "这件事只出现在事件里" not in text
 
 
-def test_judge_prompt_has_no_dialogues():
-    """judge 输入去掉台词：A/B 实测判定 0 处变化，prompt 省 24%-36%。"""
+def test_judge_uses_dialogues_only_when_enabled():
     content = _content_with_dialogues(6)
-    text = build_judge_messages(content, [{"tag": "示例", "dimension": "题材"}])[0]["content"]
+    candidates = [{"tag": "示例", "scope": "scene", "scenes": [content.content.scenes[0].scene_id]}]
+    with_dialogue = build_judge_messages(content, candidates)[0]["content"]
+    without_dialogue = build_judge_messages(
+        content, candidates, include_dialogue=False)[0]["content"]
 
-    assert "台词：" not in text
-    assert "第1句台词" not in text
+    assert "scene 按本场检索价值" in with_dialogue
+    assert "第1句台词" in with_dialogue
+    assert "第1句台词" not in without_dialogue
+
+
+def test_judge_prompt_keeps_complete_candidate_reason_on_one_line():
+    content = _content_with_dialogues(1)
+    sentences = (
+        "分别和重逢两场都回到旧码头，两人用相同的称呼确认对方依然记得当初的约定。",
+        "地点与称呼的呼应表明这段关系跨越了多年的分别。",
+    )
+    text = build_judge_messages(content, [{
+        "tag": "命运羁绊", "dimension": "主题", "reason": "\n".join(sentences),
+    }])[0]["content"]
+
+    assert f"- 命运羁绊｜主题｜{' '.join(sentences)}" in text.splitlines()
 
 
 def test_judge_prompt_keeps_scene_shape():
@@ -79,7 +145,8 @@ def test_judge_prompt_keeps_scene_shape():
                            "start_ms": 0, "end_ms": 1}]
 
     text = build_judge_messages(
-        parse_content(data), [{"tag": "示例", "dimension": "题材"}])[0]["content"]
+        parse_content(data), [{"tag": "示例", "dimension": "题材"}],
+        include_dialogue=False)[0]["content"]
 
     assert "  氛围：紧张" in text
     assert "  人物情绪：张三（愤怒）" in text

@@ -1,4 +1,4 @@
-"""0013 closed prompt standardized scoring migration rehearsal."""
+"""Rehearse closed prompt and tag quality upgrades around revision 0013."""
 
 import os
 import sqlite3
@@ -65,3 +65,44 @@ def test_0013_updates_and_downgrades_closed_prompt(rehearsal):
     downgraded = _closed_prompt(db_path)
     assert "relevance：标签与内容的相关程度，0 到 1" in downgraded
     assert "applicability" not in downgraded
+
+
+def test_0014_upgrades_main_0013(rehearsal):
+    cfg, db_path = rehearsal
+    command.upgrade(cfg, "0013")
+    closed_prompt = _closed_prompt(db_path)
+    command.upgrade(cfg, "head")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014",)
+        assert conn.execute("SELECT COUNT(*) FROM tag_quality_evaluation").fetchone() == (0,)
+    assert _closed_prompt(db_path) == closed_prompt
+
+
+def test_0014_adopts_pilot_0013_without_losing_evaluations(rehearsal):
+    cfg, db_path = rehearsal
+    command.upgrade(cfg, "head")
+    with sqlite3.connect(db_path) as conn:
+        # Pilot 0013 used the same quality schema as main 0014, before the closed prompt upgrade.
+        conn.execute("UPDATE alembic_version SET version_num='0013'")
+        conn.execute("UPDATE prompt_template SET template_text='pilot closed prompt {content}'"
+                     " WHERE mode='closed' AND version=1")
+        conn.execute("INSERT INTO media_asset (asset_id, asset_type, title) VALUES ('a1', 'movie', 'Film')")
+        conn.execute("INSERT INTO tag_generation_task"
+                     " (task_id, asset_id, mode, status, batch_id)"
+                     " VALUES ('g1', 'a1', 'open', 'succeeded', 'b1')")
+        conn.execute("INSERT INTO tag_quality_evaluation"
+                     " (task_id, status, model, prompt_version, labels, scores, frame_paths)"
+                     ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                     ("g1", "completed", "test", "tag-quality-v3", '[]',
+                      '{"1":{"value":{"score":2,"reason":"evidence"}}}', '{}'))
+
+    command.upgrade(cfg, "head")
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014",)
+        assert conn.execute("SELECT batch_id FROM tag_generation_task WHERE task_id='g1'").fetchone() == ("b1",)
+        assert conn.execute("SELECT prompt_version, scores FROM tag_quality_evaluation"
+                            " WHERE task_id='g1'").fetchone() == (
+                                "tag-quality-v3", '{"1":{"value":{"score":2,"reason":"evidence"}}}',
+                            )
+    assert "applicability" in _closed_prompt(db_path)

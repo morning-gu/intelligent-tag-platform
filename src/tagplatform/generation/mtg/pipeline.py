@@ -2,7 +2,7 @@
 
 与平台原 open 实现的差别（2026-11 替换）：
 - 输入不是一份文本 prompt，而是"资产 JSON 的场景文本 + 按场景对齐的关键帧"；
-- 一次任务跑 `mtg_runs` 轮（默认 3），跨轮并集去重后再做 e5 语义聚类；
+- 逐场单独生成，再用全片材料和逐场候选综合生成影片级标签，两级候选一起去重聚类；
 - 产出先过 judge（deepseek-v4.1-flash）逐条判内容支持度，只有 supported
   且置信度过线的候选才落 `asset_tag`；
 - 证据锚点必须是资产里真实存在的场景（模型编的 id 直接丢），
@@ -16,7 +16,7 @@
   排序，不删任何行；
 - `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
 
-每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：三轮原始候选、合并簇、
+每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：两轮原始候选、合并簇、
 judge 判决、淘汰原因、tokens 与耗时——`generation_task` 表没有 usage 列，
 不为此加迁移。
 """
@@ -27,6 +27,7 @@ import logging
 import re
 import time
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -44,22 +45,26 @@ from tagplatform.generation.mtg.catalog_align import (
     summarize_bands,
 )
 from tagplatform.generation.mtg.descriptions import (
+    build_description_template,
     content_names,
     fill_descriptions,
     is_general,
 )
-from tagplatform.generation.mtg.judge import judge_candidates
+from tagplatform.generation.mtg.judge import build_judge_template, judge_candidates
 from tagplatform.generation.mtg.merge import (
     MergedCandidate,
     merge_candidates,
     normalize_tag,
 )
 from tagplatform.generation.mtg.parse import parse_generation_items
+from tagplatform.generation.mtg.prompt_samples import SampledPromptClient
 from tagplatform.generation.mtg.prompts import (
     build_generation_messages,
+    build_generation_template,
+    build_scene_generation_messages,
     render_content,
 )
-from tagplatform.generation.mtg.verify import verify_pairs
+from tagplatform.generation.mtg.verify import build_verify_template, verify_pairs
 from tagplatform.library import (
     DirAssignment,
     library_index,
@@ -73,7 +78,8 @@ logger = logging.getLogger(__name__)
 # 口径版本号：写入 generation_task.prompt_version，重跑/换方案时可区分。
 # v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
 # v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
-MTG_VERSION = "mtg-v3"
+# v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
+MTG_VERSION = "mtg-v5-scene-context"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -249,7 +255,8 @@ def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
     与判定无关的场景。
     """
     verdict_scenes = [s for s in (verdict or {}).get("scenes") or []
-                      if s in scene_index]
+                      if s in scene_index
+                      and (candidate.scope != "scene" or s in candidate.scenes)]
     source = verdict_scenes or [s for s in candidate.scenes if s in scene_index]
     evidence: list[Evidence] = []
     seen: set[str] = set()
@@ -275,6 +282,12 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     settings = get_settings()
     started = time.monotonic()
     contents = spec.content
+
+    def sample(client, stage, template):
+        if spec.prompt_samples is None:
+            return client
+        return SampledPromptClient(client, spec.prompt_samples, stage, template)
+
     # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
     # 见 `eval/ablation.py` 的纪律说明。
     modalities = settings.mtg_modality_set
@@ -285,6 +298,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         movie_asset_root=settings.movie_asset_root,
         extra_roots=settings.movie_asset_extra_roots,
     ) if "video" in modalities else {})
+    spec.frames_by_scene = frames
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
@@ -303,53 +317,108 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
                 if settings.open_dir_hint_max > 0 else [])
 
-    # ---- 1. 多轮生成 ----
-    entries: list[dict] = []
+    # ---- 1. 逐场生成 → 全片综合 ----
+    scenes = contents.content.scenes
+    limit = max(0, min(settings.mtg_max_final_tags, spec.policy.max_tags))
+    total_limit = min(spec.policy.max_tags, 2 * limit)
+    if total_limit <= 0 or not scenes:
+        return []
+    scene_limit = (total_limit if len(scenes) == 1 else
+                   min(len(scenes), 5, max(1, total_limit // 3)))
+    scene_request_limit = min(3, scene_limit) if len(scenes) == 1 else 1
+    film_request_limit = (max(1, min(total_limit, settings.mtg_max_candidates_per_run)
+                              - scene_limit) if len(scenes) >= 2 else 0)
+    scene_ids = {scene.scene_id for scene in scenes}
     runs: list[dict] = []
-    for run_index in range(max(1, settings.mtg_runs)):
-        messages = build_generation_messages(contents, frames, run_index,
-                                             library_hint=hints,
-                                             dir_hint=dir_hint,
-                                             modalities=modalities)
-        response = llm.complete(messages, f"{spec.run_id}:r{run_index}")
+    scene_client = sample(llm, "generation_scene", partial(build_generation_template, "scene"))
+    film_client = sample(llm, "generation_film", partial(build_generation_template, "film"))
+    parsed_calls = 0
+
+    def generate(client, messages, suffix, max_items, scope, scene_id=None):
+        nonlocal parsed_calls
+        response = client.complete(messages, f"{spec.run_id}:{suffix}")
         _add_usage(usage, response.usage)
         if not response.ok:
-            raise RuntimeError(
-                f"LLM 调用失败（第 {run_index + 1} 轮）: {response.raw.get('error')}")
+            raise RuntimeError(f"LLM 调用失败（{suffix}）: {response.raw.get('error')}")
         try:
-            items = parse_generation_items(response.content,
-                                           settings.mtg_max_candidates_per_run)
-        except Exception as exc:  # noqa: BLE001 —— 解析失败：本轮记 0，跨轮继续
-            logger.warning("第 %d 轮输出解析失败：%s", run_index + 1, exc)
+            items = parse_generation_items(response.content, max_items=None)
+            parsed_calls += 1
+        except ValueError as exc:
+            logger.warning("生成输出解析失败（%s）：%s", suffix, exc)
             items = []
+
+        valid = []
         for item in items:
-            entries.append({**item, "run": run_index})
-        runs.append({"run": run_index, "items": len(items),
-                     # 逐轮标签名：一致性评测（`scripts/eval_consistency.py`）
-                     # 要的就是“同一部片跑 N 轮分别产出了什么”，不存这里就只能
-                     # 重跑一遍才能算。只存名字不存证据，体量可控。
-                     "tags": [item.get("tag") for item in items],
-                     "prompt_tokens": int(response.usage.get("prompt_tokens", 0) or 0),
-                     "completion_tokens": int(response.usage.get("completion_tokens", 0) or 0)})
-        logger.info("mtg 第 %d 轮：%d 个候选", run_index + 1, len(items))
+            if item["scope"] not in (None, scope):
+                continue
+            ids = list(dict.fromkeys(s for s in item["scenes"] if s in scene_ids))
+            if scope == "scene":
+                if scene_id not in ids:
+                    continue
+                ids = [scene_id]
+            elif len(ids) < 2:
+                continue
+            valid.append({**item, "scope": scope, "scenes": ids})
+            if len(valid) == max_items:
+                break
+        return valid
 
-    if not entries:
-        raise RuntimeError("各轮生成均无可解析标签")
+    scene_usage = usage.copy()
+    per_scene = {}
+    for index, scene in enumerate(scenes):
+        messages = build_scene_generation_messages(
+            scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
+            dir_hint=dir_hint, modalities=modalities)
+        per_scene[scene.scene_id] = generate(
+            scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
+            "scene", scene_id=scene.scene_id)
+        logger.info("mtg 场景 %d/%d %s：%d 个候选", index + 1, len(scenes),
+                    scene.scene_id, len(per_scene[scene.scene_id]))
 
-    # ---- 2. 跨轮合并 ----
+    scene_entries = [item for items in per_scene.values() for item in items]
+    runs.append({
+        "run": 0, "scope": "scene", "items": len(scene_entries),
+        "tags": [item["tag"] for item in scene_entries],
+        "scenes": {scene_id: [item["tag"] for item in items]
+                   for scene_id, items in per_scene.items()},
+        **{key: value - scene_usage[key] for key, value in usage.items()},
+    })
+    film_entries = []
+    if film_request_limit:
+        messages = build_generation_messages(
+            contents, frames, max_tags=film_request_limit, scene_tags=per_scene,
+            library_hint=hints, dir_hint=dir_hint, modalities=modalities)
+        film_usage = usage.copy()
+        film_entries = generate(film_client, messages, "film", film_request_limit, "film")
+        runs.append({
+            "run": 1, "scope": "film", "items": len(film_entries),
+            "tags": [item["tag"] for item in film_entries],
+            **{key: value - film_usage[key] for key, value in usage.items()},
+        })
+        logger.info("mtg 全片综合：%d 个候选", len(film_entries))
+
+    if not parsed_calls:
+        raise RuntimeError("各轮生成均无法解析为 JSON")
+
+    # ---- 2. 两级候选合并 ----
+    # 同名候选优先保留影片级生成的理由和释义。
+    entries = ([{**item, "run": 1} for item in film_entries]
+               + [{**item, "run": 0} for item in scene_entries])
     merged = merge_candidates(entries, embedder, settings.mtg_merge_threshold)
 
     # ---- 3. judge ----
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
-        client = judge_client or _make_judge_client(settings, llm)
-        payload = [{"tag": m.tag, "dimension": m.dimension,
+        client = sample(judge_client or _make_judge_client(settings, llm),
+                        "judge", build_judge_template)
+        payload = [{"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
                     "reason": m.reason, "scenes": list(m.scenes)}
                    for m in merged]
         try:
             verdicts = judge_candidates(client, contents, payload,
-                                        run_id=spec.run_id, usage=judge_usage)
+                                        run_id=spec.run_id, usage=judge_usage,
+                                        include_dialogue="dialogue" in modalities and "script" in modalities)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,
@@ -421,7 +490,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                      for name, item in alignment.items()
                      if item.band == BAND_SUSPECT and item.matched_name]
             if pairs:
-                client = _make_verify_client(settings, llm)
+                client = sample(_make_verify_client(settings, llm),
+                                "verify", build_verify_template)
                 verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
                                            usage=verify_usage, trace=verify_trace)
                 for name, same in verdict_map.items():
@@ -436,8 +506,6 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                             reason=f"{item.reason}；复核判非同一概念")
                     else:
                         alignment[name] = replace(item, same_concept=same)
-
-    limit = min(settings.mtg_max_final_tags, spec.policy.max_tags)
 
     def _band_rank(tag: str) -> int:
         item = alignment.get(tag)
@@ -476,13 +544,22 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         return item, same_name or replace_suspect
 
     plans = {candidate.tag: _plan(candidate) for candidate, _, _ in accepted}
-    # 命中的库内标签不占新标签名额：它们本来就是"库里已有的东西"，
-    # 让它挤掉一条真正的新词没有道理。两桶各自排序、各自受 limit 约束。
-    replaced = [item for item in accepted if plans[item[0].tag][1]]
-    fresh = [item for item in accepted if not plans[item[0].tag][1]]
-    kept_replaced = replaced[:limit]
-    truncated = fresh[limit:] + replaced[limit:]
-    accepted = fresh[:limit] + kept_replaced
+    # 按原排序分配名额，同时执行总量、来源和场景级配额。
+    by_origin: dict[bool, list] = {False: [], True: []}
+    truncated = []
+    scene_count = 0
+    kept_count = 0
+    for item in accepted:
+        candidate = item[0]
+        queue = by_origin[plans[candidate.tag][1]]
+        if (kept_count >= total_limit or len(queue) >= limit
+                or (candidate.scope == "scene" and scene_count >= scene_limit)):
+            truncated.append(item)
+            continue
+        queue.append(item)
+        kept_count += 1
+        scene_count += candidate.scope == "scene"
+    accepted = by_origin[False] + by_origin[True]
 
     tags: list[ProducedTag] = []
     tag_rows: list[dict] = []
@@ -523,7 +600,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 tag_name=item.matched_name or candidate.tag,
                 candidate_type=None, candidate_description=None,
                 relevance_score=item.cosine, confidence=confidence,
-                evidence=evidence, level=level,
+                evidence=evidence, level=level, generation_reason=candidate.reason,
                 dir_id=matched.dir_id if matched else None,
                 target_type=mount.target_type, target_id=mount.target_id,
                 # 相似命中：模型原词将来写进 tag_define.aliases
@@ -605,7 +682,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             # 或本条没参与对齐时才是 None。
             relevance_score=(item.cosine if item is not None else None),
             confidence=confidence,
-            evidence=evidence, level=level,
+            evidence=evidence, level=level, generation_reason=candidate.reason,
             dir_id=assignment.dir_id,
             target_type=mount.target_type, target_id=mount.target_id,
         ))
@@ -637,7 +714,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     desc_filled: dict[str, str] = {}
     if needs_desc:
         desc_filled = fill_descriptions(
-            llm,
+            sample(llm, "description", build_description_template),
             [{"tag": tag.tag_name,
               "dir": (" / ".join(tag_library.path_of(tag.dir_id))
                       if tag_library is not None and tag.dir_id else None)}
@@ -663,7 +740,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                         if settings.mtg_judge_enabled and not settings.use_mock_llm
                         else "mock"),
         "params": {
-            "runs": settings.mtg_runs,
+            "runs": len(runs),
+            "max_total_tags": total_limit,
+            "max_scene_tags": scene_limit,
+            "max_candidates_per_scene": scene_request_limit,
+            "max_film_candidates": film_request_limit,
             "modalities": sorted(modalities),
             "frames_per_scene": settings.mtg_frames_per_scene,
             "max_frames": settings.mtg_max_frames,
@@ -727,7 +808,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     }
     _write_report(settings, spec.task_id, report)
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
-                settings.mtg_runs, frame_count, len(merged), len(tags), elapsed)
+                len(runs), frame_count, len(merged), len(tags), elapsed)
     return tags
 
 
