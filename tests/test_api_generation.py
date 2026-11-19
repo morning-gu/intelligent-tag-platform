@@ -184,9 +184,18 @@ def test_timestamps_render_utc_with_z_suffix(client):
     listing = client.get("/api/v1/generation/tasks").json()
     assert listing[0]["created_at"].endswith("Z")
 
-    # 资产标签行的 created_at 同契约（AssetTagOut 已挂 UtcDatetime）
+    # 资产标签行的 created_at 同契约（AssetTagOut 已挂 UtcDatetime）。
+    # closed 自 PR#16 起全量进人工审核（doc §3.3，不再系统自动通过/挂载）：
+    # 审一条通过产生挂载行，再验其时间戳（原文断言旧的自动挂载口径已失效）
+    items = client.get("/api/v1/review/items").json()["items"]
+    assert items, "closed 成功路径应产出待审行"
+    approve = client.post(
+        f"/api/v1/asset-tags/{items[0]['id']}/review",
+        json={"action": "approve"})
+    assert approve.status_code == 200
+
     tags = client.get("/api/v1/assets/movie_001/tags").json()
-    assert tags, "closed 成功路径应产出自动通过的挂载行"
+    assert tags, "审核通过后应产生挂载行"
     assert all(tag["created_at"].endswith("Z") for tag in tags)
 
 
