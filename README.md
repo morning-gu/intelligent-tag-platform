@@ -89,6 +89,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_GENERATION_WORKERS`            | `2`                   | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成）                                       |
 | `TAGPLT_LLM_MODEL`                     | `qwen3.7-plus`        | LLM 模型名                                                                                      |
 | `TAGPLT_RECALL_TOP_K_PER_TYPE`         | `50`                  | 模式 A 每 tag_type 召回候选上限                                                                 |
+| `TAGPLT_CLOSED_BATCH_SIZE`             | `1`                   | 模式 A 目录组内分批上限：每批一次 LLM 调用（防输出截断），组内批次全部完成后合并再门控截断      |
 | `TAGPLT_OPEN_MATCH_THRESHOLD`          | `0.85`                | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog                                       |
 | `TAGPLT_MEDIA_ROOT`                    | `data/media/`         | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录）                                      |
 | `TAGPLT_LOG_LEVEL`                     | `INFO`                | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
@@ -101,7 +102,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 .venv/Scripts/python -m pytest
 ```
 
-全量约 285 条测试，默认全走 mock，不联网、不下载模型。
+全量约 740 条测试，默认全走 mock，不联网、不下载模型。
 
 前端测试（Vitest + Testing Library，含组件与 API 契约测试）：
 

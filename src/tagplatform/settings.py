@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     use_mock_llm: bool = False
     # 模式 A 召回：每 tag_type 召回上限
     recall_top_k_per_type: int = 50
+    # 模式 A 判定：目录组内候选标签分批上限（每批一次 LLM 调用，防输出
+    # 截断）；组内全部批次完成后才合并门控截断。<=0 视为 1
+    closed_batch_size: int = 1
     # 模式 B 归一匹配阈值：与库内标签相似度 >= 该值（含等于）归入 catalog
     open_match_threshold: float = 0.85
     # 生成任务线程池大小；0 = 同步执行（测试与单步调试）
