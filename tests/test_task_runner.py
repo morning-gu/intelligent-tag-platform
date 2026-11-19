@@ -48,6 +48,7 @@ from tagplatform.tasks import (
     reset_orphan_running,
     run_generation_task,
 )
+from tagplatform.tasks.runner import assemble_spec
 from tagplatform.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
@@ -317,3 +318,27 @@ def test_executor_workers_zero_synchronous(tmp_path):
         unbind_engine(engine)
         executor.shutdown()
     engine.dispose()
+
+
+# ---- assemble_spec：spec 组装公共化（执行器与闭环评测共用）----
+
+
+def test_assemble_spec_closed_renders_active_template(session, content_fixture):
+    """closed 模式：assemble_spec 取激活模板渲染 content 文本组装 spec。
+
+    prompt 行沿用既有 runner 测试的模式——session fixture 建表时
+    models._seed_prompt_v1 已播种 closed v1 激活行，(mode, version) 唯一
+    约束下不能重复插 v1，测试直接依赖种子激活模板。
+    """
+    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
+                                   task_id="t1", asset_id="a1", run_id="r1")
+    assert spec.library is not None and spec.task_id == "t1"
+    assert "摘要" in spec.prompt_text and template.version == 1
+
+
+def test_assemble_spec_policy_json_overrides_default(session, content_fixture):
+    """非空 policy_json 覆盖默认 GenerationPolicy（max_tags 默认 30 → 5）。"""
+    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
+                                   task_id="t1", asset_id="a1", run_id="r1",
+                                   policy_json='{"max_tags": 5}')
+    assert spec.policy.max_tags == 5 and template.version == 1
