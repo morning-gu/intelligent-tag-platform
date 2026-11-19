@@ -22,3 +22,5 @@ node_modules/
 .opencode/
 .idea/
 uv.lock
+.worktrees/
+.claude/
