@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.db import create_engine_for
 from tagplatform.db.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
-from tagplatform.eval.tag_quality import evaluate
+from tagplatform.eval.tag_quality import _parse_scores, evaluate
 from tagplatform.generation.base import ProducedTag
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.open_gen import OpenTagProducer
@@ -161,7 +161,8 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
     assert raw["tags"] == [_item(requests["movie_other"][0][2][0]["id"], 0, 1)]
     template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
-    assert template["prompt_version"] == "tag-quality-v2"
+    assert template["prompt_version"] == "tag-quality-v3"
+    assert "scene 面向片段搜索" in template["messages"][0]["content"]
     assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
     assert isinstance(template["messages_without_keyframes"][1]["content"], str)
 
@@ -187,6 +188,21 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     retry_example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
     assert retry_example["run_id"] == f"{bad_id}:tag-quality"
     assert retry_example["model"] == "replacement"
+
+
+def test_scene_evidence_is_limited_to_the_source_scene():
+    item = _item(1)
+    item["evidence"].append({"scene_id": "scene_002", "description": "别的场景"})
+    labels = [{
+        "id": 1, "desc": "对峙", "level": "scene", "target_type": "content",
+        "target_id": "movie_001", "scene_ids": ["scene_001"],
+    }]
+    scores, complete = _parse_scores(
+        json.dumps({"tags": [item]}), labels, {"scene_001": 100, "scene_002": 200})
+    assert complete
+    assert scores["1"]["evidence"] == [
+        {"scene_id": "scene_001", "start_ms": 100, "description": "仓库争执"}
+    ]
 
 
 def test_legacy_and_current_scores_have_separate_value_coverage(client):

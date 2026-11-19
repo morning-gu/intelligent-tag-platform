@@ -33,7 +33,7 @@ _RETRY_HINT = (
 def build_judge_template() -> dict:
     line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
     return {
-        "messages": render_judge_messages("{{影片内容，不含台词行}}", line),
+        "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line),
         "retry_suffix": _RETRY_HINT,
     }
 
@@ -72,6 +72,7 @@ def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
 
 def judge_candidates(client, content: ContentJSON, candidates: list[dict],
                      *, run_id: str, retries: int = 1,
+                     include_dialogue: bool = True,
                      usage: dict | None = None) -> dict[str, dict]:
     """候选 → {归一化标签名: 判决 dict}（未返回的候选由上层按未判处理）。
 
@@ -79,7 +80,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
     """
     if not candidates:
         return {}
-    messages = build_judge_messages(content, candidates)
+    messages = build_judge_messages(content, candidates, include_dialogue=include_dialogue)
     last_error: Exception | None = None
     last_raw = ""
     for attempt in range(retries + 1):

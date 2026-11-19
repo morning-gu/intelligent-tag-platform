@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 # v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
 # v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
-MTG_VERSION = "mtg-v4"
+MTG_VERSION = "mtg-v5-scene-search"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -417,7 +417,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                    for m in merged]
         try:
             verdicts = judge_candidates(client, contents, payload,
-                                        run_id=spec.run_id, usage=judge_usage)
+                                        run_id=spec.run_id, usage=judge_usage,
+                                        include_dialogue="dialogue" in modalities and "script" in modalities)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,

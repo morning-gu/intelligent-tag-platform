@@ -20,7 +20,7 @@ from tagplatform.results import PersistSummary
 from tagplatform.schemas import ContentJSON
 
 DEFAULT_MODEL = "deepseek-v4.1-flash"
-PROMPT_VERSION = "tag-quality-v2"
+PROMPT_VERSION = "tag-quality-v3"
 DIMENSIONS = ("relevance", "semantics", "value")
 
 _PROMPT = """## 标签质量评估
@@ -29,26 +29,27 @@ _PROMPT = """## 标签质量评估
 
 独立评估三个维度：
 - relevance（内容相关性）：回到影片摘要、人物、场景、台词或关键帧找依据。
-  全片级标签看整体内容，场景或人物级结合 level 和 target_id 判断局部依据。
+  level=film 时看全片。level=scene 时只用该场的描述、台词和画面，优先以 scene_ids 定位，
+  如无 scene_ids 再参考场景挂载点 target_id；无法可靠定位该场时，相关性填 null。
+  level=character 时根据 target_id 评估指定人物。
   2=内容明确且充分支持，1=仅部分支持或依据弱，0=内容无依据或与标签矛盾。
   reason 是生成模型提供的线索，不能单独作为证据。画面或文本材料不足时填 null，
   例如评价镜头语言却没有足够的视觉材料。优先引用真实 scene_id 和简短的内容证据。
 - semantics（语义准确性）：看标签名称 name 和通用释义 desc。
   2=名称释义一致且定义准确，1=概念基本对但边界模糊、过宽或过窄，
   0=定义错误、名实不符或误用热梗。缺少释义或无法可靠确定词义时填 null。
-- value（标签价值）：判断标签名称本身能否自然、独立地传达影片属性，以及该属性在全片中的重要性。
-  先把名称单独展示给没看过影片的观众，判断能否看懂它说的是哪种题材、主题、人物特征、
-  叙事、风格或关键冲突。释义可以帮助评估员确认词义，名称仍须能脱离片名、剧情和场景说明独立使用。
-  2=名称独立易懂，且准确概括全片的鲜明特征，或直接点明核心主题、主要冲突、决定性的转折或关键看点。
-  单场景也可得 2 分，前提是它对理解全片至关重要，且名称表达了可独立理解的影片属性。
-  1=名称独立易懂，也传达了有辨识度的影片属性，但属于次要看点或辅助特征，对理解全片的作用有限。
-  0=名称生硬、需要剧情上下文、宽泛到无法提供可辨识属性，或仅概括一个或少量普通场景、动作或事件。
-  「泼水融敌」即使能猜出剧情动作，也只提供情节速记。「城堡反击」把地点和普通动作拼在一起，
-  无法独立说明有用的影片属性。这两类名称给 0 分，即使内容相关性或语义准确性得分很高。
-  null=名称有独立表达能力，但现有材料不足以判断该属性在全片中的重要性。
-  明显的剧情速记或生硬拼接可直接判 0 分。说明名称独立性及该属性对理解全片的作用。
+- value（标签价值）：按 level 判断名称是否适合预期用途，释义只用于确认词义。
+  film 面向观众展示。2=名称独立易懂，能概括全片鲜明特征、主要冲突或关键看点；
+  1=有辨识度但只表达次要看点；0=生硬、过泛、依赖剧情上下文或只复述局部情节。
+  说明这一属性对观众了解影片的作用。
+  scene 面向片段搜索。2=自然易懂、具体且有区分度，用户可据此找到目标片段或同类片段，
+  例如「拆除定时炸弹」；1=描述相关且可搜，但较泛或包含不必要的限定；
+  0=含糊、生硬、泛化到大量无关片段，或脱离剧情上下文读不懂。
+  普通局部动作、事件或可辨识的视听细节可以得 2 分。说明它能帮助用户找什么片段。
+  character 看名称是否独立传达指定人物的鲜明属性，按主要属性、次要属性、无可辨识属性给 2、1、0 分。
+  null=材料不足以判断对该用途的价值。
 
-每个维度给出简短的中文理由。无证据时 evidence 填空数组，不要编造场景。
+每个维度给出简短的中文理由。场景级只引用来源场景，无证据时 evidence 填空数组。
 只输出 JSON 对象，格式如下（score 允许 0、1、2、null）：
 {"tags":[{"id":1,"relevance":{"score":2,"reason":"理由"},
 "semantics":{"score":2,"reason":"理由"},"value":{"score":1,"reason":"理由"},
@@ -101,7 +102,9 @@ def snapshot(
             "desc": definition.description if definition else row.candidate_description,
             "target_type": row.target_type,
             "target_id": row.target_id,
-            "level": tag.level if row.target_type == "content" else row.target_type,
+            "level": (tag.level if task.mode == "open" and row.target_type != "character"
+                      else {"content": "film"}.get(row.target_type, row.target_type)),
+            "scene_ids": list(dict.fromkeys(item.scene_id for item in tag.evidence)),
             "dimension": tag.candidate_type,
             "dir_id": dir_id,
             "dir_path": "/".join(library.path_of(dir_id)) if dir_id and library else None,
@@ -164,10 +167,14 @@ def _parse_scores(
             continue
         if not (expected[label_id]["desc"] or "").strip():
             score.semantics = DimensionScore(score=None, reason="缺少标签最终释义")
+        label = expected[label_id]
+        local_scenes = label.get("scene_ids") or (
+            [label.get("target_id")] if label.get("target_type") == "scene" else [])
         score.evidence = [
             item.model_copy(update={"start_ms": scene_starts.get(item.scene_id)})
             for item in score.evidence
-            if item.scene_id is None or item.scene_id in scene_starts
+            if (item.scene_id is None or item.scene_id in scene_starts)
+            and (label.get("level") != "scene" or item.scene_id in local_scenes)
         ]
         results[key] = score.model_dump(exclude={"id"})
     return results, len(results) == len(labels) == len(data["tags"])
@@ -212,7 +219,7 @@ def build_quality_template() -> dict:
 
 
 def _render_material(content: ContentJSON, labels: list[dict]) -> str:
-    material = render_content(content)
+    material = render_content(content, full_cast=True)
     targets = {item["target_id"] for item in labels if item.get("target_type") == "character"}
     if not targets:
         return material
