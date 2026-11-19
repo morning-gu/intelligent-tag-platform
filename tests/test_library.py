@@ -22,6 +22,7 @@ from conftest import MOCK_EMBEDDER
 from tagplatform.api import get_session  # noqa: F401  (确保 API 包可导入)
 from tagplatform.ingest import record_alias, record_tag_definition
 from tagplatform.library import (
+    DIR_ASSET,
     DIR_DYNAMIC,
     DIR_STATIC,
     SCOPE_CHARACTER,
@@ -75,6 +76,20 @@ def test_only_dynamic_dirs_allow_new_tags():
     assert not library.allows_new_tags(None)
     assert {d.dir_id for d in library.new_tag_dirs(None)} == {
         "dir_theme", "dir_scene", "dir_char"}
+
+
+def test_asset_dirs_allow_new_tags():
+    """dir_asset：元数据导入/联网搜索来源目录，扩充能力同 dir_dynamic。"""
+    add_dirs([{"dir_id": "dir_actor_kw", "level": 1, "dir_name": "演员关键词",
+               "dir_type": DIR_ASSET, "applicable_scope": SCOPE_CHARACTER,
+               "description": "联网搜索获取的演员标签", "aliases": []}])
+    library = try_load_library()
+    assert library.allows_new_tags("dir_actor_kw")
+    assert {d.dir_id for d in library.new_tag_dirs(None)} == {
+        "dir_theme", "dir_scene", "dir_char", "dir_actor_kw"}
+    # 范围过滤同 dir_dynamic：不在范围内的目录不进候选
+    assert {d.dir_id for d in library.new_tag_dirs(["dir_theme"])} == {
+        "dir_theme"}
 
 
 def test_tags_in_dirs_includes_descendants_and_empty_means_all():

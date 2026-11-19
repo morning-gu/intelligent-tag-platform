@@ -11,8 +11,9 @@ v2 起标签库就是这两张正式表（标签数据由导入/治理链路写�
 生成本身只依赖这里的三类能力：
 1. **范围**：任务可指定 dir_ids，只有落在这些目录（含子目录）下的标签参与
    召回 / 对齐；
-2. **可扩展性**：`dir_type == "dir_dynamic"` 的目录才允许产生新标签，静态
-   目录只能"命中"不能"新增"；
+2. **可扩展性**：`dir_type` 为 `dir_dynamic`（开放生成审核后扩充）或
+   `dir_asset`（元数据导入/联网搜索获取数据，扩充能力同 dir_dynamic）的
+   目录才允许产生新标签，静态目录只能"命中"不能"新增"；
 3. **归属与挂载粒度**：每个标签/候选都能追到目录，目录的
    `applicable_scope`（content/scene/character）决定 `pre_asset_tag` 的
    `target_type`。
@@ -39,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 DIR_STATIC = "dir_static"
 DIR_DYNAMIC = "dir_dynamic"
+# 元数据导入/联网搜索获取标签数据的目录：来源语义区别于 dir_dynamic
+# （开放生成扩充），但扩充能力与之相同
+DIR_ASSET = "dir_asset"
+# 允许动态扩充（审核后新增子标签）的目录类型
+EXPANDABLE_DIR_TYPES = (DIR_DYNAMIC, DIR_ASSET)
 SCOPE_CONTENT = "content"
 SCOPE_SCENE = "scene"
 SCOPE_CHARACTER = "character"
@@ -83,8 +89,8 @@ class Directory:
 
     @property
     def allows_new_tags(self) -> bool:
-        """动态目录允许开放生成审核后扩充，静态目录不允许。"""
-        return self.dir_type == DIR_DYNAMIC
+        """动态/元数据目录允许审核后扩充，静态目录不允许。"""
+        return self.dir_type in EXPANDABLE_DIR_TYPES
 
 
 @dataclass(frozen=True)
@@ -215,7 +221,7 @@ class TagLibrary:
         return [t for t in self._tags.values() if t.dir_id in allowed]
 
     def new_tag_dirs(self, dir_ids: list[str] | None) -> list[Directory]:
-        """可产新标签的目录：范围内且 dir_dynamic。"""
+        """可产新标签的目录：范围内且可扩充（dir_dynamic/dir_asset）。"""
         allowed = self.descendants(dir_ids)
         return [d for d in self._dirs.values()
                 if d.dir_id in allowed and d.allows_new_tags]

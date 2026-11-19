@@ -396,7 +396,7 @@ Excel 上传 → 格式解析 → 字段校验 → 重复检测 → 标签层级
 | 数据表                                 | 核心字段                                                                            | 主要职责                                                   |
 | -------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `media_asset`                        | asset_id、asset_type、parent_id、title、video_uri、content_json、source、updated_at | 影片、剧集、场景基础信息与主内容 JSON                      |
-| `tag_catalog`                        | dir_id、dir_name、dir_type、parent_id、applicable_scope、embedding                  | 标签**目录树**（静态/动态目录、可挂粒度、目录向量）  |
+| `tag_catalog`                        | dir_id、dir_name、dir_type、parent_id、applicable_scope、embedding                  | 标签**目录树**（静态/动态/元数据目录、可挂粒度、目录向量）  |
 | `tag_define`                         | tag_id、tag_name、tag_type、description、dir_id、aliases、status、embedding         | 标签定义（val_fixed / val_generalized 预留）               |
 | `tag_generation_task`                | task_id、asset_id、mode、model_version、status                                      | 标签生产任务及执行记录                                     |
 | `pre_asset_tag`                      | asset_id、target_type、target_id、tag_id、candidate_*、origin、review_status        | 生成结果 + 审核队列（asset×tag 去重）                     |
@@ -416,9 +416,10 @@ v1 的 `media_context` 表已并入本表并删除。
 
 **tag_catalog / tag_define：标签目录与标签定义（v2 起）**
 
-标签库按 v2 拆成两张表：`tag_catalog` 是目录树（`dir_type` 静态/动态、
-`applicable_scope` 声明该目录可挂的粒度 content/scene/character、
-`parent_id` 自引用），`tag_define` 是挂在目录下的标签本体（`tag_type`
+标签库按 v2 拆成两张表：`tag_catalog` 是目录树（`dir_type`
+静态/动态/元数据——`dir_asset` 由元数据导入/联网搜索获取标签数据，
+扩充能力同动态；`applicable_scope` 声明该目录可挂的粒度
+content/scene/character、`parent_id` 自引用），`tag_define` 是挂在目录下的标签本体（`tag_type`
 区分 val_fixed 固定值 / val_generalized 预留泛化值，`(dir_id, tag_name)`
 唯一）。v1 的目录+标签混合表（`tag_catalog_v1`）与 `import_batch_v1` 已随
 v2 重建删除，不再保留过渡表。
