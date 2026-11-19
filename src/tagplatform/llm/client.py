@@ -141,4 +141,5 @@ def make_llm_client(settings: Settings):
         base_url_env=settings.llm_base_url_env,
         api_key_env=settings.llm_api_key_env,
         temperature=settings.llm_temperature,
-        request_interval=settings.llm_request_interval)
+        request_interval=settings.llm_request_interval,
+        extra_body=dict(settings.llm_extra_body) if settings.llm_extra_body else None)

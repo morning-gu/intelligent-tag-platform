@@ -194,6 +194,28 @@ def test_make_llm_client_branches():
     assert isinstance(make_llm_client(Settings()), OpenAIClient)
 
 
+def test_make_llm_client_passes_extra_body():
+    # vLLM 端点需要 {"chat_template_kwargs": {"enable_thinking": false}}
+    # 关思维链（否则 closed 判定输出从数组漂成单对象，147.3 实测）；
+    # OpenAIClient 的 extra_body 管道已有，缺的是 settings → 工厂透传
+    eb = {"chat_template_kwargs": {"enable_thinking": False}}
+    client = make_llm_client(Settings(llm_extra_body=eb))
+    assert isinstance(client, OpenAIClient)
+    assert client.extra_body == eb
+
+
+def test_make_llm_client_default_no_extra_body():
+    client = make_llm_client(Settings())
+    assert client.extra_body == {}
+
+
+def test_settings_llm_extra_body_parses_env_json(monkeypatch):
+    monkeypatch.setenv("TAGPLT_LLM_EXTRA_BODY",
+                       '{"chat_template_kwargs": {"enable_thinking": false}}')
+    s = Settings()
+    assert s.llm_extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
 def test_openai_lazy_import_red_line():
     """懒导入红线：mock 路径与注入 transport 路径全程不 import openai。"""
     MockLLMClient().complete([{"role": "user", "content": "x"}], "r")
