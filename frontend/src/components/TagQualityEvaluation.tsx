@@ -10,6 +10,7 @@ import {
   type QualityStatus,
 } from '../api/tasks'
 import TaskTagResults from './TaskTagResults'
+import QualityRubricHelp from './QualityRubricHelp'
 
 const statuses: Record<QualityStatus, { color: string; label: string }> = {
   queued: { color: 'default', label: '等待评估' },
@@ -31,12 +32,13 @@ function percent(value: number | null): string {
   return value === null ? '—' : `${(100 * value).toFixed(1)}%`
 }
 
-function DimensionSummary({ dimension }: { dimension: QualityDimension }) {
+function DimensionSummary({ dimension, maxScore }: { dimension: QualityDimension; maxScore: number }) {
+  const scoreLevels = dimension.distribution.map((_, score) => score).join(' / ')
   return (
     <Space orientation="vertical" size={0}>
-      <span>均分 {dimension.average?.toFixed(2) ?? '—'} · 高分率 {percent(dimension.high_rate)}</span>
+      <span>均分 {dimension.average?.toFixed(2) ?? '—'} / {maxScore} · 满分率 {percent(dimension.high_rate)}</span>
       <Typography.Text type="secondary">
-        0 / 1 / 2 分各 {dimension.distribution.join(' / ')} 条 ·
+        {scoreLevels} 分各 {dimension.distribution.join(' / ')} 条 ·
         无法判断 {dimension.undetermined}（{percent(dimension.undetermined_rate)}）
       </Typography.Text>
     </Space>
@@ -44,6 +46,26 @@ function DimensionSummary({ dimension }: { dimension: QualityDimension }) {
 }
 
 function Metrics({ metrics }: { metrics: QualityMetrics }) {
+  const maxScore = metrics.max_score === undefined ? 2 : metrics.max_score
+  const scoreItems = maxScore === null ? [{
+    key: 'scale', label: '评分量表', children: '本批次使用了不同量表，分数统计见各影片。',
+  }] : [
+    { key: 'relevance', label: '内容相关性', children: <DimensionSummary dimension={metrics.relevance} maxScore={maxScore} /> },
+    { key: 'semantics', label: '语义准确性', children: <DimensionSummary dimension={metrics.semantics} maxScore={maxScore} /> },
+    {
+      key: 'value', label: '标签价值',
+      children: metrics.value.evaluated_tags === 0 ? '未评估' : (
+        <Space orientation="vertical" size={0}>
+          <DimensionSummary dimension={metrics.value} maxScore={maxScore} />
+          <Typography.Text type="secondary">
+            已评估 {metrics.value.evaluated_tags} / {metrics.total_tags} 条
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    { key: 'joint', label: '双维同时满分率', children: percent(metrics.joint_high_rate) },
+    { key: 'joint-three', label: '三维同时满分率', children: percent(metrics.three_dimension_high_rate) },
+  ]
   return (
     <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
       {
@@ -51,21 +73,7 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
         children: `${metrics.evaluated_tags} / ${metrics.total_tags} 条`,
       },
       { key: 'coverage', label: '评估覆盖率', children: percent(metrics.coverage) },
-      { key: 'relevance', label: '内容相关性', children: <DimensionSummary dimension={metrics.relevance} /> },
-      { key: 'semantics', label: '语义准确性', children: <DimensionSummary dimension={metrics.semantics} /> },
-      {
-        key: 'value', label: '标签价值',
-        children: metrics.value.evaluated_tags === 0 ? '未评估' : (
-          <Space orientation="vertical" size={0}>
-            <DimensionSummary dimension={metrics.value} />
-            <Typography.Text type="secondary">
-              已评估 {metrics.value.evaluated_tags} / {metrics.total_tags} 条
-            </Typography.Text>
-          </Space>
-        ),
-      },
-      { key: 'joint', label: '双维联合合格率', children: percent(metrics.joint_high_rate) },
-      { key: 'joint-three', label: '三维联合合格率', children: percent(metrics.three_dimension_high_rate) },
+      ...scoreItems,
       {
         key: 'unknown', label: '任一维度无法判断',
         children: `${metrics.undetermined_tags} 条（${percent(metrics.undetermined_rate)}）`,
@@ -75,11 +83,14 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
 }
 
 function MetricsSummary({ metrics }: { metrics: QualityMetrics }) {
+  const maxScore = metrics.max_score ?? 2
+  const average = (dimension: QualityDimension) =>
+    dimension.average === null ? '—' : `${dimension.average.toFixed(2)} / ${maxScore}`
   const items = [
     ['已评估 / 最终标签', `${metrics.evaluated_tags} / ${metrics.total_tags} 条`],
-    ['内容相关性均分', metrics.relevance.average?.toFixed(2) ?? '—'],
-    ['语义准确性均分', metrics.semantics.average?.toFixed(2) ?? '—'],
-    ['标签价值均分', metrics.value.average?.toFixed(2) ?? '—'],
+    ['内容相关性均分', average(metrics.relevance)],
+    ['语义准确性均分', average(metrics.semantics)],
+    ['标签价值均分', average(metrics.value)],
   ]
   return (
     <dl className="task-quality-summary">
@@ -98,6 +109,11 @@ function FilmEvaluation({ film, onRetry, children }: {
       <Space wrap>
         <Typography.Text strong>{film.title}</Typography.Text>
         <EvaluationStatus status={film.status} />
+        {film.metrics && (
+          <Tag color={film.metrics.max_score === 4 ? 'blue' : 'default'}>
+            {film.metrics.max_score === 4 ? '五档 0–4' : '三档 0–2'}
+          </Tag>
+        )}
         {film.model && <Typography.Text type="secondary">
           评估模型 {film.model}{film.prompt_version && ` · ${film.prompt_version}`}
         </Typography.Text>}
@@ -156,7 +172,7 @@ export default function TagQualityEvaluation({ report, taskId, onRetry, children
   }
 
   return (
-    <Card size="small" title="标签产出与评分">
+    <Card size="small" title="标签产出与评分" extra={<QualityRubricHelp />}>
       <div className="task-quality-body">
         {current ? <FilmEvaluation film={current} onRetry={() => openRetry(current)}>
           {children}
@@ -180,7 +196,8 @@ export default function TagQualityEvaluation({ report, taskId, onRetry, children
                   label: <Space wrap>{film.title}<EvaluationStatus status={film.status} /></Space>,
                   children: <FilmEvaluation film={film} onRetry={() => openRetry(film)}>
                     {film.labels.length > 0 && (
-                      <TaskTagResults assetId={film.asset_id} labels={film.labels} results={[]} />
+                      <TaskTagResults assetId={film.asset_id} labels={film.labels} results={[]}
+                        maxScore={film.metrics?.max_score ?? 2} />
                     )}
                   </FilmEvaluation>,
                 }))} />

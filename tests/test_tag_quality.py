@@ -136,12 +136,13 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     assert report["incomplete"] is True
     assert report["metrics"]["total_tags"] == 5
     assert report["metrics"]["coverage"] == pytest.approx(3 / 5)
-    assert report["metrics"]["joint_high_rate"] == pytest.approx(1 / 2)
+    assert report["metrics"]["max_score"] == 4
+    assert report["metrics"]["joint_high_rate"] == 0
     assert report["metrics"]["three_dimension_high_rate"] == 0
-    assert report["metrics"]["relevance"]["distribution"] == [1, 0, 1]
+    assert report["metrics"]["relevance"]["distribution"] == [1, 0, 1, 0, 0]
     assert report["metrics"]["semantics"]["average"] == 1.5
     assert report["metrics"]["undetermined_tags"] == 1
-    assert report["metrics"]["value"]["distribution"] == [1, 0, 1]
+    assert report["metrics"]["value"]["distribution"] == [1, 0, 1, 0, 0]
     assert report["metrics"]["value"]["evaluated_tags"] == 3
     first = next(film for film in report["films"] if film["asset_id"] == "movie_001")
     assert [label["disposition"] for label in first["labels"]] == ["mounted", "pending", "pending"]
@@ -161,8 +162,8 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
     assert raw["tags"] == [_item(requests["movie_other"][0][2][0]["id"], 0, 1)]
     template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
-    assert template["prompt_version"] == "tag-quality-v3"
-    assert "scene 面向片段搜索" in template["messages"][0]["content"]
+    assert template["prompt_version"] == "tag-quality-v4"
+    assert "恰有一项限定" in template["messages"][0]["content"]
     assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
     assert isinstance(template["messages_without_keyframes"][1]["content"], str)
 
@@ -205,6 +206,26 @@ def test_scene_evidence_is_limited_to_the_source_scene():
     ]
 
 
+def test_high_relevance_requires_scoped_evidence():
+    valid = _item(1, relevance=4, semantics=3, value=4)
+    wrong_scene = _item(2, relevance=4)
+    one_film_scene = _item(3, relevance=3)
+    excessive = _item(4, value=5)
+    labels = [
+        {"id": 1, "desc": "对峙", "level": "scene", "scene_ids": ["scene_001"]},
+        {"id": 2, "desc": "对峙", "level": "scene", "scene_ids": ["scene_002"]},
+        {"id": 3, "desc": "对峙", "level": "film"},
+        {"id": 4, "desc": "对峙", "level": "scene", "scene_ids": ["scene_001"]},
+    ]
+    scores, complete = _parse_scores(
+        json.dumps({"tags": [valid, wrong_scene, one_film_scene, excessive]}),
+        labels, {"scene_001": 100, "scene_002": 200})
+    assert not complete
+    assert list(scores) == ["1"]
+    assert scores["1"]["relevance"]["score"] == 4
+    assert scores["1"]["semantics"]["score"] == 3
+
+
 def test_legacy_and_current_scores_have_separate_value_coverage(client):
     historical = _item(1)
     del historical["value"]
@@ -243,6 +264,39 @@ def test_legacy_and_current_scores_have_separate_value_coverage(client):
     assert legacy["metrics"]["value"]["evaluated_tags"] == 0
     assert legacy["metrics"]["value"]["undetermined"] == 0
     assert legacy["metrics"]["three_dimension_high_rate"] is None
+
+
+def test_batch_keeps_three_and_five_level_scores_separate(client):
+    ratings = [("old", "tag-quality-v3", 2, 2), ("new", "tag-quality-v4", 4, 3)]
+    with client.app.state.session_factory() as session:
+        for task_id, version, relevance, value in ratings:
+            session.add(MediaAsset(asset_id=task_id, asset_type="movie", title=task_id))
+            session.flush()
+            session.add(TagGenerationTask(task_id=task_id, asset_id=task_id, mode="open",
+                                          status="succeeded", batch_id="scale-comparison"))
+            session.flush()
+            session.add(TagQualityEvaluation(
+                task_id=task_id, status="completed", model="test", prompt_version=version,
+                labels=[{"id": 1, "name": "标签", "desc": "释义",
+                         "dir_path": None, "disposition": "pending"}],
+                scores={"1": _item(1, relevance, relevance, value)}, frame_paths={},
+            ))
+        session.commit()
+
+    report = _wait_report(client, "new", "completed")
+    assert report["metrics"]["coverage"] == 1
+    assert report["metrics"]["max_score"] is None
+    assert report["metrics"]["relevance"]["distribution"] == []
+    assert report["metrics"]["relevance"]["average"] is None
+    assert report["metrics"]["joint_high_rate"] is None
+    films = {film["task_id"]: film["metrics"] for film in report["films"]}
+    assert films["old"]["max_score"] == 2
+    assert films["old"]["three_dimension_high_rate"] == 1
+    assert films["new"]["max_score"] == 4
+    assert films["new"]["joint_high_rate"] == 1
+    assert films["new"]["three_dimension_high_rate"] == 0
+    assert films["new"]["value"]["distribution"] == [0, 0, 0, 1, 0]
+    assert films["new"]["value"]["average"] == 3
 
 
 def test_migration_preserves_existing_production_results(tmp_path, monkeypatch):

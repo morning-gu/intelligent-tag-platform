@@ -144,7 +144,8 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
 
   const report = detail.quality_evaluation
   const film = report?.films.find((item) => item.task_id === detail.task_id)
-  const tags = <TaskTagResults assetId={detail.asset_id} results={detail.results} labels={film?.labels} />
+  const tags = <TaskTagResults assetId={detail.asset_id} results={detail.results} labels={film?.labels}
+    maxScore={film?.metrics?.max_score ?? 2} />
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>

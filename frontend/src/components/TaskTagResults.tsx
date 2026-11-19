@@ -24,11 +24,16 @@ interface ResultRow {
 
 type DetailTab = 'quality' | 'evidence'
 
-function Score({ score, empty = '未完成' }: { score?: QualityScore | null; empty?: string }) {
+function Score({ score, maxScore, empty = '未完成' }: {
+  score?: QualityScore | null
+  maxScore: number
+  empty?: string
+}) {
   if (!score || score.score === null) {
     return <Text type="secondary">{score ? '无法判断' : empty}</Text>
   }
-  return <Tag color={['error', 'warning', 'success'][score.score]}>{score.score} 分</Tag>
+  const color = score.score === maxScore ? 'success' : score.score === 0 ? 'error' : 'warning'
+  return <Tag color={color}>{score.score} 分</Tag>
 }
 
 function Directory({ path }: { path?: string | null }) {
@@ -39,7 +44,7 @@ function Directory({ path }: { path?: string | null }) {
   ) : <Text type="secondary">未归属</Text>
 }
 
-function QualityDetails({ label, assetId }: { label: QualityLabel; assetId: string }) {
+function QualityDetails({ label, assetId, maxScore }: { label: QualityLabel; assetId: string; maxScore: number }) {
   const score = label.score
   return (
     <>
@@ -51,7 +56,7 @@ function QualityDetails({ label, assetId }: { label: QualityLabel; assetId: stri
             ['标签价值', score.value],
           ] as const).map(([title, result]) => (
             <div className="task-tag-reason" key={title}>
-              <div><Text strong>{title}</Text><Score score={result} empty="未评估" /></div>
+              <div><Text strong>{title}</Text><Score score={result} maxScore={maxScore} empty="未评估" /></div>
               {result && <p>{result.reason}</p>}
             </div>
           ))}
@@ -77,10 +82,11 @@ function QualityDetails({ label, assetId }: { label: QualityLabel; assetId: stri
   )
 }
 
-export default function TaskTagResults({ results, labels = [], assetId }: {
+export default function TaskTagResults({ results, labels = [], assetId, maxScore = 2 }: {
   results: GenerationTaskResult[]
   labels?: QualityLabel[]
   assetId: string
+  maxScore?: number
 }) {
   const [selection, setSelection] = useState<{ id: number; tab: DetailTab } | null>(null)
   const labelsById = new Map(labels.map((label) => [label.id, label]))
@@ -118,7 +124,7 @@ export default function TaskTagResults({ results, labels = [], assetId }: {
     ] as const).map(([title, key]) => ({
       title, key, width: 90, align: 'center' as const,
       render: (_: unknown, row: ResultRow) => row.label
-        ? <Score score={row.label.score?.[key]} empty={row.label.score ? '未评估' : '未完成'} />
+        ? <Score score={row.label.score?.[key]} maxScore={maxScore} empty={row.label.score ? '未评估' : '未完成'} />
         : <Text type="secondary">—</Text>,
     })) : []),
     {
@@ -207,7 +213,7 @@ export default function TaskTagResults({ results, labels = [], assetId }: {
               items={[
                 ...(selected.label ? [{
                   key: 'quality', label: '评分理由',
-                  children: <QualityDetails label={selected.label} assetId={assetId} />,
+                  children: <QualityDetails label={selected.label} assetId={assetId} maxScore={maxScore} />,
                 }] : []),
                 {
                   key: 'evidence', label: `场景证据（${evidence.length}）`,
