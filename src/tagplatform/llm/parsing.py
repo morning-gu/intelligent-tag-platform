@@ -17,6 +17,13 @@ client 层只管传输不做解析（client.py 的分工承诺），本模块把
 from __future__ import annotations
 
 import json
+import re
+
+# 模型随机加的 markdown 代码围栏：```json\n...\n``` 或裸 ```（2026-11-20
+# 生产实测：Qwen3.8-27B temperature=0.7 下同 payload 一次裸 JSON、一次带
+# 围栏，裸 json.loads 在首字符反引号上抛 "char 0"）。非贪婪 + $ 锚定保证
+# 只剥首尾整圈围栏，JSON 字符串内部出现的 ``` 不受影响。
+_FENCE_RE = re.compile(r"^```[\w-]*[ \t]*\n?(.*?)\n?[ \t]*```[ \t]*$", re.S)
 
 
 class LLMParseError(Exception):
@@ -32,11 +39,18 @@ def _bad_element(index: int, reason: str) -> LLMParseError:
     return LLMParseError(f"LLM 输出第 {index} 个元素非法：{reason}")
 
 
+def _strip_code_fence(content: str) -> str:
+    """剥掉包住整个输出的 markdown 围栏（```json ... ```），无围栏原样返回。"""
+    m = _FENCE_RE.match(content.strip())
+    return m.group(1).strip() if m else content
+
+
 def _parse_array(content: str, required: tuple[str, ...] = ()) -> list:
     """json.loads → 顶层数组；容忍模型把数组包在单键对象里（{"tags": [...]}）。
 
     Qwen/DeepSeek 在 JSON 模式下常把结果包成对象；只要对象里恰好有一个
-    列表值就按该列表解析，多个列表/无列表才判为结构不符。
+    列表值就按该列表解析，多个列表/无列表才判为结构不符。输入先剥掉模型
+    随机加的 markdown 围栏再进 json.loads。
 
     单元素直返兜底：json_object 模式下模型若只选一个标签，可能直接返回
     该标签对象（而非 [{...}]）。此时对象内唯一的列表值是 evidences，
@@ -45,7 +59,7 @@ def _parse_array(content: str, required: tuple[str, ...] = ()) -> list:
     空 dict {} 视为"模型未选中任何标签"，返回空列表。
     """
     try:
-        data = json.loads(content)
+        data = json.loads(_strip_code_fence(content))
     except json.JSONDecodeError as e:
         raise LLMParseError(f"LLM 输出不是合法 JSON: {e}") from None
     if isinstance(data, dict):

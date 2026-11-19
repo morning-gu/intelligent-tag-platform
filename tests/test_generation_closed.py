@@ -452,6 +452,25 @@ def test_parse_closed_happy_path():
     assert items[1]["applicability"] == 1
 
 
+def test_parse_closed_strips_markdown_code_fence():
+    # 生产实测（2026-11-20 e2e，Qwen3.8-27B temperature=0.7）：模型会把 JSON
+    # 包进 ```json 围栏，裸 json.loads 在首字符反引号上抛
+    # "Expecting value: line 1 column 1 (char 0)" → 任务失败。
+    # 围栏出现与否随采样波动（同 payload 上一次裸 JSON、这一次带围栏）。
+    body = json.dumps([
+        {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 4,
+         "evidences": [{"scene_id": "s1", "evidence": "开场悬念"}]},
+    ], ensure_ascii=False)
+    fenced = f"```json\n{body}\n```"
+    assert parse_closed_output(fenced)[0]["tag_id"] == "tag_001"
+    # 无语言标注的裸围栏同样要剥
+    bare = f"```\n{body}\n```"
+    assert parse_closed_output(bare)[0]["tag_id"] == "tag_001"
+    # 围栏前后有模型补充的空白也要容忍
+    padded = f"\n{fenced}\n"
+    assert parse_closed_output(padded)[0]["tag_id"] == "tag_001"
+
+
 def test_parse_closed_error_message_has_position():
     bad = json.dumps([
         {"tag_id": "t", "applicability": 4, "evidence_strength": 4,
