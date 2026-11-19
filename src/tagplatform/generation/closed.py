@@ -23,6 +23,11 @@ v4 增量（2026-12）：LLM 判定改带 1–5 分的 applicability/evidence_st
 分，Sf 与标签成对（落 ProducedTag.relevance_score）；confidence 仍为
 (E−1)/4，作为证据维度的独立读数随行保留。
 
+v5 增量（2026-12）：组内候选再按 `closed_batch_size`（默认 1）分批送
+LLM（每批一次调用，防单组标签过多导致输出截断）；组内全部批次完成后按
+tag_id 去重合并（首次出现优先），再统一走门控、终分与 max_tags 截断——
+批只影响调用切分，不改变组级语义。
+
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -74,42 +79,58 @@ class ClosedTagProducer:
         groups: dict[str, list] = {}
         for c in candidates:
             groups.setdefault(c.dir_id, []).append(c)
-        # 4. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后，
-        #    各组结果合并作为产出（run_id 沿用任务级 id，Mock 哈希采样键不变）
+        # 4. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
+        #    单组标签过多易截断模型输出，组内再按 closed_batch_size 分批，
+        #    每批送同构组对象（目录信息相同、tags 为该批子集，批次按召回
+        #    序连续切片）。组内全部批次完成后合并判定（tag_id 去重，首次
+        #    出现优先——防真实模型跨批重复判定），再统一门控截断。
+        #    run_id 沿用任务级 id（Mock 哈希采样键不变）
         items: list[tuple[float, dict]] = []
+        batch_size = max(1, get_settings().closed_batch_size)
         for dir_id, members in groups.items():
             directory = library.directory(dir_id)
-            group_payload = {
-                "dir_id": dir_id,
-                "dir_name": directory.dir_name if directory else "未分类",
-                "dir_description": directory.description if directory else "",
-                "tags": [
-                    {
-                        "tag_id": c.tag_id,
-                        "tag_name": c.tag_name,
-                        "description": c.description,
-                    }
-                    for c in members
-                ],
-            }
-            prompt = (
-                spec.prompt_text
-                + "\n\n## 候选标签分组\n"
-                + json.dumps(group_payload, ensure_ascii=False, indent=2)
-            )
-            resp = llm.complete([{"role": "user", "content": prompt}],
-                                spec.run_id)
-            # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
-            if not resp.ok:
-                raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
+            group_parsed: list[dict] = []
+            seen: set[str] = set()
+            for start in range(0, len(members), batch_size):
+                batch = members[start:start + batch_size]
+                group_payload = {
+                    "dir_id": dir_id,
+                    "dir_name": directory.dir_name if directory else "未分类",
+                    "dir_description": directory.description if directory else "",
+                    "tags": [
+                        {
+                            "tag_id": c.tag_id,
+                            "tag_name": c.tag_name,
+                            "description": c.description,
+                        }
+                        for c in batch
+                    ],
+                }
+                prompt = (
+                    spec.prompt_text
+                    + "\n\n## 候选标签分组\n"
+                    + json.dumps(group_payload, ensure_ascii=False, indent=2)
+                )
+                print(f"ClosedTagProducer: prompt for dir {dir_id}, batch {start}-{start + len(batch)}:\n{prompt}")
+                resp = llm.complete([{"role": "user", "content": prompt}],
+                                    spec.run_id)
+                # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
+                if not resp.ok:
+                    raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
+                print(f"ClosedTagProducer: response for dir {dir_id}, batch {start}-{start + len(batch)}:\n{resp.content}")
+                for it in parse_closed_output(resp.content):
+                    if it["tag_id"] in seen:
+                        continue  # 跨批重复判定：首次出现优先
+                    seen.add(it["tag_id"])
+                    group_parsed.append(it)
+            logger.debug("闭环目录 %s 解析出 %d 条判定", dir_id,
+                         len(group_parsed))
             # 5. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
             #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦分；
             #    G 为 Sapp≥0.5 的门控（A≥3 放行，A≤2 → Sf=0 整条丢弃）。
             #    Sf 与标签成对保留，按 Sf 降序截断（max_tags 为单目录上限）
-            parsed = parse_closed_output(resp.content)
-            logger.debug("闭环目录 %s 解析出 %d 条判定", dir_id, len(parsed))
             scored: list[tuple[float, dict]] = []
-            for it in parsed:
+            for it in group_parsed:
                 if it["applicability"] < 3:
                     continue  # Sapp=(A−1)/4 < 0.5：门控关闭，G=0 → Sf=0
                 candidate = by_id.get(it["tag_id"])
