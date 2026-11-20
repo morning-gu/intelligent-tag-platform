@@ -1,8 +1,4 @@
-// 导入任务页测试（v2）：mock apiFetch 按路径/方法分发，覆盖：任务历史渲染
-// （task_id 列/状态 Tag/时间 null 兜底）、Excel 上传成功（FormData 载荷 +
-// 摘要数字 + issues/parse_errors 明细行 + 任务历史刷新）、上传失败（422 透出
-// detail 且不刷新）、任务详情 Drawer（摘要展示与 summary=null 降级）、撤销
-// 双确认流程（导出并撤销/直接撤销）与撤销 409 透出后端 detail。
+// 导入任务页测试：上传、切页、状态轮询、任务详情与撤销。
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Modal } from 'antd'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,7 +13,7 @@ vi.mock('../api/client', async (importOriginal) => {
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
-// ---------- 夹具（与后端 ImportTaskOut/ImportTaskDetailOut/ImportResponse 契约同形） ----------
+// ---------- 夹具 ----------
 
 const TASKS: ImportTaskSummary[] = [
   {
@@ -34,8 +30,17 @@ const TASKS: ImportTaskSummary[] = [
   },
 ]
 
-const IMPORT_RESULT = {
+const NEW_TASK: ImportTaskSummary = {
   task_id: 't-new',
+  file_name: 'tags.xlsx',
+  status: 'processing',
+  created_at: null,
+}
+
+const IMPORT_RESULT: ImportTaskDetail = {
+  ...NEW_TASK,
+  status: 'completed',
+  error: null,
   summary: {
     total: 10,
     inserted: 8,
@@ -54,6 +59,7 @@ const TASK_DETAIL: ImportTaskDetail = {
   file_name: '标签库-v1.xlsx',
   status: 'completed',
   created_at: '2026-10-30T08:30:00',
+  error: null,
   summary: {
     total: 6,
     inserted: 5,
@@ -67,7 +73,7 @@ const TASK_DETAIL: ImportTaskDetail = {
 
 interface MockOptions {
   tasks?: ImportTaskSummary[]
-  importResult?: typeof IMPORT_RESULT
+  upload?: Promise<ImportTaskSummary>
   importError?: Error
   taskDetail?: ImportTaskDetail
   revokeResult?: ImportTaskSummary
@@ -78,9 +84,9 @@ interface MockOptions {
 function mockApis(options: MockOptions = {}) {
   mockedApiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
-    if (method === 'POST' && path === '/api/v1/tags/import') {
+    if (method === 'POST' && path === '/api/v1/import/tasks') {
       if (options.importError) throw options.importError
-      return options.importResult ?? IMPORT_RESULT
+      return options.upload ?? NEW_TASK
     }
     if (path === '/api/v1/import/tasks') return options.tasks ?? TASKS
     if (method === 'POST' && /^\/api\/v1\/import\/tasks\/[^/]+\/revoke$/.test(path)) {
@@ -97,13 +103,13 @@ function mockApis(options: MockOptions = {}) {
 /** 上传端点的调用（未请求过返回 undefined）。 */
 function importCall(): [string, RequestInit] | undefined {
   return mockedApiFetch.mock.calls.find(
-    ([p, init]) => p === '/api/v1/tags/import' && (init as RequestInit | undefined)?.method === 'POST',
+    ([p, init]) => p === '/api/v1/import/tasks' && init?.method === 'POST',
   ) as [string, RequestInit] | undefined
 }
 
 /** 任务历史列表端点的调用次数（成功刷新后递增）。 */
 function listCallCount(): number {
-  return mockedApiFetch.mock.calls.filter(([p]) => p === '/api/v1/import/tasks').length
+  return mockedApiFetch.mock.calls.filter(([p, init]) => p === '/api/v1/import/tasks' && !init?.method).length
 }
 
 /** 撤销端点的调用（未请求过返回 undefined）。 */
@@ -192,9 +198,12 @@ describe('TagImports 导入任务页（v2）', () => {
     expect(within(row1).getByRole('button', { name: '详情' })).toBeInTheDocument()
   })
 
-  it('Excel 上传成功：POST 携带 FormData（file 字段），摘要数字与 issues/parse_errors 明细渲染，任务历史刷新', async () => {
-    mockApis()
-    renderTagImports()
+  it('切页后仍显示上传状态，任务详情自动从处理中更新为结果摘要', async () => {
+    let finishUpload!: (task: ImportTaskSummary) => void
+    const upload = new Promise<ImportTaskSummary>((resolve) => { finishUpload = resolve })
+    const options: MockOptions = { upload }
+    mockApis(options)
+    const page = renderTagImports()
     await screen.findByText('t-1')
 
     const file = selectExcelFile()
@@ -205,8 +214,27 @@ describe('TagImports 导入任务页（v2）', () => {
     expect(body).toBeInstanceOf(FormData)
     expect(body.get('file')).toBe(file)
 
+    page.unmount()
+    renderTagImports()
+    await screen.findByText('t-1')
+    expect(document.querySelector('input[type="file"]')).toBeDisabled()
+
+    options.tasks = [NEW_TASK, ...TASKS]
+    options.taskDetail = { ...NEW_TASK, summary: null, error: null }
+    finishUpload(NEW_TASK)
+    const row = (await screen.findByText('t-new')).closest('tr')!
+    expect(row).toHaveTextContent('处理中')
+    expect(document.querySelector('input[type="file"]')).toBeEnabled()
+    expect(await screen.findByText('已创建导入任务')).toBeInTheDocument()
+
+    fireEvent.click(within(row).getByRole('button', { name: '详情' }))
+    await screen.findByText('导入任务正在后台处理')
+    options.tasks = [{ ...NEW_TASK, status: 'completed' }, ...TASKS]
+    options.taskDetail = IMPORT_RESULT
+    await screen.findByText('传入标签行数', {}, { timeout: 5000 })
+    expect(row).toHaveTextContent('已完成')
+
     // 摘要统计卡：total/inserted/skipped（口径：total 仅计标签定义行，inserted 为其中入库数）
-    expect(await screen.findByText('导入结果（任务 t-new）')).toBeInTheDocument()
     expectStatistic('传入标签行数', '10')
     expectStatistic('新增入库', '8')
     expectStatistic('跳过', '2')
@@ -221,22 +249,28 @@ describe('TagImports 导入任务页（v2）', () => {
     expect(parseRow).toHaveTextContent('33')
     expect(parseRow).toHaveTextContent('—') // tag_name null 兜底
     expect(parseRow).toHaveTextContent('标签名缺失')
-
-    // 成功提示与任务历史刷新（第二次列表拉取）
-    expect(await screen.findByText('导入完成：新增 8 个标签')).toBeInTheDocument()
-    await waitFor(() => expect(listCallCount()).toBe(2))
   })
 
-  it('Excel 上传失败（422 坏文件）：透出后端 detail 且不刷新任务历史', async () => {
-    mockApis({ importError: new ApiError(422, '文件无法解析为 xlsx 表格') })
+  it('上传请求失败：显示错误并恢复上传按钮', async () => {
+    mockApis({ importError: new ApiError(413, '文件超过上传限制') })
     renderTagImports()
     await screen.findByText('t-1')
 
     selectExcelFile()
 
-    expect(await screen.findByText('文件无法解析为 xlsx 表格')).toBeInTheDocument()
-    expect(listCallCount()).toBe(1)
-    expect(screen.queryByText(/导入结果（任务/)).not.toBeInTheDocument()
+    expect(await screen.findByText('文件超过上传限制')).toBeInTheDocument()
+    expect(document.querySelector('input[type="file"]')).toBeEnabled()
+  })
+
+  it('已失败任务的详情显示后台给出的错误原因', async () => {
+    mockApis({
+      tasks: [TASKS[1]],
+      taskDetail: { ...TASKS[1], summary: null, error: '标签文件缺少必要表头' },
+    })
+    renderTagImports()
+    const row = (await screen.findByText('t-2')).closest('tr')!
+    fireEvent.click(within(row).getByRole('button', { name: '详情' }))
+    expect(await screen.findByText('标签文件缺少必要表头')).toBeInTheDocument()
   })
 
   it('任务详情 Drawer：点详情拉取任务并复用摘要视图（无明细面板时提示无问题）', async () => {
