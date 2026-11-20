@@ -462,6 +462,16 @@ class ClosedEvalService:
         self._runs: dict[str, RunState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_run_id: str | None = None
+        # 数据集根页面级 override（POST /eval/closed/dataset-root 写入）：
+        # 进程内生效，重启回落 settings 默认；起跑时经 effective_root 快照
+        self.dataset_root_override: str | None = None
+
+    @property
+    def effective_root(self) -> str:
+        """当前生效的数据集根：override 优先，回落 settings.eval_dataset_root。"""
+        return (self.dataset_root_override
+                if self.dataset_root_override is not None
+                else self.settings.eval_dataset_root)
 
     # ---------------------------------------------------------------- 对外接口
 
@@ -478,7 +488,7 @@ class ClosedEvalService:
         run 在跑抛 `RunBusyError`。`wait=True` 供测试同步等完（join
         worker 线程后返回）。
         """
-        root = self.settings.eval_dataset_root
+        root = self.effective_root
         info = next((i for i in scan_datasets(root, set())
                      if i.id == dataset_id), None)
         if info is None:
