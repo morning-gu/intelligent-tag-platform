@@ -496,6 +496,54 @@ def test_parse_closed_drops_bare_string_evidence_entries():
     assert items2[0]["evidences"] == []
 
 
+def test_parse_closed_evidence_key_singular_alias():
+    # 闭环评测首跑实锤（2026-11-20，147.3 vLLM 温度 0 + no-think，preset30
+    # 3/5 影片三连重试全灭）：模型偶发把证据数组键写成单数 evidence（与
+    # 内层证据条目键 evidence 同名，一字之差），报「缺少键: ['evidences']」。
+    # 值为列表时按别名归一为 evidences。
+    items = parse_closed_output(json.dumps([
+        {"tag_id": "619", "applicability": 2, "evidence_strength": 4,
+         "evidence": [
+             {"scene_id": "scene_054", "evidence": "马头威胁"},
+             {"scene_id": "scene_148", "evidence": "收费站伏击"},
+         ]},
+    ], ensure_ascii=False))
+    assert items[0]["tag_id"] == "619"
+    assert len(items[0]["evidences"]) == 2
+    assert items[0]["evidences"][0]["scene_id"] == "scene_054"
+    # 顶层单对象 + evidence 单数（server.log 实锤的完整生产形态）
+    single = parse_closed_output(json.dumps(
+        {"tag_id": "553", "applicability": 4, "evidence_strength": 3,
+         "evidence": [{"scene_id": "scene_010", "evidence": "压迫感"}]},
+        ensure_ascii=False))
+    assert single[0]["tag_id"] == "553"
+    assert single[0]["evidences"][0]["scene_id"] == "scene_010"
+    # 两条键并存时 evidences 优先，别名值不覆盖
+    both = parse_closed_output(json.dumps(
+        {"tag_id": "9", "applicability": 3, "evidence_strength": 3,
+         "evidence": [{"scene_id": "scene_999", "evidence": "不应被采用"}],
+         "evidences": [{"scene_id": "scene_001", "evidence": "正主"}]},
+        ensure_ascii=False))
+    assert both[0]["evidences"][0]["scene_id"] == "scene_001"
+
+
+def test_parse_closed_evidence_alias_stays_strict_for_non_list():
+    # 别名仅容忍「值为列表」的键名漂移；evidence 是字符串等非列表形态
+    # 仍按缺 evidences 键严格拒绝，不给畸形数据开口子。
+    with pytest.raises(LLMParseError, match="缺少键"):
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4, "evidence_strength": 4,
+             "evidence": "一段文字"},
+        ], ensure_ascii=False))
+    # 别名路径下证据条目里的裸字符串沿用 PR#25 丢弃语义
+    items = parse_closed_output(json.dumps([
+        {"tag_id": "7", "applicability": 3, "evidence_strength": 3,
+         "evidence": ["scene_001",
+                      {"scene_id": "scene_002", "evidence": "实锤"}]},
+    ], ensure_ascii=False))
+    assert items[0]["evidences"][0]["scene_id"] == "scene_002"
+
+
 def test_parse_closed_error_message_has_position():
     bad = json.dumps([
         {"tag_id": "t", "applicability": 4, "evidence_strength": 4,
