@@ -6,11 +6,16 @@
 // （右开右闭边界）+ min/中位/max 一行文本 ⑥ Spearman 宏值 + 每片 Collapse
 // （None → 暂无）⑦ 失败影片列表（空 → 整块不渲染）⑧ 下载三条 href（fileUrl
 // 纯路径拼接，断言字面量期望防恒真）⑨ 银标准 note 原文 + calibre 小字（null
-// 字段 → 暂无）。null 一律「暂无」（None≠0 纪律）。
+// 字段 → 暂无）。null 一律「暂无」（None≠0 纪律）。另测单片明细节：
+// ClosedEvalMovieTable 以 vi.mock 顶替（其挂载即拉取摘要，jsdom 下会发真实
+// fetch），只断言「单片明细」节的锚点顺序（spearman-section 之后、
+// downloads-section 之前）。
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import ClosedEvalReport from './ClosedEvalReport'
 import type { ClosedEvalReport as ClosedEvalReportData } from '../api/eval'
+
+vi.mock('./ClosedEvalMovieTable', () => ({ default: () => <div data-testid="movie-table" /> }))
 
 /** 夹具一：口径齐全的 run——k=10 两档 θ（0.4 更近 0.4）；k=20 的 θ=0.4 档无
  * 有效影片（全 null → 汇总回退 θ=0.6 有值格）；k=5 全 null 行；先验两行；
@@ -340,5 +345,17 @@ describe('ClosedEvalReport 报告视图', () => {
     expect(screen.getByTestId('calibre')).toHaveTextContent(
       '模型 llm-x · 向量 emb-x · prompt 暂无 · 词库 暂无 · 数据集 暂无 · GT 暂无',
     )
+  })
+
+  it('renders movie table section with runId', () => {
+    render(<ClosedEvalReport report={REPORT} runId="run-1" />)
+
+    // 锚点顺序：movie-table 在 spearman-section 之后、downloads-section 之前
+    //（compareDocumentPosition 含 FOLLOWING 位即前者在后）
+    const spearman = screen.getByTestId('spearman-section')
+    const movieTable = screen.getByTestId('movie-table')
+    const downloads = screen.getByTestId('downloads-section')
+    expect(spearman.compareDocumentPosition(movieTable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(movieTable.compareDocumentPosition(downloads) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

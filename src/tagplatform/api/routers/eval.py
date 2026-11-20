@@ -1,4 +1,4 @@
-"""`/api/v1/eval/closed` 路由：闭环评测 admin 端点（11 个，全部仅 admin）。
+"""`/api/v1/eval/closed` 路由：闭环评测 admin 端点（13 个，全部仅 admin）。
 
 薄路由层（plan Task 6）：服务层是 tagplatform.closed_eval.ClosedEvalService
 （数据集扫描/干跑运行器/报告与历史，DB 零写入），router 只做协议转换——
@@ -16,12 +16,18 @@
 - 读侧容错与 history() 同口径：report.json 缺失/截断 → 404「无报告」，
   不抛 500（meta→raw→report 写序的非原子窗口）；进程内注册表查不到的
   run_id 按磁盘历史兜底（上一进程残留/中断 run 仍可查详情，与 /runs
-  列表口径一致——列表里有的 id，详情必须能打开）。
+  列表口径一致——列表里有的 id，详情必须能打开）；
+- 单片明细两端点（runs/{id}/movies[/{tt}]，badcase 视图）读
+  raw_results.json 现算逐片指标与三表明细（movie_breakdown 纯函数，
+  指标与闭环网格共用原语可对账）：raw 缺失/截断/非 list 或行级不是带
+  tt 键的 dict → 404「无单片明细」（运行中 run 与写盘非原子窗口不
+  500），meta thetas/ks 缺失/损坏 → DEFAULT 档照常出数（两键独立回落）；
+  tt 只做 JSON 行内查找、不参与路径拼接。
 """
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -40,6 +46,7 @@ from tagplatform.closed_eval import (
 )
 from tagplatform.db.models import UserAccount
 from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
+from tagplatform.eval.movie_breakdown import breakdown_movie, summarize_movies
 from tagplatform.library import try_load_library
 from tagplatform.settings import Settings
 
@@ -146,6 +153,82 @@ class RunSummaryOut(BaseModel):
     coverage_median: float | None = None
 
 
+class MovieSummaryRowOut(BaseModel):
+    """单片摘要行（badcase 视图主表行）：指标 float | None（None=算不出，
+    前端「暂无」——θ-空相关集/无交集/失败片）；n_produced 为原始产出条数
+    含空间外；n_relevant 为 gt∩库 ≥θ 计数（失败片也照数）。行序由服务层
+    给出：失败置顶 → p_at_k 升序 → null 垫底 → 同分按 tt。"""
+
+    tt: str
+    title: str | None = None
+    ok: bool | None = None
+    error: str | None = None
+    spearman: float | None = None
+    p_at_k: float | None = None
+    r_at_k: float | None = None
+    elapsed_ms: int | None = None
+    n_produced: int
+    n_relevant: int
+
+
+class MovieSummaryOut(BaseModel):
+    """单片摘要包层（spec 钉死三键包层）：theta_used/k_p/k_r 为服务端
+    确定选取（最接近 0.4 的 θ、P 看 top-10、R 看 top-20，并列取小），
+    前端表头按这三键拼字面量（P@{k_p}/R@{k_r}）。"""
+
+    theta_used: float
+    k_p: int
+    k_r: int
+    rows: list[MovieSummaryRowOut]
+
+
+class ProducedTagOut(BaseModel):
+    """计分清单条目（GT 空间内、按 -sf 序）：hit = gt_score 非 None 且
+    ≥ theta_used；tag_name 沿用产出原文（misses 才做库回填）。"""
+
+    tag_id: str
+    tag_name: str | None = None
+    sf: float | None = None
+    confidence: float | None = None
+    evidence_count: int | None = None
+    gt_score: float | None = None
+    hit: bool
+
+
+class OutOfSpaceTagOut(BaseModel):
+    """空间外产出条目：不在本批 GT 空间（不计分只列名，不占 P@K 的坑）。"""
+
+    tag_id: str
+    tag_name: str | None = None
+    sf: float | None = None
+
+
+class MissTagOut(BaseModel):
+    """漏检条目：相关（gt∩库 ≥θ）未产出，按 gt 分降序；tag_name 从当前
+    标签库回填（库缺该标签 → None）。"""
+
+    tag_id: str
+    tag_name: str | None = None
+    gt_score: float
+
+
+class MovieDetailOut(BaseModel):
+    """单片明细（摘要行展开懒加载）：produced/out_of_space/misses 三表；
+    失败片三表全空、error 原样；theta_used/k_p/k_r 与摘要包层同源。"""
+
+    tt: str
+    title: str | None = None
+    ok: bool | None = None
+    error: str | None = None
+    elapsed_ms: int | None = None
+    theta_used: float
+    k_p: int
+    k_r: int
+    produced: list[ProducedTagOut]
+    out_of_space: list[OutOfSpaceTagOut]
+    misses: list[MissTagOut]
+
+
 # ---------------------------------------------------------------- 内部装配
 
 
@@ -153,6 +236,14 @@ def _library_tag_ids() -> list[str]:
     """当前标签库的全部 tag_id（库未就绪 → 空表：overlap 全 0，如实反映）。"""
     library = try_load_library()
     return [tag.tag_id for tag in library.tags()] if library else []
+
+
+def _library_tag_map() -> dict[str, str]:
+    """当前标签库 tag_id → tag_name 映射（库未就绪 → 空表：misses 名称
+    留空、相关性按空库如实反映——与 _library_tag_ids 同款容错）。"""
+    library = try_load_library()
+    return ({tag.tag_id: tag.tag_name for tag in library.tags()}
+            if library else {})
 
 
 def _dataset_or_404(root: str, dataset_id: str):
@@ -188,6 +279,51 @@ def _run_state_out(state) -> RunStateOut:
                        done=state.done, total=state.total,
                        failed=state.failed, started_at=state.started_at,
                        finished_at=state.finished_at, error=state.error)
+
+
+def _movies_read(settings: Settings,
+                 run_id: str) -> tuple[list[dict], Sequence[float],
+                                       Sequence[int]]:
+    """单片明细两端点的共同读侧（协议转换，模式同 get_run_report）：
+
+    - run 目录守卫不过 → 404「run 不存在」（与 GET /runs/{run_id} 同口径）；
+    - raw_results.json 缺失/截断/非 list、或行级不是带 tt 键的 dict（残缺
+      行会在指标计算处 KeyError/AttributeError 打 500）→ 404「无单片明细」
+      （运行中 run 与 meta→raw 写序非原子窗口的既定容错，不 500）；
+    - meta.json 缺失/损坏 → 档位回落 DEFAULT_THETAS / DEFAULT_KS；thetas
+      与 ks 两键独立读取独立回落（缺一不影响另一——老 run 半残 meta
+      照常出数）。
+    """
+    run_dir = _run_dir(settings, run_id)
+    if run_dir is None:
+        raise HTTPException(status_code=404,
+                            detail=f"评测 run 不存在：{run_id!r}")
+    try:
+        rows = json.loads((run_dir / "raw_results.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rows = None
+    if not (isinstance(rows, list)
+            and all(isinstance(r, dict) and "tt" in r for r in rows)):
+        raise HTTPException(
+            status_code=404,
+            detail=f"该 run 无单片明细（未完成或产物缺失）：{run_id!r}")
+    thetas: Sequence[float] = DEFAULT_THETAS
+    ks: Sequence[int] = DEFAULT_KS
+    try:
+        meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = None
+    if isinstance(meta, dict):
+        meta_thetas = meta.get("thetas")
+        if (isinstance(meta_thetas, list) and meta_thetas
+                and all(isinstance(x, (int, float)) for x in meta_thetas)):
+            thetas = meta_thetas
+        meta_ks = meta.get("ks")
+        if (isinstance(meta_ks, list) and meta_ks
+                and all(isinstance(x, int) for x in meta_ks)):
+            ks = meta_ks
+    return rows, thetas, ks
 
 
 # ---------------------------------------------------------------- 端点
@@ -382,3 +518,36 @@ def get_run_file(
         raise HTTPException(status_code=404,
                             detail=f"评测产物文件不存在：{name!r}")
     return FileResponse(path, filename=name)
+
+
+@router.get("/runs/{run_id}/movies", response_model=MovieSummaryOut)
+def get_run_movies(
+    run_id: str,
+    _admin: UserAccount = Depends(require_admin),
+    settings: Settings = Depends(get_settings_dep),
+) -> MovieSummaryOut:
+    """run 的逐片摘要（badcase 视图主表）：读盘现算（落盘结构零改动，
+    历史 run 即时可用）——失败置顶、P@K 升序的坏例优先；档位包层三键
+    回传，前端表头按其拼字面量。"""
+    rows, thetas, ks = _movies_read(settings, run_id)
+    payload = summarize_movies(rows, thetas, ks, set(_library_tag_map()))
+    return MovieSummaryOut(**payload)
+
+
+@router.get("/runs/{run_id}/movies/{tt}", response_model=MovieDetailOut)
+def get_run_movie_detail(
+    run_id: str,
+    tt: str,
+    _admin: UserAccount = Depends(require_admin),
+    settings: Settings = Depends(get_settings_dep),
+) -> MovieDetailOut:
+    """单片明细（摘要行展开懒加载）：计分清单（hit/gt_score）+ 空间外 +
+    漏检三表；misses 的 tag_name 从当前标签库回填（库缺该标签 → None）；
+    tt 只做 JSON 行内查找、不参与路径拼接，未知 tt → 404。"""
+    rows, thetas, ks = _movies_read(settings, run_id)
+    tag_map = _library_tag_map()
+    detail = breakdown_movie(rows, tt, thetas, ks, set(tag_map), tag_map)
+    if detail is None:
+        raise HTTPException(status_code=404,
+                            detail=f"影片不在该 run 明细中：{tt!r}")
+    return MovieDetailOut(**detail)
