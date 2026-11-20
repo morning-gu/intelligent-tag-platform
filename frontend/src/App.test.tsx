@@ -1,7 +1,7 @@
 // 路由门禁与菜单测试：App 以 MemoryRouter 驱动（BrowserRouter 由 main.tsx 提供）。
 // api/client 整体 mock——门禁只关心 getMe 结果：拒绝 → 登录页；成功 → 布局与菜单
-// （九项菜单齐全，其中"用户管理"/"模型配置"仅 admin 角色可见）。登录态下工作台
-// 会挂载并请求指标接口，apiFetch 桩默认为永不落定的 Promise，页面停留在加载态。
+// （十项菜单齐全，其中"用户管理"/"模型配置"/"闭环评测"仅 admin 角色可见）。登录态
+// 下工作台会挂载并请求指标接口，apiFetch 桩默认为永不落定的 Promise，页面停留在加载态。
 //
 // 路由装配集成用例（2026-11-02 白屏回归增补）：整棵 <App /> 在真实路由嵌套下
 // 渲染。各页面单测孤立渲染组件，门禁用例只看菜单项——RequireAuth → Layout →
@@ -63,7 +63,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：九项菜单齐全（含仅 admin 可见的用户管理与模型配置）', async () => {
+  it('admin 登录：十项菜单齐全（含仅 admin 可见的用户管理/模型配置/闭环评测）', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -71,7 +71,7 @@ describe('路由门禁（requireAuth）', () => {
     // 等布局渲染完成（任一菜单项出现）
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(9)
+    expect(menuItems).toHaveLength(10)
     expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
@@ -80,6 +80,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('menuitem', { name: '质量评估' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '用户管理' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '模型配置' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '闭环评测' })).toBeInTheDocument()
     // 顶部显示用户名
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
@@ -126,6 +127,9 @@ function mockAdminApis() {
         },
       ]
     }
+    // 闭环评测页挂载双拉（暂无数据集/历史的空态足够证明装配）
+    if (path === '/api/v1/eval/closed/datasets') return []
+    if (path === '/api/v1/eval/closed/runs') return []
     throw new Error(`未预期的请求：${path}`)
   })
 }
@@ -171,6 +175,17 @@ describe('路由装配（Layout → AdminRoute → 页面）', () => {
     renderAt('/model-config')
     expect(await screen.findByText('Prompt 版本管理')).toBeInTheDocument()
     expect(screen.getByText('当前运行配置')).toBeInTheDocument()
+  })
+
+  it('admin 访问 /eval-closed：渲染出闭环评测页（新建表单与历史骨架）', async () => {
+    // 装配冒烟：新页签经 RequireAuth→Layout→AdminRoute→ClosedEval 全链路渲染
+    mockAdminApis()
+    renderAt('/eval-closed')
+    expect(await screen.findByText('新建评测')).toBeInTheDocument()
+    expect(screen.getByText('评测历史')).toBeInTheDocument()
+    // 挂载双拉了数据集与历史端点
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/datasets')
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/runs')
   })
 
   it('reviewer 直接访问 /users：AdminRoute 重定向回工作台', async () => {

@@ -21,6 +21,8 @@ TaskExecutor 为线程池封装：线程内独立 session（SQLite 文件库跨�
 :memory: 不可），异常吞并记日志；workers=0 同步执行（T9 钉死的测试模式）。
 reset_orphan_running 供 create_app 启动时清理进程重启留下的 running 孤儿。
 
+assemble_spec 为执行器与闭环评测（closed_eval）共用的 spec 组装段。
+
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
@@ -34,7 +36,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import MediaAsset, TagGenerationTask
+from tagplatform.db.models import MediaAsset, PromptTemplate, TagGenerationTask
 from tagplatform.eval.tag_quality import snapshot
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
@@ -136,6 +138,45 @@ def _render_content_text(content: ContentJSON) -> str:
     return "\n".join(parts)
 
 
+def assemble_spec(
+    session: Session, *, mode: str, content: ContentJSON,
+    task_id: str, asset_id: str, run_id: str, policy_json: str = "",
+) -> tuple[GenerationSpec, PromptTemplate | None]:
+    """组装单次生成的 GenerationSpec（执行器与闭环评测 closed_eval 共用）。
+
+    run_generation_task 八步流程中的组装段（4/5/4b + spec 构造）原样搬出，
+    闭环评测复用同一组装语义，保证两侧 prompt/policy/库加载零漂移：
+    try_load_library → policy 解析（空 policy_json → 默认）→ get_producer
+    → 非 builds_prompt 生产器取 get_active_prompt 激活模板并渲染 content
+    文本 → 组装 GenerationSpec。返回 (spec, template)：builds_prompt=True
+    的生产器自己拼 prompt，template 为 None。异常语义不变：坏 policy JSON、
+    缺激活模板等配置错误原样外抛，由调用方的事务语义落失败终态。
+    """
+    # 标签库与 producer 分发（库在任务开始时加载一次，JSON 读取有缓存）
+    library = try_load_library()
+    # 策略解析（空 policy_json → 默认）
+    raw_policy = (policy_json or "").strip()
+    policy = (GenerationPolicy(**json.loads(raw_policy))
+              if raw_policy else GenerationPolicy())
+    # producer 分发与 prompt 组装渲染
+    #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
+    #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板
+    #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再组装）。
+    producer = get_producer(mode)
+    template = None
+    prompt_text = ""
+    if not getattr(producer, "builds_prompt", False):
+        template = get_active_prompt(session, mode)
+        fields: dict[str, str] = {"content": _render_content_text(content)}
+        prompt_text = render_prompt(template, **fields)
+    spec = GenerationSpec(
+        task_id=task_id, asset_id=asset_id, content=content,
+        policy=policy, prompt_text=prompt_text, run_id=run_id,
+        library=library,
+    )
+    return spec, template
+
+
 def run_generation_task(
     task_id: str, session: Session, llm, embedder, *,
     prompt_samples: PromptSampleBatch | None = None,
@@ -146,9 +187,11 @@ def run_generation_task(
     1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
     2. 资产或其 content_json 缺失 → failed + error、commit、返回 task；
     3. load_content(asset.content_json)；资产 id 即 task.asset_id（任务直绑资产）；
-    4. get_producer(task.mode)；render_prompt 渲染激活模板（closed/open 均
-       只传 content——closed 的候选标签由 produce 内部按目录分组注入）；
-    5. policy_json 空 → 默认 GenerationPolicy，否则按 JSON 构造；
+    4. assemble_spec 组装 spec（库加载/producer 分发/模板渲染，闭环评测共用）：
+       render_prompt 渲染激活模板（closed/open 均只传 content——closed 的
+       候选标签由 produce 内部按目录分组注入）；
+    5. assemble_spec 内：policy_json 空 → 默认 GenerationPolicy，否则按
+       JSON 构造；
     6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
        写入后置 failed（error=str(e)、finished_at）、commit、返回 task
        （不 re-raise，调用方看状态）；
@@ -181,31 +224,19 @@ def run_generation_task(
         content = load_content(asset.content_json)
         asset_id = task.asset_id
 
-        # 4. 标签库与 producer 分发（库在任务开始时加载一次，JSON 读取有缓存）
-        library = try_load_library()
-        # 5. 策略解析（空 policy_json → 默认）
-        raw_policy = (task.policy_json or "").strip()
-        policy = (GenerationPolicy(**json.loads(raw_policy))
-                  if raw_policy else GenerationPolicy())
-        # 4b. producer 分发与 prompt 组装渲染
-        #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
-        #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板
-        #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再组装）。
-        producer = get_producer(task.mode)
-        template = None
-        prompt_text = ""
-        if not getattr(producer, "builds_prompt", False):
-            template = get_active_prompt(session, task.mode)
-            fields: dict[str, str] = {"content": _render_content_text(content)}
-            prompt_text = render_prompt(template, **fields)
-        # 6. 生成（run_id 含随机段：同任务重跑换 run_id，Mock 哈希采样随之变化）
+        # 4/5. spec 组装（assemble_spec 公共段，闭环评测共用）：标签库加载、
+        #    策略解析、producer 分发与模板渲染。run_id 含随机段：同任务重跑
+        #    换 run_id，Mock 哈希采样随之变化
         run_id = f"{task.task_id}:{uuid4().hex[:6]}"
-        spec = GenerationSpec(
-            task_id=task.task_id, asset_id=asset_id, content=content,
-            policy=policy, prompt_text=prompt_text, run_id=run_id,
-            library=library,
-            prompt_samples=prompt_samples,
-        )
+        spec, template = assemble_spec(
+            session, mode=task.mode, content=content,
+            task_id=task.task_id, asset_id=asset_id, run_id=run_id,
+            policy_json=task.policy_json)
+        spec.prompt_samples = prompt_samples
+        # producer 供 produce 调用与 prompt_version 兜底使用（assemble_spec
+        # 按钉死签名只回 spec/template；注册表分发幂等，二次查询无副作用）
+        producer = get_producer(task.mode)
+        # 6. 生成
         tags = producer.produce(spec, session, llm, embedder)
         # 6.5 过滤责任链（合 main 的 filtering 能力）：质量评估 → 信息围栏，
         #     通过者才进审核队列。被丢弃的标签不落 pre 表、不以 rejected
@@ -246,7 +277,8 @@ def run_generation_task(
                     logger.warning("别名预览写入失败：%s", exc)
 
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
-        snapshot(session, task, spec, summary, asset.content_json, library)
+        #    （标签库改由 assemble_spec 装载并随 spec 携带，此处取 spec.library）
+        snapshot(session, task, spec, summary, asset.content_json, spec.library)
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
         # 自拼 prompt 的生产器写自己的口径版本（如 mtg-v1）
