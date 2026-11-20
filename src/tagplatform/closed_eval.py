@@ -789,7 +789,11 @@ class ClosedEvalService:
 
         每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
         （mode="closed"，读激活模板）→ produce（不写库）→ 产出按
-        (-sf, tag_id) 排序。异常兜底：重试耗尽记 error、produced 清空。
+        (-sf, tag_id) 排序。**会话在 assemble 后立即归还**：produce 含
+        全部 LLM 调用（分钟级）不得持有 DB 连接（池饿死事故 2026-11-21：
+        并发 16 > QueuePool 5+10，会话横跨 produce 把池占死、平台 API 全
+        超时）；closed producer 不消费 session（全读 spec.library，assemble
+        已装好），第二参传 None——协议签名不动，正式执行器照常传真会话。
         内容从起跑快照根加载（dataset_root）——运行中切 override 不影响
         本 run。
         """
@@ -806,8 +810,10 @@ class ClosedEvalService:
                         session, mode="closed", content=content,
                         task_id=f"eval-{run_id}", asset_id=tt,
                         run_id=f"{run_id}:{tt}")
-                    tags = get_producer("closed").produce(
-                        spec, session, self._llm, self._embedder)
+                # produce 传 None（见 docstring）：未来 producer 改用会话
+                # 会以 AttributeError 显式失败，不静默漂移
+                tags = get_producer("closed").produce(
+                    spec, None, self._llm, self._embedder)
                 produced = _produced_rows(tags)
                 error = None
                 break

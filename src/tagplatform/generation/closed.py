@@ -122,13 +122,11 @@ class ClosedTagProducer:
                     + "\n\n## 候选标签分组\n"
                     + json.dumps(group_payload, ensure_ascii=False, indent=2)
                 )
-                print(f"ClosedTagProducer: prompt for dir {dir_id}, batch {start}-{start + len(batch)}:\n{prompt}")
                 resp = llm.complete([{"role": "user", "content": prompt}],
                                     spec.run_id)
                 # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
                 if not resp.ok:
                     raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
-                print(f"ClosedTagProducer: response for dir {dir_id}, batch {start}-{start + len(batch)}:\n{resp.content}")
                 for it in parse_closed_output(resp.content):
                     if it["tag_id"] in seen:
                         continue  # 跨批重复判定：首次出现优先

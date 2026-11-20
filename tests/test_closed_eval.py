@@ -246,6 +246,50 @@ class _SlowLLM(MockLLMClient):
         return super().complete(messages, run_id)
 
 
+class _CountingSessionFactory:
+    """会话计数工厂（池饿死回归探针）：包装真实工厂，进出 with 计数。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.open_sessions = 0
+
+    def __call__(self):
+        return _CountingSession(self._inner(), self)
+
+
+class _CountingSession:
+    """计数会话：属性透传内层（assemble_spec 的 get_active_prompt 可用）。"""
+
+    def __init__(self, inner, factory):
+        self._inner = inner
+        self._factory = factory
+
+    def __enter__(self):
+        self._factory.open_sessions += 1
+        return self._inner
+
+    def __exit__(self, *exc):
+        self._factory.open_sessions -= 1
+        return self._inner.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _SessionProbeLLM(MockLLMClient):
+    """LLM 桩：complete() 时记开放会话数（violation 计数，不中断跑）。"""
+
+    def __init__(self, factory):
+        super().__init__()
+        self._factory = factory
+        self.violations = 0
+
+    def complete(self, messages, run_id):
+        if self._factory.open_sessions > 0:
+            self.violations += 1
+        return super().complete(messages, run_id)
+
+
 @pytest.fixture
 def engine(tmp_path):
     """评测服务用文件 DB（建表即播种 closed v1 激活模板——after_create 钩子）。"""
@@ -286,9 +330,10 @@ def eval_setup(tmp_path, root, engine):
     write_library(library_root(), dirs=_EVAL_DIRS, tags=_EVAL_TAGS)
     made: list[ClosedEvalService] = []
 
-    def _make(llm=MOCK_LLM, dataset_root=None) -> ClosedEvalService:
+    def _make(llm=MOCK_LLM, dataset_root=None,
+              session_factory=None) -> ClosedEvalService:
         service = ClosedEvalService(
-            make_session_factory(engine), llm, MOCK_EMBEDDER,
+            session_factory or make_session_factory(engine), llm, MOCK_EMBEDDER,
             Settings(eval_dataset_root=dataset_root or root,
                      eval_output_root=str(tmp_path / "eval-out")))
         made.append(service)
@@ -376,6 +421,21 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
     assert (meta["status"], meta["done"], meta["total"],
             meta["failed"]) == ("succeeded", 2, 2, 0)
+
+
+def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
+    """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
+    LLM 调用期间不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
+    会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。"""
+    from tagplatform.db import make_session_factory
+
+    factory = _CountingSessionFactory(make_session_factory(engine))
+    llm = _SessionProbeLLM(factory)
+    service = eval_setup(llm=llm, session_factory=factory)
+    run_id = service.start("emotion", {"mode": "all"}, wait=True)
+    assert service.get(run_id).status == "succeeded"
+    assert service.get(run_id).failed == 0
+    assert llm.violations == 0
 
 
 def test_db_zero_writes(engine, svc, root):  # Review Focus 3
