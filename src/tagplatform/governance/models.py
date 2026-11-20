@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 REQUIRED_COLUMNS = ("tag_name", "tag_type", "description")
 REQUIRED_VALUE_COLUMNS = ("tag_name", "tag_type")
 OPTIONAL_COLUMNS = ("tag_id", "parent_tag", "aliases", "applicable_scope", "status")
-# 树状 XML 的目录节点带 dir_type 属性（dir_static|dir_dynamic）；扁平
+# 树状 XML 的目录节点带 dir_type 属性（dir_static|dir_dynamic|dir_asset，
+# dir_asset 为元数据导入/联网搜索来源目录，扩充语义同 dir_dynamic）；扁平
 # 模板无此列，TagRow.dir_type 为 None（入库层归一默认 dir_dynamic）
 _ALIAS_SEPARATOR = re.compile(r"[,，;；|]")
 
@@ -29,8 +30,8 @@ class TagRow:
     applicable_scope: str | None
     status: str | None
     is_manual: bool = False
-    # 目录类型（dir_static|dir_dynamic），仅树状 XML 目录节点有值；
-    # None 时入库层归一为 dir_dynamic
+    # 目录类型（dir_static|dir_dynamic|dir_asset），仅树状 XML 目录节点
+    # 有值；None 时入库层归一为 dir_dynamic
     dir_type: str | None = None
     # 目录行显式标记（三态）：解析层本来就知道该行是目录（双表模板的
     # 「标签目录」sheet、层级模板的一/二/三级列、树状 XML 的 level1/2/3

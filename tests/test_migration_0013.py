@@ -73,7 +73,7 @@ def test_0014_upgrades_main_0013(rehearsal):
     closed_prompt = _closed_prompt(db_path)
     command.upgrade(cfg, "head")
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0015",)
         assert conn.execute("SELECT COUNT(*) FROM tag_quality_evaluation").fetchone() == (0,)
     assert _closed_prompt(db_path) == closed_prompt
 
@@ -99,7 +99,7 @@ def test_0014_adopts_pilot_0013_without_losing_evaluations(rehearsal):
     command.upgrade(cfg, "head")
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0015",)
         assert conn.execute("SELECT batch_id FROM tag_generation_task WHERE task_id='g1'").fetchone() == ("b1",)
         assert conn.execute("SELECT prompt_version, scores FROM tag_quality_evaluation"
                             " WHERE task_id='g1'").fetchone() == (

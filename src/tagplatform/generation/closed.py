@@ -1,8 +1,9 @@
 """模式 A 生成器：封闭式标签提取（Task 5）。
 
-流程（设计文档 §4.2）：按目录范围召回候选 → 空候选显式失败（提示先导入
-标签库）→ 候选**按目录分组**、每组以 JSON 追加到渲染后的 prompt 正文之后
-（组含目录名称/描述，标签含 id/名称/描述）→ 逐组调用 LLM 判定 → 契约校验
+流程（设计文档 §4.2）：按目录范围召回候选 → 剔除 dir_asset 目录的候选
+（该类目录标签由元数据导入/联网搜索获取，不做内容语义打分）→ 空候选
+显式失败（提示先导入标签库）→ 候选**按目录分组**、每组以 JSON 追加到
+渲染后的 prompt 正文之后（组含目录名称/描述，标签含 id/名称/描述）→ 逐组调用 LLM 判定 → 契约校验
 解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c = 0.2/0.5/0.3；
 Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1；G 为 Sapp≥0.5 门控，
 A≤2 整条丢弃）→ 门内按 Sf 降序截断（max_tags 为单目录上限）→
@@ -28,6 +29,10 @@ LLM（每批一次调用，防单组标签过多导致输出截断）；组内�
 tag_id 去重合并（首次出现优先），再统一走门控、终分与 max_tags 截断——
 批只影响调用切分，不改变组级语义。
 
+v6 增量（2026-12）：dir_asset 目录（元数据导入/联网搜索来源）的标签跳过
+内容语义打分——召回后按目录逐个过滤（dir_type 不沿子目录继承，与
+allows_new_tags 同口径）；范围内仅剩 dir_asset 目录时按空候选显式失败。
+
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -46,6 +51,7 @@ from tagplatform.generation.base import (
     register_producer,
 )
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
+from tagplatform.library import DIR_ASSET
 from tagplatform.llm.parsing import parse_closed_output
 from tagplatform.mounting import resolve_mount
 from tagplatform.settings import get_settings
@@ -71,15 +77,20 @@ class ClosedTagProducer:
             dir_ids=spec.policy.dir_ids,
             top_k=get_settings().recall_top_k_per_type,
         )
-        # 2. 空候选属配置错误：目录库未导入，显式失败优于静默空结果
+        # 2. dir_asset 目录（元数据/联网搜索来源）不做内容语义打分：剔除其
+        #    候选后再判空（dir_type 逐目录判定，不沿子目录继承）
+        asset_dir_ids = {d.dir_id for d in library.dirs()
+                         if d.dir_type == DIR_ASSET}
+        candidates = [c for c in candidates if c.dir_id not in asset_dir_ids]
+        # 3. 空候选属配置错误：目录库未导入，显式失败优于静默空结果
         if not candidates:
             raise ValueError("候选标签为空，请先导入标签库")
         by_id = {c.tag_id: c for c in candidates}
-        # 3. 候选按目录分组（目录下有召回标签才建组；dict 插入序 = 召回序）
+        # 4. 候选按目录分组（目录下有召回标签才建组；dict 插入序 = 召回序）
         groups: dict[str, list] = {}
         for c in candidates:
             groups.setdefault(c.dir_id, []).append(c)
-        # 4. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
+        # 5. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
         #    单组标签过多易截断模型输出，组内再按 closed_batch_size 分批，
         #    每批送同构组对象（目录信息相同、tags 为该批子集，批次按召回
         #    序连续切片）。组内全部批次完成后合并判定（tag_id 去重，首次
@@ -125,7 +136,7 @@ class ClosedTagProducer:
                     group_parsed.append(it)
             logger.debug("闭环目录 %s 解析出 %d 条判定", dir_id,
                          len(group_parsed))
-            # 5. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
+            # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
             #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦分；
             #    G 为 Sapp≥0.5 的门控（A≥3 放行，A≤2 → Sf=0 整条丢弃）。
             #    Sf 与标签成对保留，按 Sf 降序截断（max_tags 为单目录上限）
@@ -140,7 +151,7 @@ class ClosedTagProducer:
                 scored.append((0.2 * s_emb + 0.5 * s_app + 0.3 * s_evi, it))
             scored.sort(key=lambda pair: -pair[0])
             items.extend(scored[: spec.policy.max_tags])
-        # 6. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
+        # 7. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
         #    catalog 来源 tag_id 必有，候选目录直接取库
         produced: list[ProducedTag] = []
         scenes_by_id = {scene.scene_id: scene for scene in spec.content.content.scenes}

@@ -30,3 +30,19 @@ def test_parse_xml_marks_level_nodes_as_directories():
     assert not result.errors
     assert [row.tag_name for row in result.rows] == ["内容", "剧情"]
     assert [row.is_dir for row in result.rows] == [True, True]
+
+
+def test_parse_xml_carries_dir_type_attribute():
+    """目录节点的 dir_type 属性透传（含 dir_asset），归一交入库层。"""
+    result = parse_tag_xml("""<?xml version="1.0" encoding="UTF-8"?>
+      <root>
+        <level1 name="元数据目录" dir_type="dir_asset">
+          <level2 name="搜索词" dir_type="dir_static">
+            <tag>关键词标签</tag>
+          </level2>
+        </level1>
+      </root>""".encode())
+
+    assert not result.errors
+    assert [row.dir_type for row in result.rows] == ["dir_asset", "dir_static", None]
+    assert result.rows[2].is_dir is False  # 标签行无目录类型

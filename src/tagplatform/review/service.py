@@ -77,7 +77,8 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
         raise ValueError(f"目录不存在于标签库：{row.candidate_dir_id}")
     # 目录校验（生成侧建候选时已挡过一遍，入库侧再挡一次：目录可能在两轮之间
     # 被改成静态目录，或人工 modify 换了目录）。两条规则：
-    # 1) 只有动态目录允许审核后扩充新标签，静态目录的取值是固定的；
+    # 1) 只有可扩充目录（dir_dynamic/dir_asset）允许审核后扩充新标签，
+    #    静态目录的取值是固定的；
     # 2) 候选行的挂载粒度必须落在目录的 applicable_scope 里（目录可能挂多个
     #    粒度，逗号分隔），否则入的是挂不上资产的标签。
     if not directory.allows_new_tags:
@@ -204,7 +205,8 @@ def apply_review(session: Session, row_id: int, action: str,
                 raise ValueError(f"目录不存在于标签库：{final_dir}")
             # 目录校验（与生成侧同口径，入库前再挡一次：目录可能在这两轮之间
             # 被改成静态，或人工 modify 换了目录/粒度）：
-            # 1) 只有动态目录能扩充新标签，静态目录取值固定；
+            # 1) 只有可扩充目录（dir_dynamic/dir_asset）能扩充新标签，
+            #    静态目录取值固定；
             # 2) 候选行的挂载粒度必须在目录的 applicable_scope 里。
             if not directory.allows_new_tags:
                 raise ValueError(

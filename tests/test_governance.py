@@ -179,6 +179,25 @@ def test_empty_leaf_directory_marked_is_dir_stays_directory(session):
     assert kinds == {"dir", "tag"}
 
 
+def test_dir_type_values_normalized_on_insert(session):
+    """dir_type 行值：合法枚举（含 dir_asset）按行落库，非法归一回默认。"""
+    res = run_governance([
+        TagRow(None, "搜索关键词", "val_fixed", "联网搜索来源", None, [],
+               None, None, dir_type="dir_asset", is_dir=True),
+        TagRow(None, "手维护目录", "val_fixed", "", None, [],
+               None, None, dir_type="dir_hybrid", is_dir=True),
+        TagRow(None, "缺省目录", "val_fixed", "", None, [],
+               None, None, is_dir=True),
+    ], session, MOCK_EMBEDDER)
+    assert res.issues == []
+
+    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
+    assert dirs["搜索关键词"].dir_type == "dir_asset"
+    # 非法/缺省：归一回 dir_dynamic（导入路径缺省语义不变）
+    assert dirs["手维护目录"].dir_type == "dir_dynamic"
+    assert dirs["缺省目录"].dir_type == "dir_dynamic"
+
+
 def test_unmarked_empty_leaf_directory_still_degraded(session):
     """兜底语义保留：未标记的末级空目录仍按旧推断退化为标签行。
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -18,6 +19,8 @@ from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, ren
 from tagplatform.library import TagLibrary
 from tagplatform.results import PersistSummary
 from tagplatform.schemas import ContentJSON
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "deepseek-v4.1-flash"
 PROMPT_VERSION = "tag-quality-v4"
@@ -313,6 +316,9 @@ def evaluate(
         truncated = response.ok and choices[0].get("finish_reason") == "length"
         if (truncated or input_limit) and len(labels) > 1:
             middle = len(labels) // 2
+            logger.info("标签质量评估分批重试 task_id=%s reason=%s batch_sizes=%d,%d",
+                        evaluation.task_id, "output_length" if truncated else "input_length",
+                        middle, len(labels) - middle)
             batch(labels[:middle], images)
             batch(labels[middle:], images)
             return

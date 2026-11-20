@@ -8,6 +8,7 @@ raw OpenAI 信封形状、同 run_id 确定性，均在此钉死。
 import hashlib
 import json
 import sys
+from types import SimpleNamespace
 
 from tagplatform.llm import MockLLMClient, OpenAIClient, make_llm_client
 from tagplatform.settings import Settings
@@ -171,6 +172,36 @@ def test_openai_client_all_fail_returns_not_ok():
     client = OpenAIClient("m", transport=broken, request_interval=0, max_retries=2)
     resp = client.complete([{"role": "user", "content": "x"}], "r")
     assert not resp.ok and "network down" in resp.raw["error"]
+
+
+def test_openai_stream_preserves_finish_reason_and_trailing_usage(monkeypatch):
+    usage = {"prompt_tokens": 10, "completion_tokens": 8192}
+    stream = [
+        {"choices": [{"delta": {"reasoning_content": "思考过程"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": '{"tags":['}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": '{"id":1}'}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        {"choices": [], "usage": usage},
+    ]
+
+    def create(**kwargs):
+        assert kwargs["stream"] is True and kwargs["max_tokens"] == 8192
+        return (SimpleNamespace(model_dump=lambda chunk=chunk: chunk) for chunk in stream)
+
+    def fake_openai(**kwargs):
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=fake_openai))
+    client = OpenAIClient("m", request_interval=0, max_retries=1, max_tokens=8192)
+
+    response = client.complete([{"role": "user", "content": "评分"}], "r")
+
+    assert response.ok
+    assert response.content == '{"tags":[{"id":1}'
+    assert response.raw["choices"][0]["finish_reason"] == "length"
+    assert response.usage == usage
 
 
 # ---------- Settings 新字段与工厂 ----------

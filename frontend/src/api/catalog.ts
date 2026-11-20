@@ -9,8 +9,9 @@ import { apiFetch } from './client'
 /** 节点种类：目录或标签（后端 kind Query 参数同词表）。 */
 export type TagKind = 'dir' | 'tag'
 
-/** 目录类型：静态/动态（仅目录节点有值，标签节点恒为 null）。 */
-export type DirType = 'dir_static' | 'dir_dynamic'
+/** 目录类型：静态/动态/元数据（仅目录节点有值，标签节点恒为 null；
+ * dir_asset 由元数据导入/联网搜索获取数据，扩充能力同 dir_dynamic）。 */
+export type DirType = 'dir_static' | 'dir_dynamic' | 'dir_asset'
 
 /** 混合树节点（与后端 TagNodeOut 一致）：id 对目录是 dir_id、对标签是
  * tag_id；目录无 status 列恒为 null（标签 active|deprecated）；has_children

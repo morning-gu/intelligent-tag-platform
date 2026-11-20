@@ -5,8 +5,10 @@
 - recall_candidates：按目录分组召回（组内跨 query 取最高分 top_k，跨组
   合并去重），排除 deprecate / 占位行，范围 dir_ids 生效，空库返回 []；
 - parse_closed_output：键集与分值域校验、坏结构抛 LLMParseError；
-- ClosedTagProducer：库缺失/空候选 → ValueError；终分 Sf = G·(0.2·Semb +
-  0.5·Sapp + 0.3·Sevi)（门控 Sapp≥0.5，组内按 Sf 降序截断），Sf 与标签
+- ClosedTagProducer：库缺失/空候选 → ValueError；dir_asset 目录的候选
+  召回后剔除（不建组、不调 LLM、不产出，范围内全是 asset 目录按空
+  候选显式失败）；终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)（门控
+  Sapp≥0.5，组内按 Sf 降序截断），Sf 与标签
   成对绑定（relevance_score）；结果是 catalog 行，带目录与挂载点（目录
   applicable_scope → content/scene/character）。
 """
@@ -21,7 +23,7 @@ from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
 from tagplatform.generation import closed as closed_module
 from tagplatform.generation.closed import ClosedTagProducer
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
-from tagplatform.library import TagLibrary, try_load_library
+from tagplatform.library import DIR_ASSET, TagLibrary, try_load_library
 from tagplatform.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.prompts import get_active_prompt, render_prompt
@@ -41,24 +43,51 @@ _LIB_TAGS = [
 
 
 def _seed_library(*, status: dict | None = None,
-                  extra: list[dict] | None = None) -> None:
-    """写一套干净的两目录库（dir_mood 动态、dir_genre 静态）。"""
+                  extra: list[dict] | None = None,
+                  dirs: list[dict] | None = None) -> None:
+    """写一套干净的两目录库（dir_mood 动态、dir_genre 静态）。
+
+    `dirs` 传入整份目录列表时原样落库（`extra` 仍是追加标签），供
+    dir_asset 过滤等需要额外目录类型的用例使用。
+    """
     status = status or {}
-    dirs = [
-        {"dir_id": "dir_genre", "parent_id": None, "level": 1,
-         "dir_name": "主类型", "dir_type": "dir_static",
-         "applicable_scope": "content", "description": "故事类型", "aliases": []},
-        {"dir_id": "dir_mood", "parent_id": None, "level": 1,
-         "dir_name": "情绪基调", "dir_type": "dir_dynamic",
-         "applicable_scope": "content",
-         "description": "情绪与氛围", "aliases": []},
-    ]
+    all_dirs = _DEFAULT_DIRS if dirs is None else dirs
     tags = [{"tag_id": tag_id, "dir_id": dir_id, "tag_name": name,
              "tag_type": "val_fixed", "description": desc,
              "status": status.get(tag_id, "active")}
             for tag_id, name, dir_id, desc in _LIB_TAGS]
-    write_library(library_root(), dirs=dirs,
+    write_library(library_root(), dirs=all_dirs,
                   tags=tags + list(extra or []))
+
+
+# 两目录默认库：dir_genre（静态）/ dir_mood（动态）
+_DEFAULT_DIRS = [
+    {"dir_id": "dir_genre", "parent_id": None, "level": 1,
+     "dir_name": "主类型", "dir_type": "dir_static",
+     "applicable_scope": "content", "description": "故事类型", "aliases": []},
+    {"dir_id": "dir_mood", "parent_id": None, "level": 1,
+     "dir_name": "情绪基调", "dir_type": "dir_dynamic",
+     "applicable_scope": "content",
+     "description": "情绪与氛围", "aliases": []},
+]
+
+# dir_asset 目录 + 其下两条标签（元数据导入来源，closed 不打分）
+_ASSET_DIR = {"dir_id": "dir_actor", "parent_id": None, "level": 1,
+              "dir_name": "演员关键词", "dir_type": DIR_ASSET,
+              "applicable_scope": "content",
+              "description": "联网搜索获取的演员标签", "aliases": []}
+_ASSET_TAGS = [
+    {"tag_id": "tag_101", "dir_id": "dir_actor", "tag_name": "张三",
+     "tag_type": "val_fixed", "description": "主演", "status": "active"},
+    {"tag_id": "tag_102", "dir_id": "dir_actor", "tag_name": "李四",
+     "tag_type": "val_fixed", "description": "配角", "status": "active"},
+]
+
+
+def _seed_library_with_asset() -> None:
+    """两目录默认库 + 一个 dir_asset 目录（挂两条会被召回的标签）。"""
+    _seed_library(dirs=_DEFAULT_DIRS + [dict(_ASSET_DIR)],
+                  extra=list(_ASSET_TAGS))
 
 
 # ---- embed_content_texts ----
@@ -110,7 +139,7 @@ def test_closed_recall_respects_dir_scope():
     assert all(c.scope == "content" for c in cats)
 
 
-# ---- ClosedTagProducer：produce 六步流程 ----
+# ---- ClosedTagProducer：produce 七步流程（召回 → asset 过滤 → 判空 → 分组 → 逐组 LLM → 终分 → 映射） ----
 
 
 def _build_spec(session: Session, content_fixture, run_id: str,
@@ -406,6 +435,63 @@ def test_closed_no_candidates_raises(session, content_fixture):
                           content=content_fixture, policy=GenerationPolicy(),
                           prompt_text="", run_id="r1",
                           library=TagLibrary([], []))
+    with pytest.raises(ValueError, match="候选标签为空"):
+        ClosedTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+
+
+def test_closed_produce_skips_dir_asset(session, content_fixture, monkeypatch):
+    """dir_asset 目录的候选召回后剔除：不建组、不调 LLM、不出现在产出。
+
+    库里三个目录（静态 + 动态 + asset），asset 目录挂两条会被召回的标签
+    （镜像召回先证明确实召回了它们），produce 后断言：LLM 调用次数 =
+    非 asset 目录组数、没有任何 prompt 提到 asset 目录或其标签、产出里
+    没有 asset 标签（即便 ScriptedLLM 想返回它也不行——组都不存在）。
+    """
+    _seed_library_with_asset()
+    # 批大小放大（50 > 组成员数）每组只发一批：本测聚焦 asset 过滤语义，
+    # 调用数 = 组数；分批切分由 test_closed_produce_batches_within_group 专测
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r2")
+    library = try_load_library()
+
+    # 前置：asset 目录的两条标签确实在召回范围内（过滤发生在 produce 内）
+    recalled = recall_candidates(
+        library, MOCK_EMBEDDER, embed_content_texts(content_fixture), top_k=50)
+    assert {c.tag_id for c in recalled} >= {"tag_101", "tag_102"}
+    asset_ids = {c.tag_id for c in recalled if c.dir_id == "dir_actor"}
+    assert asset_ids == {"tag_101", "tag_102"}
+
+    calls: list[str] = []
+
+    class _SpyLLM(MOCK_LLM.__class__):
+        def complete(self, messages, run_id):
+            calls.append(messages[0]["content"])
+            return super().complete(messages, run_id)
+
+    out = ClosedTagProducer().produce(spec, session, _SpyLLM(), MOCK_EMBEDDER)
+
+    # 只为非 asset 目录建组调 LLM（静态 + 动态 = 2 组）
+    assert len(calls) == 2
+    group_dirs = {json.loads(
+        p.partition("\n\n## 候选标签分组\n")[2])["dir_id"] for p in calls}
+    assert group_dirs == {"dir_genre", "dir_mood"}
+    # 任何 prompt 都不提 asset 目录与其标签
+    for prompt in calls:
+        assert "dir_actor" not in prompt
+        assert "张三" not in prompt and "李四" not in prompt
+    # 产出不含 asset 标签
+    assert {t.tag_id for t in out} <= {tid for tid, *_ in _LIB_TAGS}
+    assert all(t.dir_id != "dir_actor" for t in out)
+
+
+def test_closed_all_dir_asset_raises(session, content_fixture):
+    """范围内全是 dir_asset 目录：过滤后候选为空 → 复用空候选显式失败。"""
+    write_library(library_root(),
+                  dirs=[dict(_ASSET_DIR)],
+                  tags=list(_ASSET_TAGS))
+    spec = _build_spec(session, content_fixture, run_id="r2",
+                       policy=GenerationPolicy(dir_ids=["dir_actor"]))
     with pytest.raises(ValueError, match="候选标签为空"):
         ClosedTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 

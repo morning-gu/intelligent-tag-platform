@@ -208,15 +208,18 @@ flowchart TB
 处理流程：
 
 1. 根据影视内容语义召回候选标签。
-2. 候选标签按目录分组（目录下有召回标签才建组），每组以 JSON 格式
+2. 剔除 dir_asset 目录（元数据导入/联网搜索来源）的候选——该类目录的
+   标签不做内容语义打分（目录类型逐目录判定，不沿子目录继承）；范围内
+   仅剩 dir_asset 目录时按空候选处理。
+3. 候选标签按目录分组（目录下有召回标签才建组），每组以 JSON 格式
    追加到渲染后的模板正文之后注入模型上下文（组含目录名称与描述，
    标签含 ID、名称和描述）。为防单组标签过多导致模型输出截断，组内
    候选再按批次上限（closed_batch_size，默认 1）分批逐次调用模型
    （每批送同构组对象，tags 为该批子集）。
-3. 模型判断内容与标签的相关性，输出标签 ID、相关性评分、置信度和
+4. 模型判断内容与标签的相关性，输出标签 ID、相关性评分、置信度和
    证据。组内全部批次完成后合并判定（按标签 ID 去重，首次出现优先），
    再统一进入下一步。
-4. 组内按策略过滤（置信度门槛）并按相关性降序截断（max_tags 为单
+5. 组内按策略过滤（置信度门槛）并按相关性降序截断（max_tags 为单
    目录上限），合并各组结果生成待审核标签。
 
 约束：仅允许从现有正式标签库中选择，不允许生成新的正式标签。
@@ -396,7 +399,7 @@ Excel 上传 → 格式解析 → 字段校验 → 重复检测 → 标签层级
 | 数据表                                 | 核心字段                                                                            | 主要职责                                                   |
 | -------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `media_asset`                        | asset_id、asset_type、parent_id、title、video_uri、content_json、source、updated_at | 影片、剧集、场景基础信息与主内容 JSON                      |
-| `tag_catalog`                        | dir_id、dir_name、dir_type、parent_id、applicable_scope、embedding                  | 标签**目录树**（静态/动态目录、可挂粒度、目录向量）  |
+| `tag_catalog`                        | dir_id、dir_name、dir_type、parent_id、applicable_scope、embedding                  | 标签**目录树**（静态/动态/元数据目录、可挂粒度、目录向量）  |
 | `tag_define`                         | tag_id、tag_name、tag_type、description、dir_id、aliases、status、embedding         | 标签定义（val_fixed / val_generalized 预留）               |
 | `tag_generation_task`                | task_id、asset_id、mode、model_version、status                                      | 标签生产任务及执行记录                                     |
 | `pre_asset_tag`                      | asset_id、target_type、target_id、tag_id、candidate_*、origin、review_status        | 生成结果 + 审核队列（asset×tag 去重）                     |
@@ -416,9 +419,10 @@ v1 的 `media_context` 表已并入本表并删除。
 
 **tag_catalog / tag_define：标签目录与标签定义（v2 起）**
 
-标签库按 v2 拆成两张表：`tag_catalog` 是目录树（`dir_type` 静态/动态、
-`applicable_scope` 声明该目录可挂的粒度 content/scene/character、
-`parent_id` 自引用），`tag_define` 是挂在目录下的标签本体（`tag_type`
+标签库按 v2 拆成两张表：`tag_catalog` 是目录树（`dir_type`
+静态/动态/元数据——`dir_asset` 由元数据导入/联网搜索获取标签数据，
+扩充能力同动态；`applicable_scope` 声明该目录可挂的粒度
+content/scene/character、`parent_id` 自引用），`tag_define` 是挂在目录下的标签本体（`tag_type`
 区分 val_fixed 固定值 / val_generalized 预留泛化值，`(dir_id, tag_name)`
 唯一）。v1 的目录+标签混合表（`tag_catalog_v1`）与 `import_batch_v1` 已随
 v2 重建删除，不再保留过渡表。
