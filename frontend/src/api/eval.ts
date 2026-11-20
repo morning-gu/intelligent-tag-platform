@@ -143,6 +143,28 @@ export function listMovies(datasetId: string): Promise<MovieRef[]> {
   return apiFetch<MovieRef[]>(`/api/v1/eval/closed/datasets/${datasetId}/movies`)
 }
 
+/** 当前生效的数据集根（override ?? .env 默认）与是否默认（重启后
+ * override 消失 → 回落默认、is_default=true）。 */
+export interface DatasetRootInfo {
+  root: string
+  is_default: boolean
+}
+
+/** 设置数据集根（进程内 override，重启回落 .env 默认）。校验失败 → 400
+ * （目录不存在/非目录/扫描零有效数据集，detail 经 ApiError.message 透出）；
+ * 返回应用后的生效值与 is_default。 */
+export function setDatasetRoot(root: string): Promise<DatasetRootInfo> {
+  return apiFetch<DatasetRootInfo>('/api/v1/eval/closed/dataset-root', {
+    method: 'POST',
+    body: JSON.stringify({ root }),
+  })
+}
+
+/** 当前生效的数据集根（页面「当前生效」展示的服务端真相）。 */
+export function getDatasetRoot(): Promise<DatasetRootInfo> {
+  return apiFetch<DatasetRootInfo>('/api/v1/eval/closed/dataset-root')
+}
+
 /** 起跑：返回受理 run_id（进度经 getRun 轮询）。错误映射：未知 dataset
  * → 404、校验失败（选片越权/库未就绪/零交集/并发非法）→ 400、已有活跃
  * run → 409（detail 含占用的 run_id，均经 ApiError.message 透出后端 detail）。 */

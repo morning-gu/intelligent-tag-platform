@@ -36,11 +36,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import {
   cancelRun,
+  getDatasetRoot,
   getReport,
   getRun,
   listDatasets,
   listMovies,
   listRuns,
+  setDatasetRoot,
   startRun,
   type ClosedEvalReport,
   type DatasetInfo,
@@ -55,6 +57,10 @@ import ClosedEvalReportView from '../components/ClosedEvalReport'
 
 /** 轮询间隔：单片 1–3 分钟量级的进度节奏，2s 足够跟手（spec §6）。 */
 const POLL_INTERVAL_MS = 2000
+
+/** localStorage 记上次输入的数据集根：仅作输入预填（服务端重启后 override
+ * 消失、is_default=true 时提示上次选择）；生效值真相以 GET 返回为准。 */
+const ROOT_LS_KEY = 'closed-eval-dataset-root'
 
 /** run 终态集合（后端状态机：running → succeeded | cancelled | aborted |
  * interrupted | failed——interrupted 是磁盘推断的进程死亡态，failed 是
@@ -181,6 +187,10 @@ export default function ClosedEval() {
 
   // —— 报告取数位（Task 9 的视图组件消费 report.data） ——
   const [report, setReport] = useState<{ runId: string; data: ClosedEvalReport } | null>(null)
+  // —— 数据集根（页面级切换：输入值 / 服务端生效值 / 应用中） ——
+  const [rootInput, setRootInput] = useState('')
+  const [effectiveRoot, setEffectiveRoot] = useState<string | null>(null)
+  const [applyingRoot, setApplyingRoot] = useState(false)
 
   const [createForm] = Form.useForm<EvalFormValues>()
   const movieMode = Form.useWatch('movieMode', createForm)
@@ -238,6 +248,51 @@ export default function ClosedEval() {
     void tick()
     pollTimerRef.current = setInterval(() => void tick(), POLL_INTERVAL_MS)
   }, [refreshRuns, stopPolling])
+
+  // 挂载取数据集根：展示服务端生效值；is_default 时（重启后 override 已
+  // 消失）以 localStorage 存值预填输入（仅提示，非真相）。失败不阻塞表单。
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const info = await getDatasetRoot()
+        if (cancelled) return
+        setEffectiveRoot(info.root)
+        const stored = localStorage.getItem(ROOT_LS_KEY)
+        setRootInput(stored !== null && info.is_default ? stored : info.root)
+      } catch {
+        if (!cancelled) setEffectiveRoot(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 应用数据集根：POST 校验通过 → 更新生效展示 + 重拉数据集列表（新根的
+  // 数据集）+ 存 localStorage；失败经 message 透出后端 detail，不变更状态。
+  const applyRoot = async () => {
+    const value = rootInput.trim()
+    if (!value || applyingRoot) return
+    setApplyingRoot(true)
+    try {
+      const info = await setDatasetRoot(value)
+      message.success('数据集根已应用')
+      setEffectiveRoot(info.root)
+      localStorage.setItem(ROOT_LS_KEY, value)
+      try {
+        const rows = await listDatasets()
+        setDatasets(rows)
+        setDatasetsError(null)
+      } catch (err) {
+        setDatasetsError(err instanceof Error ? err.message : '数据集列表加载失败')
+      }
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '数据集根应用失败')
+    } finally {
+      setApplyingRoot(false)
+    }
+  }
 
   // 挂载双拉（数据集与历史两路独立容错，一路挂了不拖累另一路）；历史里
   // 发现 running 行 → 接管轮询（进程重启后页面重开也能恢复进行中视图）。
@@ -395,6 +450,25 @@ export default function ClosedEval() {
             style={{ marginBottom: 16 }}
           />
         )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+          <Input
+            aria-label="数据集根路径"
+            value={rootInput}
+            onChange={(e) => setRootInput(e.target.value)}
+            placeholder="服务器上的数据集根目录，如 /cache/MovieTags"
+            style={{ flex: 1 }}
+          />
+          <Button
+            onClick={() => void applyRoot()}
+            loading={applyingRoot}
+            disabled={rootInput.trim() === ''}
+          >
+            应用
+          </Button>
+          <Typography.Text type="secondary">
+            当前生效：{effectiveRoot ?? '未知'}
+          </Typography.Text>
+        </div>
         <Form
           form={createForm}
           layout="vertical"
