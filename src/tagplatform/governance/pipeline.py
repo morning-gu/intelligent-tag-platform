@@ -4,7 +4,8 @@
 - 行分类：解析层显式标记优先（`TagRow.is_dir` 三态：True 目录行 /
   False 标签行 / None 未表态），未表态行按"名称被批内任一行 parent_tag
   引用"推断为目录。目录行 → **tag_catalog**（dir_type 取行值（树状 XML
-  目录属性），缺省/非法归一 dir_dynamic；applicable_scope 为
+  目录属性，dir_static/dir_dynamic/dir_asset），缺省/非法归一
+  dir_dynamic；applicable_scope 为
   content/scene/character 组合，缺省/非法归一三值全选）；标签行 →
   **tag_define**（tag_type 取行值，缺省/非法归一 val_fixed，
   val_generalized 放行落库）。层级 Excel（双表目录 sheet/层级列）、树状
@@ -75,9 +76,10 @@ _UNCATEGORIZED_DIR_NAME = "未分类"
 _OPERATOR = "governance"
 
 # v2 落位常量：导入路径缺省值——动态目录 + 三范围全选 + 固定值标签
-# （行值优先，非法枚举归一回默认；dir_type=dir_static / val_generalized
-# 行值合法时按行落库）
-_DIR_TYPES = ("dir_static", "dir_dynamic")
+# （行值优先，非法枚举归一回默认；dir_type=dir_static / dir_asset /
+# val_generalized 行值合法时按行落库；dir_asset 为元数据导入/联网搜索
+# 来源目录，扩充语义同 dir_dynamic）
+_DIR_TYPES = ("dir_static", "dir_dynamic", "dir_asset")
 _DEFAULT_DIR_TYPE = "dir_dynamic"
 _SCOPES = ("content", "scene", "character")
 _DEFAULT_SCOPE = "content,scene,character"

@@ -74,7 +74,7 @@ def _prompt(content, entries) -> str:
 
 
 def test_dir_hint_lists_only_expandable_dirs_with_full_path(content_fixture):
-    """只列 dir_dynamic；路径给全层级，而不是末级名字。"""
+    """只列可扩充目录（dir_dynamic/dir_asset）；路径给全层级，而不是末级名字。"""
     library = try_load_library()
     entries = mtg_pipeline._dir_hint_entries(
         library, _spec(content_fixture, "h1"), 60)
@@ -86,6 +86,23 @@ def test_dir_hint_lists_only_expandable_dirs_with_full_path(content_fixture):
     theme = next(entry for entry in entries if entry["dir_id"] == "dir_theme")
     assert theme["path"] == "内容特征标签/细分题材"
     assert theme["scope"] == "content"
+
+
+def test_dir_hint_includes_asset_dirs(content_fixture):
+    """dir_asset 同 dir_dynamic 进提示清单。"""
+    from tests.library_fixture import add_dirs
+    from tagplatform.library import DIR_ASSET
+
+    add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
+               "dir_type": DIR_ASSET, "applicable_scope": "content",
+               "description": "联网搜索获取的标签", "aliases": []}])
+    library = try_load_library()
+    entries = mtg_pipeline._dir_hint_entries(
+        library, _spec(content_fixture, "h1b"), 60)
+
+    ids = {entry["dir_id"] for entry in entries}
+    assert "dir_kw" in ids
+    assert "dir_theme" in ids  # dir_dynamic 仍正常在列
 
 
 def test_dir_hint_follows_policy_range(content_fixture):
@@ -202,6 +219,24 @@ def test_generated_reason_reaches_output_intact(session, content_fixture, dir_se
     ])
 
     assert [tag.generation_reason for tag in out] == [reason]
+
+
+def test_model_chosen_asset_dir_is_used(session, content_fixture,
+                                        dir_settings, tmp_path):
+    """dir_asset 目录可扩充：模型选它 → 采纳，同 dir_dynamic。"""
+    from tests.library_fixture import add_dirs
+    from tagplatform.library import DIR_ASSET
+
+    add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
+               "dir_type": DIR_ASSET, "applicable_scope": "content",
+               "description": "联网搜索获取的标签", "aliases": []}])
+    content = _two_scene_content(content_fixture)
+
+    out = _run(session, content, "d1b", [{**_ITEM, "dir": "dir_kw"}])
+
+    assert [tag.dir_id for tag in out] == ["dir_kw"]
+    accepted = _report(tmp_path, "d1b")["accepted"][0]
+    assert accepted["dir_source"] == "model"
 
 
 def test_static_dir_is_rejected_and_falls_back(session, content_fixture,

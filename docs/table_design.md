@@ -146,6 +146,7 @@ CREATE INDEX idx_tag_catalog_scope ON tag_catalog(applicable_scope);
 |---|---|---|
 | `dir_static` | 静态目录 — 子节点不可由开放生成动态扩充 | "类型"（喜剧、悬疑等固定枚举的父目录） |
 | `dir_dynamic` | 动态目录 — 子节点可由开放生成审核入库后动态扩充 | "整体情绪基调"（可扩展"浪漫甜蜜"等） |
+| `dir_asset` | 元数据目录 — 由元数据导入/联网搜索获取对应标签数据，子节点扩充能力同 `dir_dynamic`（审核后可新增） | "演员关键词"（联网搜索获取的标签来源目录） |
 
 **已知语义（沿 v1 0006 口径）：** SQLite/PG 的 UNIQUE 对 NULL 互不区分——根目录（parent_id NULL）同名在 SQL 层不拦，由服务层校验，与 v1 行为一致。
 

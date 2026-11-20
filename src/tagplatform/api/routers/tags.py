@@ -96,11 +96,11 @@ class TagNodeOut(BaseModel):
     """混合树节点（目录与标签统一形状，前端消费契约）。
 
     id 对目录是 dir_id、对标签是 tag_id；kind 区分节点种类（dir|tag）；
-    dir_type 仅目录有值（dir_static|dir_dynamic，标签为 null）；目录无
-    status 列恒为 null（标签 active|deprecated）；has_children 对目录 =
-    存在子目录或目录下挂有标签（与列表过滤无关、按全库判定），标签恒
-    False；aliases 列表视图即展开（v1 列表不展开别名的约定随统一节点
-    契约退役）。
+    dir_type 仅目录有值（dir_static|dir_dynamic|dir_asset，标签为 null）；
+    目录无 status 列恒为 null（标签 active|deprecated）；has_children 对
+    目录 = 存在子目录或目录下挂有标签（与列表过滤无关、按全库判定），
+    标签恒 False；aliases 列表视图即展开（v1 列表不展开别名的约定随统一
+    节点契约退役）。
     """
 
     id: str

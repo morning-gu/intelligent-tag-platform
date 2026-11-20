@@ -27,7 +27,10 @@ def _library_or_404(session: Session):
 
 @router.get("/library/stats")
 def library_stats(session: Session = Depends(get_session)) -> dict:
-    """库统计：目录 37 / 标签 514 / 可扩展目录 16 这类数字。"""
+    """库统计：目录 37 / 标签 514 / 可扩展目录 16 这类数字。
+
+    dynamic_dirs 统计可扩充目录（dir_dynamic + dir_asset）。
+    """
     library = _library_or_404(session)
     dirs = library.dirs()
     tags = library.tags()

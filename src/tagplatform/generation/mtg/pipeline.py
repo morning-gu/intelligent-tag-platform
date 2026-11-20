@@ -184,9 +184,9 @@ def _dir_hint_entries(tag_library, spec: GenerationSpec,
                       limit: int) -> list[dict]:
     """可新增标签的目录 → 提示词条目（id + 全路径 + 粒度）。
 
-    只收 `dir_dynamic`（允许扩充）且落在本次生成范围内的目录——静态目录
-    不该出现在提示词里，否则模型会往不允许新增的目录里塞词，然后在校验
-    环节被打回，白烧一轮 token。
+    只收可扩充目录（dir_dynamic/dir_asset，允许扩充）且落在本次生成
+    范围内的目录——静态目录不该出现在提示词里，否则模型会往不允许新增的
+    目录里塞词，然后在校验环节被打回，白烧一轮 token。
     """
     if tag_library is None or limit <= 0:
         return []
@@ -313,7 +313,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         hints = recall_library_hints(library, embedder, contents,
                                      settings.open_library_hint_count)
     # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
-    # 而不是等生成完再按向量猜。只列 dir_dynamic 且落在范围内的目录。
+    # 而不是等生成完再按向量猜。只列可扩充目录（dir_dynamic/dir_asset）
+    # 且落在范围内的目录。
     dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
                 if settings.open_dir_hint_max > 0 else [])
 

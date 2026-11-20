@@ -18,7 +18,9 @@
 import pytest
 
 from tagplatform.db.models import MediaAsset, PreAssetTag
+from tagplatform.library import DIR_ASSET
 from tagplatform.review import ConflictError, apply_review
+from tests.library_fixture import add_dirs
 
 
 @pytest.fixture(autouse=True)
@@ -248,6 +250,22 @@ def test_approve_new_word_in_static_dir_raises(session):
     session.commit()
     with pytest.raises(ValueError, match="静态目录"):
         apply_review(session, row.id, "approve", "alice", None)
+
+
+def test_approve_new_word_in_asset_dir_writes_tag_define(session):
+    """dir_asset 目录同 dir_dynamic：审核通过可扩充新标签。"""
+    from tagplatform.db.models import TagDefine
+
+    add_dirs([{"dir_id": "dir_kw_asset", "level": 1, "dir_name": "搜索关键词",
+               "dir_type": DIR_ASSET, "applicable_scope": "content",
+               "description": "联网搜索获取的标签", "aliases": []}])
+    row = _seed_row(session, candidate_name="元数据新词")
+    row.candidate_dir_id = "dir_kw_asset"
+    session.commit()
+    apply_review(session, row.id, "approve", "alice", None)
+    created = (session.query(TagDefine)
+               .filter_by(dir_id="dir_kw_asset", tag_name="元数据新词").one())
+    assert created.status == "active"
 
 
 def test_approve_new_word_scope_mismatch_raises(session):
