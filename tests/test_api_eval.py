@@ -1,4 +1,5 @@
-"""闭环评测 admin API 路由契约（Task 6）：8 端点 + 错误映射 + app 装配。
+"""闭环评测 admin API 路由契约（Task 6 基础 + Task 2 单片明细）：13 端点
++ 错误映射 + app 装配。
 
 路由契约钉死（plan Task 6，全部端点 require_admin）：
 - GET /datasets → DatasetInfoOut（usable_movies 输出为**数量**；畸形 gt
@@ -12,7 +13,11 @@
   打开）；POST cancel → {ok}（未知/已终态 → ok=false，幂等意图）；
 - GET report → report.json（无报告/截断 → 404，与 history 读侧容错同
   口径）；GET files/{name} → FileResponse 白名单五件套（report.json 走
-  专用端点不在白名单、白名单外 404）。
+  专用端点不在白名单、白名单外 404）；
+- GET runs/{id}/movies → 单片摘要包层 {theta_used, k_p, k_r, rows}（行
+  序失败置顶、P 升序）；GET runs/{id}/movies/{tt} → 单片明细三表；读侧
+  容错：raw_results.json 缺失/截断/非 list → 404「无单片明细」，meta
+  档位缺失/损坏 → DEFAULT 档（0.4/10/20），未知 tt → 404。
 
 夹具：`_write_dataset`（来自 test_closed_eval.py）往
 client.app.state.settings.eval_dataset_root 写迷你 MovieTags（绝不扫
@@ -443,7 +448,7 @@ def test_dataset_root_default_and_switch(client, tmp_path):
 
 
 def test_admin_only_all_endpoints(client):
-    """全部 11 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
+    """全部 13 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
     _seed_dataset_and_library(client)
     assert client.post("/api/v1/users", json={
         "username": "bob", "password": "pw-bob-1", "role": "reviewer"
@@ -465,9 +470,209 @@ def test_admin_only_all_endpoints(client):
         lambda: client.delete(f"{_BASE}/runs/{run_id}"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/report"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/files/report.md"),
+        lambda: client.get(f"{_BASE}/runs/{run_id}/movies"),
+        lambda: client.get(f"{_BASE}/runs/{run_id}/movies/{run_id}"),
         lambda: client.get(f"{_BASE}/dataset-root"),
         lambda: client.post(f"{_BASE}/dataset-root",
                             json={"root": "/cache/MovieTags"}),
     ]
     for check in checks:
         assert check().status_code == 403
+
+
+# ---------------------------------------------------------------- 单片明细两端点（badcase 视图）
+
+# 手写 run 目录的默认 id（本节用例共用）
+_MOVIES_RUN = "run-movies"
+
+
+def _movies_row(tt, gt, produced, *, ok=True, error=None, elapsed_ms=1200):
+    """手造一条 raw_results.json 行（形状 = closed_eval 终态落盘行）。"""
+    return {"tt": tt, "title": f"片名 {tt}", "ok": ok, "error": error,
+            "produced": produced, "gt": dict(gt), "elapsed_ms": elapsed_ms}
+
+
+def _movies_prod(tag_id, sf, *, tag_name=None):
+    """手造一条 produced 条目（confidence/evidence_count 给常规值）。"""
+    return {"tag_id": tag_id, "tag_name": tag_name or tag_id, "sf": sf,
+            "confidence": 0.9, "evidence_count": 2}
+
+
+def _movies_rows():
+    """默认行数据：一部 hit（A）+ 一部失败（B），指标手算值钉死：
+
+    - A（tt0000001）：produced 故意乱序（t2 在 t1 前）——明细按 (-sf, tag)
+      防御重排后 t1 在前；zz 不在本批 gt 并集 → 空间外；t9 gt=0.1 < θ →
+      产出不命中；t7 ≥θ 未产出 → 漏检（库映射 t7→喜剧 回填名称）。
+      p@10 = 2/10、r@20 = 2/3、spearman = 0.4（四键秩 [4,3,1,2]×[4,2,3,1]）。
+    - B（tt0000002）：ok=False + error → 摘要置顶、指标全 None
+      （n_relevant 仍按 gt∩库 ≥θ 计 1）。
+    """
+    a = _movies_row(
+        "tt0000001", {"t1": 0.9, "t2": 0.8, "t7": 0.85, "t9": 0.1},
+        [_movies_prod("t2", 0.80, tag_name="动作"),
+         _movies_prod("t1", 0.90, tag_name="悬疑"),
+         _movies_prod("zz", 0.99, tag_name="噪声"),
+         _movies_prod("t9", 0.75, tag_name="爱情")])
+    b = _movies_row("tt0000002", {"t7": 0.9}, [], ok=False, error="boom",
+                    elapsed_ms=300)
+    return [a, b]
+
+
+def _write_movies_run(client, *, run_id=_MOVIES_RUN, rows=None,
+                      write_raw=True, write_meta=True, grid=True):
+    """手写一个终态 run 目录（磁盘夹具模式同 test_get_run_disk_only_fallback）：
+    raw_results.json + meta.json；grid=False 时 meta 不带 thetas/ks 键
+    （老 run 形态）。"""
+    out = Path(client.app.state.settings.eval_output_root)
+    d = out / run_id
+    d.mkdir(parents=True)
+    if write_raw:
+        (d / "raw_results.json").write_text(
+            json.dumps(rows if rows is not None else _movies_rows(),
+                       ensure_ascii=False), encoding="utf-8")
+    if write_meta:
+        meta = {"run_id": run_id, "status": "succeeded", "done": 2,
+                "total": 2, "failed": 1, "dataset": {"id": "emotion"},
+                "started_at": "2026-11-21T10:00:00+00:00"}
+        if grid:
+            meta["thetas"] = [0.2, 0.4, 0.6]
+            meta["ks"] = [5, 10, 20]
+        (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False),
+                                     encoding="utf-8")
+    return d
+
+
+def test_run_movies_endpoint(client):
+    """GET /runs/{id}/movies：包层三键来自 meta thetas/ks（0.4/10/20）；
+    行序失败置顶（输入序 A,B → 输出 B,A）；摘要行十键齐全 + 指标手算值。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client)
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert [row["tt"] for row in body["rows"]] == ["tt0000002", "tt0000001"]
+    fail, hit = body["rows"]
+    assert fail["ok"] is False and fail["error"] == "boom"
+    assert fail["p_at_k"] is None and fail["r_at_k"] is None
+    assert fail["spearman"] is None and fail["n_relevant"] == 1
+    assert hit["ok"] is True
+    assert hit["p_at_k"] == pytest.approx(0.2)  # 2 命中 / k=10
+    assert hit["r_at_k"] == pytest.approx(2 / 3)  # 2 / 3 个相关
+    assert hit["spearman"] == pytest.approx(0.4)
+    assert (hit["n_produced"], hit["n_relevant"]) == (4, 3)
+    # 摘要行十键契约（不多不少）
+    assert {"tt", "title", "ok", "error", "spearman", "p_at_k", "r_at_k",
+            "elapsed_ms", "n_produced", "n_relevant"} == set(hit)
+
+
+def test_run_movie_detail_endpoint(client):
+    """GET /runs/{id}/movies/{tt}：三表齐全 + hit 标记 + misses 名称回填；
+    防御重排（produced 原始序 t2 在前 → t1 在前）；失败片三表全空；
+    未知 tt → 404。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client)
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tt"] == "tt0000001" and body["ok"] is True
+    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert [p["tag_id"] for p in body["produced"]] == ["t1", "t2", "t9"]
+    assert [p["hit"] for p in body["produced"]] == [True, True, False]
+    assert body["produced"][0]["gt_score"] == 0.9
+    assert body["produced"][0]["tag_name"] == "悬疑"
+    assert body["produced"][2]["gt_score"] == 0.1  # 产出但 <θ → 不命中
+    assert set(body["produced"][0]) == {"tag_id", "tag_name", "sf",
+                                        "confidence", "evidence_count",
+                                        "gt_score", "hit"}
+    assert body["out_of_space"] == [
+        {"tag_id": "zz", "tag_name": "噪声", "sf": 0.99}]
+    assert body["misses"] == [
+        {"tag_id": "t7", "tag_name": "喜剧", "gt_score": 0.85}]
+    # 失败片：三表全空、error 原样、档位键仍在
+    r2 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000002")
+    assert r2.status_code == 200
+    d2 = r2.json()
+    assert d2["ok"] is False and d2["error"] == "boom"
+    assert (d2["produced"] == [] and d2["out_of_space"] == []
+            and d2["misses"] == [])
+    assert (d2["theta_used"], d2["k_p"], d2["k_r"]) == (0.4, 10, 20)
+    # 未知 tt → 404
+    r3 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt9999999")
+    assert r3.status_code == 404
+    assert "tt9999999" in r3.json()["detail"]
+
+
+def test_movies_404_when_raw_results_missing_or_truncated(client):
+    """读侧容错：raw_results.json 缺失 / 截断 / 非 list → 404「无单片明细」
+    （运行中 run 与 meta→raw 写序非原子窗口，不 500）；摘要与明细端点
+    同口径。"""
+    _seed_dataset_and_library(client)
+    d = _write_movies_run(client, write_raw=False)
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r.status_code == 404
+    assert "无单片明细" in r.json()["detail"]
+    # 截断 JSON → 同 404（两端点都断言）
+    (d / "raw_results.json").write_text("{截断", encoding="utf-8")
+    r2 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r2.status_code == 404 and "无单片明细" in r2.json()["detail"]
+    r2d = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001")
+    assert r2d.status_code == 404 and "无单片明细" in r2d.json()["detail"]
+    # 合法 JSON 但非 list → 同 404
+    (d / "raw_results.json").write_text('{"tt": "x"}', encoding="utf-8")
+    r3 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r3.status_code == 404 and "无单片明细" in r3.json()["detail"]
+
+
+def test_movies_default_grid_when_meta_missing(client):
+    """meta.json 缺失 / 有 meta 但无 thetas·ks 键（老 run）→ DEFAULT 档
+    照常出数：0.4/10/20（DEFAULT_THETAS→0.4、DEFAULT_KS→k_p 10/k_r 20）。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client, write_meta=False)
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert len(body["rows"]) == 2  # 指标照算（rows 有数）
+    # meta 存在但缺 thetas/ks 键 → 同回落
+    _write_movies_run(client, run_id="run-movies-oldmeta", grid=False)
+    body2 = client.get(f"{_BASE}/runs/run-movies-oldmeta/movies").json()
+    assert (body2["theta_used"], body2["k_p"], body2["k_r"]) == (0.4, 10, 20)
+
+
+def test_movies_non_admin_401(client):
+    """非 admin 门槛（两端点各一）：登录 reviewer → 403（require_admin 对
+    非 admin 角色记 403——沿用现有端点断言模式）；未登录 → 401（内层
+    get_current_user 先行短路）。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client)
+    assert client.post("/api/v1/users", json={
+        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
+    }).status_code == 200
+    client.post("/api/v1/auth/logout")
+    client.post("/api/v1/auth/login",
+                json={"username": "bob", "password": "pw-bob-1"})
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").status_code == 403
+    assert client.get(
+        f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001").status_code == 403
+    # 未登录 → 401
+    client.post("/api/v1/auth/logout")
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").status_code == 401
+    assert client.get(
+        f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001").status_code == 401
+
+
+def test_movies_run_dir_guard(client):
+    """run_id 路径守卫（同 files 端点守卫模式）：越界形态 run_id → 404。
+    `..%2F` 解码后含 / 路由段即不匹配；反斜杠/绝对路径形态能进端点、被
+    `_run_dir` 守卫拒——这两种断言 detail 含「不存在」（守卫 404，非
+    路由裸 Not Found）。"""
+    _seed_dataset_and_library(client)
+    assert client.get(f"{_BASE}/runs/..%2Fescape/movies").status_code == 404
+    r = client.get(f"{_BASE}/runs/..%5Cescape/movies")
+    assert r.status_code == 404 and "不存在" in r.json()["detail"]
+    r2 = client.get(f"{_BASE}/runs/..%5Cescape/movies/tt0000001")
+    assert r2.status_code == 404 and "不存在" in r2.json()["detail"]
+    r3 = client.get(f"{_BASE}/runs/C:%5CWindows%5Ctemp/movies")
+    assert r3.status_code == 404 and "不存在" in r3.json()["detail"]
