@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -723,3 +724,85 @@ def test_service_end_to_end_writes_report(svc, root):
     # 历史扫描随即能看到该 run（含 θ=0.4、K=10 摘要档）
     mine = next(r for r in svc.history() if r["run_id"] == run_id)
     assert mine["status"] == "succeeded" and mine["ndcg10"] is not None
+
+
+# ---------------------------------------------------------------- 数据集根快照（Task 2）
+
+
+class _RecordingGateLLM(MockLLMClient):
+    """记录型 + 闸门 LLM：complete 留存完整 messages（断言懒加载来源），
+    hold 后阻塞调用（钉运行中切根的时序）；10s 未放行自恢复防挂死。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._gate = threading.Event()
+        self._gate.set()
+        self.prompts: list[str] = []
+
+    def hold(self) -> None:
+        self._gate.clear()
+
+    def release(self) -> None:
+        self._gate.set()
+
+    def complete(self, messages, run_id):
+        self._gate.wait(10)
+        self.prompts.append(json.dumps(messages, ensure_ascii=False))
+        return super().complete(messages, run_id)
+
+
+def _mark_scenes(root: Path, marker: str) -> None:
+    """把根内所有 content.json 的场景描述打上标记（断言懒加载来源）。"""
+    for movie_dir in sorted((root / "data").iterdir()):
+        path = movie_dir / "content.json"
+        text_ = path.read_text(encoding="utf-8")
+        path.write_text(text_.replace("开场对话。", f"开场对话。{marker}"),
+                        encoding="utf-8")
+
+
+def test_run_with_override_uses_override_root(tmp_path, eval_setup):
+    """带 override 起跑：worker 懒加载必须来自 override 根（起跑快照）。
+
+    现行缺陷（Task 2 要修）：start 用 effective_root 选片/校验，
+    _run_movie 却从 settings.eval_dataset_root 加载 content——两根不一致
+    时选片与产出张冠李戴。
+    """
+    root_a, root_b = tmp_path / "ds-a", tmp_path / "ds-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    _write_dataset(root_a)
+    _write_dataset(root_b)
+    _mark_scenes(root_a, "MARKER_A")
+    _mark_scenes(root_b, "MARKER_B")
+    llm = _RecordingGateLLM()
+    svc = eval_setup(llm=llm, dataset_root=str(root_a))
+    svc.dataset_root_override = str(root_b)
+    svc.start("emotion", {"mode": "all"}, wait=True)
+    blob = "".join(llm.prompts)
+    assert "MARKER_B" in blob
+    assert "MARKER_A" not in blob
+
+
+def test_root_switch_mid_run_uses_snapshot(tmp_path, eval_setup):
+    """运行中切根：在跑 run 的余量片继续按起跑根加载（spec 隔离红线守卫）。
+
+    concurrency=1 + 6 片：hold 首调用期间切 override，后续 5 片在切根后
+    才懒加载——必须仍来自起跑根（快照），不得读运行时 effective_root。
+    """
+    root_a, root_b = tmp_path / "ds-a2", tmp_path / "ds-b2"
+    root_a.mkdir()
+    root_b.mkdir()
+    _write_dataset(root_a, six=True)
+    _write_dataset(root_b, six=True)
+    _mark_scenes(root_a, "MARKER_A")
+    _mark_scenes(root_b, "MARKER_B")
+    llm = _RecordingGateLLM()
+    svc = eval_setup(llm=llm, dataset_root=str(root_a))
+    llm.hold()
+    svc.start("emotion", {"mode": "all"}, concurrency=1)  # 不等：首片阻塞在闸上
+    svc.dataset_root_override = str(root_b)
+    llm.release()
+    _drain_active(svc)
+    blob = "".join(llm.prompts)
+    assert "MARKER_A" in blob
+    assert "MARKER_B" not in blob

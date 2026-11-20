@@ -318,8 +318,68 @@ def test_get_run_disk_only_fallback(client):
 # ---------------------------------------------------------------- admin 门槛
 
 
+# ---------------------------------------------------------------- 数据集根路径
+
+
+def test_dataset_root_default_and_switch(client, tmp_path):
+    """GET 默认态 → POST 切有效根（读路径跟随）→ 无效根 400/422，失败不变更。
+
+    进程内 override（spec 2026-11-20-eval-dataset-root-design）：重启回落
+    .env 默认由 is_default 表达；400 语义 = 目录不存在/非目录/扫描零有效
+    数据集，原因写进 detail。
+    """
+    _seed_dataset_and_library(client)
+    # 默认态：root = settings 值、is_default=True
+    r = client.get(f"{_BASE}/dataset-root")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["root"] == str(client.app.state.settings.eval_dataset_root)
+    assert body["is_default"] is True
+
+    # 第二个有效根（同构迷你数据集）→ 200；GET 反映且 is_default=False；
+    # GET /datasets 的 gt_path 指向新根（读路径走 effective_root）
+    root_b = tmp_path / "ds-b"
+    root_b.mkdir()
+    _write_dataset(root_b)
+    r = client.post(f"{_BASE}/dataset-root", json={"root": str(root_b)})
+    assert r.status_code == 200
+    assert r.json() == {"root": str(root_b), "is_default": False}
+    body = client.get(f"{_BASE}/dataset-root").json()
+    assert body["root"] == str(root_b)
+    assert body["is_default"] is False
+    rows = client.get(f"{_BASE}/datasets").json()
+    assert len(rows) == 1 and rows[0]["id"] == "emotion"
+    assert rows[0]["gt_path"].startswith(str(root_b))
+
+    # 二次 POST 相同根 → 200 幂等
+    assert client.post(f"{_BASE}/dataset-root",
+                       json={"root": str(root_b)}).status_code == 200
+
+    # 空字符串 → 422（形状校验）
+    assert client.post(f"{_BASE}/dataset-root",
+                       json={"root": ""}).status_code == 422
+    # 不存在路径 → 400 带原因
+    r = client.post(f"{_BASE}/dataset-root",
+                    json={"root": str(tmp_path / "nope")})
+    assert r.status_code == 400
+    assert "不存在" in r.json()["detail"]
+    # 文件（非目录）→ 400
+    a_file = tmp_path / "plain.txt"
+    a_file.write_text("x", encoding="utf-8")
+    assert client.post(f"{_BASE}/dataset-root",
+                       json={"root": str(a_file)}).status_code == 400
+    # 目录存在但扫描零有效数据集 → 400 带原因
+    empty_dir = tmp_path / "empty-dir"
+    empty_dir.mkdir()
+    r = client.post(f"{_BASE}/dataset-root", json={"root": str(empty_dir)})
+    assert r.status_code == 400
+    assert "数据集" in r.json()["detail"]
+    # 失败的 POST 不变更生效值
+    assert client.get(f"{_BASE}/dataset-root").json()["root"] == str(root_b)
+
+
 def test_admin_only_all_endpoints(client):
-    """全部 8 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
+    """全部 10 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
     _seed_dataset_and_library(client)
     assert client.post("/api/v1/users", json={
         "username": "bob", "password": "pw-bob-1", "role": "reviewer"
@@ -340,6 +400,9 @@ def test_admin_only_all_endpoints(client):
         lambda: client.post(f"{_BASE}/runs/{run_id}/cancel"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/report"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/files/report.md"),
+        lambda: client.get(f"{_BASE}/dataset-root"),
+        lambda: client.post(f"{_BASE}/dataset-root",
+                            json={"root": "/cache/MovieTags"}),
     ]
     for check in checks:
         assert check().status_code == 403
