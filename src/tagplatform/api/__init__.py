@@ -37,6 +37,7 @@ from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 from tagplatform.auth import bootstrap_admin
 from tagplatform.closed_eval import ClosedEvalService
+from tagplatform.open_eval import OpenEvalService
 from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, build_embedder
 from tagplatform.llm import make_llm_client
@@ -188,6 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 红线），产物只写 settings.eval_output_root
     app.state.closed_eval = ClosedEvalService(
         app.state.session_factory, app.state.llm, app.state.embedder, settings)
+    app.state.open_eval = OpenEvalService(app.state.llm, app.state.embedder, settings)
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）

@@ -1,20 +1,4 @@
-// 闭环评测页（Task 8，admin）：以 genome 真值干跑闭环管线并出量化报告的页签。
-// 三块视图：① 创建表单——数据集下拉（选项带交集数提示）、影片集三态
-// （试点 30 / 全部 / 自定义多选，清单来自 datasets/{id}/movies）、θ/K 逗号
-// 档位（留空不携带 → 服务端回退默认网格）、并发度（默认 4）；② 进行中卡片
-// ——进度条 done/total + 取消（取消是受理语义，status 转 cancelled 终态由
-// 轮询推进发现，受理后不清轮询）；③ 历史表——多轮 nDCG@10 趋势一眼可见，
-// null 一律「暂无」（None≠0 纪律，时间列也走本口径而非 formatTime 的 '—'）。
-//
-// 单活跃 run 是后端硬约束（POST 二发 → 409）：前端在三个入口同步挡——
-// 挂载从历史发现 running 行、提交受理新 run、轮询推进到终态释放——
-// activeRun 非空期间起跑禁用并提示；409 竞态兜底透出后端 detail。
-// 轮询：受理/接管后立即首拉 + setInterval 2s，到终态（或查询失败）清定时器
-// 并刷新历史；卸载清定时器。清定时器时 bump 会话号——在途响应回来对不上号
-// 即丢弃，防卸载后/换 run 后把旧响应写进新状态。
-// 行点击取报告：GET report 在终态落盘（meta→raw→report）非原子的毫秒级窗口
-// 可能 404（后端 Task 6 披露）——优雅提示重试，不崩页面。报告视图渲染委托给
-// Task 9 的 ClosedEvalReport 组件，本页只负责取数与 runId 透传。
+// 数据集评测共用的选片、运行进度与历史页面。
 import {
   Alert,
   Button,
@@ -44,10 +28,13 @@ import {
   listDatasets,
   listMovies,
   listRuns,
+  openEvalApi,
   setDatasetRoot,
   startRun,
   type ClosedEvalReport,
   type DatasetInfo,
+  type EvalMode,
+  type OpenEvalReport,
   type MovieRef,
   type MovieSelection,
   type RunStatus,
@@ -55,14 +42,17 @@ import {
   type StartRunRequest,
 } from '../api/eval'
 import { formatTime } from '../api/time'
+import { DEFAULT_QUALITY_MODEL } from '../api/tasks'
 import ClosedEvalReportView from '../components/ClosedEvalReport'
+import OpenEvalReportView from '../components/OpenEvalReport'
 
 /** 轮询间隔：单片 1–3 分钟量级的进度节奏，2s 足够跟手（spec §6）。 */
 const POLL_INTERVAL_MS = 2000
 
-/** localStorage 记上次输入的数据集根：仅作输入预填（服务端重启后 override
- * 消失、is_default=true 时提示上次选择）；生效值真相以 GET 返回为准。 */
-const ROOT_LS_KEY = 'closed-eval-dataset-root'
+const closedEvalApi = {
+  cancelRun, deleteRun, getDatasetRoot, getReport, getRun, listDatasets,
+  listMovies, listRuns, setDatasetRoot, startRun,
+}
 
 /** run 终态集合（后端状态机：running → succeeded | cancelled | aborted |
  * interrupted | failed——interrupted 是磁盘推断的进程死亡态，failed 是
@@ -105,6 +95,7 @@ interface EvalFormValues {
   thetas?: string
   ks?: string
   concurrency?: number
+  quality_model?: string
 }
 
 /** 逗号分隔数字串 → number[]；空串/全空 token → undefined（不携带，服务端
@@ -141,7 +132,7 @@ function metricText(v: number | null): string {
   return v === null ? '暂无' : String(v)
 }
 
-const columns: NonNullable<TableProps<RunSummary>['columns']> = [
+const runColumns: NonNullable<TableProps<RunSummary>['columns']> = [
   // 时间 null 也走「暂无」——本表 null 口径统一（不用 formatTime 的 '—'）
   {
     title: '时间',
@@ -167,13 +158,28 @@ const columns: NonNullable<TableProps<RunSummary>['columns']> = [
     render: (_, r) => (r.done === null || r.total === null ? '暂无' : `${r.done}/${r.total}`),
   },
   { title: '失败', dataIndex: 'failed', render: metricText },
+]
+
+const closedMetricsColumns: NonNullable<TableProps<RunSummary>['columns']> = [
   { title: 'nDCG@10', dataIndex: 'ndcg10', render: metricText },
   { title: 'P@10', dataIndex: 'p10', render: metricText },
   { title: 'R@20', dataIndex: 'r20', render: metricText },
   { title: '覆盖中位', dataIndex: 'coverage_median', render: metricText },
 ]
 
-export default function ClosedEval() {
+const openMetricsColumns: NonNullable<TableProps<RunSummary>['columns']> = [
+  { title: '评估覆盖率', dataIndex: 'quality_coverage', render: rateText },
+  { title: '三维满分率', dataIndex: 'quality_full_rate', render: rateText },
+]
+
+function rateText(value: number | null | undefined) {
+  return value == null ? '暂无' : `${(100 * value).toFixed(1)}%`
+}
+
+export default function EvalPage({ mode = 'closed' }: { mode?: EvalMode }) {
+  const isOpen = mode === 'open'
+  const api = isOpen ? openEvalApi : closedEvalApi
+  const rootStorageKey = `${mode}-eval-dataset-root`
   // —— 数据集与历史（挂载双拉，两路独立容错——一路挂了不拖累另一路） ——
   const [datasets, setDatasets] = useState<DatasetInfo[]>([])
   const [datasetsError, setDatasetsError] = useState<string | null>(null)
@@ -193,7 +199,7 @@ export default function ClosedEval() {
   const [moviesLoading, setMoviesLoading] = useState(false)
 
   // —— 报告取数位（Task 9 的视图组件消费 report.data） ——
-  const [report, setReport] = useState<{ runId: string; data: ClosedEvalReport } | null>(null)
+  const [report, setReport] = useState<{ runId: string; data: ClosedEvalReport | OpenEvalReport } | null>(null)
   // —— 数据集根（页面级切换：输入值 / 服务端生效值 / 应用中） ——
   const [rootInput, setRootInput] = useState('')
   const [effectiveRoot, setEffectiveRoot] = useState<string | null>(null)
@@ -202,6 +208,12 @@ export default function ClosedEval() {
   const [createForm] = Form.useForm<EvalFormValues>()
   const movieMode = Form.useWatch('movieMode', createForm)
   const datasetId = Form.useWatch('dataset', createForm)
+
+  const updateDatasets = useCallback((rows: DatasetInfo[]) => {
+    setDatasets(rows)
+    setDatasetsError(null)
+    if (isOpen) createForm.setFieldValue('dataset', rows[0]?.id)
+  }, [createForm, isOpen])
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -216,7 +228,7 @@ export default function ClosedEval() {
   const refreshRuns = useCallback(async (): Promise<RunSummary[]> => {
     setRunsLoading(true)
     try {
-      const rows = await listRuns()
+      const rows = await api.listRuns()
       setRuns(rows)
       setRunsError(null)
       return rows
@@ -226,7 +238,7 @@ export default function ClosedEval() {
     } finally {
       setRunsLoading(false)
     }
-  }, [])
+  }, [api])
 
   /** 轮询一个 run 到终态：立即首拉 + 2s 间隔；终态清定时器、收起卡片并刷新
    * 历史。查询失败（run 消失/网络断）同样收束——宁缺勿崩，不打死循环。 */
@@ -235,7 +247,7 @@ export default function ClosedEval() {
     const session = ++pollSessionRef.current
     const tick = async () => {
       try {
-        const st = await getRun(runId)
+        const st = await api.getRun(runId)
         if (pollSessionRef.current !== session) return
         if (TERMINAL_STATUSES.has(st.status)) {
           stopPolling()
@@ -254,7 +266,7 @@ export default function ClosedEval() {
     }
     void tick()
     pollTimerRef.current = setInterval(() => void tick(), POLL_INTERVAL_MS)
-  }, [refreshRuns, stopPolling])
+  }, [api, refreshRuns, stopPolling])
 
   // 挂载取数据集根：展示服务端生效值；is_default 时（重启后 override 已
   // 消失）以 localStorage 存值预填输入（仅提示，非真相）。失败不阻塞表单。
@@ -262,10 +274,10 @@ export default function ClosedEval() {
     let cancelled = false
     void (async () => {
       try {
-        const info = await getDatasetRoot()
+        const info = await api.getDatasetRoot()
         if (cancelled) return
         setEffectiveRoot(info.root)
-        const stored = localStorage.getItem(ROOT_LS_KEY)
+        const stored = localStorage.getItem(rootStorageKey)
         setRootInput(stored !== null && info.is_default ? stored : info.root)
       } catch {
         if (!cancelled) setEffectiveRoot(null)
@@ -274,7 +286,7 @@ export default function ClosedEval() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [api, rootStorageKey])
 
   // 应用数据集根：POST 校验通过 → 更新生效展示 + 重拉数据集列表（新根的
   // 数据集）+ 存 localStorage；失败经 message 透出后端 detail，不变更状态。
@@ -283,14 +295,15 @@ export default function ClosedEval() {
     if (!value || applyingRoot) return
     setApplyingRoot(true)
     try {
-      const info = await setDatasetRoot(value)
+      const info = await api.setDatasetRoot(value)
       message.success('数据集根已应用')
       setEffectiveRoot(info.root)
-      localStorage.setItem(ROOT_LS_KEY, value)
+      createForm.setFieldValue('ids', undefined)
+      setMovies([])
+      localStorage.setItem(rootStorageKey, value)
       try {
-        const rows = await listDatasets()
-        setDatasets(rows)
-        setDatasetsError(null)
+        const rows = await api.listDatasets()
+        updateDatasets(rows)
       } catch (err) {
         setDatasetsError(err instanceof Error ? err.message : '数据集列表加载失败')
       }
@@ -308,10 +321,9 @@ export default function ClosedEval() {
     let cancelled = false
     async function loadDatasets() {
       try {
-        const rows = await listDatasets()
+        const rows = await api.listDatasets()
         if (!cancelled) {
-          setDatasets(rows)
-          setDatasetsError(null)
+          updateDatasets(rows)
         }
       } catch (err) {
         if (!cancelled) {
@@ -343,7 +355,7 @@ export default function ClosedEval() {
       cancelled = true
       stopPolling()
     }
-  }, [beginPolling, refreshRuns, stopPolling])
+  }, [api, beginPolling, refreshRuns, stopPolling, updateDatasets])
 
   // custom 模式（或 custom 下换数据集）拉影片清单；失败仅提示不阻塞表单。
   // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置 state
@@ -357,7 +369,7 @@ export default function ClosedEval() {
       void (async () => {
         setMoviesLoading(true)
         try {
-          const rows = await listMovies(datasetId)
+          const rows = await api.listMovies(datasetId)
           if (!cancelled) setMovies(rows)
         } catch (err) {
           if (!cancelled) message.error(err instanceof Error ? err.message : '影片清单加载失败')
@@ -369,7 +381,7 @@ export default function ClosedEval() {
     return () => {
       cancelled = true
     }
-  }, [datasetId, movieMode])
+  }, [api, datasetId, effectiveRoot, movieMode])
 
   async function handleStart(values: EvalFormValues) {
     // 双保险（按钮已禁用）：单活跃 run 的最终裁决在后端，这里不重复校验
@@ -387,9 +399,10 @@ export default function ClosedEval() {
     if (values.concurrency !== undefined && values.concurrency !== null) {
       req.concurrency = values.concurrency
     }
+    if (isOpen && values.quality_model?.trim()) req.quality_model = values.quality_model.trim()
     setSubmitting(true)
     try {
-      const { run_id } = await startRun(req)
+      const { run_id } = await api.startRun(req)
       message.success(`已受理评测 run ${run_id}`)
       // 乐观占位（进度未知）：立即首拉马上补上真实进度
       setActiveRun({
@@ -414,7 +427,7 @@ export default function ClosedEval() {
   async function handleCancel() {
     if (activeRun === null) return
     try {
-      const res = await cancelRun(activeRun.run_id)
+      const res = await api.cancelRun(activeRun.run_id)
       if (res.ok) {
         // 受理语义：worker 不再提交新片、在途片跑完按部分口径收尾——
         // 不清轮询，status 推进到 cancelled 终态由轮询发现
@@ -434,7 +447,7 @@ export default function ClosedEval() {
    * 表格单元格 memo 下回调闭包可能持有陈旧 report，函数式读最新值。 */
   async function handleDelete(runId: string) {
     try {
-      await deleteRun(runId)
+      await api.deleteRun(runId)
       message.success(`已删除 run ${runId}`)
       setReport((prev) => (prev?.runId === runId ? null : prev))
       void refreshRuns()
@@ -445,7 +458,7 @@ export default function ClosedEval() {
 
   async function openReport(runId: string) {
     try {
-      const data = await getReport(runId)
+      const data = await api.getReport(runId)
       setReport({ runId, data })
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -459,7 +472,7 @@ export default function ClosedEval() {
 
   const datasetOptions = datasets.map((d) => ({
     value: d.id,
-    label: `${d.id}（交集 ${d.library_overlap}）`,
+    label: isOpen ? `${d.id}（${d.usable_movies} 部影片）` : `${d.id}（交集 ${d.library_overlap}）`,
   }))
 
   /** 操作列（组件内构造：需要 handleDelete 闭包）：仅终态行可删，运行行
@@ -494,7 +507,7 @@ export default function ClosedEval() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Card title="新建评测">
+      <Card title={isOpen ? '新建开放生成评估' : '新建评测'}>
         {datasetsError !== null && (
           <Alert
             type="error"
@@ -509,7 +522,7 @@ export default function ClosedEval() {
             aria-label="数据集根路径"
             value={rootInput}
             onChange={(e) => setRootInput(e.target.value)}
-            placeholder="服务器上的数据集根目录，如 /cache/MovieTags"
+            placeholder={`服务器上的数据集根目录，如 /cache/${isOpen ? 'MovieTagsV2' : 'MovieTags'}`}
             style={{ flex: 1 }}
           />
           <Button
@@ -577,12 +590,25 @@ export default function ClosedEval() {
               />
             </Form.Item>
           )}
-          <Form.Item name="thetas" label="θ 档位" rules={[numListRule()]}>
-            <Input placeholder="默认档 0.2,0.4,0.6,0.8" allowClear />
-          </Form.Item>
-          <Form.Item name="ks" label="K 档位" rules={[numListRule()]}>
-            <Input placeholder="默认档 5,10,20,40" allowClear />
-          </Form.Item>
+          {isOpen ? (
+            <Form.Item
+              name="quality_model"
+              label="质量评估模型 ID"
+              initialValue={DEFAULT_QUALITY_MODEL}
+              rules={[{ required: true, whitespace: true, message: '请输入质量评估模型 ID' }]}
+            >
+              <Input maxLength={200} />
+            </Form.Item>
+          ) : (
+            <>
+              <Form.Item name="thetas" label="θ 档位" rules={[numListRule()]}>
+                <Input placeholder="默认档 0.2,0.4,0.6,0.8" allowClear />
+              </Form.Item>
+              <Form.Item name="ks" label="K 档位" rules={[numListRule()]}>
+                <Input placeholder="默认档 5,10,20,40" allowClear />
+              </Form.Item>
+            </>
+          )}
           <Form.Item name="concurrency" label="并发度" initialValue={4}>
             <InputNumber aria-label="并发度" min={1} style={{ width: 160 }} />
           </Form.Item>
@@ -639,7 +665,7 @@ export default function ClosedEval() {
         )}
         <Table<RunSummary>
           rowKey="run_id"
-          columns={[...columns, ...actionColumns]}
+          columns={[...runColumns, ...(isOpen ? openMetricsColumns : closedMetricsColumns), ...actionColumns]}
           dataSource={runs}
           loading={runsLoading}
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
@@ -652,7 +678,9 @@ export default function ClosedEval() {
 
       {report !== null && (
         <Card title={`评测报告：${report.runId}`}>
-          <ClosedEvalReportView report={report.data} runId={report.runId} />
+          {'metrics' in report.data
+            ? <OpenEvalReportView report={report.data} runId={report.runId} />
+            : <ClosedEvalReportView report={report.data} runId={report.runId} />}
         </Card>
       )}
     </div>

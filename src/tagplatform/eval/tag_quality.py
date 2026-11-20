@@ -17,8 +17,10 @@ from tagplatform.generation.base import GenerationSpec
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, render_content
 from tagplatform.library import TagLibrary
+from tagplatform.llm import MockLLMClient, OpenAIClient
 from tagplatform.results import PersistSummary
 from tagplatform.schemas import ContentJSON
+from tagplatform.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,72 @@ class ScoreDetails(BaseModel):
 class TagScore(ScoreDetails):
     id: StrictInt
     value: DimensionScore
+
+
+class DimensionMetrics(BaseModel):
+    evaluated_tags: int
+    average: float | None
+    high_rate: float | None
+    distribution: list[int]
+    undetermined: int
+    undetermined_rate: float | None
+
+
+class QualityMetrics(BaseModel):
+    total_tags: int
+    evaluated_tags: int
+    max_score: Literal[2, 4] | None
+    coverage: float | None
+    joint_high_rate: float | None
+    three_dimension_high_rate: float | None
+    undetermined_tags: int
+    undetermined_rate: float | None
+    relevance: DimensionMetrics
+    semantics: DimensionMetrics
+    value: DimensionMetrics
+
+
+def _ratio(count: int, total: int) -> float | None:
+    return count / total if total else None
+
+
+def _dimension_metrics(values: list[int | None], max_score: int | None) -> DimensionMetrics:
+    distribution = ([values.count(value) for value in range(max_score + 1)]
+                    if max_score is not None else [])
+    judged = sum(distribution)
+    unknown = values.count(None)
+    return DimensionMetrics(
+        evaluated_tags=len(values),
+        average=_ratio(sum(score * count for score, count in enumerate(distribution)), judged),
+        high_rate=_ratio(distribution[-1], judged) if distribution else None,
+        distribution=distribution,
+        undetermined=unknown, undetermined_rate=_ratio(unknown, len(values)),
+    )
+
+
+def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...],
+                     max_score: int | None) -> float | None:
+    if max_score is None:
+        return None
+    ratings = [tuple(row.get(axis) for axis in axes) for row in rows]
+    return _ratio(ratings.count((max_score,) * len(axes)),
+                  sum(None not in rating for rating in ratings))
+
+
+def quality_metrics(total: int, scores: list[dict], max_score: Literal[2, 4] | None) -> QualityMetrics:
+    # 历史评分缺少 value 对象；显式的 score=null 才计入无法判断。
+    rows = [{axis: result["score"] for axis in DIMENSIONS
+             if (result := score.get(axis)) is not None} for score in scores]
+    unknown = sum(None in row.values() for row in rows)
+    return QualityMetrics(
+        total_tags=total, evaluated_tags=len(rows), coverage=_ratio(len(rows), total),
+        max_score=max_score,
+        joint_high_rate=_joint_high_rate(rows, ("relevance", "semantics"), max_score),
+        three_dimension_high_rate=_joint_high_rate(rows, DIMENSIONS, max_score),
+        undetermined_tags=unknown, undetermined_rate=_ratio(unknown, len(rows)),
+        **{axis: _dimension_metrics([row[axis] for row in rows if axis in row], max_score)
+           for axis in DIMENSIONS},
+    )
 
 
 def snapshot(
@@ -283,18 +351,41 @@ def _image_rejected(error: str) -> bool:
     )
 
 
+def make_quality_client(settings: Settings, model: str):
+    if settings.use_mock_llm:
+        return MockLLMClient(model=model)
+    return OpenAIClient(
+        model=model, base_url_env=settings.llm_base_url_env,
+        api_key_env=settings.llm_api_key_env, temperature=0,
+        request_interval=settings.llm_request_interval, max_tokens=8192,
+    )
+
+
 def evaluate(
     client, evaluation: TagQualityEvaluation, *, prompt_samples: PromptSampleBatch | None = None,
 ) -> tuple[dict, str | None, str | None]:
+    return evaluate_labels(
+        client, load_content(evaluation.content_json), evaluation.labels,
+        evaluation.frame_paths, evaluation.task_id, previous_scores=evaluation.scores,
+        previous_note=evaluation.note, prompt_samples=prompt_samples,
+    )
+
+
+def evaluate_labels(
+    client, content: ContentJSON, labels: list[dict], frame_paths: dict[str, list[str]],
+    task_id: str, *, previous_scores: dict | None = None, previous_note: str | None = None,
+    prompt_samples: PromptSampleBatch | None = None,
+) -> tuple[dict, str | None, str | None]:
     """默认一片一请求，长度超限才切分；保留成功批次及其分数。"""
-    content = load_content(evaluation.content_json)
-    text = _render_material(content, evaluation.labels)
+    if not labels:
+        return {}, None, None
+    text = _render_material(content, labels)
     scene_starts = {scene.scene_id: scene.time_range.start_ms for scene in content.content.scenes}
-    frames, missing = _load_frame_parts(evaluation.frame_paths)
-    scores = dict(evaluation.scores)
+    frames, missing = _load_frame_parts(frame_paths)
+    scores = dict(previous_scores or {})
     errors: list[str] = []
-    notes = [evaluation.note] if evaluation.note else []
-    run_id = f"{evaluation.task_id}:tag-quality"
+    notes = [previous_note] if previous_note else []
+    run_id = f"{task_id}:tag-quality"
     if missing:
         notes.append("部分生成关键帧已无法读取。")
 
@@ -317,7 +408,7 @@ def evaluate(
         if (truncated or input_limit) and len(labels) > 1:
             middle = len(labels) // 2
             logger.info("标签质量评估分批重试 task_id=%s reason=%s batch_sizes=%d,%d",
-                        evaluation.task_id, "output_length" if truncated else "input_length",
+                        task_id, "output_length" if truncated else "input_length",
                         middle, len(labels) - middle)
             batch(labels[:middle], images)
             batch(labels[middle:], images)
@@ -338,8 +429,10 @@ def evaluate(
         if complete and prompt_samples is not None:
             prompt_samples.capture("quality", build_quality_template, client, messages, run_id, response)
 
-    batch([label for label in evaluation.labels if str(label["id"]) not in scores], frames)
-    missing_scores = len(evaluation.labels) - len(scores)
+    pending = [label for label in labels if str(label["id"]) not in scores]
+    if pending:
+        batch(pending, frames)
+    missing_scores = len(labels) - len(scores)
     if missing_scores:
         errors.insert(0, f"{missing_scores} 个标签未返回有效评分")
     return (scores, "；".join(dict.fromkeys(errors))[:1000] or None,

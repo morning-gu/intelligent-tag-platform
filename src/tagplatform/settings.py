@@ -190,6 +190,10 @@ class Settings(BaseSettings):
     # （DB 零写入红线；TAGPLT_EVAL_OUTPUT_ROOT 可覆盖）
     eval_output_root: str = "data/eval/closed"
 
+    # 开放生成评估从数据集读取影片和关键帧，报告目录与闭环评测隔离。
+    open_eval_dataset_root: str = "/cache/MovieTagsV2"
+    open_eval_output_root: str = "data/eval/open"
+
 
 @lru_cache
 def get_settings() -> Settings:

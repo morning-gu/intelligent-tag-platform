@@ -1,6 +1,6 @@
 // 路由门禁与菜单测试：App 以 MemoryRouter 驱动（BrowserRouter 由 main.tsx 提供）。
 // api/client 整体 mock——门禁只关心 getMe 结果：拒绝 → 登录页；成功 → 布局与菜单
-// （十项菜单齐全，其中"用户管理"/"模型配置"/"闭环评测"仅 admin 角色可见）。登录态
+// （含管理员专属菜单）。登录态
 // 下工作台会挂载并请求指标接口，apiFetch 桩默认为永不落定的 Promise，页面停留在加载态。
 //
 // 路由装配集成用例（2026-11-02 白屏回归增补）：整棵 <App /> 在真实路由嵌套下
@@ -63,7 +63,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：十项菜单齐全（含仅 admin 可见的用户管理/模型配置/闭环评测）', async () => {
+  it('admin 登录：十一项菜单齐全', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -71,7 +71,7 @@ describe('路由门禁（requireAuth）', () => {
     // 等布局渲染完成（任一菜单项出现）
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(10)
+    expect(menuItems).toHaveLength(11)
     expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
@@ -81,6 +81,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('menuitem', { name: '用户管理' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '模型配置' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: '闭环评测' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '开放生成评估' })).toBeInTheDocument()
     // 顶部显示用户名
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
@@ -94,6 +95,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getAllByRole('menuitem')).toHaveLength(7)
     expect(screen.queryByRole('menuitem', { name: '用户管理' })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: '模型配置' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '开放生成评估' })).not.toBeInTheDocument()
   })
 })
 
@@ -130,6 +132,11 @@ function mockAdminApis() {
     // 闭环评测页挂载双拉（暂无数据集/历史的空态足够证明装配）
     if (path === '/api/v1/eval/closed/datasets') return []
     if (path === '/api/v1/eval/closed/runs') return []
+    if (path === '/api/v1/eval/open/datasets') {
+      return [{ id: 'MovieTagsV2', n_movies: 131, usable_movies: 131 }]
+    }
+    if (path === '/api/v1/eval/open/runs') return []
+    if (path === '/api/v1/eval/open/dataset-root') return { root: '/cache/MovieTagsV2', is_default: true }
     throw new Error(`未预期的请求：${path}`)
   })
 }
@@ -162,6 +169,14 @@ function mockReviewerApis() {
 }
 
 describe('路由装配（Layout → AdminRoute → 页面）', () => {
+  it('admin 访问 /eval-open：选中 V2 并显示独立质量评估设置', async () => {
+    mockAdminApis()
+    renderAt('/eval-open')
+    expect(await screen.findByText('MovieTagsV2（131 部影片）')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('deepseek-v4.1-flash')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('默认档 0.2,0.4,0.6,0.8')).not.toBeInTheDocument()
+  })
+
   it('admin 访问 /users：整树渲染出用户管理页', async () => {
     // 回归位：AdminRoute 解构 useOutletContext 曾抛 TypeError 白屏——
     // 能等到页面内容即证明 RequireAuth→Layout→AdminRoute→Users 全链路通了

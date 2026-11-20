@@ -9,9 +9,11 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, undefer
 
 from tagplatform.db.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
-from tagplatform.eval.tag_quality import DIMENSIONS, MAX_SCORE, PROMPT_VERSION, ScoreDetails, evaluate
+from tagplatform.eval.tag_quality import (
+    MAX_SCORE, PROMPT_VERSION, QualityMetrics, ScoreDetails,
+    evaluate, make_quality_client, quality_metrics,
+)
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
-from tagplatform.llm import MockLLMClient, OpenAIClient
 from tagplatform.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -23,16 +25,6 @@ class QualityExecutor:
         self._settings = settings
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, settings.generation_workers), thread_name_prefix="tag-quality",
-        )
-
-    def _client(self, model: str):
-        settings = self._settings
-        if settings.use_mock_llm:
-            return MockLLMClient(model=model)
-        return OpenAIClient(
-            model=model, base_url_env=settings.llm_base_url_env,
-            api_key_env=settings.llm_api_key_env, temperature=0,
-            request_interval=settings.llm_request_interval, max_tokens=8192,
         )
 
     def resume_pending(self) -> None:
@@ -88,7 +80,8 @@ class QualityExecutor:
             evaluation.scores, evaluation.note = {}, None
         try:
             scores, error, note = evaluate(
-                self._client(evaluation.model), evaluation, prompt_samples=prompt_samples,
+                make_quality_client(self._settings, evaluation.model), evaluation,
+                prompt_samples=prompt_samples,
             )
         except Exception as exc:
             logger.exception("标签质量评估失败 task_id=%s", task_id)
@@ -124,29 +117,6 @@ def queue_retry(session: Session, task_id: str, model: str | None) -> bool:
     return bool(updated)
 
 
-class DimensionMetrics(BaseModel):
-    evaluated_tags: int
-    average: float | None
-    high_rate: float | None
-    distribution: list[int]
-    undetermined: int
-    undetermined_rate: float | None
-
-
-class QualityMetrics(BaseModel):
-    total_tags: int
-    evaluated_tags: int
-    max_score: Literal[2, 4] | None
-    coverage: float | None
-    joint_high_rate: float | None
-    three_dimension_high_rate: float | None
-    undetermined_tags: int
-    undetermined_rate: float | None
-    relevance: DimensionMetrics
-    semantics: DimensionMetrics
-    value: DimensionMetrics
-
-
 class LabelQuality(BaseModel):
     id: int
     name: str
@@ -175,49 +145,6 @@ class QualityReport(BaseModel):
     film_counts: dict[str, int]
     metrics: QualityMetrics
     films: list[FilmQuality]
-
-
-def _ratio(count: int, total: int) -> float | None:
-    return count / total if total else None
-
-
-def _dimension_metrics(values: list[int | None], max_score: int | None) -> DimensionMetrics:
-    distribution = ([values.count(value) for value in range(max_score + 1)]
-                    if max_score is not None else [])
-    judged = sum(distribution)
-    unknown = values.count(None)
-    return DimensionMetrics(
-        evaluated_tags=len(values),
-        average=_ratio(sum(score * count for score, count in enumerate(distribution)), judged),
-        high_rate=_ratio(distribution[-1], judged) if distribution else None,
-        distribution=distribution,
-        undetermined=unknown, undetermined_rate=_ratio(unknown, len(values)),
-    )
-
-
-def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...],
-                     max_score: int | None) -> float | None:
-    if max_score is None:
-        return None
-    ratings = [tuple(row.get(axis) for axis in axes) for row in rows]
-    return _ratio(ratings.count((max_score,) * len(axes)),
-                  sum(None not in rating for rating in ratings))
-
-
-def _metrics(total: int, scores: list[dict], max_score: Literal[2, 4] | None) -> QualityMetrics:
-    # 历史评分缺少 value 对象；显式的 score=null 才计入无法判断。
-    rows = [{axis: result["score"] for axis in DIMENSIONS
-             if (result := score.get(axis)) is not None} for score in scores]
-    unknown = sum(None in row.values() for row in rows)
-    return QualityMetrics(
-        total_tags=total, evaluated_tags=len(rows), coverage=_ratio(len(rows), total),
-        max_score=max_score,
-        joint_high_rate=_joint_high_rate(rows, ("relevance", "semantics"), max_score),
-        three_dimension_high_rate=_joint_high_rate(rows, DIMENSIONS, max_score),
-        undetermined_tags=unknown, undetermined_rate=_ratio(unknown, len(rows)),
-        **{axis: _dimension_metrics([row[axis] for row in rows if axis in row], max_score)
-           for axis in DIMENSIONS},
-    )
 
 
 def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
@@ -257,7 +184,7 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
                 task_id=film.task_id, asset_id=film.asset_id, title=title, status=status,
                 model=evaluation.model, prompt_version=evaluation.prompt_version,
                 error=evaluation.error, note=evaluation.note,
-                metrics=_metrics(len(labels), film_scores, film_max) if labels else None,
+                metrics=quality_metrics(len(labels), film_scores, film_max) if labels else None,
                 labels=[{**label, "score": evaluation.scores.get(str(label["id"]))}
                         for label in labels],
             ))
@@ -278,4 +205,4 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
         status = "unavailable"
     max_score = next(iter(scored_scales), MAX_SCORE) if len(scored_scales) <= 1 else None
     return QualityReport(status=status, incomplete=incomplete, film_counts=counts,
-                         metrics=_metrics(total, scores, max_score), films=films)
+                         metrics=quality_metrics(total, scores, max_score), films=films)

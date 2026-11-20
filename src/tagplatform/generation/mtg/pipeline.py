@@ -277,9 +277,11 @@ def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
 
 
 def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
-                        judge_client=None) -> list[ProducedTag]:
-    """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
-    settings = get_settings()
+                        judge_client=None, *, settings: Settings | None = None,
+                        dataset_frames: dict[str, tuple[Path, ...]] | None = None,
+                        ) -> list[ProducedTag]:
+    """生成落库前的标签。独立数据集有显式帧映射，并保留无目录的标签。"""
+    settings = settings or get_settings()
     started = time.monotonic()
     contents = spec.content
 
@@ -291,13 +293,15 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
     # 见 `eval/ablation.py` 的纪律说明。
     modalities = settings.mtg_modality_set
-    frames = (keyframes_mod.plan_scene_frames(
-        contents, settings.dataset_root,
-        per_scene=settings.mtg_frames_per_scene,
-        max_frames=settings.mtg_max_frames,
-        movie_asset_root=settings.movie_asset_root,
-        extra_roots=settings.movie_asset_extra_roots,
-    ) if "video" in modalities else {})
+    frames = {}
+    if "video" in modalities:
+        frames = dataset_frames if dataset_frames is not None else keyframes_mod.plan_scene_frames(
+            contents, settings.dataset_root,
+            per_scene=settings.mtg_frames_per_scene,
+            max_frames=settings.mtg_max_frames,
+            movie_asset_root=settings.movie_asset_root,
+            extra_roots=settings.movie_asset_extra_roots,
+        )
     spec.frames_by_scene = frames
     frame_count = sum(len(v) for v in frames.values())
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
@@ -568,7 +572,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     new_names = [candidate.tag for candidate, _, _ in accepted
                  if not plans.get(candidate.tag, (None, False))[1]]
     new_vectors = (embedder.embed(new_names, role="query")
-                   if new_names else [])
+                   if new_names and tag_library is not None else [])
     vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
     per_dir_count: dict[str, int] = {}
     for candidate, verdict, evidence in accepted:
@@ -623,55 +627,62 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         if not spec.policy.allow_new_tags:
             dropped.append({"tag": candidate.tag, "why": "策略禁止产出新词"})
             continue
-        if tag_library is None:
-            dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
-            continue
-        # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
-        #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
-        assignment = None
-        mount = None
-        dir_source = None
-        dir_reason = ""
         reasons: list[str] = []
-        model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
-        if candidate.dir_raw and model_dir is None:
-            reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
-        if model_dir:
-            assignment, mount, why = _validate_model_dir(
-                tag_library, model_dir, spec, contents, evidence, per_dir_count)
-            if assignment is not None:
-                dir_source = "model"
-            else:
-                reasons.append(why)
-                assignment = mount = None
-        # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
-        if assignment is None:
-            for option in rank_dir_assignments(tag_library, embedder,
-                                               vector_by_name.get(candidate.tag),
-                                               spec.policy.dir_ids):
-                if option.dir_id is None:
-                    reasons.append(f"无可归属目录（{option.reason}）")
-                    continue
-                if (spec.policy.max_tags_per_dir
-                        and per_dir_count.get(option.dir_id, 0)
-                        >= spec.policy.max_tags_per_dir):
-                    reasons.append(f"目录「{option.dir_name}」已达产出上限")
-                    continue
-                candidate_mount = resolve_mount(option.scope, spec.asset_id,
-                                                contents, evidence)
-                if candidate_mount is None:
-                    reasons.append(f"目录「{option.dir_name}」适用范围 "
-                                   f"{option.scope} 解析不出唯一挂载点")
-                    continue
-                assignment, mount = option, candidate_mount
-                dir_source = "fallback"
-                dir_reason = option.reason
-                break
+        if tag_library is None and dataset_frames is not None:
+            scope = "scene" if level == "scene" else "content"
+            assignment = DirAssignment(dir_id=None, dir_name=None, scope=scope)
+            mount = resolve_mount(scope, spec.asset_id, contents, evidence)
+            dir_source, dir_reason = None, ""
+        else:
+            if tag_library is None:
+                dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
+                continue
+            # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
+            #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
+            assignment = None
+            mount = None
+            dir_source = None
+            dir_reason = ""
+            model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
+            if candidate.dir_raw and model_dir is None:
+                reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
+            if model_dir:
+                assignment, mount, why = _validate_model_dir(
+                    tag_library, model_dir, spec, contents, evidence, per_dir_count)
+                if assignment is not None:
+                    dir_source = "model"
+                else:
+                    reasons.append(why)
+                    assignment = mount = None
+            # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
+            if assignment is None:
+                for option in rank_dir_assignments(tag_library, embedder,
+                                                   vector_by_name.get(candidate.tag),
+                                                   spec.policy.dir_ids):
+                    if option.dir_id is None:
+                        reasons.append(f"无可归属目录（{option.reason}）")
+                        continue
+                    if (spec.policy.max_tags_per_dir
+                            and per_dir_count.get(option.dir_id, 0)
+                            >= spec.policy.max_tags_per_dir):
+                        reasons.append(f"目录「{option.dir_name}」已达产出上限")
+                        continue
+                    candidate_mount = resolve_mount(option.scope, spec.asset_id,
+                                                    contents, evidence)
+                    if candidate_mount is None:
+                        reasons.append(f"目录「{option.dir_name}」适用范围 "
+                                       f"{option.scope} 解析不出唯一挂载点")
+                        continue
+                    assignment, mount = option, candidate_mount
+                    dir_source = "fallback"
+                    dir_reason = option.reason
+                    break
         if assignment is None or mount is None:
             dropped.append({"tag": candidate.tag,
                             "why": "；".join(reasons) or "无可归属目录"})
             continue
-        per_dir_count[assignment.dir_id] = per_dir_count.get(assignment.dir_id, 0) + 1
+        if assignment.dir_id is not None:
+            per_dir_count[assignment.dir_id] = per_dir_count.get(assignment.dir_id, 0) + 1
         tags.append(ProducedTag(
             origin="generated", tag_id=None, tag_name=candidate.tag,
             candidate_type=candidate.dimension,

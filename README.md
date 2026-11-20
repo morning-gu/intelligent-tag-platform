@@ -87,6 +87,14 @@ npm run dev
 `TAGPLT_EVAL_OUTPUT_ROOT` 配置；评测全程对业务库只读（DB 零写入），产物只
 落 `TAGPLT_EVAL_OUTPUT_ROOT`。
 
+### 开放生成评估（admin）
+
+「开放生成评估」页默认读取 MovieTagsV2，可固定抽样 30 部、全选或按片名和 IMDb ID 选片。
+运行复用生产的开放生成和三维五档质量评分，支持查看进度、取消及下载逐片结果。
+影片、对白和关键帧直接从数据集读取，生成标签与评分随报告写入独立目录。
+数据集根和报告根分别由 `TAGPLT_OPEN_EVAL_DATASET_ROOT` 和
+`TAGPLT_OPEN_EVAL_OUTPUT_ROOT` 配置。评估口径见 [评测方法](docs/eval.md#5-开放生成评估)。
+
 ### 生产部署（同源反代）
 
 生产部署采用 **venv + systemd + nginx** 直接部署（无 Docker 依赖）：nginx 托管
@@ -120,6 +128,8 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_MEDIA_ROOT`                    | `data/media/`         | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录）                                      |
 | `TAGPLT_EVAL_DATASET_ROOT`             | `/cache/MovieTags`    | 闭环评测基准数据集根（`gt/*.csv` 三列 gt + `data/<ttID>/content.json`，全程只读；换数据集 = 改本变量，不接受前端提交路径） |
 | `TAGPLT_EVAL_OUTPUT_ROOT`              | `data/eval/closed`    | 闭环评测产物落盘根（meta/进度/报告三件套；评测代码唯一的写盘位置）                              |
+| `TAGPLT_OPEN_EVAL_DATASET_ROOT`        | `/cache/MovieTagsV2`  | 开放生成评估数据集根，内含 `data/<ttID>/content.json` 和影片关键帧                          |
+| `TAGPLT_OPEN_EVAL_OUTPUT_ROOT`         | `data/eval/open`      | 开放生成评估的报告、进度和逐片审计目录                                                 |
 | `TAGPLT_LOG_LEVEL`                     | `INFO`                | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。

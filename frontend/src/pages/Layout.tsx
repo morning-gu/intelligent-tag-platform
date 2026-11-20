@@ -1,4 +1,4 @@
-// 主布局：左侧导航（十项菜单，"用户管理"/"模型配置"/"闭环评测"仅 admin
+// 主布局：左侧导航（管理员专属菜单仅 admin
 // 角色可见）+ 顶部用户名与登出。
 // 登录用户经路由门禁（RequireAuth）的 Outlet context 注入，本组件只读不请求。
 import { Button, Layout as AntLayout, Menu, Space } from 'antd'
@@ -25,11 +25,12 @@ const BASE_MENU_ITEMS: MenuItems = [
   { key: '/quality', label: '质量评估' },
 ]
 
-/** admin 专属菜单项（用户管理 + 模型配置 + 闭环评测），按 role 追加在全员项之后。 */
+/** admin 专属菜单项，按 role 追加在全员项之后。 */
 const ADMIN_MENU_ITEMS: MenuItems = [
   { key: '/users', label: '用户管理' },
   { key: '/model-config', label: '模型配置' },
   { key: '/eval-closed', label: '闭环评测' },
+  { key: '/eval-open', label: '开放生成评估' },
 ]
 
 const { Sider, Header, Content } = AntLayout

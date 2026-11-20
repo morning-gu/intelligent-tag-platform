@@ -1,20 +1,14 @@
-// 闭环评测 API：/eval/closed 八端点的类型契约与取数函数。类型形状与后端
-// tagplatform/api/routers/eval.py 的 Pydantic 模型、closed_eval 组装的
-// report.json 结构一致：后端 None（无报告/该档无有效影片/算不出）一律以
-// null 透传，前端按「暂无」口径呈现（None≠0 纪律）；起跑可选项缺省即不
-// 携带，由服务端回退默认网格/并发。产物文件下载走 <a href> 原生下载，
-// fileUrl 只拼路径不请求——同源导航自带会话 cookie，且文件是二进制/文本
-// 流而非 JSON，apiFetch 的 response.json() 不适用。
 import { apiFetch } from './client'
+import type { QualityLabel, QualityMetrics, QualityStatus } from './tasks'
 
 /** 可评数据集视图（与后端 DatasetInfoOut 一致）：usable_movies 输出为
  * 数量（服务层是清单——列表页只要计数，选片清单走 listMovies）。 */
 export interface DatasetInfo {
   id: string
-  gt_path: string
+  gt_path: string | null
   n_movies: number
-  n_tags: number
-  library_overlap: number
+  n_tags: number | null
+  library_overlap: number | null
   usable_movies: number
 }
 
@@ -39,6 +33,7 @@ export interface StartRunRequest {
   thetas?: number[]
   ks?: number[]
   concurrency?: number
+  quality_model?: string
 }
 
 /** run 进度快照（与后端 RunStateOut 一致）：done/total/failed/started_at
@@ -72,6 +67,8 @@ export interface RunSummary {
   p10: number | null
   r20: number | null
   coverage_median: number | null
+  quality_coverage?: number | null
+  quality_full_rate?: number | null
 }
 
 /** θ×K 网格单格（report.json grid 行）：指标 null 表示该 θ 下无有效影片
@@ -128,93 +125,83 @@ export interface ClosedEvalReport {
   note: string
 }
 
-/** 产物文件名（后端 files 端点白名单五件套；report.json 有专用 /report
- * 端点、不在白名单——结构化读走 getReport，文件端点只供下载原始产物）。 */
+export interface OpenEvalLabel extends Omit<QualityLabel, 'disposition'> {
+  level: 'film' | 'scene'
+  reason: string | null
+  evidence: { scene_id: string; start_ms: number; description: string }[]
+}
+
+export interface OpenEvalReport {
+  meta: {
+    dataset: { id: string; root: string }
+    prompt: { version: string }
+    llm_model: string
+    quality_model: string
+    quality_prompt_version: string
+    mock_llm: boolean
+    mock_embedder: boolean
+    done: number
+    total: number
+  }
+  incomplete: boolean
+  film_counts: Partial<Record<QualityStatus, number>>
+  metrics: QualityMetrics
+  films: {
+    tt: string
+    title: string
+    status: QualityStatus
+    error: string | null
+    note: string | null
+    frame_count: number
+    metrics: QualityMetrics | null
+    produced: OpenEvalLabel[]
+  }[]
+}
+
 export type EvalFileName =
   | 'report.md'
+  | 'report.json'
   | 'metrics.csv'
   | 'raw_results.json'
   | 'meta.json'
   | 'progress.jsonl'
 
-/** 可评数据集列表（畸形 gt 已在扫描层跳过；overlap 对当前标签库）。 */
-export function listDatasets(): Promise<DatasetInfo[]> {
-  return apiFetch<DatasetInfo[]>('/api/v1/eval/closed/datasets')
-}
-
-/** 数据集的 usable 影片清单（选片列表用）；未知 dataset → 404。 */
-export function listMovies(datasetId: string): Promise<MovieRef[]> {
-  return apiFetch<MovieRef[]>(`/api/v1/eval/closed/datasets/${datasetId}/movies`)
-}
-
-/** 当前生效的数据集根（override ?? .env 默认）与是否默认（重启后
- * override 消失 → 回落默认、is_default=true）。 */
 export interface DatasetRootInfo {
   root: string
   is_default: boolean
 }
 
-/** 设置数据集根（进程内 override，重启回落 .env 默认）。校验失败 → 400
- * （目录不存在/非目录/扫描零有效数据集，detail 经 ApiError.message 透出）；
- * 返回应用后的生效值与 is_default。 */
-export function setDatasetRoot(root: string): Promise<DatasetRootInfo> {
-  return apiFetch<DatasetRootInfo>('/api/v1/eval/closed/dataset-root', {
-    method: 'POST',
-    body: JSON.stringify({ root }),
-  })
+export type EvalMode = 'closed' | 'open'
+
+function evalApi<Report>(mode: EvalMode) {
+  const base = `/api/v1/eval/${mode}`
+  const runs = `${base}/runs`
+  const run = (runId: string) => `${runs}/${encodeURIComponent(runId)}`
+  return {
+    listDatasets: () => apiFetch<DatasetInfo[]>(`${base}/datasets`),
+    listMovies: (datasetId: string) =>
+      apiFetch<MovieRef[]>(`${base}/datasets/${encodeURIComponent(datasetId)}/movies`),
+    setDatasetRoot: (root: string) => apiFetch<DatasetRootInfo>(`${base}/dataset-root`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    }),
+    getDatasetRoot: () => apiFetch<DatasetRootInfo>(`${base}/dataset-root`),
+    startRun: (req: StartRunRequest) => apiFetch<{ run_id: string }>(runs, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+    listRuns: () => apiFetch<RunSummary[]>(runs),
+    getRun: (runId: string) => apiFetch<RunStatus>(run(runId)),
+    cancelRun: (runId: string) => apiFetch<{ ok: boolean }>(`${run(runId)}/cancel`, { method: 'POST' }),
+    deleteRun: (runId: string) => apiFetch<{ ok: boolean }>(run(runId), { method: 'DELETE' }),
+    getReport: (runId: string) => apiFetch<Report>(`${run(runId)}/report`),
+    fileUrl: (runId: string, name: EvalFileName) => `${run(runId)}/files/${name}`,
+  }
 }
 
-/** 当前生效的数据集根（页面「当前生效」展示的服务端真相）。 */
-export function getDatasetRoot(): Promise<DatasetRootInfo> {
-  return apiFetch<DatasetRootInfo>('/api/v1/eval/closed/dataset-root')
-}
+export const {
+  listDatasets, listMovies, setDatasetRoot, getDatasetRoot, startRun, listRuns,
+  getRun, cancelRun, deleteRun, getReport, fileUrl,
+} = evalApi<ClosedEvalReport>('closed')
 
-/** 起跑：返回受理 run_id（进度经 getRun 轮询）。错误映射：未知 dataset
- * → 404、校验失败（选片越权/库未就绪/零交集/并发非法）→ 400、已有活跃
- * run → 409（detail 含占用的 run_id，均经 ApiError.message 透出后端 detail）。 */
-export function startRun(req: StartRunRequest): Promise<{ run_id: string }> {
-  return apiFetch<{ run_id: string }>('/api/v1/eval/closed/runs', {
-    method: 'POST',
-    body: JSON.stringify(req),
-  })
-}
-
-/** 历史 run 摘要（磁盘扫描，started_at 降序；摘要档无 → null）。 */
-export function listRuns(): Promise<RunSummary[]> {
-  return apiFetch<RunSummary[]>('/api/v1/eval/closed/runs')
-}
-
-/** run 进度详情：注册表优先（活值）、磁盘历史兜底（上一进程的 run/
- * 中断 run）；两处都没有 → 404。 */
-export function getRun(runId: string): Promise<RunStatus> {
-  return apiFetch<RunStatus>(`/api/v1/eval/closed/runs/${runId}`)
-}
-
-/** 请求取消 → ok：受理 true（worker 不再提交新片，在途片跑完）；run
- * 不存在或已终态 → false（幂等意图，重复取消不报错）。 */
-export function cancelRun(runId: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/v1/eval/closed/runs/${runId}/cancel`, {
-    method: 'POST',
-  })
-}
-
-/** 删除终态 run（磁盘产物 + 进程内注册表）→ {ok: true}；运行中（含终态
- * 落盘窄窗口）→ 409 detail 带原因；不存在/已删 → 404（重复删除即 404，
- * 与 getRun 未知 run 同口径）。经 ApiError.message 透出后端 detail。 */
-export function deleteRun(runId: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/v1/eval/closed/runs/${runId}`, {
-    method: 'DELETE',
-  })
-}
-
-/** 报告 JSON（report.json 原样透出）：无报告/截断 → 404（meta→raw→report
- * 写序的非原子窗口，读侧容错不抛 500）。 */
-export function getReport(runId: string): Promise<ClosedEvalReport> {
-  return apiFetch<ClosedEvalReport>(`/api/v1/eval/closed/runs/${runId}/report`)
-}
-
-/** 产物下载路径（白名单五件套）：纯路径拼接供 <a href>/window.open 使用，
- * 不经 apiFetch（非 JSON 响应）。 */
-export function fileUrl(runId: string, name: EvalFileName): string {
-  return `/api/v1/eval/closed/runs/${runId}/files/${name}`
-}
+export const openEvalApi = evalApi<OpenEvalReport>('open')

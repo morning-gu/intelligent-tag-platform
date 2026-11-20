@@ -158,6 +158,31 @@ def plan_scene_frames(content: ContentJSON, dataset_root: str,
     return planned if any(planned.values()) else {}
 
 
+def plan_dataset_frames(
+    content: ContentJSON, movie_dir: Path, frame_lists: dict[str, list[str]],
+    per_scene: int, max_frames: int,
+) -> dict[str, tuple[Path, ...]]:
+    """从故事段自带的时间顺序帧列表均匀取样，使用与生产相同的全片预算。"""
+    if per_scene <= 0 or max_frames <= 0:
+        return {}
+    frames_dir = movie_dir.resolve() / "frames"
+    plans = []
+    for scene in content.content.scenes:
+        available = []
+        for relative in frame_lists.get(scene.scene_id, []):
+            path = (movie_dir / relative).resolve()
+            if (path.is_relative_to(frames_dir)
+                    and path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+                    and path.is_file()):
+                available.append(path)
+        count = min(per_scene, len(available))
+        sampled = tuple(available[(2 * i + 1) * len(available) // (2 * count)]
+                        for i in range(count))
+        plans.append(SceneFrames(scene.scene_id, scene.time_range.start_ms,
+                                 scene.time_range.end_ms, sampled))
+    return {plan.scene_id: plan.frames for plan in _cap_frames(plans, max_frames) if plan.frames}
+
+
 def _local_roots(movie_asset_root: str | None,
                  extra_roots: str | None = None) -> list[Path]:
     """目录导入的帧根候选：配置根 + 它的父目录 + 额外配置的根。

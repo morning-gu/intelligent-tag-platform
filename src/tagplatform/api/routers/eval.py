@@ -1,49 +1,24 @@
-"""`/api/v1/eval/closed` 路由：闭环评测 admin 端点（11 个，全部仅 admin）。
-
-薄路由层（plan Task 6）：服务层是 tagplatform.closed_eval.ClosedEvalService
-（数据集扫描/干跑运行器/报告与历史，DB 零写入），router 只做协议转换——
-
-- 起跑请求的形状校验由 pydantic 声明（mode 词表外 / 类型不符 → 422 自动）；
-- 错误映射集中在 start 端点的 try/except：未知 dataset → 404（先以
-  scan_datasets 结果校验 dataset_id 再透传——404 语义要求 + 防未校验 id
-  进下游路径拼接，Task 2 评审携带项）、服务层 EvalValidationError → 400
-  （选片越权/库未就绪/库∩gt 零交集/并发非法）、RunBusyError → 409
-  （detail 含活跃 run_id，前端据此提示谁占着）；
-- run 详情/报告/文件端点读 `eval_output_root/<run_id>/`：run_id 先经
-  `_run_dir` 守卫（解析后必须仍在输出根内——路径拼接不给 URL 手工 id
-  越界机会），files 白名单钉死五件套（report.json 走专用端点、白名单外
-  404）；
-- 读侧容错与 history() 同口径：report.json 缺失/截断 → 404「无报告」，
-  不抛 500（meta→raw→report 写序的非原子窗口）；进程内注册表查不到的
-  run_id 按磁盘历史兜底（上一进程残留/中断 run 仍可查详情，与 /runs
-  列表口径一致——列表里有的 id，详情必须能打开）。
-"""
+"""闭环排序评测和开放生成评估的管理员端点。"""
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
-from tagplatform.api import get_closed_eval, get_settings_dep
+from tagplatform.api import get_closed_eval
 from tagplatform.api.depends import require_admin
-from tagplatform.closed_eval import (
-    DEFAULT_CONCURRENCY,
-    ClosedEvalService,
-    EvalValidationError,
-    RunActiveError,
-    RunBusyError,
-    movie_entries,
-    scan_datasets,
-)
+from tagplatform.closed_eval import ClosedEvalService, movie_entries, scan_datasets
 from tagplatform.db.models import UserAccount
 from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.library import try_load_library
-from tagplatform.settings import Settings
+from tagplatform.eval.tag_quality import DEFAULT_MODEL
+from tagplatform.eval_runs import DEFAULT_CONCURRENCY, EvalValidationError, RunActiveError, RunBusyError
+from tagplatform.open_eval import OpenEvalService, dataset_movie_entries, dataset_movies
 
-router = APIRouter(prefix="/api/v1/eval/closed")
+router = APIRouter(prefix="/api/v1/eval/{mode}")
 
 # files 端点白名单（plan 钉死五件套）：report.json 有专用 /report 端点、
 # 不在白名单——报告结构化读走 JSON 端点，文件端点只供下载原始产物
@@ -71,6 +46,9 @@ class StartRunRequest(BaseModel):
     thetas: list[float] | None = None
     ks: list[int] | None = None
     concurrency: int | None = None
+    quality_model: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+    ] | None = None
 
 
 class SetDatasetRootRequest(BaseModel):
@@ -92,10 +70,10 @@ class DatasetInfoOut(BaseModel):
     计数，选片清单走 /movies 端点）。"""
 
     id: str
-    gt_path: str
+    gt_path: str | None = None
     n_movies: int
-    n_tags: int
-    library_overlap: int
+    n_tags: int | None = None
+    library_overlap: int | None = None
     usable_movies: int
 
 
@@ -144,9 +122,20 @@ class RunSummaryOut(BaseModel):
     p10: float | None = None
     r20: float | None = None
     coverage_median: float | None = None
+    quality_coverage: float | None = None
+    quality_full_rate: float | None = None
 
 
 # ---------------------------------------------------------------- 内部装配
+
+
+def _get_eval_service(request: Request, mode: Literal["closed", "open"]) -> ClosedEvalService | OpenEvalService:
+    if mode == "open":
+        return request.app.state.open_eval
+    return get_closed_eval(request)
+
+
+EvalService = Annotated[ClosedEvalService | OpenEvalService, Depends(_get_eval_service)]
 
 
 def _library_tag_ids() -> list[str]:
@@ -170,16 +159,9 @@ def _dataset_or_404(root: str, dataset_id: str):
     return info
 
 
-def _run_dir(settings: Settings, run_id: str) -> Path | None:
-    """run 目录守卫：解析后必须仍在 eval_output_root 内（防 run_id 形态的
-    路径拼接越界——`..`、绝对路径、分隔符变体一律 None → 404）。"""
-    root = Path(settings.eval_output_root)
-    candidate = (root / run_id).resolve()
-    try:
-        candidate.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return candidate
+def _require_open_dataset(root: str, dataset_id: str) -> None:
+    if dataset_id != Path(root).resolve().name or not dataset_movies(root):
+        raise HTTPException(status_code=404, detail=f"开放评估数据集不可用：{dataset_id!r}")
 
 
 def _run_state_out(state) -> RunStateOut:
@@ -195,8 +177,8 @@ def _run_state_out(state) -> RunStateOut:
 
 @router.get("/dataset-root", response_model=DatasetRootOut)
 def get_dataset_root(
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> DatasetRootOut:
     """当前生效的数据集根（override ?? .env 默认）与是否默认。"""
     return DatasetRootOut(root=service.effective_root,
@@ -206,8 +188,8 @@ def get_dataset_root(
 @router.post("/dataset-root", response_model=DatasetRootOut)
 def set_dataset_root(
     payload: SetDatasetRootRequest,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> DatasetRootOut:
     """设置数据集根（进程内 override，重启回落 .env 默认）。
 
@@ -219,7 +201,10 @@ def set_dataset_root(
         raise HTTPException(
             status_code=400,
             detail=f"数据集根目录不存在或不是目录：{root}")
-    if not scan_datasets(root, set()):
+    if isinstance(service, OpenEvalService):
+        if not dataset_movies(root):
+            raise HTTPException(status_code=400, detail=f"目录 {root} 下未找到 data/<tt>/content.json")
+    elif not scan_datasets(root, set()):
         raise HTTPException(
             status_code=400,
             detail=f"目录 {root} 下未扫描到有效数据集（需 gt 三列 CSV）")
@@ -229,11 +214,16 @@ def set_dataset_root(
 
 @router.get("/datasets", response_model=list[DatasetInfoOut])
 def list_datasets(
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> list[DatasetInfoOut]:
     """可评数据集列表（畸形 gt 已在扫描层跳过；overlap 对当前标签库）。"""
-    infos = scan_datasets(service.effective_root, _library_tag_ids())
+    root = service.effective_root
+    if isinstance(service, OpenEvalService):
+        movies = dataset_movies(root)
+        return [DatasetInfoOut(id=Path(root).resolve().name, n_movies=len(movies),
+                               usable_movies=len(movies))] if movies else []
+    infos = scan_datasets(root, _library_tag_ids())
     return [DatasetInfoOut(id=i.id, gt_path=i.gt_path, n_movies=i.n_movies,
                            n_tags=i.n_tags, library_overlap=i.library_overlap,
                            usable_movies=len(i.usable_movies))
@@ -243,13 +233,17 @@ def list_datasets(
 @router.get("/datasets/{dataset_id}/movies", response_model=list[MovieRefOut])
 def list_dataset_movies(
     dataset_id: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> list[MovieRefOut]:
     """数据集的 usable 影片清单（选片列表用）；未知 dataset → 404。"""
-    _dataset_or_404(service.effective_root, dataset_id)
+    root = service.effective_root
+    if isinstance(service, OpenEvalService):
+        _require_open_dataset(root, dataset_id)
+        return [MovieRefOut(**entry) for entry in dataset_movie_entries(root)]
+    _dataset_or_404(root, dataset_id)
     try:
-        entries = movie_entries(service.effective_root, dataset_id)
+        entries = movie_entries(root, dataset_id)
     except ValueError:  # 扫描后被删/被改坏的窄窗口 → 同 404 口径
         raise HTTPException(
             status_code=404,
@@ -260,19 +254,25 @@ def list_dataset_movies(
 @router.post("/runs", response_model=RunCreatedOut)
 def start_run(
     payload: StartRunRequest,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> RunCreatedOut:
     """起跑（错误映射集中处）：未知 dataset 404 → 校验失败 400 → busy 409。"""
-    _dataset_or_404(service.effective_root, payload.dataset)
+    concurrency = payload.concurrency if payload.concurrency is not None else DEFAULT_CONCURRENCY
+    movies = payload.movies.model_dump()
     try:
-        run_id = service.start(
-            payload.dataset, payload.movies.model_dump(),
-            thetas=(payload.thetas if payload.thetas is not None
-                    else DEFAULT_THETAS),
-            ks=(payload.ks if payload.ks is not None else DEFAULT_KS),
-            concurrency=(payload.concurrency if payload.concurrency is not None
-                         else DEFAULT_CONCURRENCY))
+        if isinstance(service, OpenEvalService):
+            _require_open_dataset(service.effective_root, payload.dataset)
+            run_id = service.start(payload.dataset, movies, payload.quality_model or DEFAULT_MODEL,
+                                   concurrency)
+        else:
+            _dataset_or_404(service.effective_root, payload.dataset)
+            run_id = service.start(
+                payload.dataset, movies,
+                thetas=payload.thetas if payload.thetas is not None else DEFAULT_THETAS,
+                ks=payload.ks if payload.ks is not None else DEFAULT_KS,
+                concurrency=concurrency,
+            )
     except EvalValidationError as exc:  # 选片越权/库未就绪/零交集/并发非法
         raise HTTPException(status_code=400, detail=str(exc))
     except RunBusyError as exc:  # 单进程同时只允许一个 run
@@ -282,8 +282,8 @@ def start_run(
 
 @router.get("/runs", response_model=list[RunSummaryOut])
 def list_runs(
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> list[RunSummaryOut]:
     """历史 run 摘要（磁盘扫描，started_at 降序；摘要档无 → None）。"""
     return [RunSummaryOut(**row) for row in service.history()]
@@ -292,8 +292,8 @@ def list_runs(
 @router.get("/runs/{run_id}", response_model=RunStateOut)
 def get_run(
     run_id: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> RunStateOut:
     """run 进度详情：注册表优先（活值）；磁盘历史兜底（上一进程的
     run/中断 run）；两处都没有 → 404。"""
@@ -313,8 +313,8 @@ def get_run(
 @router.post("/runs/{run_id}/cancel")
 def cancel_run(
     run_id: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> dict:
     """请求取消 → {ok}：受理 true（worker 不再提交新片，在途片跑完）；
     run 不存在或已终态 → false（幂等意图，重复取消不报错）。"""
@@ -324,8 +324,8 @@ def cancel_run(
 @router.delete("/runs/{run_id}")
 def delete_run(
     run_id: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> dict:
     """删除终态 run（磁盘产物 + 进程内注册表）→ {ok: true}。
 
@@ -346,12 +346,12 @@ def delete_run(
 @router.get("/runs/{run_id}/report")
 def get_run_report(
     run_id: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """报告 JSON（report.json 原样透出）：无报告/截断 → 404（读侧容错，
     不把非原子写序窗口打成 500）。"""
-    run_dir = _run_dir(settings, run_id)
+    run_dir = service.run_directory(run_id)
     if run_dir is not None:
         try:
             report = json.loads((run_dir / "report.json")
@@ -368,15 +368,15 @@ def get_run_report(
 def get_run_file(
     run_id: str,
     name: str,
+    service: EvalService,
     _admin: UserAccount = Depends(require_admin),
-    settings: Settings = Depends(get_settings_dep),
 ) -> FileResponse:
     """产物下载（白名单五件套）：白名单外 404（report.json 走 /report 端点）；
     run 目录越界或文件不存在 → 404。"""
-    if name not in _FILE_WHITELIST:
+    if name not in _FILE_WHITELIST and not (name == "report.json" and isinstance(service, OpenEvalService)):
         raise HTTPException(status_code=404,
                             detail=f"评测产物文件不存在：{name!r}")
-    run_dir = _run_dir(settings, run_id)
+    run_dir = service.run_directory(run_id)
     path = run_dir / name if run_dir is not None else None
     if path is None or not path.is_file():
         raise HTTPException(status_code=404,

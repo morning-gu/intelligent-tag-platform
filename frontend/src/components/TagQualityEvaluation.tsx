@@ -45,7 +45,7 @@ function DimensionSummary({ dimension, maxScore }: { dimension: QualityDimension
   )
 }
 
-function Metrics({ metrics }: { metrics: QualityMetrics }) {
+export function QualityMetricsDetail({ metrics }: { metrics: QualityMetrics }) {
   const maxScore = metrics.max_score === undefined ? 2 : metrics.max_score
   const scoreItems = maxScore === null ? [{
     key: 'scale', label: '评分量表', children: '本批次使用了不同量表，分数统计见各影片。',
@@ -128,7 +128,7 @@ function FilmEvaluation({ film, onRetry, children }: {
           <MetricsSummary metrics={film.metrics} />
           <details className="task-quality-metrics">
             <summary>评分统计</summary>
-            <div><Metrics metrics={film.metrics} /></div>
+            <div><QualityMetricsDetail metrics={film.metrics} /></div>
           </details>
         </>
       )}
@@ -190,7 +190,7 @@ export default function TagQualityEvaluation({ report, taskId, onRetry, children
                     .map(([status, count]) => <span key={status}>{statuses[status as QualityStatus].label} {count}</span>)}
                   {report.incomplete && <Typography.Text type="secondary">汇总结果尚未完整</Typography.Text>}
                 </Space>
-                {report.status !== 'unavailable' && <Metrics metrics={report.metrics} />}
+                {report.status !== 'unavailable' && <QualityMetricsDetail metrics={report.metrics} />}
                 <Collapse size="small" items={siblings.map((film) => ({
                   key: film.task_id,
                   label: <Space wrap>{film.title}<EvaluationStatus status={film.status} /></Space>,
