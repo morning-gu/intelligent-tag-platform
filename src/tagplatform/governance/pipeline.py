@@ -4,7 +4,8 @@
 - 行分类：解析层显式标记优先（`TagRow.is_dir` 三态：True 目录行 /
   False 标签行 / None 未表态），未表态行按"名称被批内任一行 parent_tag
   引用"推断为目录。目录行 → **tag_catalog**（dir_type 取行值（树状 XML
-  目录属性），缺省/非法归一 dir_dynamic；applicable_scope 为
+  目录属性，dir_static/dir_dynamic/dir_asset），缺省/非法归一
+  dir_dynamic；applicable_scope 为
   content/scene/character 组合，缺省/非法归一三值全选）；标签行 →
   **tag_define**（tag_type 取行值，缺省/非法归一 val_fixed，
   val_generalized 放行落库）。层级 Excel（双表目录 sheet/层级列）、树状
@@ -61,12 +62,8 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
-from tagplatform.governance.excel import TagRow
+from tagplatform.governance.excel import RowError, TagRow
 from tagplatform.vectors import encode_vector
-
-# run_governance 无文件名入参，tag_import_task.file_name 记录写入来源；
-# API 层拿到 task_id 后回填真实上传文件名（与 parse_errors 同一回写）
-_TASK_FILE_NAME = "governance"
 
 # 扁平标签行（parent_tag 为空）落入的自动根目录
 _UNCATEGORIZED_DIR_NAME = "未分类"
@@ -75,9 +72,10 @@ _UNCATEGORIZED_DIR_NAME = "未分类"
 _OPERATOR = "governance"
 
 # v2 落位常量：导入路径缺省值——动态目录 + 三范围全选 + 固定值标签
-# （行值优先，非法枚举归一回默认；dir_type=dir_static / val_generalized
-# 行值合法时按行落库）
-_DIR_TYPES = ("dir_static", "dir_dynamic")
+# （行值优先，非法枚举归一回默认；dir_type=dir_static / dir_asset /
+# val_generalized 行值合法时按行落库；dir_asset 为元数据导入/联网搜索
+# 来源目录，扩充语义同 dir_dynamic）
+_DIR_TYPES = ("dir_static", "dir_dynamic", "dir_asset")
 _DEFAULT_DIR_TYPE = "dir_dynamic"
 _SCOPES = ("content", "scene", "character")
 _DEFAULT_SCOPE = "content,scene,character"
@@ -196,7 +194,10 @@ def batch_dir_items(rows: list[TagRow]) -> list[tuple[int, TagRow]]:
 
 
 def run_governance(rows: list[TagRow], session: Session, embedder,
-                   config: GovernanceConfig | None = None) -> GovernanceResult:
+                   config: GovernanceConfig | None = None, *,
+                   task: TagImportTask | None = None,
+                   file_name: str = "governance",
+                   parse_errors: list[RowError] | None = None) -> GovernanceResult:
     """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
     审计日志落库并提交。
 
@@ -204,7 +205,11 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     semantic_similar 检查退役后其阈值不再参与判定，配置对象被忽略。
     """
     now = datetime.now(timezone.utc)
-    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    if task is None:
+        task = TagImportTask(
+            task_id=f"task_{uuid.uuid4().hex[:8]}", file_name=file_name, created_at=now,
+        )
+    task_id = task.task_id
 
     # ---------- 库内基线 ----------
     db_dirs = session.query(TagCatalog).all()
@@ -579,26 +584,17 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     # 口径——目录创建属结构落位，不进计数（如 37 目录 + 514 标签的模板
     # 文件 total=514 而非 551）
     total = len(rows) - len(dir_items)
-    session.add(TagImportTask(
-        task_id=task_id,
-        file_name=_TASK_FILE_NAME,
-        status="completed",
-        result_summary=json.dumps(
-            {
-                "total": total,
-                # inserted 仅计标签行（v1 语义延续）；目录复用行既不计入
-                # inserted 也无 issue，体现在 skipped = total - inserted 中
-                "inserted": len(inserted),
-                "skipped": total - len(inserted),
-                # issues 为明细列表（非计数）：GET /api/v1/import/tasks/{task_id}
-                # 与前端导入任务页按此解析（Task 12 消费契约）
-                "issues": [asdict(issue) for _i, issue in
-                           sorted(issues, key=lambda pair: pair[0])],
-            },
-            ensure_ascii=False,
-        ),
-        created_at=now,
-    ))
-    session.commit()
     ordered_issues = [issue for _i, issue in sorted(issues, key=lambda pair: pair[0])]
+    summary = {
+        "total": total,
+        "inserted": len(inserted),
+        "skipped": total - len(inserted),
+        "issues": [asdict(issue) for issue in ordered_issues],
+    }
+    if parse_errors is not None:
+        summary["parse_errors"] = [asdict(error) for error in parse_errors]
+    task.status = "completed"
+    task.result_summary = json.dumps(summary, ensure_ascii=False)
+    session.add(task)
+    session.commit()
     return GovernanceResult(task_id=task_id, inserted=inserted, issues=ordered_issues)

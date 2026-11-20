@@ -200,8 +200,8 @@ def _generation_instructions(scope: str, max_tags: int | str, with_dir: bool = F
 def _dir_hint_block(dirs: list[dict]) -> str:
     """可新增标签的目录清单（生成阶段就把归属交给模型决定）。
 
-    只列 `dir_dynamic` 的目录：静态目录不允许扩充，出现在提示词里只会诱使
-    模型往里面塞新词，然后在校验环节被打回。
+    只列可扩充目录（dir_dynamic/dir_asset）的目录：静态目录不允许扩充，
+    出现在提示词里只会诱使模型往里面塞新词，然后在校验环节被打回。
     """
     lines = []
     for entry in dirs:

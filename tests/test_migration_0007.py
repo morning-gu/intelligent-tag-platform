@@ -187,7 +187,7 @@ EXPECTED_CHECK_FRAGMENTS = {
         "CHECK (asset_type IN ('movie', 'series', 'scene'))",
     ],
     "tag_catalog": [
-        "CHECK (dir_type IN ('dir_static', 'dir_dynamic'))",
+        "CHECK (dir_type IN ('dir_static', 'dir_dynamic', 'dir_asset'))",
         "CHECK (applicable_scope IN ('content', 'scene', 'character', "
         "'content,scene', 'content,character', 'scene,character', "
         "'content,scene,character'))",

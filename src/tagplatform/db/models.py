@@ -87,7 +87,7 @@ class TagCatalog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "dir_type IN ('dir_static', 'dir_dynamic')",
+            "dir_type IN ('dir_static', 'dir_dynamic', 'dir_asset')",
             name="ck_tag_catalog_dir_type",
         ),
         CheckConstraint(
@@ -102,7 +102,8 @@ class TagCatalog(Base):
 
     dir_id: Mapped[str] = mapped_column(Text, primary_key=True)
     dir_name: Mapped[str] = mapped_column(Text, nullable=False)
-    # 取值 dir_static|dir_dynamic
+    # 取值 dir_static|dir_dynamic|dir_asset（元数据/联网搜索来源目录，
+    # 扩充语义同 dir_dynamic）
     dir_type: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     parent_id: Mapped[str | None] = mapped_column(

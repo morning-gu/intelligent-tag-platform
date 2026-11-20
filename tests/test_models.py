@@ -137,6 +137,19 @@ def test_pre_asset_tag_target_type_check(session):
         session.commit()
 
 
+def test_tag_catalog_dir_type_enum(session):
+    """ck_tag_catalog_dir_type：dir_asset 放行，非法值仍被 CHECK 拦截。"""
+    session.add(TagCatalog(dir_id="dir_asset_1", dir_name="演员标签",
+                           dir_type="dir_asset", description="d",
+                           applicable_scope="character"))
+    session.commit()
+    assert session.get(TagCatalog, "dir_asset_1").dir_type == "dir_asset"
+    session.add(TagCatalog(dir_id="dir_bad", dir_name="坏目录",
+                           dir_type="dir_hybrid", description="d"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
 def test_alembic_upgrade(tmp_path):
     """子进程执行 alembic upgrade head，升级后 sqlite_master 中核心表齐备。"""
     db_path = tmp_path / "m.db"
