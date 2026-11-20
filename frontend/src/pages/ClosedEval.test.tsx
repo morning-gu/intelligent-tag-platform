@@ -18,6 +18,7 @@ import ClosedEval from './ClosedEval'
 import { ApiError } from '../api/client'
 import {
   cancelRun,
+  deleteRun,
   getDatasetRoot,
   getReport,
   getRun,
@@ -43,6 +44,7 @@ vi.mock('../api/eval', async (importOriginal) => {
     listRuns: vi.fn(),
     getRun: vi.fn(),
     cancelRun: vi.fn(),
+    deleteRun: vi.fn(),
     getReport: vi.fn(),
     getDatasetRoot: vi.fn(),
     setDatasetRoot: vi.fn(),
@@ -55,6 +57,7 @@ const mockedStartRun = vi.mocked(startRun)
 const mockedListRuns = vi.mocked(listRuns)
 const mockedGetRun = vi.mocked(getRun)
 const mockedCancelRun = vi.mocked(cancelRun)
+const mockedDeleteRun = vi.mocked(deleteRun)
 const mockedGetReport = vi.mocked(getReport)
 const mockedGetDatasetRoot = vi.mocked(getDatasetRoot)
 const mockedSetDatasetRoot = vi.mocked(setDatasetRoot)
@@ -88,7 +91,8 @@ const MOVIES: MovieRef[] = [
 ]
 
 /** 历史三行：succeeded（指标齐全）/ cancelled（四指标 null→暂无）/
- * interrupted（进度与指标全 null→暂无）。 */
+ * interrupted（进度与指标全 null→暂无）。finished_at：succeeded/cancelled
+ * 有终态时刻，interrupted（老 run）无 → 暂无。 */
 const RUNS_HISTORY: RunSummary[] = [
   {
     run_id: 'run-20261119-100000-ab12',
@@ -98,6 +102,7 @@ const RUNS_HISTORY: RunSummary[] = [
     total: 30,
     failed: 2,
     started_at: '2026-11-19T10:00:00',
+    finished_at: '2026-11-19T11:30:00',
     error: null,
     ndcg10: 0.48,
     p10: 0.52,
@@ -112,6 +117,7 @@ const RUNS_HISTORY: RunSummary[] = [
     total: 30,
     failed: 0,
     started_at: '2026-11-18T09:00:00',
+    finished_at: '2026-11-18T10:05:00',
     error: null,
     ndcg10: null,
     p10: null,
@@ -126,6 +132,7 @@ const RUNS_HISTORY: RunSummary[] = [
     total: null,
     failed: null,
     started_at: null,
+    finished_at: null,
     error: null,
     ndcg10: null,
     p10: null,
@@ -134,7 +141,7 @@ const RUNS_HISTORY: RunSummary[] = [
   },
 ]
 
-/** 挂载历史里发现的活跃 run 行（运行中无报告，四指标 null）。 */
+/** 挂载历史里发现的活跃 run 行（运行中无报告，四指标 null；终态时刻未到）。 */
 const RUNNING_SUMMARY: RunSummary = {
   run_id: 'run-20261120-120000-xy90',
   dataset_id: 'genome-scores',
@@ -143,6 +150,7 @@ const RUNNING_SUMMARY: RunSummary = {
   total: 30,
   failed: 1,
   started_at: '2026-11-20T12:00:00',
+  finished_at: null,
   error: null,
   ndcg10: null,
   p10: null,
@@ -158,6 +166,7 @@ const RUNNING_STATUS: RunStatus = {
   total: 30,
   failed: 1,
   started_at: '2026-11-20T12:00:00',
+  finished_at: null,
   error: null,
 }
 
@@ -256,6 +265,7 @@ beforeEach(() => {
   mockedListRuns.mockReset()
   mockedGetRun.mockReset()
   mockedCancelRun.mockReset()
+  mockedDeleteRun.mockReset()
   mockedGetReport.mockReset()
   mockedGetDatasetRoot.mockReset()
   mockedSetDatasetRoot.mockReset()
@@ -293,10 +303,75 @@ describe('ClosedEval 闭环评测页', () => {
     expect(within(cancelledRow).getAllByText('暂无')).toHaveLength(4)
 
     // interrupted 行（历史表无 run_id 列，全 null 行以状态 Tag 文案定位）：
-    // 进度/指标/时间/数据集全 null → 8 个「暂无」
+    // 进度/指标/开始/结束时间/数据集全 null → 9 个「暂无」
     const interruptedRow = screen.getByText('已中断').closest('tr')!
     expect(interruptedRow).toHaveTextContent('已中断')
-    expect(within(interruptedRow).getAllByText('暂无')).toHaveLength(8)
+    expect(within(interruptedRow).getAllByText('暂无')).toHaveLength(9)
+  })
+
+  it('历史表渲染结束时间列：有值显示格式化时间，null → 暂无', async () => {
+    mockIdleApis()
+    render(<ClosedEval />)
+    // succeeded 行的 finished_at → 格式化时间
+    const okRow = (await screen.findByText('2026-11-19 11:30:00')).closest('tr')!
+    expect(okRow).toHaveTextContent('2026-11-19 11:30:00')
+    // cancelled 行的 finished_at 也渲染
+    expect(screen.getByText('2026-11-18 10:05:00')).toBeInTheDocument()
+    // interrupted 行 finished_at null → 第 9 个「暂无」（首个用例已计数，
+    // 这里只确认该行不出现任何格式化时间）
+    const interruptedRow = screen.getByText('已中断').closest('tr')!
+    expect(interruptedRow.textContent).not.toMatch(/2026-/)
+  })
+
+  it('删除终态 run：Popconfirm 确认 → deleteRun + 刷新历史 + 报告卡片收起', async () => {
+    mockIdleApis()
+    mockedGetReport.mockResolvedValue(REPORT)
+    mockedDeleteRun.mockResolvedValue({ ok: true })
+    render(<ClosedEval />)
+    await screen.findByText('2026-11-19 10:00:00')
+    // 先打开该 run 的报告（行点击），再删它——报告卡片应一并收起
+    fireEvent.click(
+      within(screen.getByText('2026-11-19 10:00:00').closest('tr')!).getByText('已成功'))
+    expect(
+      await screen.findByText(/评测报告：run-20261119-100000-ab12/)).toBeInTheDocument()
+    fireEvent.click(
+      within(screen.getByText('2026-11-19 10:00:00').closest('tr')!)
+        .getByRole('button', { name: /删\s*除/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
+    await waitFor(() =>
+      expect(mockedDeleteRun).toHaveBeenCalledWith('run-20261119-100000-ab12'))
+    // 等 UI 生效而非只看 mock 调用数：报告收起是异步续体里的状态更新
+    await waitFor(() => {
+      expect(mockedListRuns).toHaveBeenCalledTimes(2)
+      expect(
+        screen.queryByText(/评测报告：run-20261119-100000-ab12/)).not.toBeInTheDocument()
+    })
+    // 删除点击不得连带触发行点击重开报告（外层 span 拦截冒泡）
+    expect(mockedGetReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('删除失败（409 运行中）：透出后端 detail，不崩页面', async () => {
+    mockIdleApis()
+    mockedDeleteRun.mockRejectedValue(
+      new ApiError(409, '运行中的 run 不可删除（先取消或等收尾）：run-x'))
+    render(<ClosedEval />)
+    await screen.findByText('2026-11-19 10:00:00')
+    fireEvent.click(
+      within(screen.getByText('2026-11-19 10:00:00').closest('tr')!)
+        .getByRole('button', { name: /删\s*除/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /确\s*定/ }))
+    expect(await screen.findByText(/不可删除（先取消或等收尾）/)).toBeInTheDocument()
+    // 失败不刷新历史（挂载一次之外无第二次拉取）
+    expect(mockedListRuns).toHaveBeenCalledTimes(1)
+  })
+
+  it('运行中行的删除按钮禁用', async () => {
+    mockActiveRunApis()
+    render(<ClosedEval />)
+    expect(await screen.findByText(/已完成\s*8\s*\/\s*30/)).toBeInTheDocument()
+    // 历史表无 run_id 列，按状态 Tag 定位运行行
+    const row = screen.getByText('进行中').closest('tr')!
+    expect(within(row).getByRole('button', { name: /删\s*除/ })).toBeDisabled()
   })
 
   it('起跑：θ/K 逗号串解析为 number[]（默认档），并发度默认 4', async () => {
@@ -374,6 +449,49 @@ describe('ClosedEval 闭环评测页', () => {
       movies: { mode: 'custom', ids: ['tt0000001', 'tt0000002'] },
       concurrency: 4,
     })
+  })
+
+  it('自定义影片集：搜索框输入关键字按标题过滤下拉选项', async () => {
+    mockIdleApis()
+    mockedListMovies.mockResolvedValue(MOVIES)
+    render(<ClosedEval />)
+    await screen.findByText('2026-11-19 10:00:00')
+
+    await selectDataset('genome-scores（交集 83）')
+    fireEvent.click(screen.getByRole('radio', { name: '自定义' }))
+    await waitFor(() => expect(mockedListMovies).toHaveBeenCalledWith('genome-scores'))
+
+    // 打开下拉并输入搜索词：列表应过滤到标题含「花环」的一部
+    const search = screen.getByRole('combobox', { name: '影片清单' })
+    fireEvent.mouseDown(search)
+    fireEvent.change(search, { target: { value: '花环' } })
+
+    await waitFor(() => {
+      expect(screen.getByTitle('高山下的花环')).toBeInTheDocument()
+    })
+    expect(screen.queryByTitle('铁道游击队')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('芙蓉镇')).not.toBeInTheDocument()
+  })
+
+  it('搜索按 tt 编号命中（大小写不敏感）', async () => {
+    mockIdleApis()
+    mockedListMovies.mockResolvedValue(MOVIES)
+    render(<ClosedEval />)
+    await screen.findByText('2026-11-19 10:00:00')
+
+    await selectDataset('genome-scores（交集 83）')
+    fireEvent.click(screen.getByRole('radio', { name: '自定义' }))
+    await waitFor(() => expect(mockedListMovies).toHaveBeenCalledWith('genome-scores'))
+
+    // 大写 tt 编号也能命中（filterOption 小写化）
+    const search = screen.getByRole('combobox', { name: '影片清单' })
+    fireEvent.mouseDown(search)
+    fireEvent.change(search, { target: { value: 'TT0000002' } })
+    await waitFor(() => {
+      expect(screen.getByTitle('高山下的花环')).toBeInTheDocument()
+    })
+    expect(screen.queryByTitle('铁道游击队')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('芙蓉镇')).not.toBeInTheDocument()
   })
 
   it('活跃 run 时起跑禁用+提示（挂载从历史发现 → getRun 接管轮询）', async () => {

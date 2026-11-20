@@ -79,6 +79,7 @@ import logging
 import os
 import random
 import secrets
+import shutil
 import threading
 import time
 from collections.abc import Collection, Sequence
@@ -352,6 +353,10 @@ class RunBusyError(RuntimeError):
     """已有评测 run 进行中（单进程同时只允许一个 run，重复起跑显式拒绝）。"""
 
 
+class RunActiveError(RuntimeError):
+    """run 仍活跃（worker 在跑或在终态落盘收尾），不可删除——先取消/等收尾。"""
+
+
 class EvalValidationError(ValueError):
     """评测起跑校验失败：数据集不存在 / 选片越权或为空 / 库未就绪 / 库∩gt 零交集。"""
 
@@ -378,7 +383,11 @@ class MovieResult:
 
 @dataclass
 class RunState:
-    """一次 run 的进度快照（`get` 返回副本，读方无锁安全）。"""
+    """一次 run 的进度快照（`get` 返回副本，读方无锁安全）。
+
+    finished_at：终态时刻（_worker 落终态时盖章，运行中 None）；磁盘侧
+    meta.json 同名键由 _write_artifacts 终态写盘（老 run 无此键 → None）。
+    """
 
     run_id: str
     status: str
@@ -387,6 +396,7 @@ class RunState:
     failed: int
     started_at: str
     error: str | None = None
+    finished_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -611,6 +621,39 @@ class ClosedEvalService:
         event.set()
         return True
 
+    def delete(self, run_id: str) -> bool:
+        """删除终态 run：磁盘 run 目录 + 进程内注册表/取消事件一并清除。
+
+        活跃守卫用 `_active_run_id`（不是注册表 status——worker 落终态在
+        status 翻转之后、写盘收尾之前，窄窗口内 status 已终态但删除会与
+        写盘竞态）；run_id 解析后必须是输出根下的**单段**目录——越界形态
+        （`..`/绝对路径）与「解析后等于根」（`.`，终审 Critical：曾放行
+        rmtree 整个输出根）、嵌套段（`a/b`）一律按不存在处理（False，
+        与 router _run_dir 的 404 同口径）。磁盘 meta 残留 status=running
+        但不在注册表 → interrupted 语义（进程死亡残留），可删（与 history
+        推断同口径）。返回是否实际存在并删除。DB 零写入红线不变：只动
+        eval_output_root 下本 run 目录。
+        """
+        root = Path(self.settings.eval_output_root)
+        try:
+            rel = (root / run_id).resolve().relative_to(root.resolve())
+        except ValueError:
+            return False  # 越界：按不存在处理，绝不越根动手
+        if len(rel.parts) != 1:
+            return False  # "."（→根本身）/嵌套段：同按不存在，防 rmtree 根
+        run_dir = (root / run_id).resolve()
+        with self._lock:
+            if self._active_run_id == run_id:
+                raise RunActiveError(
+                    f"运行中的 run 不可删除（先取消或等收尾）：{run_id}")
+            state = self._runs.get(run_id)
+            existed = state is not None or run_dir.exists()
+            self._runs.pop(run_id, None)
+            self._cancel_events.pop(run_id, None)
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        return existed
+
     def active_run_id(self) -> str | None:
         """当前进行中的 run_id（无 → None）。"""
         with self._lock:
@@ -656,6 +699,7 @@ class ClosedEvalService:
                 "total": meta.get("total"),
                 "failed": meta.get("failed"),
                 "started_at": meta.get("started_at"),
+                "finished_at": meta.get("finished_at"),
                 "error": meta.get("error"),
                 **self._read_summary(root / name),
             })
@@ -711,6 +755,7 @@ class ClosedEvalService:
         with self._lock:
             if state is not None:
                 state.status = status
+                state.finished_at = _now_iso()  # 终态时刻（get() 侧透出）
                 if error is not None:
                     state.error = error
         try:
@@ -789,7 +834,11 @@ class ClosedEvalService:
 
         每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
         （mode="closed"，读激活模板）→ produce（不写库）→ 产出按
-        (-sf, tag_id) 排序。异常兜底：重试耗尽记 error、produced 清空。
+        (-sf, tag_id) 排序。**会话在 assemble 后立即归还**：produce 含
+        全部 LLM 调用（分钟级）不得持有 DB 连接（池饿死事故 2026-11-21：
+        并发 16 > QueuePool 5+10，会话横跨 produce 把池占死、平台 API 全
+        超时）；closed producer 不消费 session（全读 spec.library，assemble
+        已装好），第二参传 None——协议签名不动，正式执行器照常传真会话。
         内容从起跑快照根加载（dataset_root）——运行中切 override 不影响
         本 run。
         """
@@ -806,8 +855,10 @@ class ClosedEvalService:
                         session, mode="closed", content=content,
                         task_id=f"eval-{run_id}", asset_id=tt,
                         run_id=f"{run_id}:{tt}")
-                    tags = get_producer("closed").produce(
-                        spec, session, self._llm, self._embedder)
+                # produce 传 None（见 docstring）：未来 producer 改用会话
+                # 会以 AttributeError 显式失败，不静默漂移
+                tags = get_producer("closed").produce(
+                    spec, None, self._llm, self._embedder)
                 produced = _produced_rows(tags)
                 error = None
                 break

@@ -43,6 +43,7 @@ from tagplatform.closed_eval import (
     MovieResult,
     PRESET_SEED,
     PRESET_SIZE,
+    RunActiveError,
     RunBusyError,
     assemble_report,
     load_gt,
@@ -246,6 +247,81 @@ class _SlowLLM(MockLLMClient):
         return super().complete(messages, run_id)
 
 
+class _CountingSessionFactory:
+    """会话计数工厂（池饿死回归探针）：包装真实工厂，按线程计进出。
+
+    逐线程归属是判据的正确口径（终审 Important）：池饿死事故的本质是
+    「**本线程**的 produce（含 LLM 调用）持有**自己的**连接」；跨线程的
+    毫秒级 assemble 会话重叠是合法并发，按全局计数会把正确实现也判红
+    （评审者实测：逐线程恒 0、全局口径恒 4 假阳性）。锁内维护
+    open_by_thread 与全局开放会话峰值（峰值合法性 ≤ concurrency）。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._lock = threading.Lock()
+        self.open_by_thread: dict[int, int] = {}
+        self.peak_open = 0
+
+    def __call__(self):
+        return _CountingSession(self._inner(), self)
+
+    def _enter(self) -> None:
+        tid = threading.get_ident()
+        with self._lock:
+            n = self.open_by_thread.get(tid, 0) + 1
+            self.open_by_thread[tid] = n
+            self.peak_open = max(self.peak_open,
+                                 sum(self.open_by_thread.values()))
+
+    def _exit(self) -> None:
+        tid = threading.get_ident()
+        with self._lock:
+            n = self.open_by_thread.get(tid, 0) - 1
+            if n > 0:
+                self.open_by_thread[tid] = n
+            else:
+                self.open_by_thread.pop(tid, None)
+
+    def held_by_current_thread(self) -> int:
+        with self._lock:
+            return self.open_by_thread.get(threading.get_ident(), 0)
+
+
+class _CountingSession:
+    """计数会话：属性透传内层（assemble_spec 的 get_active_prompt 可用）。"""
+
+    def __init__(self, inner, factory):
+        self._inner = inner
+        self._factory = factory
+
+    def __enter__(self):
+        self._factory._enter()
+        return self._inner
+
+    def __exit__(self, *exc):
+        self._factory._exit()
+        return self._inner.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _SessionProbeLLM(MockLLMClient):
+    """LLM 桩：complete() 时记**本线程**持有的会话数（violation 计数，
+    不中断跑——跨线程合法重叠不计，见 _CountingSessionFactory 口径注）。"""
+
+    def __init__(self, factory):
+        super().__init__()
+        self._factory = factory
+        self.violations = 0
+
+    def complete(self, messages, run_id):
+        if self._factory.held_by_current_thread() > 0:
+            self.violations += 1
+        return super().complete(messages, run_id)
+
+
 @pytest.fixture
 def engine(tmp_path):
     """评测服务用文件 DB（建表即播种 closed v1 激活模板——after_create 钩子）。"""
@@ -286,9 +362,10 @@ def eval_setup(tmp_path, root, engine):
     write_library(library_root(), dirs=_EVAL_DIRS, tags=_EVAL_TAGS)
     made: list[ClosedEvalService] = []
 
-    def _make(llm=MOCK_LLM, dataset_root=None) -> ClosedEvalService:
+    def _make(llm=MOCK_LLM, dataset_root=None,
+              session_factory=None) -> ClosedEvalService:
         service = ClosedEvalService(
-            make_session_factory(engine), llm, MOCK_EMBEDDER,
+            session_factory or make_session_factory(engine), llm, MOCK_EMBEDDER,
             Settings(eval_dataset_root=dataset_root or root,
                      eval_output_root=str(tmp_path / "eval-out")))
         made.append(service)
@@ -376,6 +453,97 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
     assert (meta["status"], meta["done"], meta["total"],
             meta["failed"]) == ("succeeded", 2, 2, 0)
+
+
+def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
+    """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
+    LLM 调用线程自身不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
+    会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
+    判据逐线程归属（跨线程毫秒级 assemble 重叠是合法并发）；另断言全局
+    开放会话峰值不超过并发上限（合法并发的上界）。"""
+    from tagplatform.db import make_session_factory
+
+    factory = _CountingSessionFactory(make_session_factory(engine))
+    llm = _SessionProbeLLM(factory)
+    service = eval_setup(llm=llm, session_factory=factory)
+    run_id = service.start("emotion", {"mode": "all"}, wait=True)
+    assert service.get(run_id).status == "succeeded"
+    assert service.get(run_id).failed == 0
+    assert llm.violations == 0
+    assert factory.peak_open <= DEFAULT_CONCURRENCY
+
+
+def test_finished_at_on_terminal_state_and_history(svc):
+    """终态后：get() 快照与 history() 行都带 finished_at（ISO 可解析）。
+
+    meta.json 终态写盘本就带 finished_at；本用例钉的是注册表 RunState 与
+    history() 摘要行的透出（运行中/老 run 无此字段 → None，宁缺勿谎）。
+    """
+    from datetime import datetime
+
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    state = svc.get(run_id)
+    assert state.finished_at is not None
+    datetime.fromisoformat(state.finished_at)  # ISO 形态
+    row = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert row["finished_at"] is not None
+
+
+def test_delete_terminal_run_removes_disk_and_registry(svc):
+    """删除终态 run：磁盘 run 目录、注册表、历史列表三处一并清除。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)  # worker 完全收尾（active 位释放）
+    assert svc.delete(run_id) is True
+    assert svc.get(run_id) is None
+    assert not _run_dir(svc, run_id).exists()
+    assert all(r["run_id"] != run_id for r in svc.history())
+
+
+def test_delete_active_run_refused(eval_setup):
+    """运行中不可删（active 位守卫——worker 在跑或在收尾落盘均算活跃）。"""
+    gate = _RecordingGateLLM()
+    gate.hold()
+    service = eval_setup(llm=gate)
+    run_id = service.start("emotion", {"mode": "all"})
+    try:
+        with pytest.raises(RunActiveError):
+            service.delete(run_id)
+        assert _run_dir(service, run_id).exists()
+    finally:
+        gate.release()
+    _await_terminal(service, run_id)
+    _drain_active(service)
+
+
+def test_delete_unknown_returns_false(svc):
+    assert svc.delete("run-nope") is False
+
+
+def test_delete_interrupted_disk_residual(svc):
+    """进程死亡残留（磁盘 status=running、注册表无）= interrupted，可删。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    with svc._lock:
+        svc._runs.pop(run_id)
+    assert svc.delete(run_id) is True
+    assert not _run_dir(svc, run_id).exists()
+
+
+def test_delete_path_traversal_returns_false(svc):
+    """run_id 路径越界形态（../）按不存在处理，绝不对输出根外动手。"""
+    assert svc.delete("../outside") is False
+
+
+def test_delete_dot_and_nested_rejected(svc):
+    """「解析后等于根」与嵌套段形态按不存在处理（终审 Critical）：
+    delete(".") 曾把整个 eval_output_root 连同全部 run 目录 rmtree 清空。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)
+    assert svc.delete(".") is False
+    assert svc.delete("a/b") is False
+    # 爆炸半径核验：输出根与已完成 run 均完好（守卫放行即全灭）
+    root_dir = Path(svc.settings.eval_output_root)
+    assert root_dir.exists()
+    assert _run_dir(svc, run_id).exists()
 
 
 def test_db_zero_writes(engine, svc, root):  # Review Focus 3
