@@ -42,7 +42,8 @@ export interface StartRunRequest {
 }
 
 /** run 进度快照（与后端 RunStateOut 一致）：done/total/failed/started_at
- * 允许 null——磁盘兜底行（上一进程残留/损坏 meta）宁缺勿崩，不打成 500。 */
+ * /finished_at 允许 null——磁盘兜底行（上一进程残留/损坏 meta）宁缺勿崩，
+ * 不打成 500；finished_at 终态时刻，运行中/老 run → null。 */
 export interface RunStatus {
   run_id: string
   status: string
@@ -50,11 +51,13 @@ export interface RunStatus {
   total: number | null
   failed: number | null
   started_at: string | null
+  finished_at: string | null
   error: string | null
 }
 
 /** 历史摘要行（与后端 RunSummaryOut 一致）：摘要四键取 θ=0.4、K=10/20 档
- * （无报告/无该档 → null，宁缺勿崩）；error 为失败留痕（终态 failed 才有）。 */
+ * （无报告/无该档 → null，宁缺勿崩）；error 为失败留痕（终态 failed 才有）；
+ * finished_at 终态时刻（老 run 无 → null）。 */
 export interface RunSummary {
   run_id: string
   dataset_id: string | null
@@ -63,6 +66,7 @@ export interface RunSummary {
   total: number | null
   failed: number | null
   started_at: string | null
+  finished_at: string | null
   error: string | null
   ndcg10: number | null
   p10: number | null
@@ -191,6 +195,15 @@ export function getRun(runId: string): Promise<RunStatus> {
 export function cancelRun(runId: string): Promise<{ ok: boolean }> {
   return apiFetch<{ ok: boolean }>(`/api/v1/eval/closed/runs/${runId}/cancel`, {
     method: 'POST',
+  })
+}
+
+/** 删除终态 run（磁盘产物 + 进程内注册表）→ {ok: true}；运行中（含终态
+ * 落盘窄窗口）→ 409 detail 带原因；不存在/已删 → 404（重复删除即 404，
+ * 与 getRun 未知 run 同口径）。经 ApiError.message 透出后端 detail。 */
+export function deleteRun(runId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/api/v1/eval/closed/runs/${runId}`, {
+    method: 'DELETE',
   })
 }
 

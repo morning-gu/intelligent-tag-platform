@@ -22,6 +22,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Popconfirm,
   Progress,
   Radio,
   Select,
@@ -36,6 +37,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import {
   cancelRun,
+  deleteRun,
   getDatasetRoot,
   getReport,
   getRun,
@@ -139,11 +141,16 @@ function metricText(v: number | null): string {
   return v === null ? '暂无' : String(v)
 }
 
-const columns: TableProps<RunSummary>['columns'] = [
+const columns: NonNullable<TableProps<RunSummary>['columns']> = [
   // 时间 null 也走「暂无」——本表 null 口径统一（不用 formatTime 的 '—'）
   {
     title: '时间',
     dataIndex: 'started_at',
+    render: (v: string | null) => (v === null ? '暂无' : formatTime(v)),
+  },
+  {
+    title: '结束时间',
+    dataIndex: 'finished_at',
     render: (v: string | null) => (v === null ? '暂无' : formatTime(v)),
   },
   { title: '数据集', dataIndex: 'dataset_id', render: (v: string | null) => v ?? '暂无' },
@@ -324,6 +331,7 @@ export default function ClosedEval() {
           total: running.total,
           failed: running.failed,
           started_at: running.started_at,
+          finished_at: running.finished_at,
           error: running.error,
         })
         beginPolling(running.run_id)
@@ -391,6 +399,7 @@ export default function ClosedEval() {
         total: null,
         failed: null,
         started_at: null,
+        finished_at: null,
         error: null,
       })
       beginPolling(run_id)
@@ -419,6 +428,21 @@ export default function ClosedEval() {
     }
   }
 
+  /** 删除终态 run：磁盘产物 + 注册表一并清除；报告视图正展示该 run 时
+   * 收起（悬空展示已删 run 会误导）；409（运行中/收尾窗口）/404（已删）
+   * detail 经 message 透出，失败不刷新历史。报告收起走函数式 set——
+   * 表格单元格 memo 下回调闭包可能持有陈旧 report，函数式读最新值。 */
+  async function handleDelete(runId: string) {
+    try {
+      await deleteRun(runId)
+      message.success(`已删除 run ${runId}`)
+      setReport((prev) => (prev?.runId === runId ? null : prev))
+      void refreshRuns()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
   async function openReport(runId: string) {
     try {
       const data = await getReport(runId)
@@ -437,6 +461,36 @@ export default function ClosedEval() {
     value: d.id,
     label: `${d.id}（交集 ${d.library_overlap}）`,
   }))
+
+  /** 操作列（组件内构造：需要 handleDelete 闭包）：仅终态行可删，运行行
+   * 禁用（后端 409 是最终裁决，前端先挡更省一轮）。外层 span 拦截点击
+   * 冒泡——antd v6 的 Trigger 会替换子元素 onClick（按钮自身的
+   * stopPropagation 不再生效），不拦的话删除点击会连带触发行点击开报告。 */
+  const actionColumns: TableProps<RunSummary>['columns'] = [
+    {
+      title: '操作',
+      key: 'actions',
+      render: (_, r) => {
+        const deletable = TERMINAL_STATUSES.has(r.status)
+        return (
+          <span onClick={(e) => e.stopPropagation()}>
+            <Popconfirm
+              title="删除该 run 及其产物？"
+              description="磁盘目录与历史记录一并移除，不可恢复"
+              okText="确定"
+              cancelText="取消"
+              disabled={!deletable}
+              onConfirm={() => void handleDelete(r.run_id)}
+            >
+              <Button danger size="small" disabled={!deletable}>
+                删除
+              </Button>
+            </Popconfirm>
+          </span>
+        )
+      },
+    },
+  ]
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -508,10 +562,18 @@ export default function ClosedEval() {
                 aria-label="影片清单"
                 mode="multiple"
                 showSearch
-                optionFilterProp="label"
+                // 搜索同时匹配 tt 编号与标题（小写化）——只按标题时搜
+                // tt0068646 无结果；空输入恒放行（antd 语义，恒真兜底）
+                filterOption={(input, option) => {
+                  const q = input.trim().toLowerCase()
+                  if (q === '') return true
+                  const value = String(option?.value ?? '').toLowerCase()
+                  const label = String(option?.label ?? '').toLowerCase()
+                  return value.includes(q) || label.includes(q)
+                }}
                 loading={moviesLoading}
                 options={movies.map((m) => ({ value: m.tt, label: m.title }))}
-                placeholder="搜索并选择影片（按标题）"
+                placeholder="搜索并选择影片（按标题或 tt 编号）"
               />
             </Form.Item>
           )}
@@ -577,7 +639,7 @@ export default function ClosedEval() {
         )}
         <Table<RunSummary>
           rowKey="run_id"
-          columns={columns}
+          columns={[...columns, ...actionColumns]}
           dataSource={runs}
           loading={runsLoading}
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
