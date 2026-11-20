@@ -6,10 +6,12 @@
 // 再展开不重复请求）、计分清单三组对照（● 命中 / — 未命中、tag_name null
 // 回退 tag_id、misses 服务端 gt 分降序）、失败片展开只渲染 error 原文不发
 // 请求、null 指标一律「暂无」（None≠0 纪律）、明细 fetch 失败透出
-// error.message（ApiError.message 即后端 detail 文案）。
+// error.message（ApiError.message 即后端 detail 文案）；回归两条：runId 切换
+// 后 A run 的在途明细不得串写成 B run 可命中的缓存（B run 展开必须重新请求）、
+// 首次明细在途窗口内收起再展开不得重复请求（pending 去重）。
 // 注意：antd Table 展开图标按钮无可访问名，查询一律走
 // .ant-table-row-expand-icon（与 GenerationTasks 测试同口径）。
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ClosedEvalMovieTable from './ClosedEvalMovieTable'
 import {
@@ -242,5 +244,64 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     fireEvent.click(expandIconOf(rowOf('tt0000001')))
 
     expect(await screen.findByText('boom')).toBeInTheDocument()
+  })
+
+  it('runId 切换后：A run 在途明细不落入 B run 缓存，B run 展开重新请求', async () => {
+    // run A 的明细用未决 promise 卡住（模拟在途），run B 的明细即时返回
+    let resolveA!: (d: MovieDetail) => void
+    mockedGetRunMovieDetail.mockImplementation((rid: string) => {
+      if (rid === 'run-A') {
+        return new Promise<MovieDetail>((res) => {
+          resolveA = res
+        })
+      }
+      return Promise.resolve({
+        ...DETAIL,
+        produced: [{ ...DETAIL.produced[0], tag_name: '运行乙专属' }],
+        misses: [],
+      })
+    })
+    const { rerender } = render(<ClosedEvalMovieTable runId="run-A" />)
+    await screen.findByText('tt0000001')
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledWith('run-A', 'tt0000001'))
+
+    // 切到 run B（摘要重拉、展开态清空），A 的明细请求仍在途
+    rerender(<ClosedEvalMovieTable runId="run-B" />)
+    await screen.findByText('tt0000001')
+
+    // A 的在途请求此刻才 resolve：不得写成 B run 可命中的缓存
+    await act(async () => {
+      resolveA(DETAIL)
+    })
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(2)
+    expect(mockedGetRunMovieDetail).toHaveBeenNthCalledWith(2, 'run-B', 'tt0000001')
+    // 渲染的是 run B 的明细（B 专属标签），而非 A 的缓存串写
+    expect(await screen.findByText('运行乙专属')).toBeInTheDocument()
+    expect(screen.queryByText('动作')).not.toBeInTheDocument()
+  })
+
+  it('首次明细在途时收起再展开不重复请求（pending 去重）', async () => {
+    let resolve!: (d: MovieDetail) => void
+    mockedGetRunMovieDetail.mockReturnValueOnce(
+      new Promise<MovieDetail>((res) => {
+        resolve = res
+      }),
+    )
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1))
+
+    // 在途窗口内收起再展开：pending 标记挡住重复请求
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolve(DETAIL)
+    })
+    await waitFor(() => expect(screen.getByText('动作')).toBeVisible())
   })
 })

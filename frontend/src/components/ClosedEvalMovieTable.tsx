@@ -3,10 +3,13 @@
 // 前端按数组序渲染不重排，数值列仅提供 sorter 供用户点选（不预激活）；表头
 // P@K/R@K 由服务端回传的档位键（k_p/k_r）拼字面量。null 一律「暂无」
 // （None≠0 纪律：失败片/无交集/θ-空相关集是算不出，不是 0）。
-// 明细按 tt 懒加载并缓存（Map<tt, MovieDetail | Error>）：收起再展开不重复
-// 请求；失败片不发请求、展开只渲染 error 原文（后端对其三表全空）；明细
-// 请求失败在展开区透出 error.message（ApiError.message 即后端 detail 文案），
-// 失败结果同样入缓存（重复展开不反复打 404）。
+// 明细按 `runId:tt` 键懒加载并缓存（Map<key, 'pending' | MovieDetail | Error>）：
+// pending 挡住同键重复请求（在途窗口内收起再展开不重发）；键带 runId 命名
+// 空间——换 run 后旧 run 的在途/缓存条目不可达，防跨 run 串写（在途 promise
+// 落写只会命中旧键，新 run 展开必重新请求），清缓存逻辑因此无需存在；
+// 失败片不发请求、展开只渲染 error 原文（后端对其三表全空）；明细请求失败
+// 在展开区透出 error.message（ApiError.message 即后端 detail 文案），失败
+// 结果同样入缓存（重复展开不反复打 404）。
 import { useEffect, useMemo, useState } from 'react'
 import type { JSX, Key } from 'react'
 import { Alert, Spin, Table, Typography } from 'antd'
@@ -104,19 +107,25 @@ function DetailGroups({ detail }: { detail: MovieDetail }): JSX.Element {
   )
 }
 
+/** 明细缓存键：runId 命名空间（换 run 后旧 run 条目不可达，防跨 run 串写）。 */
+function detailKey(runId: string, tt: string): string {
+  return `${runId}:${tt}`
+}
+
 export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.Element {
   const [payload, setPayload] = useState<MovieSummaryPayload | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [expandedKeys, setExpandedKeys] = useState<Key[]>([])
-  const [details, setDetails] = useState<Map<string, MovieDetail | Error>>(new Map())
+  const [details, setDetails] = useState<Map<string, 'pending' | MovieDetail | Error>>(
+    new Map(),
+  )
 
-  // 摘要随 runId 拉取；换 run 清展开态与明细缓存（明细键 tt 属于该 run）
+  // 摘要随 runId 拉取；换 run 清摘要与展开态（明细缓存按 runId 分键，无需清）
   useEffect(() => {
     let cancelled = false
     setPayload(null)
     setSummaryError(null)
     setExpandedKeys([])
-    setDetails(new Map())
     getRunMovies(runId)
       .then((p) => {
         if (!cancelled) setPayload(p)
@@ -129,22 +138,24 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
     }
   }, [runId])
 
-  /** 展开懒加载：成功片且未缓存才发请求；失败片不发（展开区只渲染 error 原文）。 */
+  /** 展开懒加载：成功片且无缓存条目（pending/detail/error 均算）才发请求；
+   * 失败片不发（展开区只渲染 error 原文）。写回闭包持点击时的 runId 键——
+   * 换 run 后落写旧键，不污染新 run。 */
   function handleExpand(expanded: boolean, record: MovieSummaryRow): void {
     setExpandedKeys((keys) =>
       expanded ? [...keys, record.tt] : keys.filter((k) => k !== record.tt),
     )
-    if (!expanded || !record.ok || details.has(record.tt)) return
+    if (!expanded || !record.ok) return
+    const key = detailKey(runId, record.tt)
+    if (details.has(key)) return
+    setDetails((prev) => new Map(prev).set(key, 'pending'))
     getRunMovieDetail(runId, record.tt)
       .then((d) => {
-        setDetails((prev) => new Map(prev).set(record.tt, d))
+        setDetails((prev) => new Map(prev).set(key, d))
       })
       .catch((e: unknown) => {
         setDetails((prev) =>
-          new Map(prev).set(
-            record.tt,
-            e instanceof Error ? e : new Error(String(e)),
-          ),
+          new Map(prev).set(key, e instanceof Error ? e : new Error(String(e))),
         )
       })
   }
@@ -154,8 +165,8 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
       // 失败片：不发请求，只渲染 error 原文
       return <Typography.Text type="danger">{record.error}</Typography.Text>
     }
-    const cached = details.get(record.tt)
-    if (cached === undefined) return <Spin size="small" />
+    const cached = details.get(detailKey(runId, record.tt))
+    if (cached === undefined || cached === 'pending') return <Spin size="small" />
     if (cached instanceof Error) {
       return <Alert type="error" showIcon message={cached.message} />
     }
