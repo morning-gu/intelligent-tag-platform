@@ -67,19 +67,23 @@ class OpenAIClient:
                 kwargs["extra_body"] = extra_body
             # fuyao 网关即使非流式也返回 SSE chunk，故显式 stream=True 并累积
             content_parts: list[str] = []
+            finish_reason: str | None = None
             usage: dict = {}
             for chunk in sdk.chat.completions.create(**kwargs):
                 d = chunk.model_dump() if hasattr(chunk, "model_dump") else {}
                 choices = d.get("choices", [])
                 if choices:
-                    delta = choices[0].get("delta", {})
+                    choice = choices[0]
+                    if choice.get("finish_reason") is not None:
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
                     c = delta.get("content")
                     if c:
                         content_parts.append(c)
                 if d.get("usage"):
                     usage = d["usage"]
             content = "".join(content_parts)
-            return {"choices": [{"message": {"content": content}}],
+            return {"choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
                     "usage": usage, "model": model}
 
         return transport
