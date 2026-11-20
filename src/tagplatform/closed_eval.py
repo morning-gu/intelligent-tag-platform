@@ -406,6 +406,9 @@ class _EvalJob:
     concurrency: int
     started_at: str
     meta: dict
+    # 数据集根起跑快照：worker 懒加载 content.json 一律用 job 根——
+    # 运行中页面切 override 不影响在跑 run（spec 隔离红线）
+    dataset_root: str
 
 
 def _now_iso() -> str:
@@ -462,6 +465,16 @@ class ClosedEvalService:
         self._runs: dict[str, RunState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_run_id: str | None = None
+        # 数据集根页面级 override（POST /eval/closed/dataset-root 写入）：
+        # 进程内生效，重启回落 settings 默认；起跑时经 effective_root 快照
+        self.dataset_root_override: str | None = None
+
+    @property
+    def effective_root(self) -> str:
+        """当前生效的数据集根：override 优先，回落 settings.eval_dataset_root。"""
+        return (self.dataset_root_override
+                if self.dataset_root_override is not None
+                else self.settings.eval_dataset_root)
 
     # ---------------------------------------------------------------- 对外接口
 
@@ -478,7 +491,7 @@ class ClosedEvalService:
         run 在跑抛 `RunBusyError`。`wait=True` 供测试同步等完（join
         worker 线程后返回）。
         """
-        root = self.settings.eval_dataset_root
+        root = self.effective_root
         info = next((i for i in scan_datasets(root, set())
                      if i.id == dataset_id), None)
         if info is None:
@@ -550,7 +563,7 @@ class ClosedEvalService:
         job = _EvalJob(run_id=run_id, movies=list(selected), gt=gt,
                        tag_universe=sorted(library_ids & gt_tags),
                        concurrency=concurrency, started_at=started_at,
-                       meta=meta)
+                       meta=meta, dataset_root=root)
 
         # run 目录骨架：meta 先行落盘 status=running（进程中断后可被历史
         # 扫描识别为 interrupted，不留无名目录）
@@ -733,7 +746,8 @@ class ClosedEvalService:
                     while (next_index < len(order)
                            and len(inflight) < job.concurrency):
                         future = pool.submit(self._run_movie, job.run_id,
-                                             order[next_index])
+                                             order[next_index],
+                                             job.dataset_root)
                         inflight[future] = order[next_index]
                         next_index += 1
                 elif inflight:
@@ -770,12 +784,14 @@ class ClosedEvalService:
             if future.cancel():
                 inflight.pop(future)
 
-    def _run_movie(self, run_id: str, tt: str) -> MovieResult:
+    def _run_movie(self, run_id: str, tt: str, dataset_root: str) -> MovieResult:
         """单片干跑（线程池内执行）：共 1+RETRY_PER_MOVIE 次尝试。
 
         每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
         （mode="closed"，读激活模板）→ produce（不写库）→ 产出按
         (-sf, tag_id) 排序。异常兜底：重试耗尽记 error、produced 清空。
+        内容从起跑快照根加载（dataset_root）——运行中切 override 不影响
+        本 run。
         """
         started = time.perf_counter()
         title = ""
@@ -784,8 +800,7 @@ class ClosedEvalService:
         for _attempt in range(1 + RETRY_PER_MOVIE):
             try:
                 with self._session_factory() as session:
-                    content = load_movie_content(
-                        self.settings.eval_dataset_root, tt)
+                    content = load_movie_content(dataset_root, tt)
                     title = content.asset.title
                     spec, _template = assemble_spec(
                         session, mode="closed", content=content,

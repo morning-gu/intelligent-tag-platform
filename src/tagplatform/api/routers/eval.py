@@ -25,7 +25,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tagplatform.api import get_closed_eval, get_settings_dep
 from tagplatform.api.depends import require_admin
@@ -70,6 +70,20 @@ class StartRunRequest(BaseModel):
     thetas: list[float] | None = None
     ks: list[int] | None = None
     concurrency: int | None = None
+
+
+class SetDatasetRootRequest(BaseModel):
+    """设置数据集根请求：非空字符串（空串 → 422 形状拒绝）；
+    目录存在/扫描出有效数据集由 router 校验（不过 → 400 带原因）。"""
+
+    root: str = Field(min_length=1)
+
+
+class DatasetRootOut(BaseModel):
+    """当前生效根与是否 .env 默认（重启后 override 消失 → 回落默认）。"""
+
+    root: str
+    is_default: bool
 
 
 class DatasetInfoOut(BaseModel):
@@ -136,9 +150,13 @@ def _library_tag_ids() -> list[str]:
     return [tag.tag_id for tag in library.tags()] if library else []
 
 
-def _dataset_or_404(settings: Settings, dataset_id: str):
-    """dataset_id 先对 scan_datasets 结果校验再透传；未知 → 404。"""
-    info = next((i for i in scan_datasets(settings.eval_dataset_root, set())
+def _dataset_or_404(root: str, dataset_id: str):
+    """dataset_id 先对 scan_datasets 结果校验再透传；未知 → 404。
+
+    root 为当前生效根（service.effective_root）——页面级 override 后，
+    数据集的存在性以新根为准。
+    """
+    info = next((i for i in scan_datasets(root, set())
                  if i.id == dataset_id), None)
     if info is None:
         raise HTTPException(
@@ -170,13 +188,47 @@ def _run_state_out(state) -> RunStateOut:
 # ---------------------------------------------------------------- 端点
 
 
+@router.get("/dataset-root", response_model=DatasetRootOut)
+def get_dataset_root(
+    _admin: UserAccount = Depends(require_admin),
+    service: ClosedEvalService = Depends(get_closed_eval),
+) -> DatasetRootOut:
+    """当前生效的数据集根（override ?? .env 默认）与是否默认。"""
+    return DatasetRootOut(root=service.effective_root,
+                          is_default=service.dataset_root_override is None)
+
+
+@router.post("/dataset-root", response_model=DatasetRootOut)
+def set_dataset_root(
+    payload: SetDatasetRootRequest,
+    _admin: UserAccount = Depends(require_admin),
+    service: ClosedEvalService = Depends(get_closed_eval),
+) -> DatasetRootOut:
+    """设置数据集根（进程内 override，重启回落 .env 默认）。
+
+    校验序：目录存在（is_dir）→ 扫描出 ≥1 个有效数据集；任一不过 →
+    400 带原因且不变更生效值。运行中的 run 不受影响（起跑时已快照根）。
+    """
+    root = payload.root
+    if not Path(root).is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"数据集根目录不存在或不是目录：{root}")
+    if not scan_datasets(root, set()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"目录 {root} 下未扫描到有效数据集（需 gt 三列 CSV）")
+    service.dataset_root_override = root
+    return DatasetRootOut(root=service.effective_root, is_default=False)
+
+
 @router.get("/datasets", response_model=list[DatasetInfoOut])
 def list_datasets(
     _admin: UserAccount = Depends(require_admin),
-    settings: Settings = Depends(get_settings_dep),
+    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> list[DatasetInfoOut]:
     """可评数据集列表（畸形 gt 已在扫描层跳过；overlap 对当前标签库）。"""
-    infos = scan_datasets(settings.eval_dataset_root, _library_tag_ids())
+    infos = scan_datasets(service.effective_root, _library_tag_ids())
     return [DatasetInfoOut(id=i.id, gt_path=i.gt_path, n_movies=i.n_movies,
                            n_tags=i.n_tags, library_overlap=i.library_overlap,
                            usable_movies=len(i.usable_movies))
@@ -187,12 +239,12 @@ def list_datasets(
 def list_dataset_movies(
     dataset_id: str,
     _admin: UserAccount = Depends(require_admin),
-    settings: Settings = Depends(get_settings_dep),
+    service: ClosedEvalService = Depends(get_closed_eval),
 ) -> list[MovieRefOut]:
     """数据集的 usable 影片清单（选片列表用）；未知 dataset → 404。"""
-    _dataset_or_404(settings, dataset_id)
+    _dataset_or_404(service.effective_root, dataset_id)
     try:
-        entries = movie_entries(settings.eval_dataset_root, dataset_id)
+        entries = movie_entries(service.effective_root, dataset_id)
     except ValueError:  # 扫描后被删/被改坏的窄窗口 → 同 404 口径
         raise HTTPException(
             status_code=404,
@@ -205,10 +257,9 @@ def start_run(
     payload: StartRunRequest,
     _admin: UserAccount = Depends(require_admin),
     service: ClosedEvalService = Depends(get_closed_eval),
-    settings: Settings = Depends(get_settings_dep),
 ) -> RunCreatedOut:
     """起跑（错误映射集中处）：未知 dataset 404 → 校验失败 400 → busy 409。"""
-    _dataset_or_404(settings, payload.dataset)
+    _dataset_or_404(service.effective_root, payload.dataset)
     try:
         run_id = service.start(
             payload.dataset, payload.movies.model_dump(),

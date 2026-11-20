@@ -18,11 +18,13 @@ import ClosedEval from './ClosedEval'
 import { ApiError } from '../api/client'
 import {
   cancelRun,
+  getDatasetRoot,
   getReport,
   getRun,
   listDatasets,
   listMovies,
   listRuns,
+  setDatasetRoot,
   startRun,
   type ClosedEvalReport,
   type DatasetInfo,
@@ -42,6 +44,8 @@ vi.mock('../api/eval', async (importOriginal) => {
     getRun: vi.fn(),
     cancelRun: vi.fn(),
     getReport: vi.fn(),
+    getDatasetRoot: vi.fn(),
+    setDatasetRoot: vi.fn(),
   }
 })
 
@@ -52,6 +56,8 @@ const mockedListRuns = vi.mocked(listRuns)
 const mockedGetRun = vi.mocked(getRun)
 const mockedCancelRun = vi.mocked(cancelRun)
 const mockedGetReport = vi.mocked(getReport)
+const mockedGetDatasetRoot = vi.mocked(getDatasetRoot)
+const mockedSetDatasetRoot = vi.mocked(setDatasetRoot)
 
 // ---------- 夹具（与后端 DatasetInfoOut / MovieRefOut / RunSummaryOut / RunStateOut 契约同形） ----------
 
@@ -226,6 +232,7 @@ const REPORT: ClosedEvalReport = {
 function mockIdleApis() {
   mockedListDatasets.mockResolvedValue(DATASETS)
   mockedListRuns.mockResolvedValue(RUNS_HISTORY)
+  mockedGetDatasetRoot.mockResolvedValue({ root: '/cache/MovieTags', is_default: true })
 }
 
 /** 挂载历史含活跃 run 的桩（配合 getRun 返回 running 进度）。 */
@@ -250,6 +257,9 @@ beforeEach(() => {
   mockedGetRun.mockReset()
   mockedCancelRun.mockReset()
   mockedGetReport.mockReset()
+  mockedGetDatasetRoot.mockReset()
+  mockedSetDatasetRoot.mockReset()
+  localStorage.clear()
 })
 
 afterEach(() => {
@@ -547,5 +557,51 @@ describe('ClosedEval 闭环评测页', () => {
 
     expect(await screen.findByText('数据集列表加载失败')).toBeInTheDocument()
     expect(screen.getByText('后端不可用')).toBeInTheDocument()
+  })
+
+  it('数据集根：挂载显示当前生效根；localStorage 存值（is_default 时）预填输入', async () => {
+    localStorage.setItem('closed-eval-dataset-root', '/cache/MovieTagsV2')
+    mockIdleApis()
+    render(<ClosedEval />)
+
+    // 当前生效 = GET 返回的服务端真相
+    expect(await screen.findByText(/当前生效：\/cache\/MovieTags/)).toBeInTheDocument()
+    // is_default=true（重启后 override 已消失）→ 输入框预填上次选择，仅提示
+    expect(screen.getByRole('textbox', { name: '数据集根路径' })).toHaveValue('/cache/MovieTagsV2')
+  })
+
+  it('应用数据集根：调 setDatasetRoot → 刷新数据集列表与生效根、存 localStorage', async () => {
+    mockIdleApis()
+    mockedSetDatasetRoot.mockResolvedValue({ root: '/cache/MovieTagsV2', is_default: false })
+    render(<ClosedEval />)
+    await screen.findByText(/当前生效：\/cache\/MovieTags/)
+
+    fireEvent.change(screen.getByRole('textbox', { name: '数据集根路径' }), {
+      target: { value: '/cache/MovieTagsV2' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /应\s*用/ }))
+
+    await waitFor(() => expect(mockedSetDatasetRoot).toHaveBeenCalledWith('/cache/MovieTagsV2'))
+    // 成功后：数据集列表重拉（新根的数据集）+ 生效展示更新（POST 返回值）+ localStorage 记上次输入
+    await waitFor(() => expect(mockedListDatasets).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText(/当前生效：\/cache\/MovieTagsV2/)).toBeInTheDocument()
+    expect(localStorage.getItem('closed-eval-dataset-root')).toBe('/cache/MovieTagsV2')
+  })
+
+  it('应用数据集根失败：400 detail 经错误提示透出，不崩页面', async () => {
+    mockIdleApis()
+    mockedSetDatasetRoot.mockRejectedValue(
+      new ApiError(400, '数据集根目录不存在或不是目录：/nope'))
+    render(<ClosedEval />)
+    await screen.findByText(/当前生效：\/cache\/MovieTags/)
+
+    fireEvent.change(screen.getByRole('textbox', { name: '数据集根路径' }), {
+      target: { value: '/nope' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /应\s*用/ }))
+
+    expect(await screen.findByText(/不存在或不是目录：\/nope/)).toBeInTheDocument()
+    // 失败不落 localStorage
+    expect(localStorage.getItem('closed-eval-dataset-root')).toBeNull()
   })
 })
