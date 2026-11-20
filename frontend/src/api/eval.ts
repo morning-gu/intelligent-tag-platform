@@ -1,5 +1,7 @@
-// 闭环评测 API：/eval/closed 八端点的类型契约与取数函数。类型形状与后端
-// tagplatform/api/routers/eval.py 的 Pydantic 模型、closed_eval 组装的
+// 闭环评测 API：/eval/closed 路由族的类型契约与取数函数（端点数以后端
+// eval.py 路由模块 docstring 为准，不在此重复计数——固定数字曾随端点
+// 增加而过时）。类型形状与后端 tagplatform/api/routers/eval.py 的
+// Pydantic 模型、closed_eval 组装的
 // report.json 结构一致：后端 None（无报告/该档无有效影片/算不出）一律以
 // null 透传，前端按「暂无」口径呈现（None≠0 纪律）；起跑可选项缺省即不
 // 携带，由服务端回退默认网格/并发。产物文件下载走 <a href> 原生下载，

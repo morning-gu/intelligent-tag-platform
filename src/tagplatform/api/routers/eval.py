@@ -19,9 +19,10 @@
   列表口径一致——列表里有的 id，详情必须能打开）；
 - 单片明细两端点（runs/{id}/movies[/{tt}]，badcase 视图）读
   raw_results.json 现算逐片指标与三表明细（movie_breakdown 纯函数，
-  指标与闭环网格共用原语可对账）：raw 缺失/截断/非 list → 404「无单片
-  明细」（运行中 run 与写盘非原子窗口不 500），meta thetas/ks 缺失/
-  损坏 → DEFAULT 档照常出数；tt 只做 JSON 行内查找、不参与路径拼接。
+  指标与闭环网格共用原语可对账）：raw 缺失/截断/非 list 或行级不是带
+  tt 键的 dict → 404「无单片明细」（运行中 run 与写盘非原子窗口不
+  500），meta thetas/ks 缺失/损坏 → DEFAULT 档照常出数（两键独立回落）；
+  tt 只做 JSON 行内查找、不参与路径拼接。
 """
 
 import json
@@ -286,10 +287,12 @@ def _movies_read(settings: Settings,
     """单片明细两端点的共同读侧（协议转换，模式同 get_run_report）：
 
     - run 目录守卫不过 → 404「run 不存在」（与 GET /runs/{run_id} 同口径）；
-    - raw_results.json 缺失/截断/非 list → 404「无单片明细」（运行中 run
-      与 meta→raw 写序非原子窗口的既定容错，不 500）；
-    - meta.json 缺失/损坏或 thetas/ks 元素类型异常 → 档位回落
-      DEFAULT_THETAS / DEFAULT_KS（老 run 照常出数）。
+    - raw_results.json 缺失/截断/非 list、或行级不是带 tt 键的 dict（残缺
+      行会在指标计算处 KeyError/AttributeError 打 500）→ 404「无单片明细」
+      （运行中 run 与 meta→raw 写序非原子窗口的既定容错，不 500）；
+    - meta.json 缺失/损坏 → 档位回落 DEFAULT_THETAS / DEFAULT_KS；thetas
+      与 ks 两键独立读取独立回落（缺一不影响另一——老 run 半残 meta
+      照常出数）。
     """
     run_dir = _run_dir(settings, run_id)
     if run_dir is None:
@@ -300,7 +303,8 @@ def _movies_read(settings: Settings,
                           .read_text(encoding="utf-8"))
     except (OSError, ValueError):
         rows = None
-    if not isinstance(rows, list):
+    if not (isinstance(rows, list)
+            and all(isinstance(r, dict) and "tt" in r for r in rows)):
         raise HTTPException(
             status_code=404,
             detail=f"该 run 无单片明细（未完成或产物缺失）：{run_id!r}")
@@ -308,16 +312,17 @@ def _movies_read(settings: Settings,
     ks: Sequence[int] = DEFAULT_KS
     try:
         meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-        meta_thetas = meta["thetas"]
+    except (OSError, ValueError):
+        meta = None
+    if isinstance(meta, dict):
+        meta_thetas = meta.get("thetas")
         if (isinstance(meta_thetas, list) and meta_thetas
                 and all(isinstance(x, (int, float)) for x in meta_thetas)):
             thetas = meta_thetas
-        meta_ks = meta["ks"]
+        meta_ks = meta.get("ks")
         if (isinstance(meta_ks, list) and meta_ks
                 and all(isinstance(x, int) for x in meta_ks)):
             ks = meta_ks
-    except (OSError, ValueError, KeyError, TypeError):
-        pass  # 档位读不出 → 维持 DEFAULT（上方已初始化）
     return rows, thetas, ks
 
 

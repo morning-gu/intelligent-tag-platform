@@ -625,6 +625,23 @@ def test_movies_404_when_raw_results_missing_or_truncated(client):
     assert r3.status_code == 404 and "无单片明细" in r3.json()["detail"]
 
 
+def test_movies_404_when_rows_not_dict_shaped(client):
+    """行级形状守卫（终审 Important）：raw_results.json 是合法 JSON list
+    但行不是 dict（['abc'] → AttributeError）或行缺 tt 键（[{'nott': 1}]
+    → KeyError）→ 同 404「无单片明细」，不 500（读侧容错承诺延伸到行级，
+    两端点同口径）。"""
+    _seed_dataset_and_library(client)
+    d = _write_movies_run(client, rows=["abc"])
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r.status_code == 404 and "无单片明细" in r.json()["detail"]
+    r2 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001")
+    assert r2.status_code == 404 and "无单片明细" in r2.json()["detail"]
+    # 行是 dict 但缺 tt 键 → 同 404
+    (d / "raw_results.json").write_text('[{"nott": 1}]', encoding="utf-8")
+    r3 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r3.status_code == 404 and "无单片明细" in r3.json()["detail"]
+
+
 def test_movies_default_grid_when_meta_missing(client):
     """meta.json 缺失 / 有 meta 但无 thetas·ks 键（老 run）→ DEFAULT 档
     照常出数：0.4/10/20（DEFAULT_THETAS→0.4、DEFAULT_KS→k_p 10/k_r 20）。"""
@@ -639,6 +656,19 @@ def test_movies_default_grid_when_meta_missing(client):
     _write_movies_run(client, run_id="run-movies-oldmeta", grid=False)
     body2 = client.get(f"{_BASE}/runs/run-movies-oldmeta/movies").json()
     assert (body2["theta_used"], body2["k_p"], body2["k_r"]) == (0.4, 10, 20)
+    # meta 只有 ks 无 thetas → 两键独立回落：thetas 走 DEFAULT（0.4），
+    # ks 照用（[5] 唯一元素即 P/R 两目标的最近档 → k_p=k_r=5）（终审 Minor）
+    out = Path(client.app.state.settings.eval_output_root)
+    d3 = out / "run-movies-ks-only"
+    d3.mkdir()
+    (d3 / "raw_results.json").write_text(
+        json.dumps(_movies_rows(), ensure_ascii=False), encoding="utf-8")
+    (d3 / "meta.json").write_text(
+        json.dumps({"run_id": "run-movies-ks-only", "ks": [5]},
+                   ensure_ascii=False), encoding="utf-8")
+    body3 = client.get(f"{_BASE}/runs/run-movies-ks-only/movies").json()
+    assert body3["theta_used"] == 0.4  # thetas 缺 → DEFAULT 档
+    assert body3["k_p"] == 5 and body3["k_r"] == 5  # ks=[5] 照用
 
 
 def test_movies_non_admin_401(client):
