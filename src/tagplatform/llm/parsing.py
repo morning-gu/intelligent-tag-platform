@@ -93,6 +93,14 @@ def _validate_closed_items(data: list) -> list[dict]:
         if not isinstance(item, dict):
             raise _bad_element(index, f"元素不是对象（{type(item).__name__}）")
         missing = [key for key in _CLOSED_REQUIRED if key not in item]
+        if "evidences" not in item and isinstance(item.get("evidence"), list):
+            # 生产实锤（2026-11-20 闭环评测首跑，147.3 vLLM 温度 0 + no-think，
+            # preset30 3/5 影片三连重试全灭）：模型偶发把证据数组键写成单数
+            # evidence（与内层证据条目键 evidence 同名，一字之差）。值为列表
+            # 时按别名归一为 evidences；非列表形态仍走严格缺键报错，两条键
+            # 并存时 evidences 优先、别名不介入。
+            item["evidences"] = item["evidence"]
+            missing = [key for key in missing if key != "evidences"]
         if missing:
             raise _bad_element(index, f"缺少键: {missing}")
         tag_id = item["tag_id"]
