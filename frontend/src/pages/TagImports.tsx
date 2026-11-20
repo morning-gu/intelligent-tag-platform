@@ -1,14 +1,3 @@
-// 导入任务页（v2）：Excel/XML 标签库上传导入 + 导入任务历史。
-// - 上传（AntD Upload 手动模式）：beforeUpload 拦截改由 apiFetch 走
-//   POST /tags/import（multipart FormData，client 对 FormData 不强设
-//   Content-Type）；成功展示结果摘要（total/inserted/skipped 统计 +
-//   issues/parse_errors 折叠明细表），失败（422 坏文件/坏表头）透出后端
-//   detail。
-// - 任务历史 Table（GET /import/tasks，created_at 降序由后端保证）：行
-//   "详情"按钮 → 任务详情 Drawer（GET /import/tasks/{id}），摘要展示复用
-//   同一 SummaryView（result_summary 解析失败时后端为 null，降级提示）。
-// - 撤销（仅 completed 可点）：导出并撤销/直接撤销双确认；批内行被挂载/
-//   候选引用 → 409，message.error 透出后端 detail。
 import {
   Alert,
   Button,
@@ -26,7 +15,7 @@ import {
   Modal,
 } from 'antd'
 import type { TableProps } from 'antd'
-import { useCallback, useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
 import {
   fetchImportTask,
   fetchImportTasks,
@@ -34,11 +23,28 @@ import {
   importTags,
   revokeImportTask,
   type ImportSummary,
-  type ImportResponse,
   type ImportTaskDetail,
   type ImportTaskSummary,
 } from '../api/imports'
 import { formatTime } from '../api/time'
+
+// 上传请求跨页面切换继续，重新进入页面时仍能读取上传状态。
+let uploadState = { uploading: false, finishedUploads: 0 }
+const uploadListeners = new Set<() => void>()
+function subscribeUpload(listener: () => void) {
+  uploadListeners.add(listener)
+  return () => { uploadListeners.delete(listener) }
+}
+function setUploadingFile(uploading: boolean) {
+  uploadState = {
+    uploading,
+    finishedUploads: uploading ? uploadState.finishedUploads : uploadState.finishedUploads + 1,
+  }
+  uploadListeners.forEach((listener) => listener())
+}
+function getUploadState() {
+  return uploadState
+}
 
 /** 任务状态中文展示与 Tag 颜色（键集与后端 ImportTask.status 一致）。 */
 const BATCH_STATUS_LABELS: Record<string, string> = {
@@ -56,7 +62,7 @@ const BATCH_STATUS_COLORS: Record<string, string> = {
 /** 结果摘要视图：total/inserted/skipped 统计 + 治理问题/解析失败折叠明细表。
  * 口径注记（v2）：total 仅计标签定义行（目录行落 tag_catalog 不进计数），
  * inserted 为其中新入库数，skipped = total - inserted。
- * 上传结果与任务详情两处复用；空明细的折叠面板不渲染（避免空表噪音）。 */
+ * 空明细的折叠面板不渲染。 */
 function SummaryView({ summary }: { summary: ImportSummary }) {
   // 折叠面板按需构建（空明细不渲染面板，children 惰性渲染进表格）
   const panels: { key: string; label: string; children: ReactElement }[] = []
@@ -131,12 +137,11 @@ function SummaryView({ summary }: { summary: ImportSummary }) {
 export default function TagImports() {
   // —— 任务历史 ——
   const [tasks, setTasks] = useState<ImportTaskSummary[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [refresh, setRefresh] = useState(0)
 
-  // —— 上传状态与最近一次结果摘要 ——
-  const [uploading, setUploading] = useState(false)
-  const [uploadResult, setUploadResult] = useState<ImportResponse | null>(null)
+  const { uploading, finishedUploads } = useSyncExternalStore(subscribeUpload, getUploadState)
 
   // —— 任务详情 Drawer ——
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
@@ -145,30 +150,32 @@ export default function TagImports() {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [revoking, setRevoking] = useState(false)
 
-  const loadTasks = useCallback(async () => {
-    setLoading(true)
-    try {
-      const rows = await fetchImportTasks()
-      setTasks(rows)
-      setLoadError(null)
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : '任务历史加载失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
   useEffect(() => {
-    // 微任务后启动加载（loading 置位在异步边界内，不在 effect 同步置
-    // state）；cancelled 丢弃卸载/依赖变更后的过期触发
     let cancelled = false
-    queueMicrotask(() => {
-      if (!cancelled) void loadTasks()
-    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    async function loadTasks() {
+      let poll = true
+      try {
+        const rows = await fetchImportTasks()
+        if (cancelled) return
+        setTasks(rows)
+        setLoadError(null)
+        poll = rows.some((task) => task.status === 'processing')
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : '任务历史加载失败')
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+          if (poll) timer = setTimeout(() => void loadTasks(), 2000)
+        }
+      }
+    }
+    void loadTasks()
     return () => {
       cancelled = true
+      clearTimeout(timer)
     }
-  }, [loadTasks])
+  }, [refresh, finishedUploads])
 
   /** 打开任务详情 Drawer：在事件内重置详情态（含上次残留）并记录任务号，
    * 拉取交给下方 effect（effect 内不做同步 setState）。 */
@@ -179,7 +186,7 @@ export default function TagImports() {
     setSelectedTaskId(taskId)
   }
 
-  // selectedTaskId 变化即拉取任务详情（仅异步置 state）
+  const selectedTaskStatus = tasks.find((task) => task.task_id === selectedTaskId)?.status
   useEffect(() => {
     if (selectedTaskId === null) return
     let cancelled = false
@@ -187,6 +194,7 @@ export default function TagImports() {
       (d) => {
         if (!cancelled) {
           setDetail(d)
+          setDetailError(null)
           setDetailLoading(false)
         }
       },
@@ -200,21 +208,24 @@ export default function TagImports() {
     return () => {
       cancelled = true
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, selectedTaskStatus])
 
   /** 手动上传：beforeUpload 返回 false 阻断 antd 自带 xhr，改经 apiFetch
-   * （统一会话 cookie 与 401 拦截）。成功展示摘要并刷新任务历史。 */
+   * （统一会话 cookie 与 401 拦截）。服务端接收后刷新任务历史。 */
   async function handleUpload(file: File) {
-    setUploading(true)
+    if (uploadState.uploading) return
+    setUploadingFile(true)
     try {
-      const res = await importTags(file)
-      setUploadResult(res)
-      message.success(`导入完成：新增 ${res.summary.inserted} 个标签`)
-      await loadTasks()
+      const task = await importTags(file)
+      if (task.status === 'failed') {
+        message.error('导入启动失败，请在任务详情中查看原因')
+      } else {
+        message.success('已创建导入任务')
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : '导入失败')
     } finally {
-      setUploading(false)
+      setUploadingFile(false)
     }
   }
 
@@ -241,7 +252,7 @@ export default function TagImports() {
             await revokeImportTask(task.task_id)
             message.success('任务已撤销')
             setDetail((current) => current ? { ...current, status: 'revoked' } : current)
-            await loadTasks()
+            setRefresh((current) => current + 1)
           } catch (err) {
             message.error(err instanceof Error ? err.message : '撤销任务失败')
           } finally {
@@ -265,7 +276,7 @@ export default function TagImports() {
                       await revokeImportTask(task.task_id)
                       message.success('任务已撤销')
                       setDetail((current) => current ? { ...current, status: 'revoked' } : current)
-                      await loadTasks()
+                      setRefresh((current) => current + 1)
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : '撤销任务失败')
                     } finally {
@@ -323,14 +334,6 @@ export default function TagImports() {
               选择 Excel/XML 文件上传
             </Button>
           </Upload>
-          {uploadResult !== null && (
-            <div>
-              <Typography.Title level={5} style={{ marginTop: 0 }}>
-                导入结果（任务 {uploadResult.task_id}）
-              </Typography.Title>
-              <SummaryView summary={uploadResult.summary} />
-            </div>
-          )}
         </div>
       </Card>
       <Card title="任务历史">
@@ -378,10 +381,14 @@ export default function TagImports() {
                 { key: 'created', label: '创建时间', children: formatTime(detail.created_at) },
               ]}
             />
-            {detail.summary === null ? (
-              <Typography.Text type="secondary">无结果摘要</Typography.Text>
-            ) : (
-              <SummaryView summary={detail.summary} />
+            {detail.status === 'failed' && (
+              <Alert type="error" showIcon message={detail.error ?? '导入处理失败'} />
+            )}
+            {detail.summary && <SummaryView summary={detail.summary} />}
+            {detail.summary === null && detail.status !== 'failed' && (
+              <Typography.Text type="secondary">
+                {detail.status === 'processing' ? '导入任务正在后台处理' : '无结果摘要'}
+              </Typography.Text>
             )}
             <Button
               danger

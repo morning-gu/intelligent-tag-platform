@@ -16,10 +16,8 @@ tag_define（经 dir_id 挂目录）、正式挂载在 asset_tag。
 
 import io
 import json
-import logging
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import asdict
 from datetime import datetime, timezone
 
 import openpyxl
@@ -38,13 +36,10 @@ from tagplatform.db.models import (
     TagDefine,
     TagImportTask,
 )
-from tagplatform.governance import parse_tag_excel, parse_tag_xml, run_governance
-from tagplatform.governance.pipeline import is_directory_row, referenced_dir_names
+from tagplatform.governance import run_governance
+from tagplatform.tag_import import TagImportFileError, parse_upload
 
 router = APIRouter(prefix="/api/v1/tags")
-
-logger = logging.getLogger(__name__)
-
 
 # ---------- 响应模型 ----------
 
@@ -73,9 +68,7 @@ class ImportSummary(BaseModel):
     传入治理的**标签定义行**数（目录行落 tag_catalog 不计入；行级解析错误
     的行不进 rows，不计入），inserted 仅计标签行，skipped = total -
     inserted，issues 为治理问题明细（与入库行不相交）；
-    parse_errors 为行级解析错误明细（治理流水线不感知解析层 errors，
-    由本路由层与 file_name 回填同一模式并入 result_summary），计数以
-    列表长度为准（前端阶段 3 直接消费明细）。
+    parse_errors 为行级解析错误明细，计数以列表长度为准。
     """
 
     total: int
@@ -163,59 +156,18 @@ def import_tags(
 
     同步 def：治理流水线（embed + DB）为阻塞操作，走线程池不占事件循环。
     """
-    data = file.file.read()
-    filename = (file.filename or "").lower()
-    looks_like_xml = data.lstrip().startswith(b"<")
+    file_name = file.filename or "upload"
     try:
-        if filename.endswith(".xml") or looks_like_xml:
-            parsed = parse_tag_xml(data)
-        elif filename.endswith(".xlsx"):
-            parsed = parse_tag_excel(data)
-        else:
-            raise HTTPException(status_code=422, detail="仅支持 .xlsx 或 .xml 文件")
-    except HTTPException:
-        raise
-    except Exception:
-        # 解析器异常类型分别来自 openpyxl 与 ElementTree，统一映射为 422。
-        logger.exception("标签文件解析失败: %s", file.filename or "upload")
-        raise HTTPException(status_code=422, detail="文件无法解析为有效的 XML 或 xlsx 文件")
-    if parsed.header_error:
-        # 缺必需表头列：422，detail 为解析层给出的错误说明
-        raise HTTPException(status_code=422, detail=parsed.header_error)
+        parsed = parse_upload(file.file.read(), file_name)
+    except TagImportFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    result = run_governance(parsed.rows, session, embedder)
-
-    # 标签行计数：目录行判定与 run_governance 同源（显式 is_dir 标记优先，
-    # 未表态行按"被引用名"推断），total 口径只计标签定义行（目录行落
-    # tag_catalog 不进计数——含空目录）
-    referenced_names = referenced_dir_names(parsed.rows)
-    summary_total = sum(1 for r in parsed.rows
-                        if not is_directory_row(r, referenced_names))
-
-    # 回填真实上传文件名（治理流水线写入的是占位 "governance"），并把
-    # 行级解析错误明细并入 result_summary——治理流水线不感知 parsed.errors，
-    # 与 file_name 回填同一模式：本路由层更新已提交的任务行
-    parse_errors = [ParseErrorOut(**asdict(e)) for e in parsed.errors]
+    result = run_governance(parsed.rows, session, embedder, file_name=file_name,
+                            parse_errors=parsed.errors)
     task = session.get(TagImportTask, result.task_id)
-    if task is not None:
-        task.file_name = file.filename or "upload"
-        summary_data = json.loads(task.result_summary)
-        summary_data["parse_errors"] = [asdict(e) for e in parsed.errors]
-        task.result_summary = json.dumps(summary_data, ensure_ascii=False)
-        session.commit()
-
     return ImportResponse(
         task_id=result.task_id,
-        summary=ImportSummary(
-            # total 仅计标签定义行（目录行不计）：与治理流水线写入
-            # result_summary 的 v2 口径一致；行级解析错误的行不进 rows
-            # 不计数，parse_errors 以明细列表另行透出
-            total=summary_total,
-            inserted=len(result.inserted),
-            skipped=summary_total - len(result.inserted),
-            issues=[IssueOut(**asdict(issue)) for issue in result.issues],
-            parse_errors=parse_errors,
-        ),
+        summary=ImportSummary.model_validate_json(task.result_summary),
     )
 
 

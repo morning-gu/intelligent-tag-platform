@@ -38,6 +38,7 @@ from tagplatform.db import create_engine_for, make_session_factory
 from tagplatform.embed import Embedder, build_embedder
 from tagplatform.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
+from tagplatform.tag_import import TagImportExecutor
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
 from tagplatform.tasks.tag_quality import QualityExecutor
 
@@ -84,6 +85,10 @@ def get_executor(request: Request) -> TaskExecutor:
 
 def get_quality_executor(request: Request) -> QualityExecutor:
     return request.app.state.quality_executor
+
+
+def get_tag_import_executor(request: Request) -> TagImportExecutor:
+    return request.app.state.tag_import_executor
 
 
 from tagplatform.api.depends import get_current_user, require_admin  # noqa: E402
@@ -145,12 +150,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             workers=settings.generation_workers,
             prompt_sample_dir=settings.mtg_prompt_sample_dir,
             quality_executor=app.state.quality_executor)
+        app.state.tag_import_executor = TagImportExecutor(app.state.session_factory, app.state.embedder)
         try:
             with app.state.session_factory() as session:
                 reset_orphan_running(session)
+            app.state.tag_import_executor.reset_interrupted()
             app.state.quality_executor.resume_pending()
             yield
         finally:
+            app.state.tag_import_executor.shutdown()
             app.state.executor.shutdown()
             app.state.quality_executor.shutdown()
 

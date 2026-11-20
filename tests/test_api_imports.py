@@ -21,15 +21,19 @@ export 端点（GET /{task_id}/export）双表化已由 Task 5 落地（与
 import io
 import time
 from datetime import datetime, timezone
+from threading import Event
 
 import openpyxl
 import pytest
+from sqlalchemy import event
 
+from tagplatform import tag_import
 from tagplatform.db.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,
     TagCatalog,
+    TagChangeLog,
     TagDefine,
     TagImportTask,
 )
@@ -60,6 +64,84 @@ HIER_XLSX_BYTES = build_xlsx([
     ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"],
     ["内容", "剧情", None, "反转", "", None],
 ])
+
+
+def wait_for_import(client, task_id):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        detail = client.get(f"/api/v1/import/tasks/{task_id}").json()
+        if detail["status"] != "processing":
+            return detail
+        time.sleep(0.02)
+    pytest.fail(f"导入任务 {task_id} 未进入终态")
+
+
+def test_upload_returns_task_while_parser_is_still_running(client, monkeypatch):
+    entered, release = Event(), Event()
+    parse_upload = tag_import.parse_upload
+
+    def blocked_parse(data, file_name):
+        entered.set()
+        assert release.wait(timeout=10)
+        return parse_upload(data, file_name)
+
+    monkeypatch.setattr(tag_import, "parse_upload", blocked_parse)
+    try:
+        response = client.post("/api/v1/import/tasks", files={"file": ("后台.xlsx", HIER_XLSX_BYTES)})
+        assert response.status_code == 202
+        task = response.json()
+        task_id = task["task_id"]
+        assert task["status"] == "processing"
+        assert entered.wait(timeout=5)
+        assert client.get("/api/v1/import/tasks").json() == [task]
+        assert client.get(f"/api/v1/import/tasks/{task_id}").json()["summary"] is None
+        with client.app.state.session_factory() as session:
+            assert session.query(TagDefine).count() == 0
+    finally:
+        release.set()
+
+    detail = wait_for_import(client, task_id)
+    assert detail["status"] == "completed"
+    assert detail["file_name"] == "后台.xlsx"
+    assert detail["summary"] == {
+        "total": 1, "inserted": 1, "skipped": 0, "issues": [], "parse_errors": [],
+    }
+    assert client.get(f"/api/v1/import/tasks/{task_id}/export").status_code == 200
+    assert client.post(f"/api/v1/import/tasks/{task_id}/revoke").json()["status"] == "revoked"
+    with client.app.state.session_factory() as session:
+        assert session.query(TagDefine).count() == 0
+        assert session.query(TagCatalog).count() == 0
+
+
+def test_invalid_upload_records_failed_task(client):
+    response = client.post("/api/v1/import/tasks", files={"file": ("坏.xlsx", b"bad file")})
+    assert response.status_code == 202
+    detail = wait_for_import(client, response.json()["task_id"])
+    assert detail["status"] == "failed"
+    assert detail["error"] == "文件无法解析为有效的 XML 或 xlsx 文件"
+    assert detail["summary"] is None
+
+
+def test_failed_background_commit_rolls_back_tags_and_audit(client, monkeypatch):
+    run_governance = tag_import.run_governance
+
+    def fail_commit(session):
+        raise RuntimeError("simulate a failed import transaction")
+
+    def failing_governance(rows, session, embedder, **kwargs):
+        event.listen(session, "before_commit", fail_commit, once=True)
+        return run_governance(rows, session, embedder, **kwargs)
+
+    monkeypatch.setattr(tag_import, "run_governance", failing_governance)
+    response = client.post("/api/v1/import/tasks", files={"file": ("回滚.xlsx", HIER_XLSX_BYTES)})
+    assert response.status_code == 202
+    detail = wait_for_import(client, response.json()["task_id"])
+    assert detail["status"] == "failed"
+    assert detail["error"]
+    with client.app.state.session_factory() as session:
+        assert session.query(TagDefine).count() == 0
+        assert session.query(TagCatalog).count() == 0
+        assert session.query(TagChangeLog).count() == 0
 
 
 def test_import_task_list_and_detail(client):

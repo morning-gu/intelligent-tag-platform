@@ -1,9 +1,4 @@
-// 标签导入 API（v2）：/tags/import（multipart 上传）与 /import/tasks 导入
-// 任务历史/详情的类型契约与取数函数。类型形状与后端 tagplatform/api/routers/
-// tags.py（ImportSummary/ImportResponse）与 imports.py（ImportTaskOut/
-// ImportTaskDetailOut）一致；坏文件/坏表头 → 422（ApiError.message 透出
-// 后端 detail）。v1 的 /import/batches 前缀与 batch_id 字段随表结构 v2
-// 退役（import_batch → tag_import_task），统一 task_id。
+// 标签导入任务 API：multipart 上传、任务列表、详情、撤销与导出。
 import { apiFetch } from './client'
 
 /** 单条治理问题明细（与后端 IssueOut / governance.Issue 字段一一对应）。 */
@@ -33,12 +28,6 @@ export interface ImportSummary {
   parse_errors: ImportParseError[]
 }
 
-/** 上传导入响应：本次导入任务号 + 结果摘要（v1 batch_id 退役）。 */
-export interface ImportResponse {
-  task_id: string
-  summary: ImportSummary
-}
-
 /** 导入任务列表项（与后端 ImportTaskOut 一致，created_at 降序由后端保证）。 */
 export interface ImportTaskSummary {
   task_id: string
@@ -50,15 +39,14 @@ export interface ImportTaskSummary {
 /** 导入任务详情：列表字段之上附 result_summary 解析后的摘要（无/损坏时为 null）。 */
 export interface ImportTaskDetail extends ImportTaskSummary {
   summary: ImportSummary | null
+  error: string | null
 }
 
-/** 上传标签 Excel/XML（multipart，字段 file）：按扩展名解析 → 治理双表
- * 入库 → 任务号与摘要。注意走 FormData（client 对 FormData 不强设
- * Content-Type）。 */
-export function importTags(file: File): Promise<ImportResponse> {
+/** 上传标签 Excel/XML 并创建后台任务。 */
+export function importTags(file: File): Promise<ImportTaskSummary> {
   const form = new FormData()
   form.append('file', file)
-  return apiFetch<ImportResponse>('/api/v1/tags/import', { method: 'POST', body: form })
+  return apiFetch<ImportTaskSummary>('/api/v1/import/tasks', { method: 'POST', body: form })
 }
 
 /** 全部导入任务（created_at 降序，最近导入在前）。 */

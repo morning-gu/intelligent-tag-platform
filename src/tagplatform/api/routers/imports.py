@@ -18,12 +18,12 @@ export 端点（GET /{task_id}/export）与 tags.py 共用 `_build_export_archiv
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from tagplatform.api import get_session
+from tagplatform.api import get_session, get_tag_import_executor
 from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.db.models import (
@@ -34,6 +34,7 @@ from tagplatform.db.models import (
     TagDefine,
     TagImportTask,
 )
+from tagplatform.tag_import import TagImportExecutor
 
 router = APIRouter(prefix="/api/v1/import/tasks")
 
@@ -51,6 +52,7 @@ class ImportTaskDetailOut(ImportTaskOut):
     """导入任务详情：含 result_summary 解析后的结果摘要（无/损坏时为 None）。"""
 
     summary: ImportSummary | None = None
+    error: str | None = None
 
 
 def _batch_entries(task_id: str, session: Session) -> list[tuple[TagChangeLog, dict]]:
@@ -92,6 +94,17 @@ def _batch_dir_ids(task_id: str, session: Session) -> set[str]:
             if after.get("kind") == "dir"}
 
 
+@router.post("", status_code=202, response_model=ImportTaskOut)
+def create_import_task(
+    file: UploadFile = File(...),
+    executor: TagImportExecutor = Depends(get_tag_import_executor),
+) -> ImportTaskOut:
+    """接收上传并建立任务，解析和入库由后台线程执行。"""
+    task = executor.submit(file.filename or "upload", file.file.read())
+    return ImportTaskOut(task_id=task.task_id, file_name=task.file_name,
+                         status=task.status, created_at=task.created_at)
+
+
 @router.get("", response_model=list[ImportTaskOut])
 def list_import_tasks(session: Session = Depends(get_session)) -> list[ImportTaskOut]:
     """全部导入任务，按 created_at 降序（最近导入在前）。"""
@@ -115,9 +128,15 @@ def get_import_task(task_id: str, session: Session = Depends(get_session)) -> Im
     if task is None:
         raise HTTPException(status_code=404, detail=f"导入任务不存在：{task_id}")
     summary: ImportSummary | None = None
+    error: str | None = None
     if task.result_summary:
         try:
-            summary = ImportSummary.model_validate(json.loads(task.result_summary))
+            data = json.loads(task.result_summary)
+            if task.status == "failed":
+                if isinstance(data, dict) and isinstance(data.get("error"), str):
+                    error = data["error"]
+            else:
+                summary = ImportSummary.model_validate(data)
         except (json.JSONDecodeError, ValidationError):
             # 摘要 JSON 损坏时降级为 None，不影响任务元数据返回
             summary = None
@@ -127,6 +146,7 @@ def get_import_task(task_id: str, session: Session = Depends(get_session)) -> Im
         status=task.status,
         created_at=task.created_at,
         summary=summary,
+        error=error,
     )
 
 
