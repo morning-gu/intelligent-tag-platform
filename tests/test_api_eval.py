@@ -220,9 +220,10 @@ def test_run_end_to_end(client):
     body = _await_terminal(client, run_id)
     assert body["status"] == "succeeded"
     assert body["done"] == body["total"] == 2 and body["failed"] == 0
-    # RunState 形字段齐全
+    # RunState 形字段齐全（含终态时刻）
     assert {"run_id", "status", "done", "total", "failed", "started_at",
-            "error"} <= set(body)
+            "finished_at", "error"} <= set(body)
+    assert body["finished_at"] is not None  # 终态时刻（ISO 串）
 
     rep = _await_report(client, run_id)
     assert "grid" in rep.json()
@@ -237,6 +238,7 @@ def test_run_end_to_end(client):
     mine = next(row for row in rows if row["run_id"] == run_id)
     assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
     assert mine["ndcg10"] is not None
+    assert mine["finished_at"] is not None  # 历史行也透出终态时刻
 
 
 def test_files_whitelist_404(client):
@@ -313,6 +315,7 @@ def test_get_run_disk_only_fallback(client):
     assert body["status"] == "interrupted"
     assert body["done"] == 1 and body["total"] == 3
     assert body["run_id"] == "run-diskonly"
+    assert body["finished_at"] is None  # 老 run meta 无该键 → None（兼容）
 
 
 # ---------------------------------------------------------------- admin 门槛

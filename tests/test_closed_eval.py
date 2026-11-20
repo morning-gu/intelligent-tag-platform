@@ -438,6 +438,22 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     assert llm.violations == 0
 
 
+def test_finished_at_on_terminal_state_and_history(svc):
+    """终态后：get() 快照与 history() 行都带 finished_at（ISO 可解析）。
+
+    meta.json 终态写盘本就带 finished_at；本用例钉的是注册表 RunState 与
+    history() 摘要行的透出（运行中/老 run 无此字段 → None，宁缺勿谎）。
+    """
+    from datetime import datetime
+
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    state = svc.get(run_id)
+    assert state.finished_at is not None
+    datetime.fromisoformat(state.finished_at)  # ISO 形态
+    row = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert row["finished_at"] is not None
+
+
 def test_db_zero_writes(engine, svc, root):  # Review Focus 3
     svc.start("emotion", {"mode": "all"}, wait=True)
     with engine.connect() as con:

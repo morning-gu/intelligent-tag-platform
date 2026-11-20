@@ -378,7 +378,11 @@ class MovieResult:
 
 @dataclass
 class RunState:
-    """一次 run 的进度快照（`get` 返回副本，读方无锁安全）。"""
+    """一次 run 的进度快照（`get` 返回副本，读方无锁安全）。
+
+    finished_at：终态时刻（_worker 落终态时盖章，运行中 None）；磁盘侧
+    meta.json 同名键由 _write_artifacts 终态写盘（老 run 无此键 → None）。
+    """
 
     run_id: str
     status: str
@@ -387,6 +391,7 @@ class RunState:
     failed: int
     started_at: str
     error: str | None = None
+    finished_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -656,6 +661,7 @@ class ClosedEvalService:
                 "total": meta.get("total"),
                 "failed": meta.get("failed"),
                 "started_at": meta.get("started_at"),
+                "finished_at": meta.get("finished_at"),
                 "error": meta.get("error"),
                 **self._read_summary(root / name),
             })
@@ -711,6 +717,7 @@ class ClosedEvalService:
         with self._lock:
             if state is not None:
                 state.status = status
+                state.finished_at = _now_iso()  # 终态时刻（get() 侧透出）
                 if error is not None:
                     state.error = error
         try:
