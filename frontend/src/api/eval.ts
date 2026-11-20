@@ -218,3 +218,88 @@ export function getReport(runId: string): Promise<ClosedEvalReport> {
 export function fileUrl(runId: string, name: EvalFileName): string {
   return `/api/v1/eval/closed/runs/${runId}/files/${name}`
 }
+
+// ---------------------------------------------------------------- 单片明细（badcase 视图）
+
+/** 单片摘要行（与后端 MovieSummaryRowOut 一致）：指标 float | None（None=
+ * 算不出——失败片/无交集/θ-空相关集，前端「暂无」，None≠0）；行序由服务
+ * 层给出（失败置顶 → p_at_k 升序 → null 垫底 → 同分按 tt），前端不重排。 */
+export interface MovieSummaryRow {
+  tt: string
+  title: string
+  ok: boolean
+  error: string | null
+  spearman: number | null
+  p_at_k: number | null
+  r_at_k: number | null
+  elapsed_ms: number
+  n_produced: number
+  n_relevant: number
+}
+
+/** 单片摘要包层（与后端 MovieSummaryOut 一致）：theta_used/k_p/k_r 为服务
+ * 端确定选取（最接近 0.4 的 θ、P 看 top-10、R 看 top-20），前端表头按这三
+ * 键拼字面量（P@{k_p}/R@{k_r}）。 */
+export interface MovieSummaryPayload {
+  theta_used: number
+  k_p: number
+  k_r: number
+  rows: MovieSummaryRow[]
+}
+
+/** 计分清单条目（与后端 ProducedTagOut 一致，GT 空间内按 -sf 序）：hit =
+ * gt_score 非 null 且 ≥ theta_used；tag_name 沿用产出原文（null → 前端
+ * 回退 tag_id）。 */
+export interface ProducedTag {
+  tag_id: string
+  tag_name: string | null
+  sf: number
+  confidence: number
+  evidence_count: number
+  gt_score: number | null
+  hit: boolean
+}
+
+/** 空间外产出条目（与后端 OutOfSpaceTagOut 一致）：不在本批 GT 空间，
+ * 不计分只列名。 */
+export interface OutOfSpaceTag {
+  tag_id: string
+  tag_name: string | null
+  sf: number
+}
+
+/** 漏检条目（与后端 MissTagOut 一致）：相关未产出，服务端按 gt 分降序；
+ * tag_name 从当前标签库回填（库缺该标签 → null → 前端回退 tag_id）。 */
+export interface MissTag {
+  tag_id: string
+  tag_name: string | null
+  gt_score: number
+}
+
+/** 单片明细（与后端 MovieDetailOut 一致）：produced/out_of_space/misses 三
+ * 表；失败片三表全空、error 原样（前端不为其发明细请求）；null 一律「暂无」。 */
+export interface MovieDetail {
+  tt: string
+  title: string
+  ok: boolean
+  error: string | null
+  elapsed_ms: number
+  theta_used: number
+  k_p: number
+  k_r: number
+  produced: ProducedTag[]
+  out_of_space: OutOfSpaceTag[]
+  misses: MissTag[]
+}
+
+/** run 的逐片摘要（badcase 视图主表，读盘现算）：无单片明细（运行中/产物
+ * 缺失）→ 404，detail 经 ApiError.message 透出。 */
+export function getRunMovies(runId: string): Promise<MovieSummaryPayload> {
+  return apiFetch<MovieSummaryPayload>(`/api/v1/eval/closed/runs/${runId}/movies`)
+}
+
+/** 单片明细（摘要行展开懒加载）：未知 tt → 404（detail 经 ApiError.message
+ * 透出）。 */
+export function getRunMovieDetail(runId: string, tt: string): Promise<MovieDetail> {
+  return apiFetch<MovieDetail>(`/api/v1/eval/closed/runs/${runId}/movies/${tt}`)
+}
