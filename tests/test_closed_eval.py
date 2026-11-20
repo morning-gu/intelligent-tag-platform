@@ -248,14 +248,44 @@ class _SlowLLM(MockLLMClient):
 
 
 class _CountingSessionFactory:
-    """会话计数工厂（池饿死回归探针）：包装真实工厂，进出 with 计数。"""
+    """会话计数工厂（池饿死回归探针）：包装真实工厂，按线程计进出。
+
+    逐线程归属是判据的正确口径（终审 Important）：池饿死事故的本质是
+    「**本线程**的 produce（含 LLM 调用）持有**自己的**连接」；跨线程的
+    毫秒级 assemble 会话重叠是合法并发，按全局计数会把正确实现也判红
+    （评审者实测：逐线程恒 0、全局口径恒 4 假阳性）。锁内维护
+    open_by_thread 与全局开放会话峰值（峰值合法性 ≤ concurrency）。
+    """
 
     def __init__(self, inner):
         self._inner = inner
-        self.open_sessions = 0
+        self._lock = threading.Lock()
+        self.open_by_thread: dict[int, int] = {}
+        self.peak_open = 0
 
     def __call__(self):
         return _CountingSession(self._inner(), self)
+
+    def _enter(self) -> None:
+        tid = threading.get_ident()
+        with self._lock:
+            n = self.open_by_thread.get(tid, 0) + 1
+            self.open_by_thread[tid] = n
+            self.peak_open = max(self.peak_open,
+                                 sum(self.open_by_thread.values()))
+
+    def _exit(self) -> None:
+        tid = threading.get_ident()
+        with self._lock:
+            n = self.open_by_thread.get(tid, 0) - 1
+            if n > 0:
+                self.open_by_thread[tid] = n
+            else:
+                self.open_by_thread.pop(tid, None)
+
+    def held_by_current_thread(self) -> int:
+        with self._lock:
+            return self.open_by_thread.get(threading.get_ident(), 0)
 
 
 class _CountingSession:
@@ -266,11 +296,11 @@ class _CountingSession:
         self._factory = factory
 
     def __enter__(self):
-        self._factory.open_sessions += 1
+        self._factory._enter()
         return self._inner
 
     def __exit__(self, *exc):
-        self._factory.open_sessions -= 1
+        self._factory._exit()
         return self._inner.__exit__(*exc)
 
     def __getattr__(self, name):
@@ -278,7 +308,8 @@ class _CountingSession:
 
 
 class _SessionProbeLLM(MockLLMClient):
-    """LLM 桩：complete() 时记开放会话数（violation 计数，不中断跑）。"""
+    """LLM 桩：complete() 时记**本线程**持有的会话数（violation 计数，
+    不中断跑——跨线程合法重叠不计，见 _CountingSessionFactory 口径注）。"""
 
     def __init__(self, factory):
         super().__init__()
@@ -286,7 +317,7 @@ class _SessionProbeLLM(MockLLMClient):
         self.violations = 0
 
     def complete(self, messages, run_id):
-        if self._factory.open_sessions > 0:
+        if self._factory.held_by_current_thread() > 0:
             self.violations += 1
         return super().complete(messages, run_id)
 
@@ -426,8 +457,10 @@ def test_run_completes_and_writes_artifacts(svc, root):
 
 def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
-    LLM 调用期间不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
-    会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。"""
+    LLM 调用线程自身不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
+    会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
+    判据逐线程归属（跨线程毫秒级 assemble 重叠是合法并发）；另断言全局
+    开放会话峰值不超过并发上限（合法并发的上界）。"""
     from tagplatform.db import make_session_factory
 
     factory = _CountingSessionFactory(make_session_factory(engine))
@@ -437,6 +470,7 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     assert service.get(run_id).status == "succeeded"
     assert service.get(run_id).failed == 0
     assert llm.violations == 0
+    assert factory.peak_open <= DEFAULT_CONCURRENCY
 
 
 def test_finished_at_on_terminal_state_and_history(svc):
@@ -497,6 +531,19 @@ def test_delete_interrupted_disk_residual(svc):
 def test_delete_path_traversal_returns_false(svc):
     """run_id 路径越界形态（../）按不存在处理，绝不对输出根外动手。"""
     assert svc.delete("../outside") is False
+
+
+def test_delete_dot_and_nested_rejected(svc):
+    """「解析后等于根」与嵌套段形态按不存在处理（终审 Critical）：
+    delete(".") 曾把整个 eval_output_root 连同全部 run 目录 rmtree 清空。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)
+    assert svc.delete(".") is False
+    assert svc.delete("a/b") is False
+    # 爆炸半径核验：输出根与已完成 run 均完好（守卫放行即全灭）
+    root_dir = Path(svc.settings.eval_output_root)
+    assert root_dir.exists()
+    assert _run_dir(svc, run_id).exists()
 
 
 def test_db_zero_writes(engine, svc, root):  # Review Focus 3

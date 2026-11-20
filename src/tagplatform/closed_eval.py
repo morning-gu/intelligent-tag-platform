@@ -626,18 +626,22 @@ class ClosedEvalService:
 
         活跃守卫用 `_active_run_id`（不是注册表 status——worker 落终态在
         status 翻转之后、写盘收尾之前，窄窗口内 status 已终态但删除会与
-        写盘竞态）；`../` 等越界形态按不存在处理（False，与 router _run_dir
-        的 404 同口径）。磁盘 meta 残留 status=running 但不在注册表 →
-        interrupted 语义（进程死亡残留），可删（与 history 推断同口径）。
-        返回是否实际存在并删除。DB 零写入红线不变：只动 eval_output_root
-        下本 run 目录。
+        写盘竞态）；run_id 解析后必须是输出根下的**单段**目录——越界形态
+        （`..`/绝对路径）与「解析后等于根」（`.`，终审 Critical：曾放行
+        rmtree 整个输出根）、嵌套段（`a/b`）一律按不存在处理（False，
+        与 router _run_dir 的 404 同口径）。磁盘 meta 残留 status=running
+        但不在注册表 → interrupted 语义（进程死亡残留），可删（与 history
+        推断同口径）。返回是否实际存在并删除。DB 零写入红线不变：只动
+        eval_output_root 下本 run 目录。
         """
         root = Path(self.settings.eval_output_root)
         try:
-            run_dir = (root / run_id).resolve()
-            run_dir.relative_to(root.resolve())
+            rel = (root / run_id).resolve().relative_to(root.resolve())
         except ValueError:
-            return False  # run_id 路径越界：按不存在处理，绝不越根动手
+            return False  # 越界：按不存在处理，绝不越根动手
+        if len(rel.parts) != 1:
+            return False  # "."（→根本身）/嵌套段：同按不存在，防 rmtree 根
+        run_dir = (root / run_id).resolve()
         with self._lock:
             if self._active_run_id == run_id:
                 raise RunActiveError(
