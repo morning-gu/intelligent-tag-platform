@@ -43,6 +43,7 @@ from tagplatform.closed_eval import (
     MovieResult,
     PRESET_SEED,
     PRESET_SIZE,
+    RunActiveError,
     RunBusyError,
     assemble_report,
     load_gt,
@@ -452,6 +453,50 @@ def test_finished_at_on_terminal_state_and_history(svc):
     datetime.fromisoformat(state.finished_at)  # ISO 形态
     row = next(r for r in svc.history() if r["run_id"] == run_id)
     assert row["finished_at"] is not None
+
+
+def test_delete_terminal_run_removes_disk_and_registry(svc):
+    """删除终态 run：磁盘 run 目录、注册表、历史列表三处一并清除。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)  # worker 完全收尾（active 位释放）
+    assert svc.delete(run_id) is True
+    assert svc.get(run_id) is None
+    assert not _run_dir(svc, run_id).exists()
+    assert all(r["run_id"] != run_id for r in svc.history())
+
+
+def test_delete_active_run_refused(eval_setup):
+    """运行中不可删（active 位守卫——worker 在跑或在收尾落盘均算活跃）。"""
+    gate = _RecordingGateLLM()
+    gate.hold()
+    service = eval_setup(llm=gate)
+    run_id = service.start("emotion", {"mode": "all"})
+    try:
+        with pytest.raises(RunActiveError):
+            service.delete(run_id)
+        assert _run_dir(service, run_id).exists()
+    finally:
+        gate.release()
+    _await_terminal(service, run_id)
+    _drain_active(service)
+
+
+def test_delete_unknown_returns_false(svc):
+    assert svc.delete("run-nope") is False
+
+
+def test_delete_interrupted_disk_residual(svc):
+    """进程死亡残留（磁盘 status=running、注册表无）= interrupted，可删。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    with svc._lock:
+        svc._runs.pop(run_id)
+    assert svc.delete(run_id) is True
+    assert not _run_dir(svc, run_id).exists()
+
+
+def test_delete_path_traversal_returns_false(svc):
+    """run_id 路径越界形态（../）按不存在处理，绝不对输出根外动手。"""
+    assert svc.delete("../outside") is False
 
 
 def test_db_zero_writes(engine, svc, root):  # Review Focus 3

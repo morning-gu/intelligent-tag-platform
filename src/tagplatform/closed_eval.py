@@ -79,6 +79,7 @@ import logging
 import os
 import random
 import secrets
+import shutil
 import threading
 import time
 from collections.abc import Collection, Sequence
@@ -352,6 +353,10 @@ class RunBusyError(RuntimeError):
     """已有评测 run 进行中（单进程同时只允许一个 run，重复起跑显式拒绝）。"""
 
 
+class RunActiveError(RuntimeError):
+    """run 仍活跃（worker 在跑或在终态落盘收尾），不可删除——先取消/等收尾。"""
+
+
 class EvalValidationError(ValueError):
     """评测起跑校验失败：数据集不存在 / 选片越权或为空 / 库未就绪 / 库∩gt 零交集。"""
 
@@ -615,6 +620,35 @@ class ClosedEvalService:
                 return False
         event.set()
         return True
+
+    def delete(self, run_id: str) -> bool:
+        """删除终态 run：磁盘 run 目录 + 进程内注册表/取消事件一并清除。
+
+        活跃守卫用 `_active_run_id`（不是注册表 status——worker 落终态在
+        status 翻转之后、写盘收尾之前，窄窗口内 status 已终态但删除会与
+        写盘竞态）；`../` 等越界形态按不存在处理（False，与 router _run_dir
+        的 404 同口径）。磁盘 meta 残留 status=running 但不在注册表 →
+        interrupted 语义（进程死亡残留），可删（与 history 推断同口径）。
+        返回是否实际存在并删除。DB 零写入红线不变：只动 eval_output_root
+        下本 run 目录。
+        """
+        root = Path(self.settings.eval_output_root)
+        try:
+            run_dir = (root / run_id).resolve()
+            run_dir.relative_to(root.resolve())
+        except ValueError:
+            return False  # run_id 路径越界：按不存在处理，绝不越根动手
+        with self._lock:
+            if self._active_run_id == run_id:
+                raise RunActiveError(
+                    f"运行中的 run 不可删除（先取消或等收尾）：{run_id}")
+            state = self._runs.get(run_id)
+            existed = state is not None or run_dir.exists()
+            self._runs.pop(run_id, None)
+            self._cancel_events.pop(run_id, None)
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        return existed
 
     def active_run_id(self) -> str | None:
         """当前进行中的 run_id（无 → None）。"""

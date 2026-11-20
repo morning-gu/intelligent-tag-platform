@@ -122,6 +122,23 @@ def _await_report(client: TestClient, run_id: str,
     pytest.fail(f"run {run_id} 的报告未在 {timeout}s 内落盘")
 
 
+def _await_file(client: TestClient, run_id: str, name: str,
+                timeout: float = 5.0):
+    """轮询产物文件端点至 200。
+
+    write_report 写序 report.json → report.md → metrics.csv（closed_eval
+    :1209 起）：等 report.json 200 后紧接断言 md/csv 仍可能撞上毫秒级
+    窗口（负载下的实测 flake，2026-11-21）——同 _await_report 口径轮询。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = client.get(f"{_BASE}/runs/{run_id}/files/{name}")
+        if r.status_code == 200:
+            return r
+        time.sleep(0.01)
+    pytest.fail(f"run {run_id} 的产物 {name} 未在 {timeout}s 内落盘")
+
+
 # ---------------------------------------------------------------- 数据集列表
 
 
@@ -229,9 +246,8 @@ def test_run_end_to_end(client):
     assert "grid" in rep.json()
     assert rep.json()["banner"] is None  # 全量成功无部分运行 banner
 
-    # 文件白名单内：report.md 可下载
-    assert client.get(
-        f"{_BASE}/runs/{run_id}/files/report.md").status_code == 200
+    # 文件白名单内：report.md 可下载（md/csv 在 json 后落盘，轮询到出现）
+    assert _await_file(client, run_id, "report.md").status_code == 200
 
     # 历史列表含本 run（摘要档随报告落盘：θ=0.4 的 K=10 在默认档内）
     rows = client.get(f"{_BASE}/runs").json()
@@ -248,13 +264,58 @@ def test_files_whitelist_404(client):
     run_id = _start_run(client).json()["run_id"]
     _await_terminal(client, run_id)
     # 先等报告落盘（终态写序 meta→raw→report 的窄窗口），再验白名单全量稳定
+    # （md/csv 在 json 后毫秒级落盘，逐文件轮询——同 _await_report 口径）
     _await_report(client, run_id)
     base = f"{_BASE}/runs/{run_id}/files"
     for name in ("report.md", "metrics.csv", "raw_results.json",
                  "meta.json", "progress.jsonl"):
-        assert client.get(f"{base}/{name}").status_code == 200, name
+        assert _await_file(client, run_id, name).status_code == 200, name
     assert client.get(f"{base}/whatever.txt").status_code == 404
     assert client.get(f"{base}/report.json").status_code == 404
+
+
+# ---------------------------------------------------------------- 删除
+
+
+def test_delete_run_endpoint(client):
+    """DELETE 终态 run：200 {ok} → 详情/列表 404；重复删除 → 404。"""
+    _seed_dataset_and_library(client)
+    run_id = _start_run(client).json()["run_id"]
+    _await_terminal(client, run_id)
+    _await_report(client, run_id)
+    # 报告落盘后 active 位可能还有毫秒级释放窗口：短轮询到 200
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        r = client.delete(f"{_BASE}/runs/{run_id}")
+        if r.status_code == 200:
+            break
+        time.sleep(0.01)
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert client.get(f"{_BASE}/runs/{run_id}").status_code == 404
+    # 重复删除 → 404（资源消失语义，与 GET 未知 run 同口径）
+    assert client.delete(f"{_BASE}/runs/{run_id}").status_code == 404
+    # 历史列表不再含该 run
+    assert all(row["run_id"] != run_id
+               for row in client.get(f"{_BASE}/runs").json())
+
+
+def test_delete_active_run_409(client):
+    """运行中删除 → 409 带原因（active 位守卫）。"""
+    _seed_dataset_and_library(client)
+    gate = _GateLLM()
+    gate.hold()
+    service = client.app.state.closed_eval
+    original_llm = service._llm
+    service._llm = gate
+    try:
+        run_id = _start_run(client).json()["run_id"]
+        r = client.delete(f"{_BASE}/runs/{run_id}")
+        assert r.status_code == 409
+        assert "不可删除" in r.json()["detail"]
+    finally:
+        gate.release()
+        service._llm = original_llm
+    _await_terminal(client, run_id)
 
 
 # ---------------------------------------------------------------- 取消
@@ -382,7 +443,7 @@ def test_dataset_root_default_and_switch(client, tmp_path):
 
 
 def test_admin_only_all_endpoints(client):
-    """全部 10 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
+    """全部 11 端点仅 admin：建 reviewer → 换登录态 → 逐一 403。"""
     _seed_dataset_and_library(client)
     assert client.post("/api/v1/users", json={
         "username": "bob", "password": "pw-bob-1", "role": "reviewer"
@@ -401,6 +462,7 @@ def test_admin_only_all_endpoints(client):
         lambda: client.get(f"{_BASE}/runs"),
         lambda: client.get(f"{_BASE}/runs/{run_id}"),
         lambda: client.post(f"{_BASE}/runs/{run_id}/cancel"),
+        lambda: client.delete(f"{_BASE}/runs/{run_id}"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/report"),
         lambda: client.get(f"{_BASE}/runs/{run_id}/files/report.md"),
         lambda: client.get(f"{_BASE}/dataset-root"),

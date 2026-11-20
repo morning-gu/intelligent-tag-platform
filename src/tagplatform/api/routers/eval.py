@@ -1,4 +1,4 @@
-"""`/api/v1/eval/closed` 路由：闭环评测 admin 端点（8 个，全部仅 admin）。
+"""`/api/v1/eval/closed` 路由：闭环评测 admin 端点（11 个，全部仅 admin）。
 
 薄路由层（plan Task 6）：服务层是 tagplatform.closed_eval.ClosedEvalService
 （数据集扫描/干跑运行器/报告与历史，DB 零写入），router 只做协议转换——
@@ -33,6 +33,7 @@ from tagplatform.closed_eval import (
     DEFAULT_CONCURRENCY,
     ClosedEvalService,
     EvalValidationError,
+    RunActiveError,
     RunBusyError,
     movie_entries,
     scan_datasets,
@@ -318,6 +319,28 @@ def cancel_run(
     """请求取消 → {ok}：受理 true（worker 不再提交新片，在途片跑完）；
     run 不存在或已终态 → false（幂等意图，重复取消不报错）。"""
     return {"ok": service.cancel(run_id)}
+
+
+@router.delete("/runs/{run_id}")
+def delete_run(
+    run_id: str,
+    _admin: UserAccount = Depends(require_admin),
+    service: ClosedEvalService = Depends(get_closed_eval),
+) -> dict:
+    """删除终态 run（磁盘产物 + 进程内注册表）→ {ok: true}。
+
+    错误映射：活跃 run（含终态落盘窄窗口）→ 409 带原因；不存在/已删 →
+    404（与 GET 未知 run 同口径，重复删除即 404）。只动 eval_output_root
+    下本 run 目录，DB 零写入红线不变。"""
+    try:
+        ok = service.delete(run_id)
+    except RunActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"评测 run 不存在：{run_id!r}")
+    return {"ok": True}
 
 
 @router.get("/runs/{run_id}/report")
