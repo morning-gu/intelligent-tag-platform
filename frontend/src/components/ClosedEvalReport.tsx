@@ -3,7 +3,8 @@
 // ④ 基线对照表（系统/先验/随机）⑤ 覆盖分布 BarChart（5 桶计数）+ min/中位/max
 // ⑥ Spearman 宏值 + 每片 Collapse ⑦ 失败影片列表（空 → 整块不渲染）⑧ 产物
 // 下载（fileUrl 拼路径 + <a download> 原生下载）⑨ Alert.info 银标准 note 原文
-// + calibre 小字。
+// + calibre 小字。另在 Spearman 节后接「单片明细」表（ClosedEvalMovieTable，
+// runId 直传，摘要/明细拉取由子组件自理）。
 // null 一律「暂无」（None≠0 纪律）：网格格值缺失、CI 缺失（只出值不出 ±）、
 // 档位缺格（k 不在本次档位）、基线缺行、calibre 可空字段同口径。
 // 汇总/基线的取格规则：同 K 的「有值」格中 θ 最接近 0.4（并列取小 θ）——
@@ -19,6 +20,7 @@ import {
 } from '../api/eval'
 import BarChart from './BarChart'
 import type { BarItem } from './BarChart'
+import ClosedEvalMovieTable from './ClosedEvalMovieTable'
 
 const NA = '暂无'
 
@@ -217,6 +219,11 @@ export default function ClosedEvalReport({
             },
           ]}
         />
+      </div>
+
+      <div data-testid="movie-section">
+        <Typography.Title level={5}>单片明细</Typography.Title>
+        <ClosedEvalMovieTable runId={runId} />
       </div>
 
       {report.failed_movies.length > 0 && (
