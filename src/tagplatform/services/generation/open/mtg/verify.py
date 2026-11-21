@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import logging
 
+from tagplatform.capabilities.llm.usage import accumulate_usage
+
 VERIFY_MARKER = "## 相似度复核"
 
 # 单次最多复核多少对：一部片子通常 5-10 对，40 是上限保险
@@ -26,6 +28,31 @@ _RETRY_HINT = (
     "\n\n上一次输出无法解析：只输出一个 JSON 对象，形如 "
     '{"results":[{"candidate":"候选原文","same":true}]}，'
     "不要解释、不要 Markdown 代码块。"
+)
+
+# ---- 指令文案（与解析器互为协议）----
+# 提取自 _verify_messages 的函数体字面量，逐字未改。本模块的
+# parse_verify_results 就是这段文案的解析端：候选行 `- 候选｜库标签｜相似度`
+# 的行格式、输出 JSON 形状 {"results":[{"candidate","same"}]}、"每行都要给一条"
+# 两侧必须同改——文案要求什么、解析就认什么，改动只落一侧=静默丢对子。
+VERIFY_INSTRUCTIONS = (
+    "下面每行是一组「候选标签｜已有标签｜相似度」。\n"
+    "判断标准只有一条：如果这两个词都进了标签库，审核的人会不会认为它们是"
+    "重复条目、只该留一条？会 → same=true，否则 false。\n"
+    "答 true 的典型情况（同一含义的详略/近义说法，合并后信息不丢，"
+    "原措辞会作为别名保留）：\n"
+    "- 压抑沉重 / 压抑\n"
+    "- 古典史诗 / 宏大史诗\n"
+    "- 悬疑神秘 / 悬疑\n"
+    "答 false 的三种情况：\n"
+    "1. 意思相反（非线性叙事 / 线性叙事）；\n"
+    "2. 字面像但指不同事物（友情与背叛 / 权力与背叛；超能力觉醒 / 绝境觉醒）；\n"
+    "3. 候选是另一个独立概念，只是共享了词（暴君多疑 / 多疑 视情况，"
+    "共享词但主体不同的判 false）。\n"
+)
+VERIFY_OUTPUT_FORMAT = (
+    '只输出一个 JSON 对象：{"results":[{"candidate":"候选原文","same":true}]}，'
+    "每行都要给一条，不要解释、不要 Markdown 代码块。"
 )
 
 logger = logging.getLogger(__name__)
@@ -53,22 +80,9 @@ def _pair_line(candidate: str, library: str, score: str) -> str:
 def _verify_messages(lines: str) -> list[dict]:
     text = (
         f"{VERIFY_MARKER}\n"
-        "下面每行是一组「候选标签｜已有标签｜相似度」。\n"
-        "判断标准只有一条：如果这两个词都进了标签库，审核的人会不会认为它们是"
-        "重复条目、只该留一条？会 → same=true，否则 false。\n"
-        "答 true 的典型情况（同一含义的详略/近义说法，合并后信息不丢，"
-        "原措辞会作为别名保留）：\n"
-        "- 压抑沉重 / 压抑\n"
-        "- 古典史诗 / 宏大史诗\n"
-        "- 悬疑神秘 / 悬疑\n"
-        "答 false 的三种情况：\n"
-        "1. 意思相反（非线性叙事 / 线性叙事）；\n"
-        "2. 字面像但指不同事物（友情与背叛 / 权力与背叛；超能力觉醒 / 绝境觉醒）；\n"
-        "3. 候选是另一个独立概念，只是共享了词（暴君多疑 / 多疑 视情况，"
-        "共享词但主体不同的判 false）。\n"
+        f"{VERIFY_INSTRUCTIONS}"
         f"{lines}\n"
-        '只输出一个 JSON 对象：{"results":[{"candidate":"候选原文","same":true}]}，'
-        "每行都要给一条，不要解释、不要 Markdown 代码块。"
+        f"{VERIFY_OUTPUT_FORMAT}"
     )
     return [{"role": "user", "content": text}]
 
@@ -117,10 +131,7 @@ def verify_pairs(client, pairs: list[tuple[str, str, float]], *,
             logger.warning("相似度复核调用失败：%s", exc)
             return {}
         if usage is not None:
-            usage["calls"] = usage.get("calls", 0) + 1
-            for key in ("prompt_tokens", "completion_tokens"):
-                usage[key] = (usage.get(key, 0)
-                              + int((response.usage or {}).get(key, 0) or 0))
+            accumulate_usage(usage, response.usage)
         if not getattr(response, "ok", True):
             logger.warning("相似度复核响应异常：%s",
                            (response.raw or {}).get("error"))

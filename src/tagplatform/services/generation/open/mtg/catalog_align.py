@@ -16,7 +16,8 @@
 - ``duplicate``：名字归一后完全相同；
 - ``suspect``：库内某个名字（≥2 字）被候选包含、或与最像那条的字符重合
   ≥ ``name_overlap``、或与最像那条的余弦 ≥ ``suspect_cosine``
-  （0.87 ≈ 候选对库随机配对的 99.9% 分位 0.866）；
+  （默认 0.74——suspect 只影响复核与排序，复核不通过回退 new，不直接
+  改写产出；历史标定 0.87 的出处见 settings 注释）；
 - ``new``：其余。
 
 余弦只在"候选（query）× 库标签（passage）"之间比较。库内两条标签互比的
@@ -36,8 +37,12 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagDefine
-from tagplatform.services.tags.library import LibraryTag, is_deprecated  # 定义在 library，避免循环导入
-from tagplatform.services.generation.open.mtg.merge import normalize_tag
+from tagplatform.services.tags.library import (  # 定义在 library，避免循环导入
+    LibraryTag,
+    is_deprecated,
+    is_placeholder,
+)
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.schemas import ContentJSON
 from tagplatform.capabilities.vectors import decode_vector
 
@@ -53,14 +58,9 @@ BAND_NEW = "new"
 # 排序用：数值越大越优先（新词优先占名额）
 BAND_RANK = {BAND_NEW: 2, BAND_SUSPECT: 1, BAND_DUPLICATE: 0}
 
-# 导入模板里的占位行（实测库里有"按 YYYY-MM-DD 填写"这种）。它们既不该
-# 出现在提示词里，也不该被当成对齐目标——否则生成的新词可能被替换成一句模板。
-_PLACEHOLDER_MARKS = ("YYYY-MM-DD", "yyyy-mm-dd", "填写", "示例", "TODO")
+# 模板占位行判定（is_placeholder）单一来源在 services.tags.library——本模块与
+# library_index 共用同一份词表，避免"库侧过滤了、对齐侧没过滤"的漂移。
 
-
-def _is_placeholder(name: str) -> bool:
-    """模板占位行识别：命中明显是"填表说明"而非标签的写法。"""
-    return any(mark in name for mark in _PLACEHOLDER_MARKS)
 
 
 
@@ -89,13 +89,13 @@ def load_library_index(session: Session, *, dim: int | None = None) -> list[Libr
     不会出现"候选撞上一个分类名"。
 
     `dim`：查询向量的维度。库内向量来自导入时算好的那份，换句向量模型后
-    必须重灌（scripts/reembed_catalog.py）；万一忘了重灌，维度对不上会让
+    必须重灌（python -m tagplatform.reembed）；万一忘了重灌，维度对不上会让
     search_similar 抛 ValueError、整条生成任务失败。这里直接跳过维度不符的
     行：宁可这一轮没有库可比（全部按新词出），也不要让任务挂掉。
     """
     rows = [row for row in session.query(TagDefine).all()
             if not is_deprecated(row.status) and row.embedding
-            and not _is_placeholder(row.tag_name)]
+            and not is_placeholder(row.tag_name)]
     index: list[LibraryTag] = []
     skipped = 0
     for row in rows:
@@ -107,7 +107,7 @@ def load_library_index(session: Session, *, dim: int | None = None) -> list[Libr
                                 vector=vector))
     if skipped:
         logger.warning("标签库有 %d 条维度不符的向量（期望 %d），已跳过——"
-                       "换过句向量模型就要跑 scripts/reembed_catalog.py", skipped, dim)
+                       "换过句向量模型就要跑 python -m tagplatform.reembed", skipped, dim)
     return index
 
 
@@ -160,7 +160,7 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
 
     by_key: dict[str, list[LibraryTag]] = {}
     for tag in index:
-        by_key.setdefault(normalize_tag(tag.name), []).append(tag)
+        by_key.setdefault(normalize_key(tag.name), []).append(tag)
     library_names = [tag.name for tag in index]
     matrix = np.stack([tag.vector for tag in index])
     queries = embedder.embed(names, role="query")
@@ -182,7 +182,7 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
         cosine = float(sims[top])
         nearest = index[top]
 
-        exact_hits = by_key.get(normalize_tag(name))
+        exact_hits = by_key.get(normalize_key(name))
         if exact_hits:
             exact, note = _pick(exact_hits)
             result[name] = Alignment(

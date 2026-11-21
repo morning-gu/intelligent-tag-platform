@@ -32,6 +32,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from tagplatform.capabilities.llm.usage import accumulate_usage
 from tagplatform.services.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
 from tagplatform.services.generation.open.mtg.catalog_align import (
@@ -54,8 +55,8 @@ from tagplatform.services.generation.open.mtg.judge import build_judge_template,
 from tagplatform.services.generation.open.mtg.merge import (
     MergedCandidate,
     merge_candidates,
-    normalize_tag,
 )
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import parse_generation_items
 from tagplatform.services.generation.open.mtg.prompt_samples import SampledPromptClient
 from tagplatform.services.generation.open.mtg.prompts import (
@@ -132,52 +133,44 @@ def _require_quotes(verdicts: dict[str, dict], haystack: str) -> None:
 _IMPORTANCE_RANK = {"core": 3, "secondary": 2, "incidental": 1}
 
 
-def _add_usage(total: dict, usage: dict | None) -> None:
-    usage = usage or {}
-    total["calls"] = total.get("calls", 0) + 1
-    for key in ("prompt_tokens", "completion_tokens"):
-        total[key] = total.get(key, 0) + int(usage.get(key, 0) or 0)
+def _make_stage_client(settings: Settings, llm, *, temperature: float,
+                       max_tokens: int | None = None):
+    """judge / verify 阶段客户端工厂（原两函数 85% 相同，参数化合并）。
+
+    可复用判定按**能力探测**而非客户端类型：配置开关 settings.use_mock_llm，
+    或客户端声明 `zero_network` 能力位（零网络替身，如 MockLLMClient）——
+    管线因此不 import 测试替身的类型（测试关注点不泄漏进生产代码），任何
+    声明该能力位的客户端都适配。可复用 = 直接把传入客户端当阶段客户端；
+    否则按 mtg_judge_model + 阶段参数另建真实客户端：
+    - judge：温度取 settings.mtg_judge_temperature，不限输出（一次 20 条判决，
+      输出量本来就大）；
+    - verify：温度 0 且卡 max_tokens（推理模型在模棱两可的对子上会把思考
+      写爆，实测一次 27k completion tokens 把 4 分钟的任务拖到 7 分钟；
+      超限解析失败 → 不替换，代价可控）。
+    """
+    if settings.use_mock_llm or getattr(llm, "zero_network", False):
+        return llm
+    from tagplatform.capabilities.llm import OpenAIClient
+    return OpenAIClient(
+        model=settings.mtg_judge_model,
+        base_url_env=settings.llm_base_url_env,
+        api_key_env=settings.llm_api_key_env,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        request_interval=settings.llm_request_interval,
+    )
 
 
 def _make_judge_client(settings: Settings, llm):
-    """judge 客户端：mock 路径复用传入的 mock；真实路径按 judge 模型另建。
-
-    判定"mock 路径"有两个依据——配置开关，或调用方传进来的就是
-    MockLLMClient（单元测试与进程内 e2e 都走后者），避免测试意外联网。
-    """
-    from tagplatform.capabilities.llm.mock import MockLLMClient
-    if settings.use_mock_llm or isinstance(llm, MockLLMClient):
-        return llm
-    from tagplatform.capabilities.llm import OpenAIClient
-    return OpenAIClient(
-        model=settings.mtg_judge_model,
-        base_url_env=settings.llm_base_url_env,
-        api_key_env=settings.llm_api_key_env,
-        temperature=settings.mtg_judge_temperature,
-        request_interval=settings.llm_request_interval,
-    )
+    """judge 阶段客户端（_make_stage_client 的 judge 特化）。"""
+    return _make_stage_client(settings, llm,
+                              temperature=settings.mtg_judge_temperature)
 
 
 def _make_verify_client(settings: Settings, llm):
-    """相似度复核客户端：与 judge 同模型，但温度 0 且**卡输出上限**。
-
-    judge 一次要出 20 条判决，输出量本来就大；复核只有几条二分类，实测却
-    有一次烧掉 27k completion tokens（推理模型在模棱两可的对子上反复权衡），
-    把 4 分钟的任务拖到 7 分钟。这里给 max_tokens 兜底，超了就解析失败 →
-    不替换，代价可控。
-    """
-    from tagplatform.capabilities.llm.mock import MockLLMClient
-    if settings.use_mock_llm or isinstance(llm, MockLLMClient):
-        return llm
-    from tagplatform.capabilities.llm import OpenAIClient
-    return OpenAIClient(
-        model=settings.mtg_judge_model,
-        base_url_env=settings.llm_base_url_env,
-        api_key_env=settings.llm_api_key_env,
-        temperature=0.0,
-        max_tokens=settings.open_library_verify_max_tokens,
-        request_interval=settings.llm_request_interval,
-    )
+    """相似度复核阶段客户端（_make_stage_client 的 verify 特化）。"""
+    return _make_stage_client(settings, llm, temperature=0.0,
+                              max_tokens=settings.open_library_verify_max_tokens)
 
 
 def _dir_hint_entries(tag_library, spec: GenerationSpec,
@@ -338,7 +331,7 @@ def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
                     ) -> tuple[list[dict], int]:
     """单轮生成调用 → 过滤后的候选条目；顺带累计 usage 与成功解析轮数。"""
     response = client.complete(messages, f"{spec.run_id}:{suffix}")
-    _add_usage(usage, response.usage)
+    accumulate_usage(usage, response.usage)
     if not response.ok:
         raise RuntimeError(f"LLM 调用失败（{suffix}）: {response.raw.get('error')}")
     try:
@@ -477,7 +470,7 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
     accepted: list[tuple[MergedCandidate, dict | None, list[Evidence]]] = []
     dropped: list[dict] = []
     for candidate in merged:
-        verdict = verdicts.get(_key(candidate.tag))
+        verdict = verdicts.get(normalize_key(candidate.tag))
         if settings.mtg_judge_enabled:
             if verdict is None:
                 dropped.append({"tag": candidate.tag, "why": "judge 未返回判决"})
@@ -779,7 +772,7 @@ def _generalize_descriptions(spec: GenerationSpec, llm, contents, tags,
              for tag in needs_desc],
             names=names, run_id=spec.run_id, usage=desc_usage)
         for tag in needs_desc:
-            tag.candidate_description = desc_filled.get(normalize_tag(tag.tag_name))
+            tag.candidate_description = desc_filled.get(normalize_key(tag.tag_name))
     descriptions_summary = {
         "needs": len(needs_desc),
         "filled": len(desc_filled),
@@ -956,11 +949,6 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
                 len(runs), frame_count, len(merged), len(tags), elapsed)
     return tags
-
-
-def _key(tag: str) -> str:
-    """与合并层/judge 层一致的归一化键。"""
-    return "".join(ch for ch in tag.casefold() if ch.isalnum())
 
 
 def _write_report(settings: Settings, task_id: str, report: dict) -> None:

@@ -78,11 +78,6 @@ function SummaryView({ summary }: { summary: ImportSummary }) {
             { title: '标签名', dataIndex: 'tag_name' },
             { title: '问题码', dataIndex: 'code' },
             { title: '明细', dataIndex: 'detail' },
-            {
-              title: '相似标签',
-              dataIndex: 'similar_to',
-              render: (v: string | null) => v ?? '—',
-            },
           ]}
           dataSource={summary.issues}
           pagination={false}

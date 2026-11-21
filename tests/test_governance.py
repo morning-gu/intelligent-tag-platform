@@ -15,14 +15,13 @@
 - tag_change_log action='import'：after_json 带 task_id（revoke/export
   反查键），kind 区分 dir/tag 行；
 - 复活：deprecated 同 (dir,name) 再导入恢复 active、保留原 tag_id；
-- 批量编码：全批一次 embed 调用；GovernanceConfig 随 semantic_similar
-  退役为空壳（v1 allowed_tag_types 白名单校验早已随 tag_type 枚举化退役）。
+- 批量编码：全批一次 embed 调用；GovernanceConfig 空壳与 Issue.similar_to
+  占位已删除（v1 allowed_tag_types 白名单校验早已随 tag_type 枚举化退役）。
 
 状态字面量：v2 统一 "deprecated"（v1 "deprecate" 退役）。
 """
 
 import json
-from dataclasses import fields
 from datetime import datetime, timezone
 
 import numpy as np
@@ -32,7 +31,6 @@ from conftest import MOCK_EMBEDDER
 from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.services.tags.governance import TagRow, parse_tag_excel, run_governance
 from tagplatform.services.tags.governance.pipeline import (
-    GovernanceConfig,
     is_directory_row,
     referenced_dir_names,
 )
@@ -442,14 +440,13 @@ def test_change_log_import_rows_carry_task_id(session):
 
 # ---------- 配置与批量编码 ----------
 
-def test_governance_config_threshold_only(session):
-    # GovernanceConfig 随 semantic_similar 退役为空壳：无字段，显式传参
-    # 不再影响判定（不同名同向量余弦 1.0 依旧放行）
-    assert not [f.name for f in fields(GovernanceConfig)]
+def test_semantic_similar_check_retired(session):
+    # semantic_similar 检查退役（v2 随手动导入取消余弦相似控制，治理无
+    # 配置面——旧 GovernanceConfig 空壳已删）：不同名同向量（余弦 1.0）
+    # 依旧放行，不产生任何问题项
     run_governance([_row("推理", desc="以解谜推进")], session, SameVecEmbedder())
-    cfg = GovernanceConfig()
     res = run_governance([_row("侦探", desc="另一段描述")], session,
-                         SameVecEmbedder(), config=cfg)
+                         SameVecEmbedder())
     assert res.issues == [] and len(res.inserted) == 1
 
 

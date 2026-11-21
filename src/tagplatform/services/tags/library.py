@@ -443,8 +443,12 @@ _INDEX_LOCK = threading.Lock()
 
 
 def _embeddings_key(library: TagLibrary, embedder, dir_ids) -> tuple:
+    # embedder.name 是 Embedder 协议声明的字段（mock/local/remote 三实现都
+    # 有）：同一模型名的向量同空间，缓存键按模型区分——比旧实现里
+    # getattr(model_name) or id(embedder) 语义正确（同模型不同实例的向量
+    # 相同，理应共享缓存）。
     return (library.version, library.source, tuple(sorted(dir_ids or ())),
-            getattr(embedder, "model_name", None) or id(embedder))
+            embedder.name)
 
 
 def library_index(library: TagLibrary, embedder,
@@ -460,7 +464,7 @@ def library_index(library: TagLibrary, embedder,
             return cached
 
     tags = [t for t in library.tags_in_dirs(dir_ids)
-            if not is_deprecated(t.status) and not _is_placeholder(t.tag_name)]
+            if not is_deprecated(t.status) and not is_placeholder(t.tag_name)]
     if not tags:
         index: list[LibraryTag] = []
     else:
@@ -497,7 +501,7 @@ def dir_vectors(library: TagLibrary, embedder,
     else:
         samples: dict[str, list[str]] = {}
         for tag in library.tags():
-            if is_deprecated(tag.status) or _is_placeholder(tag.tag_name):
+            if is_deprecated(tag.status) or is_placeholder(tag.tag_name):
                 continue
             bucket = samples.setdefault(tag.dir_id, [])
             if len(bucket) < _DIR_SAMPLE_TAGS:
@@ -524,12 +528,15 @@ def dir_text(directory, sample_tags: list[str] | None = None) -> str:
     return "。".join(parts)
 
 
-_PLACEHOLDER_MARKS = ("YYYY-MM-DD", "yyyy-mm-dd", "填写", "示例", "TODO")
+# 导入模板里的占位行（实测库里有"按 YYYY-MM-DD 填写"这种）。它们不该进
+# 索引/提示词，也不该被当成对齐目标——否则生成的新词可能被替换成一句模板。
+# 单一来源：mtg/catalog_align 从这里引用，避免两份词表漂移。
+PLACEHOLDER_MARKS = ("YYYY-MM-DD", "yyyy-mm-dd", "填写", "示例", "TODO")
 
 
-def _is_placeholder(name: str) -> bool:
-    """模板占位行（"按 YYYY-MM-DD 填写"这类）不参与对齐。"""
-    return any(mark in name for mark in _PLACEHOLDER_MARKS)
+def is_placeholder(name: str) -> bool:
+    """模板占位行识别：命中明显是"填表说明"而非标签的写法。"""
+    return any(mark in name for mark in PLACEHOLDER_MARKS)
 
 
 @dataclass

@@ -87,13 +87,11 @@ _DEFAULT_TAG_TYPE = "val_fixed"
 
 @dataclass
 class Issue:
-    """单行治理问题；similar_to 保留字段位（semantic_similar 退役后
-    现有 issue 码不再填充，历史序列化结果兼容）。"""
+    """单行治理问题（similar_to 字段随 semantic_similar 检查退役一并删除）。"""
 
     tag_name: str
     code: str
     detail: str
-    similar_to: str | None = None
 
 
 @dataclass
@@ -109,16 +107,6 @@ class GovernanceResult:
     task_id: str
     inserted: list[str]
     issues: list[Issue]
-
-
-@dataclass
-class GovernanceConfig:
-    """治理显式配置。v2 随手动导入取消余弦相似控制，semantic_similar
-    检查退役（similar_threshold / settings.semantic_similar_threshold
-    一并退役）；类保留为 run_governance 的 config 参数类型占位——
-    显式传参（如旧测试）被忽略，不再影响判定行为。"""
-
-    pass
 
 
 @dataclass(eq=False)
@@ -669,17 +657,12 @@ def _embed_rows(rows: list[TagRow], dir_indexes: set[int], embedder,
     return uncat_existing, uncat_dir_id, needs_uncat, uncat_vec, batch_vecs
 
 
-def run_governance(rows: list[TagRow], session: Session, embedder,
-                   config: GovernanceConfig | None = None, *,
+def run_governance(rows: list[TagRow], session: Session, embedder, *,
                    task: TagImportTask | None = None,
                    file_name: str = "governance",
                    parse_errors: list[RowError] | None = None) -> GovernanceResult:
     """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
-    审计日志落库并提交。
-
-    config 参数保留仅为既有调用方（tests、API 路由）签名兼容；
-    semantic_similar 检查退役后其阈值不再参与判定，配置对象被忽略。
-    """
+    审计日志落库并提交。"""
     now = datetime.now(timezone.utc)
     if task is None:
         task = TagImportTask(

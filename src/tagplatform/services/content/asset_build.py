@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.services.content.assets import AssetBuilder, MatchResult, build_index, match, source_tag
+from tagplatform.services.content.assets.lexicon import RELEASE_GROUP_NOISE, YEAR_RE
 from tagplatform.services.content.content_import import import_content
 from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset
@@ -77,19 +78,9 @@ def asset_for_movie(session: Session, movie_id: str) -> MediaAsset | None:
     return session.get(MediaAsset, task.asset_id) if task is not None else None
 
 
-# 文件名里的发布组噪音：这些词不参与片名比对（`Memento.1080p.BluRay.x264`
-# 与资产标题 `Memento` 是同一部片）。
-_NOISE_TOKENS = frozenset({
-    "1080p", "720p", "2160p", "480p", "4k", "8k", "uhd",
-    "bluray", "blu", "ray", "brrip", "bdrip", "webrip", "web", "dl", "webdl",
-    "hdrip", "dvdrip", "hdtv", "remux", "hdr", "sdr", "10bit", "8bit",
-    "x264", "x265", "h264", "h265", "hevc", "avc", "aac", "ac3", "eac3",
-    "dts", "ddp", "dd", "atmos", "truehd", "flac", "mp3",
-    "proper", "repack", "extended", "unrated", "imax", "directors", "cut",
-    "multi", "dual", "chs", "cht", "eng", "jpn", "kor", "国语", "粤语",
-    "中字", "字幕", "双语", "高清", "蓝光",
-})
-_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+# 文件名里的发布组噪音：词表单一来源在 assets/lexicon.py（与 dataset 共用
+# 并集口径，两侧过滤行为一致——`Memento.1080p.BluRay.x264` 与资产标题
+# `Memento` 是同一部片）。年份/噪音词过滤见 name_tokens（fullmatch 整词剥离）。
 # 音轨写法（DDP5.1 会被切开成 ddp5 + 1）：按前缀词根整体丢掉
 _CODEC_RE = re.compile(r"^(ddp|dd|dts|aac|ac3|eac3|truehd|atmos|mp3|flac|opus)\d*$")
 
@@ -107,8 +98,8 @@ def name_tokens(name: str) -> str:
     stem = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", stem)
     words = [word for word in stem.split()
              if word
-             and word not in _NOISE_TOKENS
-             and not _YEAR_RE.match(word)
+             and word not in RELEASE_GROUP_NOISE
+             and not YEAR_RE.fullmatch(word)
              and not _CODEC_RE.match(word)
              and not word.isdigit()]
     return " ".join(words)

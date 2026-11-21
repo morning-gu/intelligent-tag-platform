@@ -18,6 +18,8 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import reduce
 
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
+
 
 @dataclass(frozen=True)
 class MergedCandidate:
@@ -40,11 +42,6 @@ class MergedCandidate:
     # 模型自报的归属目录（原始串，可能是 id / 路径 / 名字）；合并时取多数派，
     # 由流水线解析成 dir_id 并校验，这里不做合法性判断。
     dir_raw: str | None = None
-
-
-def normalize_tag(name: str) -> str:
-    """归一化键：只留字母/数字/汉字，casefold，丢弃其余字符（含空白标点）。"""
-    return "".join(ch for ch in name.casefold() if ch.isalnum())
 
 
 def _clusters(vectors, threshold: float) -> list[list[int]]:
@@ -89,7 +86,7 @@ def merge_candidates(entries: list[dict], embedder,
     groups: dict[str, dict] = {}
     order: list[str] = []
     for entry in entries:
-        key = normalize_tag(entry["tag"])
+        key = normalize_key(entry["tag"])
         if not key:
             continue
         if key not in groups:

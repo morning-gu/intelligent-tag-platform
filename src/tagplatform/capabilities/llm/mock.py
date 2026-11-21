@@ -227,7 +227,15 @@ def _quality_output(text: str) -> dict:
 
 
 class MockLLMClient:
-    """确定性伪 LLM：哈希即输出，测试与 mock 配置专用。"""
+    """确定性伪 LLM：哈希即输出，测试与 mock 配置专用。
+
+    能力位 `zero_network = True`：mtg 管线构造 judge/verify 阶段客户端时按
+    能力探测（getattr，而非 isinstance 本类）决定"复用传入客户端还是按阶段
+    参数另建真实客户端"——管线因此不 import 测试替身的类型，任何声明该
+    能力位的零网络客户端都适配。
+    """
+
+    zero_network = True
 
     def __init__(self, model: str = "mock-1"):
         self.model = model

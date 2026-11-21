@@ -222,12 +222,13 @@ def _result_out(row: PreAssetTag, info: dict[str, dict],
 # ---------- 标签导入摘要 + 导出归档（tags / imports 两域共用）----------
 
 class IssueOut(BaseModel):
-    """单条治理问题明细（与 governance.Issue 字段一一对应）。"""
+    """单条治理问题明细（与 governance.Issue 字段一一对应；similar_to
+    字段随 semantic_similar 退役删除，历史 result_summary JSON 里的该键
+    由 Pydantic extra=ignore 吞掉）。"""
 
     tag_name: str
     code: str
     detail: str
-    similar_to: str | None = None
 
 
 class ParseErrorOut(BaseModel):

@@ -46,7 +46,7 @@ const IMPORT_RESULT: ImportTaskDetail = {
     inserted: 8,
     skipped: 2,
     issues: [
-      { tag_name: '打斗', code: 'duplicate', detail: '与现有标签重复', similar_to: '搏斗' },
+      { tag_name: '打斗', code: 'duplicate', detail: '与现有标签重复' },
     ],
     parse_errors: [
       { row_number: 33, tag_name: null, code: 'missing_tag_name', detail: '标签名缺失' },
@@ -243,7 +243,8 @@ describe('TagImports 导入任务页（v2）', () => {
     const issueRow = screen.getByText('打斗').closest('tr')!
     expect(issueRow).toHaveTextContent('duplicate')
     expect(issueRow).toHaveTextContent('与现有标签重复')
-    expect(issueRow).toHaveTextContent('搏斗')
+    // similar_to 字段已随后端 semantic_similar 退役删除：无"相似标签"列
+    expect(screen.queryByText('相似标签')).not.toBeInTheDocument()
     expect(screen.getByText('解析失败（1）')).toBeInTheDocument()
     const parseRow = screen.getByText('missing_tag_name').closest('tr')!
     expect(parseRow).toHaveTextContent('33')

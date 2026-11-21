@@ -180,7 +180,13 @@ def _clamp_confidence(value) -> float:
 
 
 def parse_judge_items(text: str) -> list[dict]:
-    """审核输出 → [{tag, verdict, importance, confidence, scenes, reason}]。"""
+    """审核输出 → [{tag, verdict, importance, confidence, scenes, reason}]。
+
+    文案与解析互为协议：judge 提示词（prompts.JUDGE_CRITERIA / JUDGE_ROLE_BRIEF）
+    与重试提示（judge._RETRY_HINT）描述的输出形状就是本函数的输入契约——
+    verdict/importance 取值集、quote/reason 截断上限与本函数硬编码一致；
+    改字段名、取值集或 JSON 形状时提示与解析两侧必须同改。
+    """
     items: list[dict] = []
     for entry in extract_json_array(text):
         if not isinstance(entry, dict):

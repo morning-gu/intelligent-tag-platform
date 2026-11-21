@@ -44,6 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tagplatform.capabilities.llm.usage import combined_usage
 from tagplatform.services.content.assets.dataset import normalize
 from tagplatform.services.content.assets.emotions import FEELINGS, MOODS, prompt_catalog, to_emotions
 from tagplatform.services.content.assets.subtitles import SubtitleLine, lines_for_scene, load_subtitles
@@ -487,12 +488,6 @@ def _cast_entries(meta: dict, limit: int = 25) -> list[tuple[str, str | None]]:
     return entries
 
 
-def _add_usage(a: dict, b: dict) -> dict:
-    """两次调用的 usage 累加（重试场景）。"""
-    keys = ("prompt_tokens", "completion_tokens")
-    return {**a, **{k: int(a.get(k, 0) or 0) + int(b.get(k, 0) or 0) for k in keys}}
-
-
 # ---------------------------------------------------------------- 编排分段
 # build_movie 拆出的四段（四层重构 Task 9）：读盘 → 分析 → 统计 → 落盘，
 # 函数体逐字搬移，行为零变化（test_assets_builder.py 全绿即验收）。
@@ -638,7 +633,7 @@ class AssetBuilder:
         parsed = parse_scene_result(text)
         if parsed is None:
             text2, usage2 = self._call(messages, plan.scene_id + "#retry")
-            usage = _add_usage(usage, usage2)
+            usage = combined_usage(usage, usage2)
             parsed = parse_scene_result(text2)
         if parsed is None:
             parsed = {"description": plan.source_description, "atmosphere": [],
@@ -660,7 +655,7 @@ class AssetBuilder:
         summary = parse_summary_result(text)
         if not summary:
             text2, usage2 = self._call(messages, f"summary_{movie_id}#retry")
-            usage = _add_usage(usage, usage2)
+            usage = combined_usage(usage, usage2)
             summary = parse_summary_result(text2)
         return (summary or fallback), usage
 

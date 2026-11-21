@@ -51,6 +51,40 @@ def _scope_label(scope: str | None) -> str:
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
 
+# ---- judge 指令文案（与解析器互为协议）----
+# 提取自 render_judge_messages 的函数体字面量，逐字未改。judge 输出的解析端
+# 是 parse.parse_judge_items（verdict/importance 取值集、confidence 夹取、
+# quote/reason 截断都在那里），重试提示 judge._RETRY_HINT 是同一输出协议的
+# 第三次出现——改字段名、取值集或输出 JSON 形状时三处必须同改，改动只落
+# 提示词一侧=靠解析容错兜住的静默漂移（审查 nit #11 的病灶）。
+JUDGE_ROLE_BRIEF = (
+    "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
+    "请逐个判定候选标签是否被内容真实支持。\n\n"
+)
+JUDGE_CRITERIA = (
+    "## 判定标准\n"
+    "- supported：内容中有明确依据（如场景描述、台词、氛围或人物情绪）；\n"
+    "- insufficient：内容不足以判断（不要臆测）；\n"
+    "- contradicted：内容明显与标签矛盾；\n"
+    "- importance：film 按全片展示价值评 core / secondary / incidental。"
+    "scene 按本场检索价值评 core（精确且有区分度）/ secondary（相关但较泛）/ "
+    "incidental（难以帮助定位片段），无需衡量在全片中的重要性。\n"
+    "- confidence：0-1，你对判定结果的把握；\n"
+    "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
+    "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
+    "台词、氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
+    "理由**；找不到能摘的原文就判 insufficient。\n"
+    "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
+    "按候选标明的作用域审核。film 判 supported 时，scenes 必须列出至少两个共同支撑它的真实场景；"
+    "只有一处依据时判 insufficient。scene 只在候选标明的依据场景内核验并引用原文。\n"
+    "只有 quote 能在内容里逐字找到的判定才算数，没有原文依据一律 insufficient。\n"
+    "宁可判 insufficient，也不要放过没有依据的标签。\n\n"
+    "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
+    '{"verdicts":[{"tag":"候选标签原文","verdict":"supported|insufficient|contradicted",'
+    '"importance":"core|secondary|incidental","confidence":0.0,'
+    '"scenes":["场景 id"],"quote":"原文逐字摘录","reason":"30 字以内"}]}'
+)
+
 # prompt 内明细上限（控制 token；资产本身已按场景裁剪过台词）
 _MAX_CAST = 8
 _MAX_SCENE_DESC = 240
@@ -365,31 +399,10 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
 def render_judge_messages(body: str, candidate_lines: str) -> list[dict]:
     text = (
         f"{JUDGE_MARKER}\n"
-        "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
-        "请逐个判定候选标签是否被内容真实支持。\n\n"
+        f"{JUDGE_ROLE_BRIEF}"
         "## 候选标签\n" + candidate_lines + "\n\n"
         "## 影片内容\n" + body + "\n\n"
-        "## 判定标准\n"
-        "- supported：内容中有明确依据（如场景描述、台词、氛围或人物情绪）；\n"
-        "- insufficient：内容不足以判断（不要臆测）；\n"
-        "- contradicted：内容明显与标签矛盾；\n"
-        "- importance：film 按全片展示价值评 core / secondary / incidental。"
-        "scene 按本场检索价值评 core（精确且有区分度）/ secondary（相关但较泛）/ "
-        "incidental（难以帮助定位片段），无需衡量在全片中的重要性。\n"
-        "- confidence：0-1，你对判定结果的把握；\n"
-        "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
-        "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
-        "台词、氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
-        "理由**；找不到能摘的原文就判 insufficient。\n"
-        "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
-        "按候选标明的作用域审核。film 判 supported 时，scenes 必须列出至少两个共同支撑它的真实场景；"
-        "只有一处依据时判 insufficient。scene 只在候选标明的依据场景内核验并引用原文。\n"
-        "只有 quote 能在内容里逐字找到的判定才算数，没有原文依据一律 insufficient。\n"
-        "宁可判 insufficient，也不要放过没有依据的标签。\n\n"
-        "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
-        '{"verdicts":[{"tag":"候选标签原文","verdict":"supported|insufficient|contradicted",'
-        '"importance":"core|secondary|incidental","confidence":0.0,'
-        '"scenes":["场景 id"],"quote":"原文逐字摘录","reason":"30 字以内"}]}'
+        f"{JUDGE_CRITERIA}"
     )
     return [{"role": "user", "content": text}]
 

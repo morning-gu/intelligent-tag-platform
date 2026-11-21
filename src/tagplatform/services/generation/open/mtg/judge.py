@@ -16,6 +16,8 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 """
 from __future__ import annotations
 
+from tagplatform.capabilities.llm.usage import accumulate_usage
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import MTGParseError, parse_judge_items
 from tagplatform.services.generation.open.mtg.prompts import (
     build_judge_messages, candidate_line, render_judge_messages,
@@ -42,18 +44,14 @@ class JudgeError(RuntimeError):
     """judge 调用或解析失败（任务应置 failed，不得静默放行）。"""
 
 
-def _key(tag: str) -> str:
-    """判决映射键：与合并层同一套归一化（去空白标点 + casefold）。"""
-    return "".join(ch for ch in (tag or "").casefold() if ch.isalnum())
-
-
 def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
     """判决项 → {候选归一化标签: 判决}：精确优先，其次唯一前缀匹配。"""
-    tags_by_key = {_key(c["tag"]): c["tag"] for c in candidates if _key(c["tag"])}
+    tags_by_key = {normalize_key(c["tag"]): c["tag"]
+                   for c in candidates if normalize_key(c["tag"])}
     mapped: dict[str, dict] = {}
     leftovers: list[tuple[str, dict]] = []
     for item in items:
-        key = _key(item["tag"])
+        key = normalize_key(item["tag"])
         if key in tags_by_key and key not in mapped:
             mapped[key] = item
         else:
@@ -89,10 +87,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
              "content": messages[0]["content"] + _RETRY_HINT}]
         response = client.complete(request, f"{run_id}:judge{'' if attempt == 0 else attempt}")
         if usage is not None:
-            usage["calls"] = usage.get("calls", 0) + 1
-            for key in ("prompt_tokens", "completion_tokens"):
-                usage[key] = (usage.get(key, 0)
-                              + int((response.usage or {}).get(key, 0) or 0))
+            accumulate_usage(usage, response.usage)
         if not response.ok:
             raise JudgeError(f"judge 调用失败: {response.raw.get('error')}")
         try:

@@ -140,6 +140,11 @@ def test_closed_recall_global_top_k_and_dedup():
 
 
 class _FixedRecallEmbedder:
+    # name 是 Embedder 协议字段（library 的向量缓存键按它区分模型）——
+    # 与其余替身（RecordingEmbedder/_FixedEmbedder 等）同约定
+    name = "fixed-recall"
+    dim = 2
+
     def __init__(self, passage_vectors: dict[str, list[float]]):
         self.passage_vectors = passage_vectors
 

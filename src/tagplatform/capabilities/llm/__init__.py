@@ -14,6 +14,7 @@ from tagplatform.capabilities.llm.client import (
     make_llm_client,
 )
 from tagplatform.capabilities.llm.mock import MockLLMClient
+from tagplatform.capabilities.llm.usage import accumulate_usage, combined_usage
 
 __all__ = ["LLMResponse", "MockLLMClient", "OpenAIClient", "Transport",
-           "make_llm_client"]
+           "accumulate_usage", "combined_usage", "make_llm_client"]

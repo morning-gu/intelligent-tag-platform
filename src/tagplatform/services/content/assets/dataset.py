@@ -21,17 +21,9 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from tagplatform.services.content.assets.lexicon import RELEASE_GROUP_NOISE, YEAR_RE
+
 _IMDB_RE = re.compile(r"(tt\d{7,8})", re.IGNORECASE)
-_YEAR_RE = re.compile(r"(19|20)\d{2}")
-# 发布组/技术标记：出现即从标题里剥离
-_NOISE_TOKENS = {
-    "1080p", "720p", "2160p", "480p", "4k", "uhd", "hdr", "hdr10", "dv",
-    "bluray", "blu", "ray", "bdrip", "brrip", "webrip", "web", "dl", "webdl",
-    "hdtv", "dvdrip", "dvd", "remux", "x264", "x265", "h264", "h265", "hevc",
-    "avc", "aac", "ac3", "dts", "ddp", "atmos", "truehd", "10bit", "8bit",
-    "extended", "remastered", "proper", "repack", "internal", "uncut",
-    "multi", "chs", "cht", "gb", "big5", "hardsub", "hdr", "hq", "hd",
-}
 _ARTICLES = ("the ", "a ", "an ")
 MIN_SCORE = 0.86
 
@@ -86,7 +78,7 @@ def parse_filename(filename: str) -> tuple[str, str]:
     kept: list[str] = []
     for token in tokens:
         low = token.lower()
-        if _YEAR_RE.fullmatch(low) or low in _NOISE_TOKENS:
+        if YEAR_RE.fullmatch(low) or low in RELEASE_GROUP_NOISE:
             continue
         if re.fullmatch(r"\d{3,4}p", low) or re.fullmatch(r"[0-9a-f]{8,}", low):
             continue
