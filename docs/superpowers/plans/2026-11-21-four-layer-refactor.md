@@ -175,7 +175,7 @@ Expected: 零命中（能力层零出层依赖）
 
 - [ ] **Step 3: 迁移 + 协议补齐**（git mv + import 更新 + 协议成员 + 注册时校验）
 
-- [ ] **Step 4: 全量回归** — 全绿；死代码顺带删除：`replaces_pending`、`catalog_align.replaceable`、`DescriptionError`、`candidate_line`（spec 顺修清单死代码簇）
+- [ ] **Step 4: 全量回归** — 全绿；死代码顺带删除：`replaces_pending`、`catalog_align.replaceable`、`DescriptionError`（candidate_line **不删**——执行修正：审查快照过时，当前代码 3 个活调用点，详见 ledger Task 4 ruling）
 
 - [ ] **Step 5: Commit** — `refactor: generation 域归位 services（closed/open/review 子包）+ 协议缝补齐`
 
