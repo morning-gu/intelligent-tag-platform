@@ -283,6 +283,11 @@ describe('ClosedEval 闭环评测页', () => {
     mockIdleApis()
     render(<ClosedEval />)
 
+    // 列头标约定取格（后端 _read_summary 统一约定：θ0.2/θ0.8 最近有值格）
+    expect(screen.getByText('nDCG@10(θ0.2)')).toBeInTheDocument()
+    expect(screen.getByText('P@10(θ0.2)')).toBeInTheDocument()
+    expect(screen.getByText('R@20(θ0.8)')).toBeInTheDocument()
+
     // succeeded 行出现即证明挂载历史拉取完成（数据集拉取由下拉选片用例证明）
     const okRow = (await screen.findByText('2026-11-19 10:00:00')).closest('tr')!
     expect(mockedListRuns).toHaveBeenCalledTimes(1)

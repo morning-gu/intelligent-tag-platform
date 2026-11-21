@@ -17,7 +17,7 @@
 - GET runs/{id}/movies → 单片摘要包层 {theta_used, k_p, k_r, rows}（行
   序失败置顶、P 升序）；GET runs/{id}/movies/{tt} → 单片明细三表；读侧
   容错：raw_results.json 缺失/截断/非 list → 404「无单片明细」，meta
-  档位缺失/损坏 → DEFAULT 档（0.4/10/20），未知 tt → 404。
+  档位缺失/损坏 → DEFAULT 档（缺省取格 θ0.2/θ0.8、K10/20），未知 tt → 404。
 
 夹具：`_write_dataset`（来自 test_closed_eval.py）往
 client.app.state.settings.eval_dataset_root 写迷你 MovieTags（绝不扫
@@ -254,7 +254,7 @@ def test_run_end_to_end(client):
     # 文件白名单内：report.md 可下载（md/csv 在 json 后落盘，轮询到出现）
     assert _await_file(client, run_id, "report.md").status_code == 200
 
-    # 历史列表含本 run（摘要档随报告落盘：θ=0.4 的 K=10 在默认档内）
+    # 历史列表含本 run（摘要档随报告落盘：θ0.2 的 K=10 在默认档内）
     rows = client.get(f"{_BASE}/runs").json()
     mine = next(row for row in rows if row["run_id"] == run_id)
     assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
@@ -547,7 +547,7 @@ def _write_movies_run(client, *, run_id=_MOVIES_RUN, rows=None,
 
 
 def test_run_movies_endpoint(client):
-    """GET /runs/{id}/movies：包层三键来自 meta thetas/ks（0.4/10/20）；
+    """GET /runs/{id}/movies：包层来自 meta thetas/ks（缺省取格 0.2/0.6）；
     行序失败置顶（输入序 A,B → 输出 B,A）；摘要行十键齐全 + 指标手算值。"""
     _seed_dataset_and_library(client)
     _write_movies_run(client)
@@ -555,7 +555,7 @@ def test_run_movies_endpoint(client):
     assert r.status_code == 200
     body = r.json()
     assert (body["theta_p"], body["theta_r"], body["k_p"],
-            body["k_r"]) == (0.4, 0.4, 10, 20)
+            body["k_r"]) == (0.2, 0.6, 10, 20)
     assert [row["tt"] for row in body["rows"]] == ["tt0000002", "tt0000001"]
     fail, hit = body["rows"]
     assert fail["ok"] is False and fail["error"] == "boom"
@@ -582,7 +582,7 @@ def test_run_movie_detail_endpoint(client):
     body = r.json()
     assert body["tt"] == "tt0000001" and body["ok"] is True
     assert (body["theta_p"], body["theta_r"], body["k_p"],
-            body["k_r"]) == (0.4, 0.4, 10, 20)
+            body["k_r"]) == (0.2, 0.6, 10, 20)
     assert [p["tag_id"] for p in body["produced"]] == ["t1", "t2", "t9"]
     assert [p["hit"] for p in body["produced"]] == [True, True, False]
     assert body["produced"][0]["gt_score"] == 0.9
@@ -603,7 +603,7 @@ def test_run_movie_detail_endpoint(client):
     assert (d2["produced"] == [] and d2["out_of_space"] == []
             and d2["misses"] == [])
     assert (d2["theta_p"], d2["theta_r"], d2["k_p"],
-            d2["k_r"]) == (0.4, 0.4, 10, 20)
+            d2["k_r"]) == (0.2, 0.6, 10, 20)
     # 未知 tt → 404
     r3 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt9999999")
     assert r3.status_code == 404
@@ -650,21 +650,21 @@ def test_movies_404_when_rows_not_dict_shaped(client):
 
 def test_movies_default_grid_when_meta_missing(client):
     """meta.json 缺失 / 有 meta 但无 thetas·ks 键（老 run）→ DEFAULT 档
-    照常出数：0.4/10/20（DEFAULT_THETAS→0.4、DEFAULT_KS→k_p 10/k_r 20）。"""
+    照常出数：缺省取格 0.2/0.8（DEFAULT_THETAS 四档）+ K10/20。"""
     _seed_dataset_and_library(client)
     _write_movies_run(client, write_meta=False)
     r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
     assert r.status_code == 200
     body = r.json()
     assert (body["theta_p"], body["theta_r"], body["k_p"],
-            body["k_r"]) == (0.4, 0.4, 10, 20)
+            body["k_r"]) == (0.2, 0.8, 10, 20)
     assert len(body["rows"]) == 2  # 指标照算（rows 有数）
     # meta 存在但缺 thetas/ks 键 → 同回落
     _write_movies_run(client, run_id="run-movies-oldmeta", grid=False)
     body2 = client.get(f"{_BASE}/runs/run-movies-oldmeta/movies").json()
     assert (body2["theta_p"], body2["theta_r"], body2["k_p"],
-            body2["k_r"]) == (0.4, 0.4, 10, 20)
-    # meta 只有 ks 无 thetas → 两键独立回落：thetas 走 DEFAULT（0.4），
+            body2["k_r"]) == (0.2, 0.8, 10, 20)
+    # meta 只有 ks 无 thetas → 两键独立回落：thetas 走 DEFAULT（取格 0.2/0.8），
     # ks 照用（[5] 唯一元素即 P/R 两目标的最近档 → k_p=k_r=5）（终审 Minor）
     out = Path(client.app.state.settings.eval_output_root)
     d3 = out / "run-movies-ks-only"
@@ -675,7 +675,7 @@ def test_movies_default_grid_when_meta_missing(client):
         json.dumps({"run_id": "run-movies-ks-only", "ks": [5]},
                    ensure_ascii=False), encoding="utf-8")
     body3 = client.get(f"{_BASE}/runs/run-movies-ks-only/movies").json()
-    assert body3["theta_p"] == 0.4 and body3["theta_r"] == 0.4  # 缺 → DEFAULT
+    assert (body3["theta_p"], body3["theta_r"]) == (0.2, 0.8)  # 缺 → DEFAULT 取格
     assert body3["k_p"] == 5 and body3["k_r"] == 5  # ks=[5] 照用
 
 
@@ -735,7 +735,7 @@ _THETA_GRID = [0.2, 0.4, 0.6, 0.8]
 
 def test_movies_theta_query_validation(client):
     """θ query 参数：非网格档 → 400 带合法值清单（两端点）；合法拆门 →
-    p 用 θ_p、r/n_relevant 用 θ_r；缺省 → theta_p==theta_r==0.4 回归。"""
+    p 用 θ_p、r/n_relevant 用 θ_r；缺省 → 统一取格 0.2/0.8 回归。"""
     _seed_dataset_and_library(client)
     _write_movies_run(client, rows=_theta_split_rows(), thetas=_THETA_GRID)
 
@@ -761,11 +761,11 @@ def test_movies_theta_query_validation(client):
     assert row["n_relevant"] == 1  # 只数 ≥0.8
 
     default = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").json()
-    assert (default["theta_p"], default["theta_r"]) == (0.4, 0.4)
+    assert (default["theta_p"], default["theta_r"]) == (0.2, 0.8)
     drow = default["rows"][0]
-    assert drow["p_at_k"] == pytest.approx(0.1)  # t1 0.3 < 0.4 不相关
-    assert drow["r_at_k"] == pytest.approx(0.5)  # 相关 {t2,t7}，命中 t2
-    assert drow["n_relevant"] == 2
+    assert drow["p_at_k"] == pytest.approx(0.2)  # θ_p=0.2：t1(0.3) 入相关 → 2/10
+    assert drow["r_at_k"] == pytest.approx(0.0)  # θ_r=0.8：分母只 t7，未产出
+    assert drow["n_relevant"] == 1
 
 
 def test_movie_detail_theta_query(client):

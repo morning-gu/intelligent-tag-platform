@@ -50,6 +50,10 @@ from tagplatform.eval.ranking import (
 
 __all__ = [
     "DEFAULT_KS",
+    "DEFAULT_K_P",
+    "DEFAULT_K_R",
+    "DEFAULT_THETA_P",
+    "DEFAULT_THETA_R",
     "DEFAULT_THETAS",
     "ClosedReport",
     "ClosedSample",
@@ -58,6 +62,17 @@ __all__ = [
     "random_precision_recall",
     "spearman",
 ]
+
+# ---------------------------------------------------------------- 统一取格约定
+# 三处展示位（评测历史 _read_summary、报告汇总卡/基线对照 pickField、单片
+# 明细 movie_breakdown 缺省）共用的取格目标（2026-11-22 用户拍板）：
+# K=10 类指标（P@10/nDCG@10）取 θ≈0.2 行、R@20 取 θ≈0.8 行；取格规则
+# 「最接近目标的有值格、并列取小、无有值格 → None」。前端 ClosedEvalReport
+# 以常量镜像本约定（TS 无法 import，值变更须两侧同步）。
+DEFAULT_THETA_P: float = 0.2
+DEFAULT_THETA_R: float = 0.8
+DEFAULT_K_P: int = 10
+DEFAULT_K_R: int = 20
 
 # 相关门槛网格：gt 分 ≥θ 才算相关；θ 拍一个数会漂移，整条网格一起看
 DEFAULT_THETAS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)

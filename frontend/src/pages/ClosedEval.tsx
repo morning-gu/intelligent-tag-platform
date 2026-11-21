@@ -167,9 +167,10 @@ const columns: NonNullable<TableProps<RunSummary>['columns']> = [
     render: (_, r) => (r.done === null || r.total === null ? '暂无' : `${r.done}/${r.total}`),
   },
   { title: '失败', dataIndex: 'failed', render: metricText },
-  { title: 'nDCG@10', dataIndex: 'ndcg10', render: metricText },
-  { title: 'P@10', dataIndex: 'p10', render: metricText },
-  { title: 'R@20', dataIndex: 'r20', render: metricText },
+  // 列头标约定取格（后端 _read_summary 统一约定：θ0.2/θ0.8 最近有值格）
+  { title: 'nDCG@10(θ0.2)', dataIndex: 'ndcg10', render: metricText },
+  { title: 'P@10(θ0.2)', dataIndex: 'p10', render: metricText },
+  { title: 'R@20(θ0.8)', dataIndex: 'r20', render: metricText },
   { title: '覆盖中位', dataIndex: 'coverage_median', render: metricText },
 ]
 

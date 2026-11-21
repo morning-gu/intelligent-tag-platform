@@ -137,8 +137,9 @@ class RunStateOut(BaseModel):
 
 
 class RunSummaryOut(BaseModel):
-    """历史行（history()）：摘要四键无报告/无该档 → None（宁缺勿崩）；
-    finished_at 终态时刻（meta 终态写盘带出，老 run 无该键 → None）。"""
+    """历史行（history()）：摘要四键按统一取格约定出（p10/ndcg10 @θ≈0.2、
+    r20 @θ≈0.8 的最近有值格，custom-θ run 回退；无报告/无有值格 → None
+    宁缺勿崩）；finished_at 终态时刻（meta 终态写盘带出，老 run 无 → None）。"""
 
     run_id: str
     dataset_id: str | None = None
@@ -175,7 +176,8 @@ class MovieSummaryRowOut(BaseModel):
 
 class MovieSummaryOut(BaseModel):
     """单片摘要包层（增补 2026-11-22 拆 θ）：theta_p/theta_r 为 P 门与
-    R 门各自的实际取值（query 参数或最接近 0.4 的缺省档）；thetas 回传
+    R 门各自的实际取值（query 参数或统一取格约定的缺省 θ≈0.2/θ≈0.8）；
+    thetas 回传
     该 run 的网格档（前端选择器的选项源）；k_p/k_r 仍是确定选取
     （P 看 top-10、R 看 top-20）。前端表头按这些键拼字面量
     （P@{k_p}(θ{theta_p}) / R@{k_r}(θ{theta_r})）。"""
@@ -543,9 +545,9 @@ def get_run_file(
 def get_run_movies(
     run_id: str,
     theta_p: float | None = Query(
-        None, description="P 门 θ（须为 run 网格档；缺省=最接近 0.4）"),
+        None, description="P 门 θ（须为 run 网格档；缺省=统一取格 θ≈0.2）"),
     theta_r: float | None = Query(
-        None, description="R 门 θ（同上；n_relevant 与明细 hit/漏检跟此门）"),
+        None, description="R 门 θ（同上，缺省=统一取格 θ≈0.8；n_relevant 与明细 hit/漏检跟此门）"),
     _admin: UserAccount = Depends(require_admin),
     settings: Settings = Depends(get_settings_dep),
 ) -> MovieSummaryOut:

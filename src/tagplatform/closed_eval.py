@@ -90,7 +90,11 @@ from pathlib import Path
 
 from tagplatform.content_io import load_content
 from tagplatform.eval.closed_ranking import (
+    DEFAULT_K_P,
+    DEFAULT_K_R,
     DEFAULT_KS,
+    DEFAULT_THETA_P,
+    DEFAULT_THETA_R,
     DEFAULT_THETAS,
     ClosedSample,
     evaluate_closed,
@@ -666,8 +670,10 @@ class ClosedEvalService:
         进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
         读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过；report.json 缺失或
         截断（meta→raw→report 写序的非原子窗口）→ 摘要四键为 None，不抛
-        异常。摘要取 θ=0.4、K=10/20 档（无该档 → None，coverage 中位与 θ
-        无关照常读）。
+        异常。摘要取格走统一约定（closed_ranking 常量）：p10/ndcg10 =
+        θ≈0.2 的最近**有值**格 @K=10、r20 = θ≈0.8 的最近有值格 @K=20
+        （并列取小、无有值格 → None，custom-θ run 回退最近有值档），
+        coverage 中位与 θ 无关照常读。
         """
         root = Path(self.settings.eval_output_root)
         try:
@@ -708,7 +714,14 @@ class ClosedEvalService:
 
     @staticmethod
     def _read_summary(run_dir: Path) -> dict:
-        """report.json → 历史摘要四键（θ=0.4、K=10/20；无报告/无该档 → None）。"""
+        """report.json → 历史摘要四键（统一取格约定，2026-11-22）。
+
+        p10/ndcg10 = θ≈DEFAULT_THETA_P(0.2) 的最近**有值**格 @K=10；
+        r20 = θ≈DEFAULT_THETA_R(0.8) 的最近有值格 @K=20。「有值」= 字段
+        值为数值（该 θ 无有效影片 → 格值 None 不算）；距离并列取小
+        （round 9 防浮点噪声）；无有值格 → None（宁缺勿假——custom-θ
+        run 回退最近有值档，不再因缺 0.4 档空列）。
+        """
         summary = {"ndcg10": None, "p10": None, "r20": None,
                    "coverage_median": None}
         try:
@@ -720,18 +733,29 @@ class ClosedEvalService:
             return summary
         grid = report.get("grid")
         if isinstance(grid, list):
-            for point in grid:
-                if not isinstance(point, dict):
-                    continue
-                theta = point.get("theta")
-                if (not isinstance(theta, (int, float))
-                        or abs(theta - 0.4) > 1e-9):
-                    continue
-                if point.get("k") == 10:
-                    summary["ndcg10"] = point.get("ndcg")
-                    summary["p10"] = point.get("precision")
-                elif point.get("k") == 20:
-                    summary["r20"] = point.get("recall")
+
+            def _pick_valued_cell(theta_target: float, k: int,
+                                  field: str):
+                """统一取格：最接近 theta_target 的有值格（并列取小）。
+                与前端 ClosedEvalReport.pickField 同规则，勿单侧漂移。"""
+                valued = [
+                    point for point in grid
+                    if isinstance(point, dict)
+                    and isinstance(point.get("theta"), (int, float))
+                    and point.get("k") == k
+                    and isinstance(point.get(field), (int, float))]
+                if not valued:
+                    return None
+                return min(valued, key=lambda point: (
+                    round(abs(point["theta"] - theta_target), 9),
+                    point["theta"]))[field]
+
+            summary["p10"] = _pick_valued_cell(
+                DEFAULT_THETA_P, DEFAULT_K_P, "precision")
+            summary["ndcg10"] = _pick_valued_cell(
+                DEFAULT_THETA_P, DEFAULT_K_P, "ndcg")
+            summary["r20"] = _pick_valued_cell(
+                DEFAULT_THETA_R, DEFAULT_K_R, "recall")
         coverage = report.get("coverage")
         if isinstance(coverage, dict):
             summary["coverage_median"] = coverage.get("median")
