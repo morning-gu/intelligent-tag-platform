@@ -809,7 +809,7 @@ def test_report_md_and_csv_written(tmp_path):
 def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
     out = Path(svc.settings.eval_output_root)
     assert svc.history() == []  # 输出根不存在 → []
-    # run-old：终态 + 报告齐全（θ=0.4 的 K=10/20 摘要档都在）
+    # run-old：终态 + 报告齐全（统一取格约定的 θ0.2/θ0.8 档 + θ0.4 行在）
     old = out / "run-old"
     old.mkdir(parents=True)
     (old / "meta.json").write_text(json.dumps({
@@ -818,6 +818,12 @@ def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
         "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
     (old / "report.json").write_text(json.dumps({
         "grid": [
+            {"theta": 0.2, "k": 10, "n_valid": 2, "precision": 0.55,
+             "recall": 0.65, "ndcg": 0.75, "precision_random": 0.2,
+             "recall_random": 0.4},
+            {"theta": 0.8, "k": 20, "n_valid": 2, "precision": 0.3,
+             "recall": 0.45, "ndcg": 0.5, "precision_random": 0.1,
+             "recall_random": 0.5},
             {"theta": 0.4, "k": 10, "n_valid": 2, "precision": 0.5,
              "recall": 0.6, "ndcg": 0.7, "precision_random": 0.2,
              "recall_random": 0.4},
@@ -835,7 +841,8 @@ def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
         "run_id": "run-new", "status": "running", "done": 1, "total": 3,
         "failed": 0, "started_at": "2026-11-20T10:00:00+00:00",
         "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
-    # run-wrongtheta：报告只有 θ=0.6 档 → 摘要无该档 → None（覆盖率照读）
+    # run-wrongtheta：报告只有 θ=0.6 档（custom-θ run）→ 统一取格回退
+    # 最近有值格：p10/ndcg10 取 0.6 格、r20 无 K=20 行 → None（覆盖率照读）
     wrong = out / "run-wrongtheta"
     wrong.mkdir()
     (wrong / "meta.json").write_text(json.dumps({
@@ -863,12 +870,66 @@ def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
     assert rows[0]["status"] == "interrupted"
     assert rows[0]["ndcg10"] is None and rows[0]["r20"] is None
     assert rows[1]["status"] == "succeeded"
+    # 统一取格：p10/ndcg10 @θ0.2、r20 @θ0.8（都精确存在）
     assert (rows[1]["ndcg10"], rows[1]["p10"], rows[1]["r20"],
-            rows[1]["coverage_median"]) == (0.7, 0.5, 0.5, 0.8)
-    assert rows[2]["ndcg10"] is None and rows[2]["p10"] is None
+            rows[1]["coverage_median"]) == (0.75, 0.55, 0.45, 0.8)
+    assert (rows[2]["ndcg10"], rows[2]["p10"], rows[2]["r20"]) == (
+        0.9, 0.9, None)  # custom-θ 回退：K=10 落 0.6 格、无 K=20 行
     assert rows[2]["coverage_median"] == 0.5  # 覆盖率与 θ 无关，照常读出
     assert rows[3]["ndcg10"] is None and rows[3]["coverage_median"] is None
     assert all(r["dataset_id"] == "emotion" for r in rows)
+
+
+def test_history_summary_theta_row_empty_falls_back_or_none(svc):  # Review Focus 2
+    """统一取格的「有值格」判定：目标 θ 行的格值为 null（该 θ 无有效影片）
+    → 不算有值，回退最近有值档；整档无值 → None（宁缺勿假）。"""
+    out = Path(svc.settings.eval_output_root)
+    # run-emptyrow：θ0.2 行 K=10 格全 null、θ0.8 行 K=20 格 null → 回退
+    # θ0.4 有值格；K=20 只有 θ0.4 行有值 → r20 也回退 0.4
+    d = out / "run-emptyrow"
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({
+        "run_id": "run-emptyrow", "status": "succeeded", "done": 2, "total": 2,
+        "failed": 0, "started_at": "2026-11-19T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (d / "report.json").write_text(json.dumps({
+        "grid": [
+            {"theta": 0.2, "k": 10, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+            {"theta": 0.8, "k": 20, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+            {"theta": 0.4, "k": 10, "n_valid": 2, "precision": 0.3,
+             "recall": 0.4, "ndcg": 0.4},
+            {"theta": 0.4, "k": 20, "n_valid": 2, "precision": 0.2,
+             "recall": 0.25, "ndcg": 0.3},
+        ]}, ensure_ascii=False), encoding="utf-8")
+    # run-allnull：四行全 null → 全 None（不取无值格的「θ」也不取值）
+    d2 = out / "run-allnull"
+    d2.mkdir(parents=True)
+    (d2 / "meta.json").write_text(json.dumps({
+        "run_id": "run-allnull", "status": "succeeded", "done": 2, "total": 2,
+        "failed": 0, "started_at": "2026-11-18T10:00:00+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (d2 / "report.json").write_text(json.dumps({
+        "grid": [
+            {"theta": 0.2, "k": 10, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+            {"theta": 0.4, "k": 10, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+            {"theta": 0.8, "k": 20, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+            {"theta": 0.4, "k": 20, "n_valid": 0, "precision": None,
+             "recall": None, "ndcg": None},
+        ]}, ensure_ascii=False), encoding="utf-8")
+
+    rows = svc.history()
+    by_id = {r["run_id"]: r for r in rows}
+    empty = by_id["run-emptyrow"]
+    assert (empty["ndcg10"], empty["p10"], empty["r20"]) == (
+        0.4, 0.3, 0.25)  # θ0.2/0.8 行无值 → 回退 θ0.4 有值格
+    allnull = by_id["run-allnull"]
+    assert (allnull["ndcg10"], allnull["p10"], allnull["r20"]) == (
+        None, None, None)  # 全 null → None（宁缺勿假）
 
 
 def test_service_end_to_end_writes_report(svc, root):
@@ -889,7 +950,7 @@ def test_service_end_to_end_writes_report(svc, root):
     assert len(report["calibre"]["gt_sha8"]) == 8
     assert "银标准" in report["note"]
     assert (d / "report.md").exists() and (d / "metrics.csv").exists()
-    # 历史扫描随即能看到该 run（含 θ=0.4、K=10 摘要档）
+    # 历史扫描随即能看到该 run（含 θ0.2/θ0.8、K=10/20 摘要档）
     mine = next(r for r in svc.history() if r["run_id"] == run_id)
     assert mine["status"] == "succeeded" and mine["ndcg10"] is not None
 

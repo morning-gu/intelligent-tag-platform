@@ -137,8 +137,9 @@ class RunStateOut(BaseModel):
 
 
 class RunSummaryOut(BaseModel):
-    """历史行（history()）：摘要四键无报告/无该档 → None（宁缺勿崩）；
-    finished_at 终态时刻（meta 终态写盘带出，老 run 无该键 → None）。"""
+    """历史行（history()）：摘要四键按统一取格约定出（p10/ndcg10 @θ≈0.2、
+    r20 @θ≈0.8 的最近有值格，custom-θ run 回退；无报告/无有值格 → None
+    宁缺勿崩）；finished_at 终态时刻（meta 终态写盘带出，老 run 无 → None）。"""
 
     run_id: str
     dataset_id: str | None = None
