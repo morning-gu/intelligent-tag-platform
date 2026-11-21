@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from tagplatform.schemas import ContentJSON
 
 if TYPE_CHECKING:
-    from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
+    from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 
 
 @dataclass
@@ -118,13 +118,24 @@ class TagProducer(Protocol):
     """标签生成器协议。
 
     约定：
-    - `mode` 唯一标识生成模式（closed/open 在任务 5/6 注册），同一
+    - `mode` 唯一标识生成模式（closed/open 在各自模块导入时注册），同一
       mode 不可重复注册；
     - `produce` 返回 ProducedTag 列表，允许返回空列表（生成不出来
-      不算失败）。
+      不算失败）；
+    - `builds_prompt`：本模式是否自拼 prompt（True = spec.prompt_text
+      传空串，装配不渲染模板；False = 装配统一取本地模板常量渲染）——
+      producer 声明需求、装配统一响应，调度侧零 if-else/getattr 探测；
+    - `prompt_version`：口径版本字符串（任务表 TEXT 列留痕，如 closed
+      的 "1"、open 的 "mtg-v5-scene-context"），换算法时能区分历史结果。
+
+    Task 4 起后两者为协议成员：实现类漏声明在 `register_producer` 注册
+    时即抛 TypeError（非调用时）——动态扩展承诺的护栏，漏实现成员不允许
+    静默写空口径进 generation_task。
     """
 
     mode: str
+    builds_prompt: bool
+    prompt_version: str
 
     def produce(
         self,
@@ -142,11 +153,33 @@ _REGISTRY: dict[str, TagProducer] = {}
 
 
 def register_producer(producer: TagProducer) -> None:
-    """注册生成器；mode 重复抛 ValueError。"""
+    """注册生成器；mode 重复抛 ValueError；缺协议声明成员抛 TypeError。
+
+    协议校验在注册时显式进行（hasattr + isinstance）：Python Protocol 的
+    runtime_checkable 只查方法存在、不查属性成员，靠它兜不住"漏声明
+    builds_prompt/prompt_version"的实现——这里在注册入口拒绝，错误在
+    接线时暴露而非首次调用时。
+    """
     if producer.mode in _REGISTRY:
         raise ValueError(
             f"生成器 mode 已注册: {producer.mode}（可用: {list_producers()}）"
         )
+    missing = [name for name in ("builds_prompt", "prompt_version")
+               if not hasattr(producer, name)]
+    if missing:
+        raise TypeError(
+            f"生成器 {type(producer).__name__} 缺少 TagProducer 协议声明成员: "
+            f"{missing}（协议要求 builds_prompt: bool 与 prompt_version: str，"
+            "注册时校验——漏实现成员禁止静默落库空口径）")
+    bad = []
+    if not isinstance(producer.builds_prompt, bool):
+        bad.append("builds_prompt（须为 bool）")
+    if not isinstance(producer.prompt_version, str):
+        bad.append("prompt_version（须为 str）")
+    if bad:
+        raise TypeError(
+            f"生成器 {type(producer).__name__} 协议声明成员类型不符: "
+            f"{'、'.join(bad)}")
     _REGISTRY[producer.mode] = producer
 
 

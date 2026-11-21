@@ -10,12 +10,12 @@ import json
 import pytest
 from conftest import MOCK_EMBEDDER
 
-from tagplatform.generation import GenerationPolicy, GenerationSpec
-from tagplatform.generation.mtg import pipeline as mtg_pipeline
-from tagplatform.generation.mtg.merge import merge_candidates
-from tagplatform.generation.mtg.parse import parse_generation_items
-from tagplatform.generation.mtg.prompts import build_generation_messages
-from tagplatform.generation.open_gen import OpenTagProducer
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.merge import merge_candidates
+from tagplatform.services.generation.open.mtg.parse import parse_generation_items
+from tagplatform.services.generation.open.mtg.prompts import build_generation_messages
+from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.library import try_load_library
 from tagplatform.schemas import parse_content

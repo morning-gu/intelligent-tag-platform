@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tagplatform.generation.mtg.prompts import (
+from tagplatform.services.generation.open.mtg.prompts import (
     build_generation_messages,
     build_judge_messages,
     build_scene_generation_messages,

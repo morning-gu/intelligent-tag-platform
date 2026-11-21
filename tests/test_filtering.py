@@ -35,7 +35,7 @@ from tagplatform.filtering import (
 from tagplatform.filtering.base import _CHAIN
 from tagplatform.filtering.fence import InfoFenceFilter
 from tagplatform.filtering.quality import QualityFilter
-from tagplatform.generation import ProducedTag
+from tagplatform.services.generation import ProducedTag
 from tagplatform.schemas import ContentJSON, parse_content
 from tagplatform.tasks import run_generation_task
 from tagplatform.vectors import encode_vector

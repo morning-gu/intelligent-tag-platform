@@ -67,9 +67,3 @@ OPEN_TEMPLATE_TEXT = "\n".join([
     "",
     "只输出 JSON 数组，不要输出其他文字。输出 5 到 15 个标签。",
 ])
-
-# 口径版本标识（沿用 DB 版本机制时代的值：closed/open 模板均为 v1 就地
-# 演进至今，线上库同行 version=1）。本地化后 git 即版本，本映射仅供
-# 任务口径留痕（tag_generation_task.prompt_version / 评测 meta 记录）
-# 沿用历史值——Task 4 将把 prompt_version 声明挪到 TagProducer 协议。
-TEMPLATE_VERSIONS: dict[str, int] = {"closed": 1, "open": 1}

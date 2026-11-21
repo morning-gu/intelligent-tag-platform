@@ -40,12 +40,12 @@ from tagplatform.capabilities.storage.models import (
     TagChangeLog,
     TagDefine,
 )
-from tagplatform.generation.mtg.descriptions import (
+from tagplatform.services.generation.open.mtg.descriptions import (
     clean_description,
     content_names,
     fill_descriptions,
 )
-from tagplatform.generation.mtg.merge import normalize_tag
+from tagplatform.services.generation.open.mtg.merge import normalize_tag
 from tagplatform.settings import get_settings
 
 _BATCH = 8

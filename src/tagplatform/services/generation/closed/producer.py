@@ -73,17 +73,17 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from tagplatform.generation.base import (
+from tagplatform.services.generation.base import (
     Evidence,
     GenerationSpec,
     ProducedTag,
     register_producer,
 )
-from tagplatform.generation.mtg.keyframes import _local_roots
-from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts
-from tagplatform.generation.recall import embed_content_texts, recall_candidates
+from tagplatform.services.generation.open.mtg.keyframes import _local_roots
+from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts
+from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
 from tagplatform.library import DIR_ASSET
-from tagplatform.llm.parsing import LLMParseError, parse_closed_output
+from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
 from tagplatform.mounting import Mount, resolve_mount
 from tagplatform.movie_import import resolve_scene_frames
 from tagplatform.settings import get_settings
@@ -156,6 +156,12 @@ class ClosedTagProducer:
     """封闭式标签提取：从目录候选中挑选，origin 恒为 "catalog"。"""
 
     mode = "closed"
+    # 协议声明（Task 4）：本模式不自拼 prompt——runner 装配统一渲染本地
+    # 模板常量（capabilities/prompts/templates.py CLOSED_TEMPLATE_TEXT）
+    builds_prompt = False
+    # 任务口径留痕（generation_task.prompt_version，TEXT 列字符串）：沿用
+    # DB 版本机制时代的 v1 值——模板即 v1 就地演进（git 即版本）
+    prompt_version = "1"
 
     def produce(self, spec: GenerationSpec, session: Session, llm,
                 embedder) -> list[ProducedTag]:

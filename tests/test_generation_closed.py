@@ -21,10 +21,10 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
-from tagplatform.generation import closed as closed_module
-from tagplatform.generation.closed import ClosedTagProducer
-from tagplatform.generation.recall import embed_content_texts, recall_candidates
+from tagplatform.services.generation import Evidence, GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.closed import producer as closed_module
+from tagplatform.services.generation.closed.producer import ClosedTagProducer
+from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
 from tagplatform.library import (
     DIR_ASSET,
     Directory,
@@ -33,7 +33,7 @@ from tagplatform.library import (
     try_load_library,
 )
 from tagplatform.capabilities.llm.client import LLMResponse
-from tagplatform.llm.parsing import LLMParseError, parse_closed_output
+from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
 from tagplatform.capabilities.prompts import get_prompt, render_prompt
 from tagplatform.settings import Settings
 from tagplatform.tasks.runner import _render_content_text
@@ -660,7 +660,7 @@ def test_closed_produce_parse_retry_recovers(
 
     llm = _FlakyLLM()
     with caplog.at_level(logging.WARNING,
-                         logger="tagplatform.generation.closed"):
+                         logger="tagplatform.services.generation.closed.producer"):
         out = ClosedTagProducer().produce(spec, session,
                                           llm, MOCK_EMBEDDER)
     # 重试后该组正常贡献：两组标签都在，任务未失败
@@ -757,7 +757,7 @@ def test_closed_produce_unmountable_dropped_before_selection(
             {"tag_id": "tag_004", "applicability": 4,
              "evidence": _evi(1, 1, 1)}],
     }
-    with caplog.at_level(logging.INFO, logger="tagplatform.generation.closed"):
+    with caplog.at_level(logging.INFO, logger="tagplatform.services.generation.closed.producer"):
         out = ClosedTagProducer().produce(spec, session,
                                           _ScriptedLLM(responses), MOCK_EMBEDDER)
     # tag_101 挂载失败在前置阶段淘汰：M=2 名额由两个可挂载组头占满

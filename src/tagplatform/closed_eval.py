@@ -100,9 +100,8 @@ from tagplatform.eval.closed_ranking import (
     evaluate_closed,
     spearman,
 )
-from tagplatform.generation import get_producer
+from tagplatform.services.generation import get_producer
 from tagplatform.library import try_load_library
-from tagplatform.capabilities.prompts import TEMPLATE_VERSIONS
 from tagplatform.schemas import ContentJSON
 from tagplatform.settings import Settings
 from tagplatform.tasks.runner import assemble_spec
@@ -957,9 +956,13 @@ class ClosedEvalService:
 
         四层重构 Task 3 起模板为本地常量（capabilities/prompts/templates.py，
         git 即版本），版本标识随常量固定，不再查 DB、不会缺失——与起跑
-        校验段解耦的旧口径（模板缺失走单片失败）随之退役。
+        校验段解耦的旧口径（模板缺失走单片失败）随之退役。Task 4 起口径
+        版本由 producer 协议声明（TagProducer.prompt_version，任务表
+        TEXT 列留痕口径的字符串）；meta 沿用 DB 版本机制时代的整数语义
+        （既有 meta 契约 version=1），故此处转 int——单一来源仍是
+        producer 声明，不经 mode 查表。
         """
-        return TEMPLATE_VERSIONS["closed"]
+        return int(get_producer("closed").prompt_version)
 
     def _new_run_id(self) -> str:
         """`run-YYYYMMDD-HHMMSS-xxxx`：时间戳人读 + 2 字节随机防同秒撞名。

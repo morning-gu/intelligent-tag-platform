@@ -116,7 +116,7 @@ def test_verify_client_carries_max_tokens(monkeypatch):
 
     monkeypatch.setattr(llm_pkg, "OpenAIClient", FakeOpenAIClient)
 
-    from tagplatform.generation.mtg.pipeline import _make_verify_client
+    from tagplatform.services.generation.open.mtg.pipeline import _make_verify_client
 
     settings = Settings()
     client = _make_verify_client(settings, object())  # 非 MockLLMClient → 走真实构造分支

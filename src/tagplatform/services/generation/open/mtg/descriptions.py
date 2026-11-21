@@ -16,7 +16,7 @@ import logging
 import re
 from collections.abc import Iterable, Sequence
 
-from tagplatform.generation.mtg.parse import MTGParseError, extract_json_array
+from tagplatform.services.generation.open.mtg.parse import MTGParseError, extract_json_array
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,6 @@ _RETRY_HINT = (
     "\n\n上一版不合格：出现了具体影片信息、专名或长度越界。"
     "请严格照要求重写，只输出 JSON。"
 )
-
-
-class DescriptionError(RuntimeError):
-    """补写描述调用失败（上层按"没有描述"处理）。"""
 
 
 def clean_description(text: str | None) -> str:
@@ -141,7 +137,7 @@ def fill_descriptions(client, items: Sequence[dict], *, names: Iterable[str] = (
     失败不抛错：生成任务不该因为"描述写不出来"而失败，缺的描述留空由
     审核员补（修改动作支持改 candidate_description）。
     """
-    from tagplatform.generation.mtg.merge import normalize_tag
+    from tagplatform.services.generation.open.mtg.merge import normalize_tag
 
     if not items:
         return {}
@@ -184,6 +180,6 @@ def fill_descriptions(client, items: Sequence[dict], *, names: Iterable[str] = (
 
 
 __all__ = [
-    "DESC_MAX", "DESC_MIN", "DescriptionError", "build_description_messages",
+    "DESC_MAX", "DESC_MIN", "build_description_messages",
     "clean_description", "content_names", "fill_descriptions", "is_general",
 ]

@@ -32,9 +32,9 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.generation.base import Evidence, GenerationSpec, ProducedTag
-from tagplatform.generation.mtg import keyframes as keyframes_mod
-from tagplatform.generation.mtg.catalog_align import (
+from tagplatform.services.generation.base import Evidence, GenerationSpec, ProducedTag
+from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
+from tagplatform.services.generation.open.mtg.catalog_align import (
     BAND_DUPLICATE,
     BAND_NEW,
     BAND_RANK,
@@ -44,27 +44,27 @@ from tagplatform.generation.mtg.catalog_align import (
     recall_library_hints,
     summarize_bands,
 )
-from tagplatform.generation.mtg.descriptions import (
+from tagplatform.services.generation.open.mtg.descriptions import (
     build_description_template,
     content_names,
     fill_descriptions,
     is_general,
 )
-from tagplatform.generation.mtg.judge import build_judge_template, judge_candidates
-from tagplatform.generation.mtg.merge import (
+from tagplatform.services.generation.open.mtg.judge import build_judge_template, judge_candidates
+from tagplatform.services.generation.open.mtg.merge import (
     MergedCandidate,
     merge_candidates,
     normalize_tag,
 )
-from tagplatform.generation.mtg.parse import parse_generation_items
-from tagplatform.generation.mtg.prompt_samples import SampledPromptClient
-from tagplatform.generation.mtg.prompts import (
+from tagplatform.services.generation.open.mtg.parse import parse_generation_items
+from tagplatform.services.generation.open.mtg.prompt_samples import SampledPromptClient
+from tagplatform.services.generation.open.mtg.prompts import (
     build_generation_messages,
     build_generation_template,
     build_scene_generation_messages,
     render_content,
 )
-from tagplatform.generation.mtg.verify import build_verify_template, verify_pairs
+from tagplatform.services.generation.open.mtg.verify import build_verify_template, verify_pairs
 from tagplatform.library import (
     DirAssignment,
     library_index,

@@ -1,7 +1,7 @@
 """`/api/v1/generation` 与 `/api/v1/assets/{asset_id}/tags` 路由：生成任务创建、查询与重试。
 
 薄路由层：校验（mode 注册表/资产存在/识别内容）→ 建任务（queued）→
-executor.submit → 响应模型；业务规则全部在 tagplatform.generation
+executor.submit → 响应模型；业务规则全部在 tagplatform.services.generation
 （producer 注册表）、tagplatform.tasks（执行器状态机与生成流水线）与
 DB 层，router 只做协议转换与错误映射（mode 未知/资产及其父链均未完成
 内容识别/非 failed 重试 → 422；未知资产/任务 → 404）。
@@ -39,7 +39,7 @@ from tagplatform.api.schemas import UtcDatetime
 from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.eval.tag_quality import DEFAULT_MODEL
 from tagplatform.library import TagLibrary, try_load_library
-from tagplatform.generation import list_producers
+from tagplatform.services.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry
 

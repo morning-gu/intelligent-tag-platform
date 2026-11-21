@@ -13,7 +13,7 @@
 - 环节可以丢（drop）也可以改写（重算 confidence / 抹敏感描述），契约
   一律是"返回新的 ProducedTag 列表"，扩展时无需改 runner。
 
-扩展承诺（同 `generation/base.py` 的反失败承诺）：新增一个环节 = 新实现
+扩展承诺（同 `services/generation/base.py` 的反失败承诺）：新增一个环节 = 新实现
 类 + `register_filter` 注册，调度与审核/前端自动兼容。
 
 注册表 `_CHAIN` 是模块级有序 list（顺序即语义，不能改成 dict）；默认
@@ -30,7 +30,7 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session
 
-from tagplatform.generation.base import ProducedTag
+from tagplatform.services.generation.base import ProducedTag
 from tagplatform.schemas import ContentJSON
 
 logger = logging.getLogger(__name__)

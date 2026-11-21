@@ -3,7 +3,7 @@
 把前序部件串成完整执行链（计划钉死的八步流程）：
 状态机（queued → running → succeeded|failed，running 置位先落库防长任务
 重复提交）→ 内容解析 → producer 分发（get_producer，closed/open 注册于
-tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用；
+tagplatform.services.generation 导入）→ prompt 组装渲染（content 文本两模式共用；
 closed 的候选标签由 producer 在 produce 内部按目录分组注入）→ policy
 解析 → produce → persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量
 → 终态一次性 commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
@@ -36,15 +36,11 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from tagplatform.capabilities.prompts import (
-    TEMPLATE_VERSIONS,
-    get_prompt,
-    render_prompt,
-)
+from tagplatform.capabilities.prompts import get_prompt, render_prompt
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask
 from tagplatform.eval.tag_quality import snapshot
-from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
-from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec, get_producer
+from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.filtering import FilterContext, run_filter_chain
 from tagplatform.results import persist_tags
 from tagplatform.content_io import load_content
@@ -153,11 +149,13 @@ def assemble_spec(
     try_load_library → policy 解析（空 policy_json → 默认）→ get_producer
     → 非 builds_prompt 生产器取本地模板常量（get_prompt，四层重构 Task 3
     起 prompt 不再读 DB）并渲染 content 文本 → 组装 GenerationSpec。
-    返回 (spec, prompt_version)：模板型生产器为 templates.py 常量的口径
-    版本（TEMPLATE_VERSIONS），builds_prompt=True 的生产器自己拼 prompt
-    （如 open 的多轮多模态流水线），为 None。session 参数保留（签名冻结，
-    Task 5 装配两级化时重构）；本地模板无 DB 读取。异常语义不变：坏
-    policy JSON 等配置错误原样外抛，由调用方的事务语义落失败终态。
+    返回 (spec, prompt_version)：模板型生产器的口径版本从协议声明
+    （TagProducer.prompt_version，字符串留痕口径）派生，int 转换保持本
+    元组第二返回值 DB 版本机制时代的整数口径（Task 5 装配两级化时随元组
+    一并消亡）；builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮
+    多模态流水线），为 None。session 参数保留（签名冻结，Task 5 装配
+    两级化时重构）；本地模板无 DB 读取。异常语义不变：坏 policy JSON 等
+    配置错误原样外抛，由调用方的事务语义落失败终态。
     """
     # 标签库与 producer 分发（库在任务开始时加载一次，JSON 读取有缓存）
     library = try_load_library()
@@ -168,12 +166,13 @@ def assemble_spec(
     # producer 分发与 prompt 组装渲染
     #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
     #    流水线），不取模板、不渲染 content 文本；其余模式走本地模板常量
-    #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再组装）。
+    #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再
+    #    组装）。口径版本从协议声明派生（Task 4 起不再按 mode 查表）。
     producer = get_producer(mode)
     prompt_version = None
     prompt_text = ""
-    if not getattr(producer, "builds_prompt", False):
-        prompt_version = TEMPLATE_VERSIONS[mode]
+    if not producer.builds_prompt:
+        prompt_version = int(producer.prompt_version)
         prompt_text = render_prompt(
             get_prompt(mode), content=_render_content_text(content))
     spec = GenerationSpec(
@@ -240,7 +239,7 @@ def run_generation_task(
             task_id=task.task_id, asset_id=asset_id, run_id=run_id,
             policy_json=task.policy_json)
         spec.prompt_samples = prompt_samples
-        # producer 供 produce 调用与 prompt_version 兜底使用（assemble_spec
+        # producer 供 produce 调用与 prompt_version 口径留痕使用（assemble_spec
         # 按钉死签名只回 spec/prompt_version；注册表分发幂等，二次查询无副作用）
         producer = get_producer(task.mode)
         # 6. 生成
@@ -295,11 +294,10 @@ def run_generation_task(
         #    （标签库改由 assemble_spec 装载并随 spec 携带，此处取 spec.library）
         snapshot(session, task, spec, summary, asset.content_json, spec.library)
         task.model_version = llm.model
-        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
-        # 自拼 prompt 的生产器写自己的口径版本（如 mtg-v1），模板型生产器
-        # 写本地模板常量的口径版本（TEMPLATE_VERSIONS，Task 4 起由协议声明）
-        task.prompt_version = (str(prompt_version) if prompt_version is not None
-                               else getattr(producer, "prompt_version", ""))
+        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致。口径版本
+        # 由 producer 协议成员声明（Task 4：closed "1"、open MTG_VERSION，
+        # 注册时校验保证成员必在）——runner 不再按 mode 查表
+        task.prompt_version = producer.prompt_version
         task.status = "succeeded"
         task.finished_at = datetime.now(timezone.utc)
         session.commit()

@@ -180,7 +180,7 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     # 暴露，而非仅靠 MockLLM 选中概率兜底）——按 runner 同款路径复算：
     # 30 枚导入标签全量召回（top_k=50 ≥ 每目录 10 枚）
     from tagplatform.content_io import load_content
-    from tagplatform.generation.recall import embed_content_texts, recall_candidates
+    from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
     from tagplatform.library import load_library
     with client.app.state.session_factory() as s:
         content = load_content(s.get(MediaAsset, asset_id).content_json)

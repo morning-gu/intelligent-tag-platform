@@ -16,8 +16,8 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 """
 from __future__ import annotations
 
-from tagplatform.generation.mtg.parse import MTGParseError, parse_judge_items
-from tagplatform.generation.mtg.prompts import (
+from tagplatform.services.generation.open.mtg.parse import MTGParseError, parse_judge_items
+from tagplatform.services.generation.open.mtg.prompts import (
     build_judge_messages, candidate_line, render_judge_messages,
 )
 from tagplatform.schemas import ContentJSON

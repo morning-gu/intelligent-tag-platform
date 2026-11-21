@@ -25,7 +25,7 @@
   由路由层转 HTTP 状态码。
 
 帧文件不复制、不移动：生成侧按 imdb id 回这里取帧（见
-`generation/mtg/keyframes.py`），目录只是被引用。
+`services/generation/open/mtg/keyframes.py`），目录只是被引用。
 """
 
 from __future__ import annotations

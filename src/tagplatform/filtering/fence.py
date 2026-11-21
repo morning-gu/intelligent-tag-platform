@@ -19,7 +19,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from tagplatform.filtering.base import FilterContext, FilterOutcome
-from tagplatform.generation.base import ProducedTag
+from tagplatform.services.generation.base import ProducedTag
 
 logger = logging.getLogger(__name__)
 

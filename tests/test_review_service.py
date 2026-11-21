@@ -19,7 +19,7 @@ import pytest
 
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag
 from tagplatform.library import DIR_ASSET
-from tagplatform.review import ConflictError, apply_review
+from tagplatform.services.generation.review import ConflictError, apply_review
 from tests.library_fixture import add_dirs
 
 
@@ -341,7 +341,7 @@ def test_reject_writes_no_mount(session):
 
 def test_mount_is_idempotent(session):
     """同一资产同一标签重复挂载不会多插行（重复审核/同片多候选）。"""
-    from tagplatform.review.service import _mount_asset_tag
+    from tagplatform.services.generation.review.service import _mount_asset_tag
     from tagplatform.capabilities.storage.models import AssetTag
 
     row = _seed_row(session)
@@ -358,7 +358,7 @@ def test_mount_is_idempotent(session):
 def test_refresh_mounted_tag_names_syncs_redundant_copy(session):
     """定义侧改名后，挂载行的 tag_name 冗余拷贝要被刷新（doc §6.3）。"""
     from tagplatform.capabilities.storage.models import AssetTag, TagDefine
-    from tagplatform.review import refresh_mounted_tag_names
+    from tagplatform.services.generation.review import refresh_mounted_tag_names
 
     row = _seed_row(session)
     apply_review(session, row.id, "approve", "alice", None)
@@ -371,7 +371,7 @@ def test_refresh_mounted_tag_names_syncs_redundant_copy(session):
 
 
 def test_refresh_unknown_tag_raises(session):
-    from tagplatform.review import refresh_mounted_tag_names
+    from tagplatform.services.generation.review import refresh_mounted_tag_names
 
     with pytest.raises(ValueError, match="标签定义不存在"):
         refresh_mounted_tag_names(session, "tag_ghost")

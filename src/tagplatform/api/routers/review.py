@@ -1,6 +1,6 @@
 """`/api/v1/asset-tags` 审核操作与 `/api/v1/review` 审核列表路由（Task 4/5）。
 
-薄路由层：业务规则全部在 tagplatform.review 服务（四动作语义、前置校验、
+薄路由层：业务规则全部在 tagplatform.services.generation.review 服务（四动作语义、前置校验、
 记录写入、服务内提交），router 只做协议转换与错误映射：
 - 行不存在 → 404（router 先行查库；服务层 ValueError 为直接调用方兜底）；
 - ConflictError（行已被处理，重复提交/并发抢先；或 merge/modify 落库撞
@@ -47,7 +47,7 @@ from tagplatform.api.routers.generation import (
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, UserAccount
 from tagplatform.library import try_load_library
 from tagplatform.results import SYSTEM_REVIEWER
-from tagplatform.review import ConflictError, apply_review
+from tagplatform.services.generation.review import ConflictError, apply_review
 
 router = APIRouter(prefix="/api/v1")
 

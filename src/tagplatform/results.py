@@ -29,7 +29,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import AssetTag, PreAssetTag
-from tagplatform.generation.base import ProducedTag
+from tagplatform.services.generation.base import ProducedTag
 
 # 人工已定稿状态：重跑一律跳过（不覆盖、不复活）
 FINALIZED_STATUSES = ("approved", "rejected")

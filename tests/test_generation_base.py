@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-import tagplatform.generation.base as generation_base
-from tagplatform.generation import (
+import tagplatform.services.generation.base as generation_base
+from tagplatform.services.generation import (
     Evidence,
     GenerationPolicy,
     GenerationSpec,
@@ -35,6 +35,8 @@ class _DummyProducer:
     """测试用最小生成器：满足 TagProducer 协议结构即可注册。"""
 
     mode = "dummy"
+    builds_prompt = False
+    prompt_version = "dummy"
 
     def produce(self, spec, session, llm, embedder):
         return []
@@ -94,9 +96,63 @@ def test_unknown_mode_message_lists_available(restore_registry):
 
 
 def test_protocol_shape():
-    # 协议约定：produce(spec, session, llm, embedder) 方法 + mode 注解属性
+    # 协议约定：produce(spec, session, llm, embedder) 方法 + 声明成员注解
+    # （mode/builds_prompt/prompt_version——Task 4 起补齐后两者，
+    # 消除 runner 侧 getattr 探测）
     assert callable(getattr(TagProducer, "produce", None))
     assert "mode" in TagProducer.__annotations__
+    assert "builds_prompt" in TagProducer.__annotations__
+    assert "prompt_version" in TagProducer.__annotations__
+
+
+# ---- 协议违约：注册时校验（非调用时——动态扩展承诺的护栏）----
+
+
+def test_register_missing_prompt_version_raises_typeerror(restore_registry):
+    """缺 prompt_version 声明的假 producer → register_producer 抛 TypeError。
+
+    注册时即拒绝，而非等 runner 调用时才暴露（漏实现成员不允许静默
+    写空口径进 generation_task.prompt_version）。
+    """
+
+    class _NoPromptVersion:
+        mode = "no_pv"
+        builds_prompt = False
+
+        def produce(self, spec, session, llm, embedder):
+            return []
+
+    with pytest.raises(TypeError):
+        register_producer(_NoPromptVersion())
+
+
+def test_register_missing_builds_prompt_raises_typeerror(restore_registry):
+    """缺 builds_prompt 声明的假 producer → register_producer 抛 TypeError。"""
+
+    class _NoBuildsPrompt:
+        mode = "no_bp"
+        prompt_version = "1"
+
+        def produce(self, spec, session, llm, embedder):
+            return []
+
+    with pytest.raises(TypeError):
+        register_producer(_NoBuildsPrompt())
+
+
+def test_register_wrong_member_type_raises_typeerror(restore_registry):
+    """声明成员类型不符协议（prompt_version 非 str）→ 注册时 TypeError。"""
+
+    class _BadType:
+        mode = "bad_type"
+        builds_prompt = False
+        prompt_version = 1  # 协议声明 str（TEXT 列写入侧即字符串）
+
+        def produce(self, spec, session, llm, embedder):
+            return []
+
+    with pytest.raises(TypeError):
+        register_producer(_BadType())
 
 
 # ---- dataclass 构造与默认值 ----

@@ -1,7 +1,7 @@
 """OpenAI 兼容 LLM 客户端：transport 可注入便于测试，openai SDK 懒导入。
 
-不做输出解析——解析在 llm/parsing.py（任务 5），重试解析在任务执行器
-（任务 8）。本层只负责：传输、重试、response_format 降级、限速间隔、
+不做输出解析——解析在 services/generation/closed/parse.py（生成域，四层重构 Task 4 迁入），
+重试解析在任务执行器（任务 8）。本层只负责：传输、重试、response_format 降级、限速间隔、
 usage 记录。不做响应磁盘缓存（YAGNI，接口允许后加）。
 """
 from __future__ import annotations

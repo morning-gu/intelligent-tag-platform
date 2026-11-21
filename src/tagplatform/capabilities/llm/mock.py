@@ -37,9 +37,9 @@ _CLOSED_MARKER = "## 候选标签分组"
 # 开放式生成（mtg 流水线）的标志串：生成 / 审核两种请求靠它分流
 _MTG_GEN_MARKER = "## 标签生成任务"
 _MTG_JUDGE_MARKER = "## 审核任务"
-# 相似度复核请求（generation/mtg/verify.py）：行格式同为全角竖线三段
+# 相似度复核请求（services/generation/open/mtg/verify.py）：行格式同为全角竖线三段
 _MTG_VERIFY_MARKER = "## 相似度复核"
-# 标签描述补写请求（generation/mtg/descriptions.py）：行格式
+# 标签描述补写请求（services/generation/open/mtg/descriptions.py）：行格式
 # `- {tag}（归属目录：...）`，与生成/审核请求互斥
 _MTG_DESC_MARKER = "## 通用释义"
 # 审核候选行格式：`- {tag}｜{dimension}｜{reason}`（全角竖线，与场景行互斥）

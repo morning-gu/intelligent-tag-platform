@@ -25,7 +25,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagGenerationTask,
 )
-from tagplatform.generation import ProducedTag
+from tagplatform.services.generation import ProducedTag
 from tagplatform.tasks import run_generation_task
 
 _CONTENT = {

@@ -15,7 +15,6 @@ drop，DB 版本机制随之删除）：文案是开发者资产，git 即版本
 from tagplatform.capabilities.prompts.templates import (
     CLOSED_TEMPLATE_TEXT,
     OPEN_TEMPLATE_TEXT,
-    TEMPLATE_VERSIONS,
 )
 
 __all__ = [
@@ -24,7 +23,6 @@ __all__ = [
     "MODES",
     "OPEN_TEMPLATE_TEXT",
     "REQUIRED_PLACEHOLDERS",
-    "TEMPLATE_VERSIONS",
     "get_prompt",
     "render_prompt",
 ]

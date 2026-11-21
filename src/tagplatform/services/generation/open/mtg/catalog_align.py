@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagDefine
 from tagplatform.library import LibraryTag, is_deprecated  # 定义在 library，避免循环导入
-from tagplatform.generation.mtg.merge import normalize_tag
+from tagplatform.services.generation.open.mtg.merge import normalize_tag
 from tagplatform.schemas import ContentJSON
 from tagplatform.vectors import decode_vector
 
@@ -79,20 +79,6 @@ class Alignment:
     matched_tag_id: str | None = None
     cosine: float | None = None
     same_concept: bool | None = None
-
-    @property
-    def replaceable(self) -> bool:
-        """是否该把候选替换成库内标准名。
-
-        同名（duplicate）无需复核即可替换；疑似必须复核通过才替换——
-        "像"不等于"是"，规则层的误判率实测约 38%，替换错了会把
-        "非线性叙事"并进"线性叙事"。
-        """
-        if self.matched_tag_id is None:
-            return False
-        if self.band == BAND_DUPLICATE:
-            return True
-        return self.band == BAND_SUSPECT and self.same_concept is True
 
 
 def load_library_index(session: Session, *, dim: int | None = None) -> list[LibraryTag]:

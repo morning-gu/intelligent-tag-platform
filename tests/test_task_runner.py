@@ -328,8 +328,9 @@ def test_executor_workers_zero_synchronous(tmp_path):
 def test_assemble_spec_closed_renders_active_template(session, content_fixture):
     """closed 模式：assemble_spec 取本地模板常量渲染 content 文本组装 spec。
 
-    四层重构 Task 3 起 prompt 本地化（不读 DB）：第二返回值是 templates.py
-    常量的口径版本（TEMPLATE_VERSIONS），沿用 DB 版本机制时代的 v1 值。
+    四层重构 Task 3 起 prompt 本地化（不读 DB）；Task 4 起第二返回值从
+    producer 协议声明（TagProducer.prompt_version）派生，int 转换保持
+    DB 版本机制时代的 v1 整数口径。
     """
     spec, prompt_version = assemble_spec(session, mode="closed", content=content_fixture,
                                          task_id="t1", asset_id="a1", run_id="r1")

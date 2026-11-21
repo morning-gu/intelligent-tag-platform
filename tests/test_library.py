@@ -193,7 +193,7 @@ def test_mount_content_uses_asset_id():
 def test_mount_scene_uses_first_real_scene():
     content = _content()
     scene_id = content.content.scenes[0].scene_id
-    from tagplatform.generation.base import Evidence
+    from tagplatform.services.generation.base import Evidence
 
     mount = resolve_mount(SCOPE_SCENE, content.asset.asset_id, content,
                           [Evidence(scene_id, 0, 1000, "证据")])
@@ -219,7 +219,7 @@ def test_mount_character_needs_exactly_one_character():
         "character_ids": ["char_001"],
     }]
     content = parse_content(data)
-    from tagplatform.generation.base import Evidence
+    from tagplatform.services.generation.base import Evidence
 
     evidence = [Evidence("scene_001", 0, 1000, "对峙")]
     assert resolve_mount(SCOPE_CHARACTER, content.asset.asset_id, content,

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 
-from tagplatform.generation.mtg.prompts import DIMENSIONS
+from tagplatform.services.generation.open.mtg.prompts import DIMENSIONS
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _MAX_TAG_LEN = 20

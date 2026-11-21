@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 from tagplatform.capabilities.storage import create_engine_for
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.eval.tag_quality import _parse_scores, evaluate
-from tagplatform.generation.base import ProducedTag
-from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
-from tagplatform.generation.open_gen import OpenTagProducer
+from tagplatform.services.generation.base import ProducedTag
+from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
+from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.capabilities.llm.mock import MockLLMClient
 from tagplatform.settings import get_settings

@@ -14,15 +14,15 @@ import re
 import pytest
 from conftest import MOCK_EMBEDDER
 
-from tagplatform.generation import GenerationPolicy, GenerationSpec
-from tagplatform.generation.mtg import pipeline as mtg_pipeline
-from tagplatform.generation.mtg.descriptions import (
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.descriptions import (
     clean_description,
     content_names,
     fill_descriptions,
     is_general,
 )
-from tagplatform.generation.open_gen import OpenTagProducer
+from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.library import try_load_library
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.settings import Settings

@@ -8,10 +8,10 @@
 - `judge`：deepseek-v4.1-flash 逐条判内容支持度；
 - `pipeline`：编排（生成 → 合并 → 审核 → 证据校验 → 目录匹配）。
 
-插拔点：平台只认 `open_gen.OpenTagProducer` 这一个 mode="open" 的入口，
-内部实现全部在这里。以后本地方案迭代，替换本包即可，runner / 审核 / API
-不用动。
+插拔点：平台只认 `open/producer.py` 的 `OpenTagProducer` 这一个
+mode="open" 的入口，内部实现全部在这里。以后本地方案迭代，替换本包即可，
+runner / 审核 / API 不用动。
 """
-from tagplatform.generation.mtg.pipeline import MTG_VERSION, run_open_generation
+from tagplatform.services.generation.open.mtg.pipeline import MTG_VERSION, run_open_generation
 
 __all__ = ["MTG_VERSION", "run_open_generation"]

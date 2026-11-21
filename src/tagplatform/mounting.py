@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tagplatform.generation.base import Evidence
+from tagplatform.services.generation.base import Evidence
 from tagplatform.library import SCOPE_CHARACTER, SCOPE_SCENE
 from tagplatform.schemas import ContentJSON
 

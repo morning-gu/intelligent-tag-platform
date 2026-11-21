@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 
 from tagplatform.content_io import load_content
 from tagplatform.capabilities.storage.models import TagDefine, TagGenerationTask, TagQualityEvaluation
-from tagplatform.generation.base import GenerationSpec
-from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
-from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, render_content
+from tagplatform.services.generation.base import GenerationSpec
+from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
+from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts, render_content
 from tagplatform.library import TagLibrary
 from tagplatform.results import PersistSummary
 from tagplatform.schemas import ContentJSON

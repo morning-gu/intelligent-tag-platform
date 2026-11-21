@@ -259,7 +259,7 @@ def test_create_task_empty_asset_ids_422(client):
 
 def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_path,
                                                                    monkeypatch):
-    from tagplatform.generation.mtg import pipeline
+    from tagplatform.services.generation.open.mtg import pipeline
     from tagplatform.capabilities.llm.mock import MockLLMClient
     from tests.library_fixture import add_tags
 
