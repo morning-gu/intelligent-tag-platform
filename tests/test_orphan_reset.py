@@ -67,7 +67,8 @@ def test_asset_build_orphan_reset(session):
 
 
 def test_tag_import_orphan_reset(session):
-    """TagImportTask processing 孤儿复位 failed：说明写 result_summary JSON。"""
+    """TagImportTask processing 孤儿复位 failed：说明写 result_summary JSON，
+    文案保留含恢复指引的导入侧旧文案（controller 裁定，Task 13）。"""
     _add_import_task(session, "import_orphan", "processing")
     session.commit()
 
@@ -78,7 +79,7 @@ def test_tag_import_orphan_reset(session):
     row = session.get(TagImportTask, "import_orphan")
     assert row.status == "failed"
     summary = json.loads(row.result_summary)
-    assert "进程重启中断" in summary["error"]
+    assert summary["error"] == "服务重启中断了导入，请重新上传文件"
 
 
 def test_orphan_reset_ignores_non_running(session):

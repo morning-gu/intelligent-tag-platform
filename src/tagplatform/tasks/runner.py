@@ -120,10 +120,11 @@ def reset_orphan_running(session: Session) -> int:
 def reset_orphan_tasks(engine: Engine) -> int:
     """进程重启后的非生成类孤儿清理：资产构建与标签导入任务复位 failed。
 
-    AssetBuildTask 的 running 行与 TagImportTask 的在途行（processing，
-    其 "running" 等位状态）复位为 failed（error="进程重启中断"，措辞对齐
-    reset_orphan_running）；TagImportTask 无 error 列，说明写
-    result_summary JSON（与导入失败收尾同构）。收引擎、内部自建独立
+    AssetBuildTask 的 running 行复位为 failed（error="进程重启中断"，措辞
+    对齐 reset_orphan_running）；TagImportTask 的在途行（processing，其
+    "running" 等位状态）复位为 failed——该表无 error 列，说明写
+    result_summary JSON，文案保留导入侧含用户恢复指引的既有文案（前端
+    展示用，controller 裁定；与导入失败收尾同构）。收引擎、内部自建独立
     session 一次事务提交（lifespan 启动时调用），返回复位总数。
     """
     with Session(engine) as session:
@@ -144,7 +145,8 @@ def reset_orphan_tasks(engine: Engine) -> int:
         )
         for task in imports:
             task.status = "failed"
-            task.result_summary = json.dumps({"error": "进程重启中断"},
-                                             ensure_ascii=False)
+            task.result_summary = json.dumps(
+                {"error": "服务重启中断了导入，请重新上传文件"},
+                ensure_ascii=False)
         session.commit()
         return len(builds) + len(imports)
