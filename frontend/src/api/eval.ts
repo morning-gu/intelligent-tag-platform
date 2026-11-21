@@ -239,14 +239,24 @@ export interface MovieSummaryRow {
   n_relevant: number
 }
 
-/** 单片摘要包层（与后端 MovieSummaryOut 一致）：theta_used/k_p/k_r 为服务
- * 端确定选取（最接近 0.4 的 θ、P 看 top-10、R 看 top-20），前端表头按这三
- * 键拼字面量（P@{k_p}/R@{k_r}）。 */
+/** 单片摘要包层（与后端 MovieSummaryOut 一致，增补 2026-11-22 拆 θ）：
+ * theta_p/theta_r 为 P 门与 R 门实际取值（query 参数或最接近 0.4 的缺省
+ * 档）；thetas 为该 run 网格档（选择器选项源）；前端表头按这些键拼字面量
+ * （P@{k_p}(θ{theta_p}) / R@{k_r}(θ{theta_r})）。 */
 export interface MovieSummaryPayload {
-  theta_used: number
+  theta_p: number
+  theta_r: number
+  thetas: number[]
   k_p: number
   k_r: number
   rows: MovieSummaryRow[]
+}
+
+/** θ 门参数（getRunMovies/getRunMovieDetail 的可选 query）：p/r 各自独立，
+ * 未选的字段不携带（服务端按缺省=最接近 0.4 取档）。 */
+export interface ThetaQuery {
+  p?: number
+  r?: number
 }
 
 /** 计分清单条目（与后端 ProducedTagOut 一致，GT 空间内按 -sf 序）：hit =
@@ -286,7 +296,8 @@ export interface MovieDetail {
   ok: boolean
   error: string | null
   elapsed_ms: number
-  theta_used: number
+  theta_p: number
+  theta_r: number
   k_p: number
   k_r: number
   produced: ProducedTag[]
@@ -294,14 +305,34 @@ export interface MovieDetail {
   misses: MissTag[]
 }
 
+/** θ query 拼接（增补 2026-11-22）：未传/空对象 → 无 query（服务端缺省）。 */
+function thetaQuery(theta?: ThetaQuery): string {
+  if (!theta) return ''
+  const params = new URLSearchParams()
+  if (theta.p !== undefined) params.set('theta_p', String(theta.p))
+  if (theta.r !== undefined) params.set('theta_r', String(theta.r))
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
 /** run 的逐片摘要（badcase 视图主表，读盘现算）：无单片明细（运行中/产物
- * 缺失）→ 404，detail 经 ApiError.message 透出。 */
-export function getRunMovies(runId: string): Promise<MovieSummaryPayload> {
-  return apiFetch<MovieSummaryPayload>(`/api/v1/eval/closed/runs/${runId}/movies`)
+ * 缺失）→ 404，detail 经 ApiError.message 透出；theta 拆门可选（非法档
+ * 400 带合法值清单）。 */
+export function getRunMovies(
+  runId: string,
+  theta?: ThetaQuery,
+): Promise<MovieSummaryPayload> {
+  return apiFetch<MovieSummaryPayload>(
+    `/api/v1/eval/closed/runs/${runId}/movies${thetaQuery(theta)}`)
 }
 
 /** 单片明细（摘要行展开懒加载）：未知 tt → 404（detail 经 ApiError.message
- * 透出）。 */
-export function getRunMovieDetail(runId: string, tt: string): Promise<MovieDetail> {
-  return apiFetch<MovieDetail>(`/api/v1/eval/closed/runs/${runId}/movies/${tt}`)
+ * 透出）；theta 同摘要端点（明细 hit/漏检分类跟 theta_r）。 */
+export function getRunMovieDetail(
+  runId: string,
+  tt: string,
+  theta?: ThetaQuery,
+): Promise<MovieDetail> {
+  return apiFetch<MovieDetail>(
+    `/api/v1/eval/closed/runs/${runId}/movies/${tt}${thetaQuery(theta)}`)
 }

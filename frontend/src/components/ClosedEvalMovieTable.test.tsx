@@ -40,7 +40,9 @@ const RUN_ID = 'run-20261120-000000-aa00'
 /** 摘要夹具：k_p=8 / k_r=20 档位（表头字面量 P@8 / R@20）。三行即服务端序：
  * 失败片置顶 → p=0.2 坏例片 → p=null 无交集片垫底。 */
 const SUMMARY: MovieSummaryPayload = {
-  theta_used: 0.4,
+  theta_p: 0.4,
+  theta_r: 0.4,
+  thetas: [0.2, 0.4, 0.6, 0.8],
   k_p: 8,
   k_r: 20,
   rows: [
@@ -92,7 +94,8 @@ const DETAIL: MovieDetail = {
   ok: true,
   error: null,
   elapsed_ms: 8000,
-  theta_used: 0.4,
+  theta_p: 0.4,
+  theta_r: 0.4,
   k_p: 8,
   k_r: 20,
   produced: [
@@ -168,8 +171,8 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     ).toBeTruthy()
 
     // 动态表头：k_p=8 / k_r=20 档位拼字面量
-    expect(screen.getByText('P@8')).toBeInTheDocument()
-    expect(screen.getByText('R@20')).toBeInTheDocument()
+    expect(screen.getByText('P@8(θ0.4)')).toBeInTheDocument()
+    expect(screen.getByText('R@20(θ0.4)')).toBeInTheDocument()
 
     // 状态列成功/失败；耗时列 Math.round(elapsed_ms/1000)：8000→8 秒、3000→3 秒
     expect(within(failedRow).getByText('失败')).toBeInTheDocument()
@@ -303,5 +306,99 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
       resolve(DETAIL)
     })
     await waitFor(() => expect(screen.getByText('动作')).toBeVisible())
+  })
+
+  // ---------- θ 可调（增补 2026-11-22） ----------
+
+  /** θ 切换用夹具：k_p=10 档（表头 P@10(θ…)），thetas 四档供选择器。 */
+  const SUMMARY_THETA: MovieSummaryPayload = {
+    ...SUMMARY,
+    k_p: 10,
+  }
+
+  it('θ_P 选择器切换：重拉摘要带 theta_p、明细缓存清空收起、再展开带参取数、表头带门', async () => {
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY_THETA)
+      .mockResolvedValueOnce({ ...SUMMARY_THETA, theta_p: 0.2 })
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await screen.findByText('动作')
+    expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1)
+
+    // 打开 θ_P 选择器 → 四档选项 → 选 0.2
+    const pSelect = screen.getByTestId('theta-p-select')
+    fireEvent.mouseDown(pSelect)
+    const options = await screen.findAllByRole('option')
+    expect(options.map((o) => o.textContent)).toEqual(['0.2', '0.4', '0.6', '0.8'])
+    fireEvent.click(screen.getByTitle('0.2'))
+
+    // 重拉摘要带 theta_p（θ_R 未选不带）；明细不自动重拉但缓存清空、展开行收起
+    // （payload 替换后 rc-table 重渲染会把展开行卸载——图标收起场景才是
+    // 保持挂载，故断言兼容「不存在或不可见」两态）
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+    expect(mockedGetRunMovies).toHaveBeenNthCalledWith(2, RUN_ID, { p: 0.2 })
+    expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1)
+    await waitFor(() => {
+      const el = screen.queryByText('动作')
+      if (el !== null) expect(el).not.toBeVisible()
+    })
+
+    // 再展开同一行：缓存已清 → 第二次明细调用带 theta_p=0.2
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(2))
+    expect(mockedGetRunMovieDetail).toHaveBeenNthCalledWith(
+      2, RUN_ID, 'tt0000001', { p: 0.2 },
+    )
+    await waitFor(() => expect(screen.getByText('动作')).toBeVisible())
+    // 表头带门字面量（第二份 payload theta_p=0.2、k_p=10）
+    expect(screen.getByText('P@10(θ0.2)')).toBeInTheDocument()
+  })
+
+  it('θ 选择器渲染：两 Select 初值=服务端回传档（0.4），θ_R 同样可切', async () => {
+    mockedGetRunMovies.mockResolvedValue(SUMMARY_THETA)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    // 两个选择器都存在且显示当前生效门 0.4
+    expect(screen.getByTestId('theta-p-select')).toBeInTheDocument()
+    expect(screen.getByTestId('theta-r-select')).toBeInTheDocument()
+    expect(screen.getByTestId('theta-p-select').textContent).toContain('0.4')
+    expect(screen.getByTestId('theta-r-select').textContent).toContain('0.4')
+
+    // θ_R 切到 0.8 → 重拉带 theta_r
+    const rSelect = screen.getByTestId('theta-r-select')
+    fireEvent.mouseDown(rSelect)
+    fireEvent.click(await screen.findByTitle('0.8'))
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+    expect(mockedGetRunMovies).toHaveBeenNthCalledWith(2, RUN_ID, { r: 0.8 })
+  })
+
+  it('换 run 后 θ 状态回服务端默认：摘要重拉不带参、明细取数不带参', async () => {
+    mockedGetRunMovies.mockResolvedValue(SUMMARY_THETA)
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    const { rerender } = render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    // 先把 θ_P 切到 0.2（弄脏状态）
+    const pSelect = screen.getByTestId('theta-p-select')
+    fireEvent.mouseDown(pSelect)
+    fireEvent.click(await screen.findByTitle('0.2'))
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+
+    // 换 run：θ 状态重置 → 摘要不带 θ 参数、选择器显示 0.4
+    rerender(<ClosedEvalMovieTable runId="run-B" />)
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(3))
+    expect(mockedGetRunMovies).toHaveBeenLastCalledWith('run-B')
+    await screen.findByText('tt0000001')
+    expect(screen.getByTestId('theta-p-select').textContent).toContain('0.4')
+
+    // 明细取数不带 θ（默认门）
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledWith(
+      'run-B', 'tt0000001',
+    ))
   })
 })
