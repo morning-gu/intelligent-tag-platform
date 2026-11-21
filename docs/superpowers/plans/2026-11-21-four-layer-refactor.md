@@ -60,13 +60,16 @@ git add docs/superpowers/specs/2026-11-21-four-layer-refactor-design.md docs/sup
 git commit -m "refactor: 四层重构设计与实施计划入分支"
 ```
 
-### Task 1: 迁移字面量冻结（0012/0013/0016）
+### Task 1: 迁移字面量冻结（0012/0013/0014/0016）
+
+> 执行修正（2026-11-21）：0014_tag_quality_evaluation.py 也 import 活常量，加入冻结范围（原清单漏）。残留信息：0002/0005 仍 import `PROMPT_V1_SEED`/`PROMPT_DEPRECATED_OPEN_SEED`——Task 2 迁 db/ 时若动这两个常量需同样冻结。
 
 **Files:**
 - Modify: `alembic/versions/0012_closed_prompt_grouped_candidates.py`
 - Modify: `alembic/versions/0013_closed_prompt_standardized_scoring.py`
+- Modify: `alembic/versions/0014_tag_quality_evaluation.py`
 - Modify: `alembic/versions/0016_closed_prompt_multimodal_evidence.py`
-- Test: 既有 `tests/test_migration_0012.py`、`test_migration_0013.py`、`test_migration_0016.py`（不新增，跑绿即可）
+- Test: 既有 `tests/test_migration_0013.py`、`test_migration_0016.py`（0012 的 upgrade 经 0013/0016 测试内 `upgrade(cfg, "0012")` 覆盖；0014 rehearsal 在 test_migration_0013.py 内）
 
 **Interfaces:**
 - Produces: 三个迁移文件零 `from tagplatform.db.models import`——`_PROMPT_V1_CLOSED_TEXT`/`_PREVIOUS_CLOSED_V1_TEXT` 等以字面量内联（从 models.py 当前值逐字复制）；models.py 常量**暂不删**（Task 3 删）
