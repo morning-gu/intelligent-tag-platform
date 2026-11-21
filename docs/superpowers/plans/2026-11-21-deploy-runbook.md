@@ -140,7 +140,7 @@ cp /backup/switch-<日期>/tagplatform.db /opt/tagplatform/data/tagplatform.db
 cp -r /backup/switch-<日期>/media/. /opt/tagplatform/data/media/
 
 # 3. 起旧形态（二选一，与切换前线上形态一致）：
-#    a. 旧容器（若此前已是容器形态）：docker run 同 §1.5、镜像换旧 tag、
+#    a. 旧容器（若此前已是容器形态）：docker run 同 §1.6、镜像换旧 tag、
 #       去掉入口 alembic 前缀
 #    b. 旧 systemd 服务（venv 形态，本文基线）：
 sudo systemctl start tagplatform   # ExecStartPre 自动重跑迁移（还原库为旧版本，迁移为 no-op）
