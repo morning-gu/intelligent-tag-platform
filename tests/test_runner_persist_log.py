@@ -25,7 +25,7 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import PreAssetTag
+from tagplatform.capabilities.storage.models import PreAssetTag
 from tagplatform.tasks import run_generation_task
 
 from tests.test_task_runner import _make_task, _seed_catalog, _utcnow

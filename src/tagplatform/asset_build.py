@@ -27,11 +27,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.adapters.vision import to_content_json
+from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.assets import AssetBuilder, MatchResult, build_index, match, source_tag
 from tagplatform.content_import import import_content
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import AssetBuildTask, MediaAsset
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset
 from tagplatform.schemas.upstream import parse_upstream
 from tagplatform.settings import Settings, get_settings
 
@@ -236,7 +236,7 @@ def execute(task_id: str, settings: Settings | None = None, *,
             finally:
                 side.close()
 
-        from tagplatform.llm import make_llm_client
+        from tagplatform.capabilities.llm import make_llm_client
 
         builder = AssetBuilder(
             root=Path(settings.dataset_root),

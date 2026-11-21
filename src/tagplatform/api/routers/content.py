@@ -1,7 +1,7 @@
 """`/api/v1/content`、`/api/v1/assets`、`/api/v1/adapters` 路由：内容导入与资产查询。
 
 薄路由层：适配（get_adapter().adapt）→ 导入（import_content）→ 响应模型，
-业务规则全部在 tagplatform.adapters / content_import 与 DB 层，router 只做
+业务规则全部在 tagplatform.capabilities.adapters / content_import 与 DB 层，router 只做
 协议转换与错误映射（未知 kind / 内容 JSON 校验失败 / video_root 非法 →
 422；未知资产 → 404）。内容只有一份：`media_asset.content_json`，完整 JSON
 走 `GET /assets/{asset_id}/content`；v1 的 contexts 数组与 contexts 端点已
@@ -14,13 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from tagplatform.adapters import get_adapter, list_adapters
+from tagplatform.capabilities.adapters import get_adapter, list_adapters
 from tagplatform.api import get_session
 from tagplatform.api.schemas import UtcDatetime
 import tagplatform.movie_import as movie_import
 from tagplatform.content_import import import_content as import_content_svc
 from tagplatform.content_template import template_from_stored
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 router = APIRouter(prefix="/api/v1")
 

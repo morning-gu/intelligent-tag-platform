@@ -27,8 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tagplatform.db import create_engine_for, make_session_factory  # noqa: E402
-from tagplatform.db.models import (  # noqa: E402
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory  # noqa: E402
+from tagplatform.capabilities.storage.models import (  # noqa: E402
     AssetTag,
     PreAssetTag,
     TagDefine,

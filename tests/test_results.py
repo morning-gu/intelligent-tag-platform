@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.generation import Evidence, ProducedTag
 from tagplatform.results import PersistSummary, persist_tags
 

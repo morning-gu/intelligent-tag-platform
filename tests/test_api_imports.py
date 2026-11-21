@@ -28,7 +28,7 @@ import pytest
 from sqlalchemy import event
 
 from tagplatform import tag_import
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,

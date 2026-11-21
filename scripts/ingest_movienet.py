@@ -259,9 +259,9 @@ def _import_payloads(out: Path, video_root: str | None = None) -> dict:
     """把 out 目录下的上游 JSON 经服务层导入平台库（不 commit 业务外的内容）。"""
     from sqlalchemy.orm import Session  # noqa: F401  (类型提示用)
 
-    from tagplatform.adapters.vision import to_content_json
+    from tagplatform.capabilities.adapters.vision import to_content_json
     from tagplatform.content_import import import_content
-    from tagplatform.db import create_engine_for, make_session_factory
+    from tagplatform.capabilities.storage import create_engine_for, make_session_factory
     from tagplatform.schemas.upstream import parse_upstream
     from tagplatform.settings import get_settings
 

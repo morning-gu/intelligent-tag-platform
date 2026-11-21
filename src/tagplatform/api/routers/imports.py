@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from tagplatform.api import get_session, get_tag_import_executor
 from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
 from tagplatform.api.schemas import UtcDatetime
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     PreAssetTag,
     TagCatalog,

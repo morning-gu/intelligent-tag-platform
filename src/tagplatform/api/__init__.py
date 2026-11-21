@@ -37,9 +37,9 @@ from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 from tagplatform.auth import bootstrap_admin
 from tagplatform.closed_eval import ClosedEvalService
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import Embedder, build_embedder
-from tagplatform.llm import make_llm_client
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.embed import Embedder, build_embedder
+from tagplatform.capabilities.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
 from tagplatform.tag_import import TagImportExecutor
 from tagplatform.tasks import TaskExecutor, reset_orphan_running

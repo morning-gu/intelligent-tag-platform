@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tagplatform.content_io import load_content
-from tagplatform.db.models import TagDefine, TagGenerationTask, TagQualityEvaluation
+from tagplatform.capabilities.storage.models import TagDefine, TagGenerationTask, TagQualityEvaluation
 from tagplatform.generation.base import GenerationSpec
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts, render_content

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 
-from tagplatform.adapters.vision import to_content_json
+from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.schemas.content import ContentJSON, parse_content
 from tagplatform.schemas.upstream import parse_upstream
 

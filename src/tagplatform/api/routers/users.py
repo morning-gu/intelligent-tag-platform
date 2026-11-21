@@ -17,7 +17,7 @@ from tagplatform.api import get_session
 from tagplatform.api.depends import require_admin
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.auth import create_user as create_user_account
-from tagplatform.db.models import UserAccount
+from tagplatform.capabilities.storage.models import UserAccount
 
 router = APIRouter(prefix="/api/v1/users")
 

@@ -20,9 +20,9 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import TagCatalog
-from tagplatform.embed import build_embedder
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import TagCatalog
+from tagplatform.capabilities.embed import build_embedder
 from tagplatform.settings import get_settings
 from tagplatform.vectors import decode_vector, encode_vector
 

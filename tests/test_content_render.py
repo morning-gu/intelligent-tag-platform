@@ -10,7 +10,7 @@
 import json
 from pathlib import Path
 
-from tagplatform.llm.mock import _parse_scenes
+from tagplatform.capabilities.llm.mock import _parse_scenes
 from tagplatform.schemas import parse_content
 from tagplatform.tasks.runner import _render_content_text
 from tagplatform.tasks.runner import _MAX_CAST_LINES

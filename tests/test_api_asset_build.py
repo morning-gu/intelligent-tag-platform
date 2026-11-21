@@ -23,8 +23,8 @@ import pytest
 from tagplatform import asset_build
 from tagplatform.assets import source_tag
 from tagplatform.content_io import load_content
-from tagplatform.db.models import AssetBuildTask, MediaAsset
-from tagplatform.llm import LLMResponse
+from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset
+from tagplatform.capabilities.llm import LLMResponse
 
 MOVIE_ID = "tt0000001"
 PAYLOAD = b"fake-video-bytes"
@@ -154,7 +154,7 @@ def test_upload_auto_build_off(dataset_client, monkeypatch):
 
 def test_execute_success_writes_context(dataset_client, monkeypatch):
     """执行层：跑完生成 → 任务 succeeded、内容落到上传的资产上。"""
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+    monkeypatch.setattr("tagplatform.capabilities.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
@@ -246,7 +246,7 @@ def test_execute_facts_mode_skips_llm(dataset_client, monkeypatch):
             calls.append(run_id)
             return super().complete(messages, run_id)
 
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+    monkeypatch.setattr("tagplatform.capabilities.llm.make_llm_client",
                         lambda settings=None: Counting())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
@@ -275,7 +275,7 @@ def test_execute_unknown_task_is_noop(dataset_client):
 
 def test_execute_overwrites_stale_content(dataset_client, monkeypatch):
     """旧口径（source 不是当前编码）的内容被整块覆盖，旧场景行一并清掉。"""
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+    monkeypatch.setattr("tagplatform.capabilities.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
@@ -315,7 +315,7 @@ def test_execute_overwrites_instead_of_reusing(dataset_client, monkeypatch):
             calls.append(run_id)
             return super().complete(messages, run_id)
 
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+    monkeypatch.setattr("tagplatform.capabilities.llm.make_llm_client",
                         lambda settings=None: Counting())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={
@@ -367,7 +367,7 @@ def test_match_endpoint_matched_without_content(dataset_client):
 
 def test_match_endpoint_reports_built_content(dataset_client, monkeypatch):
     """已生成过：has_content=true + 场景数 + 口径与更新时间（前端据此问重新生成）。"""
-    monkeypatch.setattr("tagplatform.llm.make_llm_client",
+    monkeypatch.setattr("tagplatform.capabilities.llm.make_llm_client",
                         lambda settings=None: FakeClient())
     monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     settings = dataset_client.app.state.settings.model_copy(update={

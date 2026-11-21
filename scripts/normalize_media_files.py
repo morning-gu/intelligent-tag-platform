@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from tagplatform.db.models import MediaAsset  # noqa: E402
+from tagplatform.capabilities.storage.models import MediaAsset  # noqa: E402
 
 
 def _owner_id(group: list[MediaAsset]) -> str:

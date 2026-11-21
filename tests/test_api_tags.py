@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 import openpyxl
 import pytest
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,

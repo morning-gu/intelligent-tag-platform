@@ -112,7 +112,7 @@ def test_verify_client_carries_max_tokens(monkeypatch):
         def __init__(self, **kwargs):
             recorded.update(kwargs)
 
-    import tagplatform.llm as llm_pkg
+    import tagplatform.capabilities.llm as llm_pkg
 
     monkeypatch.setattr(llm_pkg, "OpenAIClient", FakeOpenAIClient)
 

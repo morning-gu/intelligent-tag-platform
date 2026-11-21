@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 # 1024 字节已知模式：content[i] = i % 256（分块字节级断言的期望值来源）
 CONTENT = bytes(range(256)) * 4

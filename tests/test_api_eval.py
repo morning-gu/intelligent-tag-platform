@@ -42,7 +42,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.llm import MockLLMClient
+from tagplatform.capabilities.llm import MockLLMClient
 from test_closed_eval import _EVAL_DIRS, _EVAL_TAGS, _write_dataset
 
 # 评测 API 端点前缀（本文件所有用例共用）

@@ -362,7 +362,7 @@ def library_from_session(session) -> TagLibrary:
     不加 ORDER BY：SQLite 的自然顺序即 rowid 插入顺序，与迁移/导入时的
     目录树顺序一致（旧的 JSON 库同样按文件顺序遍历，前端树与召回顺序不变）。
     """
-    from tagplatform.db.models import TagCatalog, TagDefine
+    from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
 
     dir_rows = session.query(TagCatalog).all()
     tag_rows = session.query(TagDefine).all()

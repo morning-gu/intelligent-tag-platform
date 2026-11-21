@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     PreAssetTag,
     TagCatalog,
     TagChangeLog,

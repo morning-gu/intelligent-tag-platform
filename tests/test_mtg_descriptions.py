@@ -24,7 +24,7 @@ from tagplatform.generation.mtg.descriptions import (
 )
 from tagplatform.generation.open_gen import OpenTagProducer
 from tagplatform.library import try_load_library
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.settings import Settings
 
 

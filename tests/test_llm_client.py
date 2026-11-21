@@ -10,7 +10,7 @@ import json
 import sys
 from types import SimpleNamespace
 
-from tagplatform.llm import MockLLMClient, OpenAIClient, make_llm_client
+from tagplatform.capabilities.llm import MockLLMClient, OpenAIClient, make_llm_client
 from tagplatform.settings import Settings
 
 

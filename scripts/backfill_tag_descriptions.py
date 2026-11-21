@@ -32,8 +32,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from tagplatform.content_io import load_content
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagCatalog,
@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"数据库不存在: {database}", file=sys.stderr)
         return 2
 
-    from tagplatform.llm import OpenAIClient
+    from tagplatform.capabilities.llm import OpenAIClient
 
     client = OpenAIClient(
         model=settings.mtg_judge_model,

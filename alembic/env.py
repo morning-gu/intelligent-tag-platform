@@ -34,7 +34,7 @@ def _database_path() -> str:
 def run_migrations_offline() -> None:
     """离线模式：不连库，仅生成 SQL 脚本。"""
     # 延迟 import（控制器 ruling）：models.py 在 Task 3 才创建
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage.models import Base
 
     context.configure(
         url=f"sqlite:///{_database_path()}",
@@ -50,8 +50,8 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """在线模式：连接数据库执行迁移。"""
     # 延迟 import（控制器 ruling）：models.py 在 Task 3 才创建
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
 
     # 复用基础层引擎：自动确保父目录存在，并逐连接强制 WAL/foreign_keys
     connectable = create_engine_for(_database_path())

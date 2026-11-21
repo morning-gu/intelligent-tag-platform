@@ -26,7 +26,7 @@ import hashlib
 import json
 import re
 
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 
 # 场景行格式（runner._render_content_text 组装，逐字对齐）：
 # `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选

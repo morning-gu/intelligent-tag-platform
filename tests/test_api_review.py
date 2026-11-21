@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, TagGenerationTask
 
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 

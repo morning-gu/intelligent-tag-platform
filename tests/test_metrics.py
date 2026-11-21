@@ -33,7 +33,7 @@ from itertools import count
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagCatalog,

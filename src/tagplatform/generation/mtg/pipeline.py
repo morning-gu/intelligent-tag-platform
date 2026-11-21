@@ -145,10 +145,10 @@ def _make_judge_client(settings: Settings, llm):
     判定"mock 路径"有两个依据——配置开关，或调用方传进来的就是
     MockLLMClient（单元测试与进程内 e2e 都走后者），避免测试意外联网。
     """
-    from tagplatform.llm.mock import MockLLMClient
+    from tagplatform.capabilities.llm.mock import MockLLMClient
     if settings.use_mock_llm or isinstance(llm, MockLLMClient):
         return llm
-    from tagplatform.llm import OpenAIClient
+    from tagplatform.capabilities.llm import OpenAIClient
     return OpenAIClient(
         model=settings.mtg_judge_model,
         base_url_env=settings.llm_base_url_env,
@@ -166,10 +166,10 @@ def _make_verify_client(settings: Settings, llm):
     把 4 分钟的任务拖到 7 分钟。这里给 max_tokens 兜底，超了就解析失败 →
     不替换，代价可控。
     """
-    from tagplatform.llm.mock import MockLLMClient
+    from tagplatform.capabilities.llm.mock import MockLLMClient
     if settings.use_mock_llm or isinstance(llm, MockLLMClient):
         return llm
-    from tagplatform.llm import OpenAIClient
+    from tagplatform.capabilities.llm import OpenAIClient
     return OpenAIClient(
         model=settings.mtg_judge_model,
         base_url_env=settings.llm_base_url_env,

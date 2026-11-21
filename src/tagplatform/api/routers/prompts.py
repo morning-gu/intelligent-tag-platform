@@ -20,7 +20,7 @@ from tagplatform import prompts as prompt_service
 from tagplatform.api import get_session
 from tagplatform.api.depends import require_admin
 from tagplatform.api.schemas import UtcDatetime
-from tagplatform.db.models import PromptTemplate, UserAccount
+from tagplatform.capabilities.storage.models import PromptTemplate, UserAccount
 
 router = APIRouter(prefix="/api/v1")
 

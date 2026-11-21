@@ -16,7 +16,7 @@ from tagplatform.generation.mtg.merge import merge_candidates
 from tagplatform.generation.mtg.parse import parse_generation_items
 from tagplatform.generation.mtg.prompts import build_generation_messages
 from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.library import try_load_library
 from tagplatform.schemas import parse_content
 from tagplatform.settings import Settings

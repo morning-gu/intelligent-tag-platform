@@ -260,8 +260,8 @@ def test_custom_session_secret_is_honored(tmp_path):
     证明签发与校验都取 Settings.session_secret（生产 TAGPLT_SESSION_SECRET
     生效的依据）。自建 app（不经 conftest client，密钥是 app 级配置）。"""
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
     from tagplatform.settings import Settings
 
     db_path = tmp_path / "tagplatform.db"

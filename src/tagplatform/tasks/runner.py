@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import MediaAsset, PromptTemplate, TagGenerationTask
+from tagplatform.capabilities.storage.models import MediaAsset, PromptTemplate, TagGenerationTask
 from tagplatform.eval.tag_quality import snapshot
 from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch

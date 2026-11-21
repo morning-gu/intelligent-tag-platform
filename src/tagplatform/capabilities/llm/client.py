@@ -138,7 +138,7 @@ def make_llm_client(settings: Settings):
     from dotenv import load_dotenv
     load_dotenv()
     if settings.use_mock_llm:
-        from tagplatform.llm.mock import MockLLMClient  # 延迟导入避免 client↔mock 循环
+        from tagplatform.capabilities.llm.mock import MockLLMClient  # 延迟导入避免 client↔mock 循环
         return MockLLMClient()
     return OpenAIClient(
         model=settings.llm_model,

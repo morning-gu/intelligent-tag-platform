@@ -135,8 +135,8 @@ def test_lifespan_bootstrap_creates_admin(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
     from tagplatform.settings import Settings
 
     monkeypatch.setenv("TAGPLT_ADMIN_PASSWORD", "e2e-admin-pw")
@@ -163,7 +163,7 @@ def test_lifespan_bootstrap_creates_admin(tmp_path, monkeypatch):
 
 def test_migration_creates_user_account(tmp_path):
     """alembic upgrade head → user_account 建表，列与 ORM 模型逐一对齐。"""
-    from tagplatform.db.models import UserAccount
+    from tagplatform.capabilities.storage.models import UserAccount
 
     db_path = tmp_path / "m.db"
     env = {**os.environ, "TAGPLT_DATABASE_PATH": str(db_path)}

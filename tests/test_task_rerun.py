@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import PreAssetTag
+from tagplatform.capabilities.storage.models import PreAssetTag
 from tagplatform.tasks import run_generation_task
 from test_task_runner import _make_task, _seed_catalog
 

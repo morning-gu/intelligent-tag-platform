@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagChangeLog,

@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_quality_executor, get_session
 from tagplatform.api.schemas import UtcDatetime
-from tagplatform.db.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.eval.tag_quality import DEFAULT_MODEL
 from tagplatform.library import TagLibrary, try_load_library
 from tagplatform.generation import list_producers

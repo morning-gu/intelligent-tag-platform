@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from tagplatform.api import get_settings_dep
 from tagplatform.api.depends import require_admin
-from tagplatform.db.models import UserAccount
+from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")

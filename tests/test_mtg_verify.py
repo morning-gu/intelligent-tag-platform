@@ -8,7 +8,7 @@ from tagplatform.generation.mtg.verify import (
     parse_verify_results,
     verify_pairs,
 )
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 
 
 class _Client:

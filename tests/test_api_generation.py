@@ -260,7 +260,7 @@ def test_create_task_empty_asset_ids_422(client):
 def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_path,
                                                                    monkeypatch):
     from tagplatform.generation.mtg import pipeline
-    from tagplatform.llm.mock import MockLLMClient
+    from tagplatform.capabilities.llm.mock import MockLLMClient
     from tests.library_fixture import add_tags
 
     movie = deepcopy(CONTENT_FIXTURE_DICT)
@@ -398,7 +398,7 @@ def test_create_task_scene_and_movie_deduped(client):
 
 def test_create_task_orphan_scene_422(client):
     """父级影片也无识别内容（上传占位场景）→ 422，detail 指明场景与父级。"""
-    from tagplatform.db.models import MediaAsset
+    from tagplatform.capabilities.storage.models import MediaAsset
 
     with client.app.state.session_factory() as s:
         s.add(MediaAsset(asset_id="movie_blank", asset_type="movie",
@@ -417,7 +417,7 @@ def test_create_task_orphan_scene_422(client):
 
 def test_create_task_movie_without_content_422(client):
     """非场景资产自身未识别内容且无父级 → 422 保持原文案。"""
-    from tagplatform.db.models import MediaAsset
+    from tagplatform.capabilities.storage.models import MediaAsset
 
     with client.app.state.session_factory() as s:
         s.add(MediaAsset(asset_id="movie_raw", asset_type="movie",
@@ -570,8 +570,8 @@ def test_lifespan_orphan_reset_on_startup(tmp_path):
     from fastapi.testclient import TestClient
 
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.db.models import Base, MediaAsset, TagGenerationTask
+    from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+    from tagplatform.capabilities.storage.models import Base, MediaAsset, TagGenerationTask
     from tagplatform.settings import Settings
 
     db_path = str(tmp_path / "orphan.db")
@@ -609,7 +609,7 @@ def test_result_out_falls_back_to_tag_id_for_legacy_row():
     必须回退到 tag_id，否则资产标签视图会出现无名标签。
     """
     from tagplatform.api.routers.generation import _result_out
-    from tagplatform.db.models import PreAssetTag
+    from tagplatform.capabilities.storage.models import PreAssetTag
 
     row = PreAssetTag(asset_id='a1', target_type='content', target_id='a1',
                       tag_id='tag_legacy_0001', origin='closed',

@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
 from tagplatform.api.schemas import UtcDatetime
-from tagplatform.db.models import AssetBuildTask, MediaAsset
+from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")

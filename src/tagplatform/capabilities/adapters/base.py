@@ -2,7 +2,7 @@
 
 适配器把源格式 raw dict 转为统一 `ContentJSON`；注册表为模块级 dict
 （阶段 1 单进程足够，不做插件发现）。内容导入与 API 层统一从
-`tagplatform.adapters` 引用本模块的协议与注册表函数。
+`tagplatform.capabilities.adapters` 引用本模块的协议与注册表函数。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """

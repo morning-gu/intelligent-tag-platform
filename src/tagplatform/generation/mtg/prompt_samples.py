@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import Callable
 
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 
 logger = logging.getLogger(__name__)
 # 同一进程可以并发运行多个批次，更新一组文件时串行写入。

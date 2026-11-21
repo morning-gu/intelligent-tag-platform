@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
-from tagplatform.db.models import TagImportTask
-from tagplatform.embed import Embedder
+from tagplatform.capabilities.storage.models import TagImportTask
+from tagplatform.capabilities.embed import Embedder
 from tagplatform.governance import ImportParseResult, parse_tag_excel, parse_tag_xml, run_governance
 
 logger = logging.getLogger(__name__)

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.auth.session import parse_session_token
-from tagplatform.db.models import UserAccount
+from tagplatform.capabilities.storage.models import UserAccount
 
 # 会话 cookie 名（登录下发、依赖解析、登出清除共用同一常量）
 SESSION_COOKIE_NAME = "tagplatform_session"

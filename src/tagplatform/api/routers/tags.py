@@ -28,7 +28,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, aliased
 
 from tagplatform.api import get_embedder, get_session
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     PreAssetTag,
     TagCatalog,

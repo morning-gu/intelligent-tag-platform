@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import TagCatalog, TagDefine
+from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
 from tagplatform.library import try_load_library
 from tests.library_fixture import add_tags
 from tagplatform.generation import GenerationPolicy, GenerationSpec
@@ -331,7 +331,7 @@ class _VerifyClient:
         self.calls = 0
 
     def complete(self, messages, run_id):
-        from tagplatform.llm.client import LLMResponse
+        from tagplatform.capabilities.llm.client import LLMResponse
         self.calls += 1
         text = messages[0]["content"]
         rows = [line[2:] for line in text.splitlines()

@@ -24,7 +24,7 @@ from tagplatform.generation.mtg import keyframes as keyframes_mod
 from tagplatform.generation.mtg import pipeline as mtg_pipeline
 from tagplatform.generation.mtg.merge import merge_candidates
 from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.library import try_load_library
 from tagplatform.settings import Settings
 from tests.library_fixture import add_tags

@@ -35,14 +35,14 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import (
     Base,
     MediaAsset,
     PreAssetTag,
     TagGenerationTask,
 )
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.tasks import (
     TaskExecutor,
     reset_orphan_running,
@@ -219,7 +219,7 @@ def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch
     闭环生产器会先滤掉未知候选，所以
     这里直接替换 persist_tags 制造"已写一半再失败"。
     """
-    from tagplatform.db.models import PreAssetTag
+    from tagplatform.capabilities.storage.models import PreAssetTag
 
     _seed_catalog(session)
 

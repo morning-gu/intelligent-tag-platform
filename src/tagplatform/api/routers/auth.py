@@ -20,7 +20,7 @@ from tagplatform.api import get_session, get_settings_dep
 from tagplatform.api.depends import SESSION_COOKIE_NAME, get_current_user
 from tagplatform.auth import get_user_by_username, verify_password
 from tagplatform.auth.session import create_session_token
-from tagplatform.db.models import UserAccount
+from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1/auth")

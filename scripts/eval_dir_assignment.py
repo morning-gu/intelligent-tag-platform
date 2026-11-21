@@ -72,8 +72,8 @@ from pathlib import Path
 
 import numpy as np
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import build_embedder
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.embed import build_embedder
 from tagplatform.eval import (
     GRADE_EXACT,
     GRADE_NONE,

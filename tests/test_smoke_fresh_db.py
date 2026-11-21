@@ -42,7 +42,7 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "content_movie.json"
 CONTENT_FIXTURE_DICT = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -86,8 +86,8 @@ def smoke_client(tmp_path):
     同步执行 + dataset_root 指向空目录）；区别仅在登录留给链路第 1 步。
     """
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
     from tagplatform.settings import Settings
 
     db_path = tmp_path / "smoke.db"

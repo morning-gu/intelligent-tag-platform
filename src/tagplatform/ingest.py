@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagChangeLog, TagDefine
+from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
 from tagplatform.library import TagLibrary
 
 TAG_TYPES = ("val_fixed", "val_generalized")

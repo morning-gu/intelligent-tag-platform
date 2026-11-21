@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from conftest import MOCK_EMBEDDER
-from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
+from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.governance import TagRow, run_governance
 from tagplatform.governance.pipeline import (
     GovernanceConfig,

@@ -10,14 +10,14 @@ from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from tagplatform.db import create_engine_for
-from tagplatform.db.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
+from tagplatform.capabilities.storage import create_engine_for
+from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.eval.tag_quality import _parse_scores, evaluate
 from tagplatform.generation.base import ProducedTag
 from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.llm.client import LLMResponse
-from tagplatform.llm.mock import MockLLMClient
+from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.capabilities.llm.mock import MockLLMClient
 from tagplatform.settings import get_settings
 from tests.test_api_generation import CONTENT_FIXTURE_DICT
 

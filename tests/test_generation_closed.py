@@ -32,7 +32,7 @@ from tagplatform.library import (
     TagLibrary,
     try_load_library,
 )
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.prompts import get_active_prompt, render_prompt
 from tagplatform.settings import Settings

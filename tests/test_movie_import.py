@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from tagplatform import movie_import
-from tagplatform.adapters.vision import to_content_json
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.adapters.vision import to_content_json
+from tagplatform.capabilities.storage.models import MediaAsset
 from tagplatform.generation.mtg import keyframes
 from tagplatform.schemas.upstream import parse_upstream
 

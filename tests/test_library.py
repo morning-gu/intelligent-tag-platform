@@ -235,7 +235,7 @@ def test_mount_character_needs_exactly_one_character():
 
 def test_record_tag_definition_writes_row_and_is_idempotent(session):
     """新词入库：插一行 tag_define + 一条 create 日志；同目录同名不重复插。"""
-    from tagplatform.db.models import TagChangeLog, TagDefine
+    from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
 
     library = try_load_library(session)
     first = record_tag_definition(
@@ -273,7 +273,7 @@ def test_record_tag_definition_rejects_blank_name(session):
 
 def test_record_alias_appends_and_dedupes(session):
     """别名入库：追加进 tag_define.aliases，重复返回 False，记 update 日志。"""
-    from tagplatform.db.models import TagChangeLog, TagDefine
+    from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
 
     assert record_alias(session, tag_id="tag_revenge", alias="报仇") is True
     assert record_alias(session, tag_id="tag_revenge", alias="报仇") is False
@@ -323,7 +323,7 @@ def test_library_tags_api_filters(client):
 
 def test_ingest_preview_api(client):
     """审核通过新词 + 合并别名 → /ingest/preview 反映最近入库记录。"""
-    from tagplatform.db.models import MediaAsset, PreAssetTag
+    from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag
 
     factory = client.app.state.session_factory
     with factory() as s:

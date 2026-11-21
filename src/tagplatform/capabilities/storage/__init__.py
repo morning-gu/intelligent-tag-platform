@@ -3,6 +3,10 @@
 分层红线：本包不得 import fastapi（设计文档 §9.4）。
 `create_engine_for` 产出的引擎在每个新连接上强制 WAL 日志模式与
 foreign_keys=ON（SQLite 外键默认关闭，必须逐连接开启）。
+
+能力层定位（四层重构 Task 2）：本包是存储技术基础（引擎/会话工厂，
+models.py 为 ORM 列契约）；业务查询与事务流程归服务层；防滑坡规则：
+流程编排、算法、领域规则禁止入层，业务知识上限 = schema 常量。
 """
 
 from pathlib import Path

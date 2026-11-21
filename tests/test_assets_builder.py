@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from tagplatform.adapters.vision import to_content_json
+from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.assets import (
     ASSET_BUILDER_VERSION,
     AssetBuilder,
@@ -37,7 +37,7 @@ from tagplatform.assets import (
     source_tag,
 )
 from tagplatform.assets.subtitles import SubtitleLine
-from tagplatform.llm import LLMResponse
+from tagplatform.capabilities.llm import LLMResponse
 from tagplatform.schemas.upstream import parse_upstream
 
 LONG_SUMMARY = ("这是整片的中文剧情描述，交代了主要人物、核心冲突与结局走向，"

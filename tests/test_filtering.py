@@ -18,7 +18,7 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagCatalog,

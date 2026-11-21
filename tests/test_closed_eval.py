@@ -55,7 +55,7 @@ from tagplatform.closed_eval import (
     write_report,
 )
 from tagplatform.eval.closed_ranking import ClosedSample, evaluate_closed
-from tagplatform.llm import MockLLMClient
+from tagplatform.capabilities.llm import MockLLMClient
 
 
 # ---------------------------------------------------------------- 夹具
@@ -325,8 +325,8 @@ class _SessionProbeLLM(MockLLMClient):
 @pytest.fixture
 def engine(tmp_path):
     """评测服务用文件 DB（建表即播种 closed v1 激活模板——after_create 钩子）。"""
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
 
     eng = create_engine_for(str(tmp_path / "closed-eval.db"))
     Base.metadata.create_all(eng)
@@ -349,7 +349,7 @@ def eval_setup(tmp_path, root, engine):
     用例经 dataset_root 换数据集根。teardown 统一等 worker 收尾再解绑库
     引擎——不让 daemon 线程碰已 dispose 的引擎（输出保整洁）。
     """
-    from tagplatform.db import make_session_factory
+    from tagplatform.capabilities.storage import make_session_factory
     from tagplatform.settings import Settings
     from tests.library_fixture import (
         bind_engine,
@@ -461,7 +461,7 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
     判据逐线程归属（跨线程毫秒级 assemble 重叠是合法并发）；另断言全局
     开放会话峰值不超过并发上限（合法并发的上界）。"""
-    from tagplatform.db import make_session_factory
+    from tagplatform.capabilities.storage import make_session_factory
 
     factory = _CountingSessionFactory(make_session_factory(engine))
     llm = _SessionProbeLLM(factory)

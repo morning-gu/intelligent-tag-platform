@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from tagplatform.db.models import MediaAsset, TagCatalog, TagDefine
-from tagplatform.embed import MockEmbedder
+from tagplatform.capabilities.storage.models import MediaAsset, TagCatalog, TagDefine
+from tagplatform.capabilities.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
 from tagplatform.vectors import decode_vector, encode_vector
 

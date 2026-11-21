@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import AssetTag, PreAssetTag, TagDefine
+from tagplatform.capabilities.storage.models import AssetTag, PreAssetTag, TagDefine
 from tagplatform.ingest import record_alias, record_tag_definition
 from tagplatform.library import TagLibrary, try_load_library
 

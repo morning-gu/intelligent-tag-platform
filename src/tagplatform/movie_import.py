@@ -41,11 +41,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.adapters.vision import to_content_json
+from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.content_import import import_content as import_content_svc
 from tagplatform.content_io import is_upstream_shape
 from tagplatform.content_template import to_template
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 from tagplatform.schemas.upstream import parse_upstream
 
 #: 目录名里的 imdb 后缀：`<片名>--tt0075314`

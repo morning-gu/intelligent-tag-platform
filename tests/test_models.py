@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,

@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 # 上传内容体（任意字节即可，测试零真实视频依赖）
 PAYLOAD = b"fake-video-bytes"

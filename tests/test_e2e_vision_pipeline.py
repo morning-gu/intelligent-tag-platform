@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.adapters import get_adapter
+from tagplatform.capabilities.adapters import get_adapter
 from tagplatform.content_import import import_content
-from tagplatform.db.models import MediaAsset, PreAssetTag, TagGenerationTask
+from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.tasks import run_generation_task
 
 UPSTREAM = {

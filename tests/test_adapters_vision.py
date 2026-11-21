@@ -15,7 +15,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from tagplatform.adapters import VisionAdapter, get_adapter, list_adapters, register_adapter
+from tagplatform.capabilities.adapters import VisionAdapter, get_adapter, list_adapters, register_adapter
 
 # 与《图谱&标签与长视频理解数据对齐.txt》示例逐字对齐（含注释时请先去除）
 SAMPLE = {

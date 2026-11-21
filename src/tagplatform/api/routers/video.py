@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.content_import import resolve_video_path
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 router = APIRouter(prefix="/api/v1")
 

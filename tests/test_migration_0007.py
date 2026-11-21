@@ -28,8 +28,8 @@ from sqlalchemy.exc import IntegrityError
 from alembic import command
 from alembic.config import Config
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,

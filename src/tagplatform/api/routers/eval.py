@@ -46,7 +46,7 @@ from tagplatform.closed_eval import (
     movie_entries,
     scan_datasets,
 )
-from tagplatform.db.models import UserAccount
+from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.eval.movie_breakdown import breakdown_movie, summarize_movies
 from tagplatform.library import try_load_library

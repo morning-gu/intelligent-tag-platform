@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.content_io import dump_for_storage, is_upstream_shape
 from tagplatform.content_template import to_template, to_template_from_content
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     PreAssetTag,
     MediaAsset,
 )

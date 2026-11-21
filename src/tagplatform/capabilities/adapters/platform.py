@@ -1,7 +1,7 @@
 """平台格式适配器（Task 8）。
 
 平台格式即统一内容 JSON 标准格式，`adapt` 为 identity：raw dict 直接
-经 `parse_content` 校验后返回。包导入时由 `tagplatform.adapters` 自动
+经 `parse_content` 校验后返回。包导入时由 `tagplatform.capabilities.adapters` 自动
 注册（kind="platform"）。
 """
 

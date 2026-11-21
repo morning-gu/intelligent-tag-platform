@@ -227,7 +227,7 @@ def test_create_prompt_version_atomic_on_failure(session, monkeypatch):
 
 def test_activate_prompt_atomic_on_failure(session, monkeypatch):
     """激活切换事务中途失败：回滚后旧激活行原样（v2 仍激活、v1 未被误激活）。"""
-    from tagplatform.db.models import PromptTemplate
+    from tagplatform.capabilities.storage.models import PromptTemplate
     from tagplatform.prompts import activate_prompt_version, create_prompt_version
 
     create_prompt_version(session, "closed", CLOSED_V2_TEXT)  # v2 激活

@@ -29,7 +29,7 @@ from typing import BinaryIO
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 # 上传后缀白名单（比较前归一小写；存盘名后缀同取小写）
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv"}
