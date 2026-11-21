@@ -1,7 +1,8 @@
 """eval/movie_breakdown 的单测：单片 badcase 指标的口径钉死。
 
 夹具为手造 raw_results.json 行 dict；标准网格 thetas=[0.2,0.4,0.6]、
-ks=[5,10,20] → theta_used=0.4、k_p=10、k_r=20。这里钉死几件容易写错的
+ks=[5,10,20] → 缺省 θ_p=0.2（DEFAULT_THETA_P）、θ_r=0.6（0.8 的最近
+档）。这里钉死几件容易写错的
 事：
 
 1. **None≠0**——θ-空 / 无交集 / 失败片的 p/r/spearman 是 None（算不出），
@@ -24,7 +25,7 @@ from tagplatform.eval.movie_breakdown import (
     summarize_movies,
 )
 
-THETAS = [0.2, 0.4, 0.6]  # → theta_used = 0.4
+THETAS = [0.2, 0.4, 0.6]  # → 缺省 θ_p=0.2、θ_r=0.6（0.8 最近档）
 KS = [5, 10, 20]  # → k_p = 10、k_r = 20
 
 
@@ -46,8 +47,11 @@ def _prod(tag_id, sf, *, tag_name=None, confidence=0.9, evidence_count=1):
 # ---------------------------------------------------------------- 选 θ / 选 k
 
 def test_pick_theta_and_k_tie_rules():
-    assert pick_theta([0.2, 0.6]) == 0.2  # 距离并列（0.2）取小
-    assert pick_theta([0.2, 0.4]) == 0.4
+    # target 参数化（统一约定：P/nDCG→0.2、R→0.8；并列取小）
+    assert pick_theta([0.2, 0.6], 0.4) == 0.2  # 距离并列（0.2）取小
+    assert pick_theta([0.2, 0.4], 0.4) == 0.4
+    assert pick_theta([0.2, 0.4, 0.6], 0.2) == 0.2  # θ_p 目标
+    assert pick_theta([0.2, 0.4, 0.6], 0.8) == 0.6  # θ_r 目标（最近档）
     assert pick_k([5, 20], 10) == 5  # 距离并列（5）取小
     assert pick_k([15, 5], 10) == 5
     assert pick_k([15], 10) == 15
@@ -63,9 +67,10 @@ def test_hit_miss_noise_classification():
 
     summary = summarize_movies([row], THETAS, KS, library_ids)
     assert (summary["theta_p"], summary["theta_r"], summary["k_p"],
-            summary["k_r"]) == (0.4, 0.4, 10, 20)
+            summary["k_r"]) == (0.2, 0.6, 10, 20)
     srow = summary["rows"][0]
-    # 手算：计分条 2 条全进 top-10，命中 gC 1 条 → p=1/10；相关 3 个 → r=1/3
+    # 手算（θ_p=0.2/θ_r=0.6，相关集同 0.4 门）：计分条 2 条全进 top-10，
+    # 命中 gC 1 条 → p=1/10；相关 3 个 → r=1/3
     assert srow["p_at_k"] == pytest.approx(0.1)
     assert srow["r_at_k"] == pytest.approx(1 / 3)
     # 手算：keys=[gA,gB,gC,gD]，xs=[0,0,0.95,0.9] 秩 [1.5,1.5,4,3]，
@@ -74,7 +79,7 @@ def test_hit_miss_noise_classification():
     assert (srow["n_produced"], srow["n_relevant"]) == (3, 3)
 
     detail = breakdown_movie([row], "m1", THETAS, KS, library_ids, {})
-    assert (detail["theta_p"], detail["theta_r"]) == (0.4, 0.4)
+    assert (detail["theta_p"], detail["theta_r"]) == (0.2, 0.6)
     produced = detail["produced"]
     assert [p["tag_id"] for p in produced] == ["gC", "gD"]
     assert produced[0]["hit"] is True
@@ -116,16 +121,16 @@ def test_out_of_space_excluded_from_metrics_but_listed():
 # ---------------------------------------------------------------- θ-空：P/R 为 None、Spearman 保留
 
 def test_theta_empty_relevant_nulls_pr_keeps_spearman():
-    cold = _row("m-cold", {"low1": 0.3, "low2": 0.1}, [_prod("low1", 0.9)])
+    cold = _row("m-cold", {"low1": 0.15, "low2": 0.05}, [_prod("low1", 0.9)])
     hot = _row("m-hot", {"h1": 0.9, "h2": 0.8},
                [_prod("h1", 0.95), _prod("h2", 0.90)])
     library_ids = {"low1", "low2", "h1", "h2"}
 
     summary = summarize_movies([cold, hot], THETAS, KS, library_ids)
     by_tt = {r["tt"]: r for r in summary["rows"]}
-    assert by_tt["m-cold"]["p_at_k"] is None  # gt∩库非空但全 <θ → None≠0
+    assert by_tt["m-cold"]["p_at_k"] is None  # gt∩库非空但全 <θ_p → None≠0
     assert by_tt["m-cold"]["r_at_k"] is None
-    # 手算：两点 xs=[0.9,0]、ys=[0.3,0.1] 完全同向 → 1.0
+    # 手算：两点 xs=[0.9,0]、ys=[0.15,0.05] 完全同向 → 1.0
     assert by_tt["m-cold"]["spearman"] == 1.0
     assert by_tt["m-cold"]["n_relevant"] == 0
     # 排序：p=None 垫底，位于非空 P 行之后
@@ -165,7 +170,7 @@ def test_summary_sort_failed_first_p_asc_nulls_last():
               [_prod("r3", 0.9), _prod("r4", 0.8)])
     m1 = _row("m1", {"r1": 0.9, "r2": 0.8},
               [_prod("r1", 0.9), _prod("r2", 0.8)])
-    n1 = _row("s3", {"c1": 0.3}, [_prod("c1", 0.9)])
+    n1 = _row("s3", {"c1": 0.15}, [_prod("c1", 0.9)])
     library_ids = {"r1", "r2", "r3", "r4", "c1"}
 
     summary = summarize_movies([fail, b2, m1, n1], THETAS, KS, library_ids)
@@ -214,7 +219,7 @@ def test_reconciliation_with_grid():
         _row("mA", {"a1": 0.9, "a2": 0.7, "a3": 0.1},
              [_prod("a1", 0.95), _prod("a3", 0.90)]),
         _row("mB", {"b1": 0.9, "b2": 0.8}, [_prod("b1", 0.90), _prod("b2", 0.85)]),
-        _row("mC", {"c1": 0.3}, [_prod("c1", 0.90)]),  # θ-空：0.3 < 0.4
+        _row("mC", {"c1": 0.15}, [_prod("c1", 0.90)]),  # θ-空：0.15 < 0.2
         _row("mD", {}, []),  # 无交集
         _row("mE", {"e1": 0.9}, [], ok=False, error="x"),  # 失败片
     ]
@@ -229,7 +234,7 @@ def test_reconciliation_with_grid():
     by_tt = {r["tt"]: r for r in summary["rows"]}
     assert by_tt["mA"]["p_at_k"] == pytest.approx(0.1)  # 命中 a1 / k=10
     assert by_tt["mB"]["p_at_k"] == pytest.approx(0.2)
-    assert by_tt["mC"]["p_at_k"] is None  # 单片侧 θ-空 → null
+    assert by_tt["mC"]["p_at_k"] is None  # 单片侧 θ_p-空 → null
     assert by_tt["mD"]["p_at_k"] is None
     assert by_tt["mE"]["p_at_k"] is None
 
@@ -247,8 +252,8 @@ def test_reconciliation_with_grid():
         _sample(rows[3], (), {}),
     ]
     report = evaluate_closed(samples, THETAS, KS)
-    gp = next(g for g in report.grid if g.theta == 0.4 and g.k == 10)
-    assert gp.n_valid == 2  # 网格侧：θ-空片被 valid_theta 预滤
+    gp = next(g for g in report.grid if g.theta == 0.2 and g.k == 10)
+    assert gp.n_valid == 2  # 网格侧：θ0.2-空片被 valid_theta 预滤
     assert report.n_invalid == 1  # 无交集片计 invalid
 
     # 双路过算：非空 p 均值（按原始行序求和，与网格同序）精确相等
@@ -271,21 +276,23 @@ def test_default_split_equals_single_theta_behavior():
                           _prod("out1", 0.50)])
     library_ids = set(gt) | {"out1"}
 
-    summary = summarize_movies([row], THETAS, KS, library_ids)
+    summary = summarize_movies([row], THETAS_SPLIT, KS, library_ids)
     assert "theta_used" not in summary
-    assert (summary["theta_p"], summary["theta_r"]) == (0.4, 0.4)
-    assert summary["thetas"] == THETAS
+    assert (summary["theta_p"], summary["theta_r"]) == (0.2, 0.8)
+    assert summary["thetas"] == THETAS_SPLIT
     srow = summary["rows"][0]
     assert srow["p_at_k"] == pytest.approx(0.1)
-    assert srow["r_at_k"] == pytest.approx(1 / 3)
+    # θ_r=0.8：相关只 gA(.81)，top-20=[gC,gD] 无命中 → r=0.0
+    assert srow["r_at_k"] == pytest.approx(0.0)
     assert srow["spearman"] == pytest.approx(-0.7379, abs=1e-3)
+    assert srow["n_relevant"] == 1
 
-    detail = breakdown_movie([row], "m1", THETAS, KS, library_ids, {})
+    detail = breakdown_movie([row], "m1", THETAS_SPLIT, KS, library_ids, {})
     assert "theta_used" not in detail
-    assert (detail["theta_p"], detail["theta_r"]) == (0.4, 0.4)
+    assert (detail["theta_p"], detail["theta_r"]) == (0.2, 0.8)
     assert [p["tag_id"] for p in detail["produced"]] == ["gC", "gD"]
-    assert detail["produced"][0]["hit"] is True
-    assert [m["tag_id"] for m in detail["misses"]] == ["gA", "gB"]
+    assert detail["produced"][0]["hit"] is False  # gC .61 < 0.8
+    assert [m["tag_id"] for m in detail["misses"]] == ["gA"]  # gB .77 < 0.8
 
 
 def test_split_theta_classification_follows_theta_r():

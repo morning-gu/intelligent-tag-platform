@@ -7,7 +7,8 @@ sf），因此单片指标与网格格值可精确对账（test_reconciliation_w
 死）；该 θ 下相关集为空的影片，网格靠 valid_theta 预滤、单片自管 null，
 两侧都不进平均。增补（2026-11-22）：P 门与 R 门可各自独立取 θ——p 对账
 (θ_p, K_P) 格、r 对账 (θ_r, K_R) 格；n_relevant/hit/misses 一律跟 θ_r
-（漏检=召回侧语义）；Spearman 与 θ 无关。
+（漏检=召回侧语义）；Spearman 与 θ 无关。缺省取格走统一约定
+（DEFAULT_THETA_P=0.2 / DEFAULT_THETA_R=0.8，见 closed_ranking）。
 已知取舍：precision/recall 原语对空相关集记 0.0，本模块先判 θ-相关集为空
 → None、非空才调（None≠0）；计分清单与明细顺序防御性按 (-sf, tag_id) 重
 排，不信任输入序。
@@ -20,7 +21,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from tagplatform.eval.closed_ranking import spearman
+from tagplatform.eval.closed_ranking import (
+    DEFAULT_K_P,
+    DEFAULT_K_R,
+    DEFAULT_THETA_P,
+    DEFAULT_THETA_R,
+    spearman,
+)
 from tagplatform.eval.ranking import precision_at_k, recall_at_k
 
 __all__ = [
@@ -30,21 +37,18 @@ __all__ = [
     "summarize_movies",
 ]
 
-# θ 选取目标（spec 钉死：最接近 0.4，并列取小）
-_THETA_TARGET = 0.4
-# P/R 的 k 选取目标：P 看 top-10、R 看 top-20（badcase 视图口径）
-_TARGET_K_P = 10
-_TARGET_K_R = 20
+# θ/k 选取目标统一走 closed_ranking 的取格约定常量（2026-11-22：
+# P/nDCG@K=10 → θ≈0.2、R@K=20 → θ≈0.8；并列取小）
 
 
-def pick_theta(thetas: Sequence[float]) -> float:
-    """选最接近 0.4 的 θ；距离并列取小（确定性，防实现漂移）。
+def pick_theta(thetas: Sequence[float], target: float) -> float:
+    """选最接近 target 的 θ；距离并列取小（确定性，防实现漂移）。
 
-    距离先按 9 位小数取整再比——0.6-0.4 的浮点表示（0.1999…96）比
-    0.4-0.2（0.2000…01）略小，不取整会让"并列取小"被表示噪声击穿。
+    距离先按 9 位小数取整再比——浮点表示噪声（如 0.6-0.4=0.1999…96
+    比 0.4-0.2=0.2000…01 略小）会把"并列取小"击穿，不取整不行。
     """
     return min(thetas,
-               key=lambda t: (round(abs(t - _THETA_TARGET), 9), t))
+               key=lambda t: (round(abs(t - target), 9), t))
 
 
 def pick_k(ks: Sequence[int], target: int) -> int:
@@ -114,19 +118,21 @@ def summarize_movies(rows: list[dict], thetas: Sequence[float],
                      theta_r: float | None = None) -> dict:
     """逐片摘要（badcase 视图主表）：指标 + 计数 + 排序。
 
-    - `theta_p`/`theta_r`：P 门与 R 门各自独立（增补 2026-11-22）；缺省
-      None → 各自 `pick_theta`（= 旧单 θ 行为）；`thetas` 回传网格档
-      （选择器选项源）；
+    - `theta_p`/`theta_r`：P 门与 R 门各自独立；缺省 None → 统一取格
+      约定（θ_p≈0.2、θ_r≈0.8，closed_ranking 常量）；`thetas` 回传网格
+      档（选择器选项源）；
     - 每片一行：指标（float | None，None=算不出；p 用 θ_p、r 用 θ_r）+
       n_produced（原始产出条数含空间外）+ n_relevant（gt∩库 ≥**θ_r**
       计数，与漏检/命中分类同门；失败片也照数）；
     - 排序：失败置顶 → p_at_k 非空升序 → null 垫底 → 同分按 tt 字典序
       （垫底键只看 p，θ_r 不参与排序）。
     """
-    theta_p = pick_theta(thetas) if theta_p is None else theta_p
-    theta_r = pick_theta(thetas) if theta_r is None else theta_r
-    k_p = pick_k(ks, _TARGET_K_P)
-    k_r = pick_k(ks, _TARGET_K_R)
+    theta_p = (pick_theta(thetas, DEFAULT_THETA_P) if theta_p is None
+               else theta_p)
+    theta_r = (pick_theta(thetas, DEFAULT_THETA_R) if theta_r is None
+               else theta_r)
+    k_p = pick_k(ks, DEFAULT_K_P)
+    k_r = pick_k(ks, DEFAULT_K_R)
     gt_space = _gt_space(rows)
     out: list[dict] = []
     for row in rows:
@@ -174,8 +180,10 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
     row = next((r for r in rows if r.get("tt") == tt), None)
     if row is None:
         return None
-    theta_p = pick_theta(thetas) if theta_p is None else theta_p
-    theta_r = pick_theta(thetas) if theta_r is None else theta_r
+    theta_p = (pick_theta(thetas, DEFAULT_THETA_P) if theta_p is None
+               else theta_p)
+    theta_r = (pick_theta(thetas, DEFAULT_THETA_R) if theta_r is None
+               else theta_r)
     detail = {
         "tt": row["tt"],
         "title": row.get("title"),
@@ -184,8 +192,8 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
         "elapsed_ms": row.get("elapsed_ms"),
         "theta_p": theta_p,
         "theta_r": theta_r,
-        "k_p": pick_k(ks, _TARGET_K_P),
-        "k_r": pick_k(ks, _TARGET_K_R),
+        "k_p": pick_k(ks, DEFAULT_K_P),
+        "k_r": pick_k(ks, DEFAULT_K_R),
         "produced": [],
         "out_of_space": [],
         "misses": [],
