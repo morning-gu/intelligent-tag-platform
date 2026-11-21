@@ -3,14 +3,14 @@
 三条主线：
 1. 彩排升级：临时文件库程序化升到 0006 → 手工插外键链完整的 v1 数据
    （账号、目录父/子、资产（父/子两行）+上下文+生成任务、挂载两行、
-   change_log）→ upgrade head → 断言旧业务表消失、user_account / prompt
+   change_log）→ upgrade 0016 → 断言旧业务表消失、user_account / prompt
    3 行种子 / media_asset 两行原样保留、v2 新表结构与 db.models 逐字对拍
    （列/NOT NULL/默认值/CHECK/索引名，media_asset 含 §3.1 定稿 CHECK 与
    两个索引——升级库与 create_all 库同构）、合法行可插且非法枚举 / FK
    违例 / 幂等唯一索引拒绝、PRAGMA foreign_key_check 为空。
-2. 全新空库 0001→head：种子迁移链（0002/0005 import 种子常量）不断，
-   prompt_template 3 行种子齐备——恢复 v1 test_models.py 退役的迁移链
-   种子覆盖（deferred minor 闭环点）。
+2. 全新空库 0001→head：迁移链不断（0002/0005 已冻结为字面量快照，
+   四层重构 Task 2）；prompt_template 由 0018 drop（prompt 本地化，
+   Task 3）——head 处无该表，downgrade 一级由 test_prompts 钉死回填。
 3. downgrade 0006：v2 新表移除、v1 空表重建（数据不回迁）、media_asset
    重建回 v1 形状，再 round-trip 升回 0007 验证迁移可重入。
 
@@ -58,7 +58,8 @@ V2_NEW_TABLES = {
 }
 # 其中全新建（v1 无同名表）的 4 张——downgrade 后必须彻底消失
 V2_NEW_ONLY = V2_NEW_TABLES - {"tag_catalog", "asset_tag", "tag_change_log"}
-# 本期物理不动的表 + 只补两列的 media_asset
+# 0007 物理不动的表 + 只补两列的 media_asset（彩排升级止于 0016——
+# prompt_template 尚未被 0018 drop，种子保留断言在此钉死）
 UNTOUCHED_TABLES = {"user_account", "prompt_template", "asset_build_task", "media_asset"}
 
 # prompt_template 3 行种子（closed v1 激活 / open v1 激活 / open v2 过时标注）
@@ -453,12 +454,17 @@ def _invalid_enum_rows() -> list:
 
 
 def test_0007_upgrade_rehearsal(rehearsal):
-    """带数据彩排：0006 带数据升 0007——旧表消失 / 种子保留 / 结构对拍 / 约束兜底。"""
+    """带数据彩排：0006 带数据升 0016——旧表消失 / 种子保留 / 结构对拍 / 约束兜底。
+
+    升级止于 0016（Task 1/2 冻结链的末端）：彩排主题是 0007 v2 重建对
+    未动表与种子的保留，prompt_template 在 0018（drop）之前的链路上
+    必须原样——升级到 head 反而会把断言对象删掉。
+    """
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0006")
     _seed_v1_data(db_path)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0016")
 
     # ---- 表集合：旧业务表消失、v2 新表齐备、保留表不动 ----
     names = _table_names(db_path)
@@ -581,23 +587,17 @@ def test_0007_upgrade_rehearsal(rehearsal):
 
 
 def test_fresh_db_full_chain(rehearsal):
-    """全新空库 0001→head：种子链不断，prompt_template 3 行种子齐备。"""
+    """全新空库 0001→head：迁移链不断；prompt_template 终点被 0018 drop。"""
     cfg, db_path = rehearsal
     command.upgrade(cfg, "head")
 
     names = _table_names(db_path)
     assert not (GONE_V1_TABLES & names)
     assert V2_NEW_TABLES <= names
-    assert UNTOUCHED_TABLES <= names
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = conn.execute(
-            "SELECT mode, version, is_active FROM prompt_template ORDER BY id"
-        ).fetchall()
-        assert rows == PROMPT_SEEDS
-    finally:
-        conn.close()
+    assert UNTOUCHED_TABLES - {"prompt_template"} <= names
+    # 本地化终点（四层重构 Task 3）：head 处 prompt_template 已 drop——
+    # 全链（含 0018 的活常量 import）无断链即 Review Focus #1 的 fresh 检查
+    assert "prompt_template" not in names
 
     assert _fk_check(db_path) == []
 
@@ -643,9 +643,12 @@ def test_downgrade_to_0006(rehearsal):
         for table in GONE_V1_TABLES:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             assert count == 0, table
-        # 账号与模板种子不受降级影响
+        # 账号保留；模板种子经 0018 downgrade 回填 2 行（closed/open v1
+        # 激活，templates.py 常量——open v2 过时标注行随本地化退役）
         assert conn.execute("SELECT COUNT(*) FROM user_account").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM prompt_template").fetchone()[0] == 3
+        assert conn.execute(
+            "SELECT mode, version, is_active FROM prompt_template ORDER BY id"
+        ).fetchall() == [("closed", 1, 1), ("open", 1, 1)]
     finally:
         conn.close()
     # 重建后的 v1 media_asset 自引用外键仍然成立（子行指向父行）

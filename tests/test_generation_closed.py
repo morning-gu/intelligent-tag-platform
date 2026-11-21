@@ -34,7 +34,7 @@ from tagplatform.library import (
 )
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
-from tagplatform.prompts import get_active_prompt, render_prompt
+from tagplatform.capabilities.prompts import get_prompt, render_prompt
 from tagplatform.settings import Settings
 from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
@@ -226,11 +226,14 @@ def test_closed_recall_respects_dir_scope():
 
 def _build_spec(session: Session, content_fixture, run_id: str,
                 policy=None) -> GenerationSpec:
-    """按 runner 职责模拟组装：渲染 closed prompt（候选分组由 produce 注入）。"""
+    """按 runner 职责模拟组装：渲染 closed prompt（候选分组由 produce 注入）。
+
+    四层重构 Task 3 起模板为本地常量（get_prompt），session 仅随签名保留。
+    """
     library = try_load_library()
     policy = policy or GenerationPolicy()
     prompt_text = render_prompt(
-        get_active_prompt(session, "closed"),
+        get_prompt("closed"),
         content=_render_content_text(content_fixture),
     )
     return GenerationSpec(

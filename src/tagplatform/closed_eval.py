@@ -22,8 +22,8 @@
 =====================================
 
 起跑校验（spec 钉死顺序）→ daemon worker 持线程池逐片生成 → 终态落盘。
-每片走与正式生成**零漂移**的路径：`assemble_spec`（同一组装段，读激活
-closed 模板）→ `ClosedTagProducer.produce`（producer 本就不落库——落库
+每片走与正式生成**零漂移**的路径：`assemble_spec`（同一组装段，取本地
+closed 模板常量渲染）→ `ClosedTagProducer.produce`（producer 本就不落库——落库
 是正式执行器的职责），所以干跑全程对业务表只读（DB 零写入红线），评测
 产物只写 `settings.eval_output_root/<run_id>/` 六个文件：起跑即写
 meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
@@ -102,7 +102,7 @@ from tagplatform.eval.closed_ranking import (
 )
 from tagplatform.generation import get_producer
 from tagplatform.library import try_load_library
-from tagplatform.prompts import get_active_prompt
+from tagplatform.capabilities.prompts import TEMPLATE_VERSIONS
 from tagplatform.schemas import ContentJSON
 from tagplatform.settings import Settings
 from tagplatform.tasks.runner import assemble_spec
@@ -456,8 +456,8 @@ def _produced_rows(tags: list) -> list[dict]:
 class ClosedEvalService:
     """闭环评测干跑运行器：起跑校验 → 线程池逐片生成 → 终态落盘。
 
-    DB 零写入红线（spec §5/§9）：`_run_movie` 只调 `assemble_spec`（读激
-    活模板）与 `ClosedTagProducer.produce`（producer 不落库——落库是正
+    DB 零写入红线（spec §5/§9）：`_run_movie` 只调 `assemble_spec`（本地
+    模板常量渲染）与 `ClosedTagProducer.produce`（producer 不落库——落库是正
     式执行器的事），全程对业务表只读；评测唯一的写盘位置是
     `settings.eval_output_root/<run_id>/`。与正式生成复用同一组装段与
     producer，评测结果因此可直接对照生产口径。
@@ -862,7 +862,7 @@ class ClosedEvalService:
         """单片干跑（线程池内执行）：共 1+RETRY_PER_MOVIE 次尝试。
 
         每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
-        （mode="closed"，读激活模板）→ produce（不写库）→ 产出按
+        （mode="closed"，本地模板常量渲染）→ produce（不写库）→ 产出按
         (-sf, tag_id) 排序。**会话在 assemble 后立即归还**：produce 含
         全部 LLM 调用（分钟级）不得持有 DB 连接（池饿死事故 2026-11-21：
         并发 16 > QueuePool 5+10，会话横跨 produce 把池占死、平台 API 全
@@ -880,7 +880,7 @@ class ClosedEvalService:
                 with self._session_factory() as session:
                     content = load_movie_content(dataset_root, tt)
                     title = content.asset.title
-                    spec, _template = assemble_spec(
+                    spec, _prompt_version = assemble_spec(
                         session, mode="closed", content=content,
                         task_id=f"eval-{run_id}", asset_id=tt,
                         run_id=f"{run_id}:{tt}")
@@ -952,17 +952,14 @@ class ClosedEvalService:
         return os.path.join(self.settings.eval_output_root, run_id,
                             "progress.jsonl")
 
-    def _active_prompt_version(self) -> int | None:
-        """读激活 closed 模板版本（meta 口径记录）；读不到返回 None。
+    def _active_prompt_version(self) -> int:
+        """closed 模板口径版本（meta 口径记录）。
 
-        不放进 start 校验段——模板缺失时每片会在 assemble_spec 失败并走
-        单片失败/中止路径，起跑校验保持 spec 钉死的五步。
+        四层重构 Task 3 起模板为本地常量（capabilities/prompts/templates.py，
+        git 即版本），版本标识随常量固定，不再查 DB、不会缺失——与起跑
+        校验段解耦的旧口径（模板缺失走单片失败）随之退役。
         """
-        try:
-            with self._session_factory() as session:
-                return get_active_prompt(session, "closed").version
-        except Exception:  # noqa: BLE001 —— 口径缺失不拦截起跑，记 None
-            return None
+        return TEMPLATE_VERSIONS["closed"]
 
     def _new_run_id(self) -> str:
         """`run-YYYYMMDD-HHMMSS-xxxx`：时间戳人读 + 2 字节随机防同秒撞名。

@@ -289,7 +289,7 @@ class _CountingSessionFactory:
 
 
 class _CountingSession:
-    """计数会话：属性透传内层（assemble_spec 的 get_active_prompt 可用）。"""
+    """计数会话：属性透传内层（assemble_spec 内服务级 DB 读取可用）。"""
 
     def __init__(self, inner, factory):
         self._inner = inner
@@ -324,7 +324,8 @@ class _SessionProbeLLM(MockLLMClient):
 
 @pytest.fixture
 def engine(tmp_path):
-    """评测服务用文件 DB（建表即播种 closed v1 激活模板——after_create 钩子）。"""
+    """评测服务用文件 DB（四层重构 Task 3 起 prompt 本地化：create_all
+    不再播种 prompt_template——after_create 钩子随本地化退役）。"""
     from tagplatform.capabilities.storage import create_engine_for
     from tagplatform.capabilities.storage.models import Base
 

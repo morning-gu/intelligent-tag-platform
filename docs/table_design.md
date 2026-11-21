@@ -550,9 +550,9 @@ open 生成端（mtg-v1）产出的是自拟分类，不知道平台目录体系
 
 **现状：服务器业务数据已清零（2026-11-05 两轮 wipe），仅存 user_account 1 行 + prompt_template 3 行种子。**
 
-- 0007+ 系列重建 v2 变更所及的业务表（新结构 + 新表名）；`user_account` / `prompt_template` / `asset_build_task` **本期物理不动、ORM 保持 v1 形状**（§3.9–3.11 所示 DDL 与 v1 的差异留待 PG 迁移时统一对齐）。
+- 0007+ 系列重建 v2 变更所及的业务表（新结构 + 新表名）；`user_account` / `prompt_template` / `asset_build_task` **本期物理不动、ORM 保持 v1 形状**（§3.9–3.11 所示 DDL 与 v1 的差异留待 PG 迁移时统一对齐；`prompt_template` 后由四层重构迁移 0018 drop——prompt 本地化，见下）。
 - 旧表（media_context / review_record / v1 asset_tag / v1 tag_catalog / import_batch / generation_task）业务数据为空，直接 drop。
-- 注意：旧迁移 0002/0005 从 `tagplatform.db.models` import 种子常量（`PROMPT_V1_SEED` / `PROMPT_DEPRECATED_OPEN_SEED`）——重写 models.py 必须保住这两个导出，否则全新库 0001→head 升级链断裂。
+- ~~旧迁移 0002/0005 从 `tagplatform.db.models` import 种子常量（`PROMPT_V1_SEED` / `PROMPT_DEPRECATED_OPEN_SEED`）——重写 models.py 必须保住这两个导出~~ **已解除**：四层重构（Task 1/2）把 0002/0005/0012/0013/0014/0016 全部冻结为字面量快照，迁移文件自包含、不再 import 任何活常量；prompt 文案随之本地化为代码常量（`tagplatform.capabilities.prompts.templates`，git 即版本），`prompt_template` 表由迁移 **0018 drop**（downgrade 重建 + 从 templates.py 常量回填），ORM 与常量已删。
 - 服务器升级流程不变：`alembic upgrade head`（沿用既有部署管线）。
 - 迁移按既有**带数据彩排法**验证：本地建库升到 0006 → 手工插父/子表数据（含外键行、账号、模板）→ upgrade head → 验证行数 / PRAGMA foreign_key_check / 约束。注意该环境 alembic 为非事务 DDL，PRAGMA foreign_keys=OFF 在迁移内真实生效。
 - **338 标签库在 v2 上线后再导入**（避免导两次）；分层 Excel 的层级列落到 tag_catalog（目录）+ tag_define（标签）两级，导入适配在实施计划中定义。

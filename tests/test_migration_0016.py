@@ -56,7 +56,8 @@ def test_0016_updates_and_downgrades_closed_prompt(rehearsal):
         )
         conn.commit()
 
-    command.upgrade(cfg, "head")
+    # 升级止于 0016（head 已是 0018——prompt_template 被 drop）
+    command.upgrade(cfg, "0016")
     upgraded = _closed_prompt(db_path)
     # 三模态嵌套契约进文案：模态节与各模态独立评分的说明
     assert "content、scene、frame" in upgraded
@@ -77,10 +78,10 @@ def test_0016_updates_and_downgrades_closed_prompt(rehearsal):
 
 
 def test_0016_upgrade_from_older_revision_is_idempotent(rehearsal):
-    """从 0012 直升 head：0013 与 0016 两次 UPDATE 叠加，最终为 0016 文案。"""
+    """从 0012 直升 0016：0013 与 0016 两次 UPDATE 叠加，最终为 0016 文案。"""
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0012")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0016")
     with sqlite3.connect(str(db_path)) as conn:
         assert conn.execute(
             "SELECT version_num FROM alembic_version").fetchone() == ("0016",)

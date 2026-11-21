@@ -54,7 +54,9 @@ def test_0013_updates_and_downgrades_closed_prompt(rehearsal):
         )
         conn.commit()
 
-    command.upgrade(cfg, "head")
+    # 升级止于 0016（本文件彩排 0013/0014/0016 的 prompt 演进；
+    # head 已是 0018——prompt_template 被 drop，查询对象不存在）
+    command.upgrade(cfg, "0016")
     upgraded = _closed_prompt(db_path)
     assert "applicability" in upgraded
     assert "evidence_strength" in upgraded
@@ -71,7 +73,7 @@ def test_0014_upgrades_main_0013(rehearsal):
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0013")
     closed_prompt = _closed_prompt(db_path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0016")
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0016",)
         assert conn.execute("SELECT COUNT(*) FROM tag_quality_evaluation").fetchone() == (0,)
@@ -80,7 +82,7 @@ def test_0014_upgrades_main_0013(rehearsal):
 
 def test_0014_adopts_pilot_0013_without_losing_evaluations(rehearsal):
     cfg, db_path = rehearsal
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0016")  # 止于 0016：head(0018) 已 drop prompt_template
     with sqlite3.connect(db_path) as conn:
         # Pilot 0013 used the same quality schema as main 0014, before the closed prompt upgrade.
         conn.execute("UPDATE alembic_version SET version_num='0013'")
@@ -96,7 +98,7 @@ def test_0014_adopts_pilot_0013_without_losing_evaluations(rehearsal):
                      ("g1", "completed", "test", "tag-quality-v3", '[]',
                       '{"1":{"value":{"score":2,"reason":"evidence"}}}', '{}'))
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0016")
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0016",)

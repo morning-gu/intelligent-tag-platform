@@ -326,21 +326,20 @@ def test_executor_workers_zero_synchronous(tmp_path):
 
 
 def test_assemble_spec_closed_renders_active_template(session, content_fixture):
-    """closed 模式：assemble_spec 取激活模板渲染 content 文本组装 spec。
+    """closed 模式：assemble_spec 取本地模板常量渲染 content 文本组装 spec。
 
-    prompt 行沿用既有 runner 测试的模式——session fixture 建表时
-    models._seed_prompt_v1 已播种 closed v1 激活行，(mode, version) 唯一
-    约束下不能重复插 v1，测试直接依赖种子激活模板。
+    四层重构 Task 3 起 prompt 本地化（不读 DB）：第二返回值是 templates.py
+    常量的口径版本（TEMPLATE_VERSIONS），沿用 DB 版本机制时代的 v1 值。
     """
-    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
-                                   task_id="t1", asset_id="a1", run_id="r1")
+    spec, prompt_version = assemble_spec(session, mode="closed", content=content_fixture,
+                                         task_id="t1", asset_id="a1", run_id="r1")
     assert spec.library is not None and spec.task_id == "t1"
-    assert "摘要" in spec.prompt_text and template.version == 1
+    assert "摘要" in spec.prompt_text and prompt_version == 1
 
 
 def test_assemble_spec_policy_json_overrides_default(session, content_fixture):
     """非空 policy_json 覆盖默认 GenerationPolicy（max_tags 默认 30 → 5）。"""
-    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
-                                   task_id="t1", asset_id="a1", run_id="r1",
-                                   policy_json='{"max_tags": 5}')
-    assert spec.policy.max_tags == 5 and template.version == 1
+    spec, prompt_version = assemble_spec(session, mode="closed", content=content_fixture,
+                                         task_id="t1", asset_id="a1", run_id="r1",
+                                         policy_json='{"max_tags": 5}')
+    assert spec.policy.max_tags == 5 and prompt_version == 1

@@ -18,7 +18,7 @@
 - POST /api/v1/generation/tasks/{task_id}/retry：仅 failed 可重试（否则
   422 "仅失败任务可重试"）——先造 failed 任务（标签库未导入时 closed
   生成失败），补导标签库后重试至 succeeded；未知任务 404；
-- GET /api/v1/prompts?mode=：v1 种子模板列表（closed/open 各一）；
+- GET /api/v1/prompts?mode=：只读契约视图（closed/open 各一，无版本字段）；
 - GET /api/v1/assets/{asset_id}/tags：资产全部标签行（摘要形状 + 行 id
   主键 + tag_id/candidate_name 原样）；未知资产 404。
 
@@ -525,29 +525,27 @@ def test_task_list_filters_and_pagination(client):
 
 
 def test_prompts_list(client):
-    """种子模板：closed/open v1 激活；open 另有 v2 过时标注（inactive）。"""
+    """只读契约视图（四层重构 Task 3 本地化）：closed/open 各一项、无版本
+    字段（git 即版本），closed 正文为三模态 evidence 版。"""
     rows = client.get("/api/v1/prompts").json()
-    assert {(r["mode"], r["version"], r["is_active"]) for r in rows} == {
-        ("closed", 1, True), ("open", 1, True), ("open", 2, False)}
-    assert all(r["created_at"] is not None for r in rows)
-    # template_text 直接随列表返回（运营侧新建版本预填依赖，阶段 4 审查轮 1）
-    by_key = {(r["mode"], r["version"]): r for r in rows}
-    assert "{content}" in by_key[("closed", 1)]["template_text"]
-    assert "{candidates}" not in by_key[("closed", 1)]["template_text"]
-    closed_text = by_key[("closed", 1)]["template_text"]
+    assert [r["mode"] for r in rows] == ["closed", "open"]
+    assert all(set(r.keys()) == {"mode", "template_text",
+                                "allowed_fields", "required_placeholders"}
+               for r in rows)
+    by_key = {r["mode"]: r for r in rows}
+    closed_text = by_key["closed"]["template_text"]
+    assert "{content}" in closed_text
+    assert "{candidates}" not in closed_text
     assert "Applicability" in closed_text
     assert "Evidence Strength" in closed_text
     assert "applicability" in closed_text and "evidence_strength" in closed_text
     assert "evidences" in closed_text
     assert "1=完全不适用" in closed_text
     assert "5=证据直接、充分且能够相互印证" in closed_text
-    assert "{content}" in by_key[("open", 1)]["template_text"]
-    # open v2 是"已过时"标注行：inactive，且正文写明不再被消费
-    assert "已过时" in by_key[("open", 2)]["template_text"]
+    assert "{content}" in by_key["open"]["template_text"]
 
     closed = client.get("/api/v1/prompts?mode=closed").json()
-    assert [(r["mode"], r["version"], r["is_active"]) for r in closed] == \
-        [("closed", 1, True)]
+    assert [r["mode"] for r in closed] == ["closed"]
     assert "{candidates}" not in closed[0]["template_text"]
 
 
