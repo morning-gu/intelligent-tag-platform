@@ -132,8 +132,11 @@ PRESET_SEED = 20261120
 # gt CSV 的合法首行（spec §5：统一三列 movieId,tagId,relevance）
 _GT_HEADER = ["movieId", "tagId", "relevance"]
 
-# gt 表缓存：path → (mtime, {movieId: {tagId: relevance}})
-_GT_CACHE: dict[str, tuple[float, dict[str, dict[str, float]]]] = {}
+# gt 表缓存：path → ((mtime, size), {movieId: {tagId: relevance}})。
+# 键含 size：Windows mtime 精度为秒级文件时间戳，同秒内追加写入 mtime
+# 不变（实测 delta=0.0），仅按 mtime 判失效会复用旧表；size 与内容长度
+# 同步变化，同秒写入也能正确失效（Linux 上更稳健）
+_GT_CACHE: dict[str, tuple[tuple[float, int], dict[str, dict[str, float]]]] = {}
 # 片名缓存：content.json 路径 → asset.title
 _TITLE_CACHE: dict[str, str] = {}
 
@@ -162,14 +165,16 @@ def _read_gt_table(path: str) -> dict[str, dict[str, float]] | None:
     """读一份 gt CSV → {movieId: {tagId: relevance}}；畸形 → None（宁缺勿崩）。
 
     首行不是三列 `movieId,tagId,relevance`、或任何数据行列数/浮点解析
-    不对 → 整份文件判无效（调用方跳过）。按 (path, mtime) 进程内缓存。
+    不对 → 整份文件判无效（调用方跳过）。按 (path, mtime+size) 进程内
+    缓存（size 防 Windows 同秒写入 mtime 不变的失效盲区）。
     """
     try:
-        mtime = os.path.getmtime(path)
+        st = os.stat(path)
+        stamp = (st.st_mtime, st.st_size)
     except OSError:
         return None
     cached = _GT_CACHE.get(path)
-    if cached is not None and cached[0] == mtime:
+    if cached is not None and cached[0] == stamp:
         return cached[1]
     table: dict[str, dict[str, float]] = {}
     try:
@@ -186,7 +191,7 @@ def _read_gt_table(path: str) -> dict[str, dict[str, float]] | None:
                 table.setdefault(movie_id, {})[tag_id] = float(raw)
     except (OSError, ValueError, csv.Error):
         return None
-    _GT_CACHE[path] = (mtime, table)
+    _GT_CACHE[path] = (stamp, table)
     return table
 
 
