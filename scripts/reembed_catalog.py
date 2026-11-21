@@ -24,7 +24,7 @@ from tagplatform.capabilities.storage import create_engine_for, make_session_fac
 from tagplatform.capabilities.storage.models import TagCatalog
 from tagplatform.capabilities.embed import build_embedder
 from tagplatform.settings import get_settings
-from tagplatform.vectors import decode_vector, encode_vector
+from tagplatform.capabilities.vectors import decode_vector, encode_vector
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -34,7 +34,7 @@ from tagplatform.services.generation.open.mtg.catalog_align import (
 )
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.settings import Settings
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 
 class _FixedEmbedder:

@@ -38,7 +38,7 @@ from tagplatform.services.generation.filtering.base import _CHAIN
 from tagplatform.services.generation.filtering.fence import InfoFenceFilter
 from tagplatform.services.generation.filtering.quality import QualityFilter
 from tagplatform.schemas import ContentJSON, parse_content
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(

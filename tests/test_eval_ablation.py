@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tagplatform.eval import (
+from tagplatform.services.eval import (
     ABLATION_VARIANTS,
     MODALITIES,
     Variant,

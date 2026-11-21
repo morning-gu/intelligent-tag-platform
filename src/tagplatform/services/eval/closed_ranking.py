@@ -27,7 +27,7 @@
 - **coverage 与 θ 无关**：`len(ranked)/len(relevance)` 衡量系统产出对
   gt 交集的覆盖面，按"有交集"的样本算一次，不做 θ 上的重复计算。
 
-分层红线：本模块只用标准库，平台侧只 import `tagplatform.eval.ranking`
+分层红线：本模块只用标准库，平台侧只 import `tagplatform.services.eval.ranking`
 的既有原语（precision_at_k / recall_at_k / ndcg_at_k / macro_average /
 bootstrap_ci），不 import fastapi / numpy / scipy——脚本与未来离线工具
 可独立复用（与 ranking.py §9.4 同款约束）。
@@ -40,7 +40,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from tagplatform.eval.ranking import (
+from tagplatform.services.eval.ranking import (
     bootstrap_ci,
     macro_average,
     ndcg_at_k,

@@ -1,7 +1,7 @@
 """`/api/v1/auth` 路由：登录、登出与当前用户摘要。
 
-薄路由层：密码校验复用 tagplatform.auth（verify_password），会话令牌经
-auth.session 纯函数签发；本 router 不在 create_app 统一挂会话保护——
+薄路由层：密码校验复用 tagplatform.services.auth（verify_password），会话
+令牌经 auth.session 纯函数签发；本 router 不在 create_app 统一挂会话保护——
 login 是"取会话"的入口必须开放，/me 经端点级 get_current_user 自行保护，
 logout 仅清 cookie（无 cookie 时幂等，无需认证）。
 
@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session, get_settings_dep
 from tagplatform.api.depends import SESSION_COOKIE_NAME, get_current_user
-from tagplatform.auth import get_user_by_username, verify_password
-from tagplatform.auth.session import create_session_token
+from tagplatform.services.auth import get_user_by_username, verify_password
+from tagplatform.services.auth.session import create_session_token
 from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.settings import Settings
 

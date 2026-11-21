@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from tagplatform.auth import (
+from tagplatform.services.auth import (
     bootstrap_admin,
     create_user,
     get_user_by_username,

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from tagplatform.vectors import decode_vector, encode_vector, search_similar
+from tagplatform.capabilities.vectors import decode_vector, encode_vector, search_similar
 
 
 def test_vector_roundtrip_and_search():

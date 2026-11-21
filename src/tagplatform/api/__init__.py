@@ -35,8 +35,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
-from tagplatform.auth import bootstrap_admin
-from tagplatform.closed_eval import ClosedEvalService
+from tagplatform.services.auth import bootstrap_admin
+from tagplatform.services.eval.service import ClosedEvalService
 from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 from tagplatform.capabilities.embed import Embedder, build_embedder
 from tagplatform.capabilities.llm import make_llm_client

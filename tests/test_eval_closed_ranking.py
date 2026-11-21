@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from tagplatform.eval.closed_ranking import (
+from tagplatform.services.eval.closed_ranking import (
     DEFAULT_KS,
     DEFAULT_THETAS,
     ClosedSample,

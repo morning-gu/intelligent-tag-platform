@@ -1,10 +1,20 @@
-"""标签归属评测包：把"目录归属排得准不准"变成可回归的数字。
+"""评测域（四层重构 Task 10 归位）：两族评测 + 只读质量指标。
 
-分层红线：本包不 import fastapi（设计文档 §9.4），也不 import 任何平台
-业务模块——`ranking` 是纯 stdlib 指标函数，脚本与测试都可独立复用。
+- **归属评测**：把"目录归属排得准不准"变成可回归的数字——`ranking`
+  （纯 stdlib 指标原语）、`ablation`（模态消融变体）、`consistency`
+  （跨轮一致性）；
+- **闭环评测**：`closed_ranking`（θ×K 网格指标装配）、`dataset`
+  （数据集发现/加载/选片）、`service`（ClosedEvalService 干跑运行器，
+  守护线程 + run 生命周期）、`report`（报告组装/渲染/三件套落盘）、
+  `movie_breakdown`（单片 badcase 明细）；
+- **质量指标**：`metrics`（审核与生成数据的只读聚合）、`tag_quality`
+  （影片质量评估维度打分）。
+
+分层红线：本包不 import fastapi（设计文档 §9.4）；指标原语（ranking /
+closed_ranking）零平台依赖、纯标准库，脚本与测试都可独立复用。
 """
 
-from tagplatform.eval.ablation import (
+from tagplatform.services.eval.ablation import (
     ABLATION_VARIANTS,
     MODALITIES,
     Variant,
@@ -13,7 +23,7 @@ from tagplatform.eval.ablation import (
     paired_bootstrap,
     variant_by_name,
 )
-from tagplatform.eval.consistency import (
+from tagplatform.services.eval.consistency import (
     consistent_share,
     consistency_std,
     icc_2_1,
@@ -22,7 +32,7 @@ from tagplatform.eval.consistency import (
     presence_matrix,
     stable_share,
 )
-from tagplatform.eval.ranking import (
+from tagplatform.services.eval.ranking import (
     DEFAULT_K_VALUES,
     GRADE_EXACT,
     GRADE_NONE,

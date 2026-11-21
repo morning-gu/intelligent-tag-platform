@@ -19,7 +19,7 @@ import pytest
 from tagplatform.capabilities.storage.models import MediaAsset, TagCatalog, TagDefine
 from tagplatform.capabilities.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
-from tagplatform.vectors import decode_vector, encode_vector
+from tagplatform.capabilities.vectors import decode_vector, encode_vector
 
 # 本模块断言重嵌入处理的行数（含"空库 0 行"）：夹具不得预置标签库默认行
 pytestmark = pytest.mark.empty_library

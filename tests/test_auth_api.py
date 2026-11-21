@@ -15,7 +15,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.auth.session import create_session_token, parse_session_token
+from tagplatform.services.auth.session import create_session_token, parse_session_token
 
 # conftest client fixture 的 Settings 未覆盖 session_secret，默认即此值
 # （仅测试环境；生产经 TAGPLT_SESSION_SECRET 覆盖）

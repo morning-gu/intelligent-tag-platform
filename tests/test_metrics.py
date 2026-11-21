@@ -41,7 +41,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagGenerationTask,
 )
-from tagplatform.metrics import (
+from tagplatform.services.eval.metrics import (
     compute_metrics,
     confidence_distribution,
     tag_dir_coverage,

@@ -39,7 +39,7 @@ from tagplatform.capabilities.storage.models import TagDefine
 from tagplatform.services.tags.library import LibraryTag, is_deprecated  # 定义在 library，避免循环导入
 from tagplatform.services.generation.open.mtg.merge import normalize_tag
 from tagplatform.schemas import ContentJSON
-from tagplatform.vectors import decode_vector
+from tagplatform.capabilities.vectors import decode_vector
 
 logger = logging.getLogger(__name__)
 

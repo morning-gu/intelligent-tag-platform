@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, undefer
 
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
-from tagplatform.eval.tag_quality import DIMENSIONS, MAX_SCORE, PROMPT_VERSION, ScoreDetails, evaluate
+from tagplatform.services.eval.tag_quality import DIMENSIONS, MAX_SCORE, PROMPT_VERSION, ScoreDetails, evaluate
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.capabilities.llm import MockLLMClient, OpenAIClient
 from tagplatform.settings import Settings

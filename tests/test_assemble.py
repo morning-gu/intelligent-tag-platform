@@ -15,7 +15,7 @@
   迁移 + builds_prompt 规则钉死。
 """
 
-import tagplatform.closed_eval as closed_eval_mod
+import tagplatform.services.eval.service as closed_eval_mod
 import tagplatform.services.generation.assemble as assemble_mod
 import tagplatform.services.generation.execute as execute_mod
 from tagplatform.services.generation.assemble import (

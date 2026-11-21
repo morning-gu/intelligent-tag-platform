@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage import create_engine_for
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
-from tagplatform.eval.tag_quality import _parse_scores, evaluate
+from tagplatform.services.eval.tag_quality import _parse_scores, evaluate
 from tagplatform.services.generation.base import ProducedTag
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.services.generation.open.producer import OpenTagProducer

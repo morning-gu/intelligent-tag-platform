@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from tagplatform.auth.password import hash_password
+from tagplatform.services.auth.password import hash_password
 from tagplatform.capabilities.storage.models import UserAccount
 
 # 首管理员固定用户名与角色（bootstrap_admin 落库用）

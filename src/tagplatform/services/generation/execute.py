@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask
 from tagplatform.services.content.content_io import load_content
-from tagplatform.eval.tag_quality import snapshot
+from tagplatform.services.eval.tag_quality import snapshot
 from tagplatform.services.content.ingest import record_alias
 from tagplatform.services.generation.assemble import (
     build_spec,

@@ -146,10 +146,10 @@ class Settings(BaseSettings):
     def mtg_modality_set(self) -> frozenset[str]:
         """`mtg_modalities` → 模态集合（空/全空串回落 full，不让任务裸跑）。
 
-        `eval/ablation.py` 的 `Variant` 会用同一套名字校验，非法值在这里就
-        报错，而不是等流水线跑到一半才发现拼错了。
+        `services/eval/ablation.py` 的 `Variant` 会用同一套名字校验，非法值
+        在这里就报错，而不是等流水线跑到一半才发现拼错了。
         """
-        from tagplatform.eval.ablation import MODALITIES
+        from tagplatform.services.eval.ablation import MODALITIES
 
         names = {part.strip().lower() for part in self.mtg_modalities.split(",")
                  if part.strip()}

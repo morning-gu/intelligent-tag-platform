@@ -21,14 +21,14 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from tagplatform.eval.closed_ranking import (
+from tagplatform.services.eval.closed_ranking import (
     DEFAULT_K_P,
     DEFAULT_K_R,
     DEFAULT_THETA_P,
     DEFAULT_THETA_R,
     spearman,
 )
-from tagplatform.eval.ranking import precision_at_k, recall_at_k
+from tagplatform.services.eval.ranking import precision_at_k, recall_at_k
 
 __all__ = [
     "breakdown_movie",

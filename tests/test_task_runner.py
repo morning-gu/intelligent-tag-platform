@@ -46,7 +46,7 @@ from tagplatform.capabilities.storage.models import (
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.generation.execute import run_generation_task
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(

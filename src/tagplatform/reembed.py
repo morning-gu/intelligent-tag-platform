@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 
 @dataclass

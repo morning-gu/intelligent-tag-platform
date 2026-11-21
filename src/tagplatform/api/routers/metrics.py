@@ -1,7 +1,7 @@
 """`/api/v1/metrics` 质量指标路由（v2 重写，Task 9）。
 
-薄路由层：推导逻辑全部在 tagplatform.metrics 核心模块（纯读、不 import
-fastapi），router 只做协议转换——Session 依赖注入 + Pydantic 响应模型
+薄路由层：推导逻辑全部在 tagplatform.services.eval.metrics 核心模块（纯读、
+不 import fastapi），router 只做协议转换——Session 依赖注入 + Pydantic 响应模型
 （JSON 形状契约）。登录门槛由 create_app include 时的 protected_deps
 统一挂载（同 review/video，本文件零认证代码）。
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
-from tagplatform.metrics import (
+from tagplatform.services.eval.metrics import (
     compute_metrics,
     confidence_distribution,
     tag_dir_coverage,
@@ -90,7 +90,7 @@ class DirCoverageOut(BaseModel):
 def get_metrics_summary(session: Session = Depends(get_session)) -> dict:
     """质量指标总览：pending / review_status 终态分布 / 生成产出通过率 /
     evidence 覆盖率 / 任务统计（推导语义见
-    tagplatform.metrics.compute_metrics）。"""
+    tagplatform.services.eval.metrics.compute_metrics）。"""
     return compute_metrics(session)
 
 

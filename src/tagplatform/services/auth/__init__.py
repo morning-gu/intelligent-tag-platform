@@ -5,13 +5,13 @@
 令牌编解码与账号管理逻辑，供 api 层与 lifespan 引导复用。
 """
 
-from tagplatform.auth.password import hash_password, verify_password
-from tagplatform.auth.service import (
+from tagplatform.services.auth.password import hash_password, verify_password
+from tagplatform.services.auth.service import (
     bootstrap_admin,
     create_user,
     get_user_by_username,
 )
-from tagplatform.auth.session import create_session_token, parse_session_token
+from tagplatform.services.auth.session import create_session_token, parse_session_token
 
 __all__ = [
     "hash_password",

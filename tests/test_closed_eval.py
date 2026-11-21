@@ -34,27 +34,31 @@ import pytest
 from sqlalchemy import text
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
-from tagplatform.closed_eval import (
+from tagplatform.services.eval.dataset import (
+    PRESET_SEED,
+    PRESET_SIZE,
+    load_gt,
+    load_movie_content,
+    movie_entries,
+    scan_datasets,
+    select_movies,
+)
+from tagplatform.services.eval.report import (
+    assemble_report,
+    render_report_md,
+    write_report,
+)
+from tagplatform.services.eval.service import (
     ABORT_CONSECUTIVE,
     DEFAULT_CONCURRENCY,
     RETRY_PER_MOVIE,
     ClosedEvalService,
     EvalValidationError,
     MovieResult,
-    PRESET_SEED,
-    PRESET_SIZE,
     RunActiveError,
     RunBusyError,
-    assemble_report,
-    load_gt,
-    load_movie_content,
-    movie_entries,
-    render_report_md,
-    scan_datasets,
-    select_movies,
-    write_report,
 )
-from tagplatform.eval.closed_ranking import ClosedSample, evaluate_closed
+from tagplatform.services.eval.closed_ranking import ClosedSample, evaluate_closed
 from tagplatform.capabilities.llm import MockLLMClient
 
 

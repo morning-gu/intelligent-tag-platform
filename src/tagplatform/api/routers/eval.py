@@ -1,6 +1,7 @@
 """`/api/v1/eval/closed` 路由：闭环评测 admin 端点（13 个，全部仅 admin）。
 
-薄路由层（plan Task 6）：服务层是 tagplatform.closed_eval.ClosedEvalService
+薄路由层（plan Task 6）：服务层是
+tagplatform.services.eval.service.ClosedEvalService
 （数据集扫描/干跑运行器/报告与历史，DB 零写入），router 只做协议转换——
 
 - 起跑请求的形状校验由 pydantic 声明（mode 词表外 / 类型不符 → 422 自动）；
@@ -37,18 +38,17 @@ from pydantic import BaseModel, Field
 
 from tagplatform.api import get_closed_eval, get_settings_dep
 from tagplatform.api.depends import require_admin
-from tagplatform.closed_eval import (
+from tagplatform.services.eval.dataset import movie_entries, scan_datasets
+from tagplatform.services.eval.service import (
     DEFAULT_CONCURRENCY,
     ClosedEvalService,
     EvalValidationError,
     RunActiveError,
     RunBusyError,
-    movie_entries,
-    scan_datasets,
 )
 from tagplatform.capabilities.storage.models import UserAccount
-from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
-from tagplatform.eval.movie_breakdown import breakdown_movie, summarize_movies
+from tagplatform.services.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
+from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
 from tagplatform.services.tags.library import try_load_library
 from tagplatform.settings import Settings
 

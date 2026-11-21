@@ -1,4 +1,4 @@
-"""排序指标单测：`tagplatform.eval.ranking` 的纯函数口径。
+"""排序指标单测：`tagplatform.services.eval.ranking` 的纯函数口径。
 
 这些函数是"归属排序准不准"的唯一算分口径，错一个折扣因子就会让所有
 基线数字失去意义，因此逐条钉死手算的黄金值：
@@ -16,7 +16,7 @@ import math
 
 import pytest
 
-from tagplatform.eval import (
+from tagplatform.services.eval import (
     GRADE_EXACT,
     GRADE_NONE,
     GRADE_SIBLING,

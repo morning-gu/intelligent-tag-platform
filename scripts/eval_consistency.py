@@ -42,7 +42,7 @@
 
 安全设计：本脚本**只读**审计目录，不连数据库、不调模型。
 
-分层红线：脚本可用平台模块，但指标全在 `tagplatform/eval`（纯标准库）。
+分层红线：脚本可用平台模块，但指标全在 `tagplatform/services/eval`（纯标准库）。
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ import json
 import sys
 from pathlib import Path
 
-from tagplatform.eval import (
+from tagplatform.services.eval import (
     consistency_std,
     icc_2_1,
     macro_average,

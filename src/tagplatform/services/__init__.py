@@ -8,7 +8,7 @@ api → orchestration → services → capabilities，任何层不得反向 impo
 领域库/服务二分规则（设计文档"服务层模块二分"节）：
 - 领域库：无状态纯函数/数据结构/契约（如 library、generation/base、
   content_io、mtg/prompts 工具）——跨域共享语言，允许被任何服务 import；
-- 服务：有状态、管事务/会话/线程（如 review/service、closed_eval、
+- 服务：有状态、管事务/会话/线程（如 review/service、eval/service、
   tasks/runner 调度）——彼此零直接 import；跨服务协作只经注册表
   （get_producer 式间接）或编排层装配；
 - 跨域数据契约（≥3 域共享）上移契约包（schemas/ 既有实践的推广）；仅

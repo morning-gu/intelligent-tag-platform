@@ -24,7 +24,7 @@
 模型永远同一个分数），因此可直接当回归基线——改提示词、改目录描述、换
 嵌入模型，分数掉下去就是真掉下去了。
 
-指标解读（实现见 `tagplatform/eval/ranking.py`）
+指标解读（实现见 `tagplatform/services/eval/ranking.py`）
 =================================================
 
 - **NDCG@3/@5**：主指标。分级相关度——预测到精确目录得 2 分，到同父
@@ -60,7 +60,7 @@
 
 安全设计：本脚本**只读**，不写库、不改标签库、不落任何状态。
 
-分层红线：脚本可用平台模块，但指标全在 `tagplatform/eval`（纯标准库）。
+分层红线：脚本可用平台模块，但指标全在 `tagplatform/services/eval`（纯标准库）。
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ import numpy as np
 
 from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 from tagplatform.capabilities.embed import build_embedder
-from tagplatform.eval import (
+from tagplatform.services.eval import (
     GRADE_EXACT,
     GRADE_NONE,
     GRADE_SIBLING,

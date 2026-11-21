@@ -63,7 +63,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
 from tagplatform.services.tags.governance.excel import RowError, TagRow
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 # 扁平标签行（parent_tag 为空）落入的自动根目录
 _UNCATEGORIZED_DIR_NAME = "未分类"
