@@ -185,9 +185,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.embedder = build_embedder(settings)
     app.state.llm = make_llm_client(settings)
     # 闭环评测服务（Task 6）：app 级单例——评测对业务表只读（DB 零写入
-    # 红线），产物只写 settings.eval_output_root
+    # 红线），产物只写 settings.eval_output_root；session_factory 参数已随
+    # Task 11 裁定删除（服务体内零 DB，干跑装配走全局引擎）
     app.state.closed_eval = ClosedEvalService(
-        app.state.session_factory, app.state.llm, app.state.embedder, settings)
+        app.state.llm, app.state.embedder, settings)
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）

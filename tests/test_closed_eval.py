@@ -368,10 +368,11 @@ def eval_setup(tmp_path, root, engine):
     write_library(library_root(), dirs=_EVAL_DIRS, tags=_EVAL_TAGS)
     made: list[ClosedEvalService] = []
 
-    def _make(llm=MOCK_LLM, dataset_root=None,
-              session_factory=None) -> ClosedEvalService:
+    def _make(llm=MOCK_LLM, dataset_root=None) -> ClosedEvalService:
+        # session_factory 参数已随 Task 11 裁定从 ClosedEvalService 删除
+        # （服务体内零 DB，该参数零消费者）
         service = ClosedEvalService(
-            session_factory or make_session_factory(engine), llm, MOCK_EMBEDDER,
+            llm, MOCK_EMBEDDER,
             Settings(eval_dataset_root=dataset_root or root,
                      eval_output_root=str(tmp_path / "eval-out")))
         made.append(service)
@@ -471,7 +472,9 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
 
     factory = _CountingSessionFactory(make_session_factory(engine))
     llm = _SessionProbeLLM(factory)
-    service = eval_setup(llm=llm, session_factory=factory)
+    # 探针经 LLM 包装生效；service 的 session_factory 参数已随 Task 11
+    # 裁定删除（服务体内零 DB，该参数零消费者）
+    service = eval_setup(llm=llm)
     run_id = service.start("emotion", {"mode": "all"}, wait=True)
     assert service.get(run_id).status == "succeeded"
     assert service.get(run_id).failed == 0

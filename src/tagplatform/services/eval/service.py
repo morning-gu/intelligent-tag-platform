@@ -230,12 +230,12 @@ class ClosedEvalService:
     注册表更新、cancel、progress 追加都在 `threading.Lock` 内。
     """
 
-    def __init__(self, session_factory, llm, embedder, settings: Settings) -> None:
-        """session_factory 留自池饿死改造时代：Task 5 装配两级化后干跑循环
-        零 DB（起跑装配走全局引擎，见 load_assembly_context），服务体内
-        不再开会话；参数保留给 API 装配层（Task 11 编排接手时裁决去留）。"""
+    def __init__(self, llm, embedder, settings: Settings) -> None:
+        """session_factory 参数已随四层重构 Task 11 裁定删除：Task 5 装配
+        两级化后干跑循环零 DB（起跑装配走全局引擎，见 load_assembly_context），
+        服务体内不再开会话，该参数自池饿死改造时代起零消费者（仅赋值从不
+        读取），删除为零行为变化。"""
         self.settings = settings
-        self._session_factory = session_factory
         self._llm = llm
         self._embedder = embedder
         self._lock = threading.Lock()
