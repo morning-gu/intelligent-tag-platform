@@ -201,15 +201,19 @@ describe('ClosedEvalReport 报告视图', () => {
     expect(screen.getByText('样本量偏小，指标波动较大')).toBeInTheDocument()
     expect(screen.getAllByRole('alert')).toHaveLength(3)
 
-    // ② 汇总五卡：P@10/nDCG@10 取 θ=0.4 的 k=10 格（θ=0.6 档更远不取）；
-    // R@20 的 θ=0.4 档无有效影片 → 回退 θ=0.6 有值格。数值断言用
-    // toHaveTextContent（antd Statistic 把小数拆 int/decimal 两个 span，
-    // getByText 的直接文本节点匹配不命中——与页面历史表断言同口径）
+    // ② 汇总五卡：统一取格目标 θ0.2/θ0.8 无该档 → 回退最近有值格
+    // （K=10 → θ0.4、K=20 → θ0.6——夹具无 0.2/0.8 行）；卡题标实际取格 θ。
+    // 数值断言用 toHaveTextContent（antd Statistic 把小数拆 int/decimal
+    // 两个 span，getByText 的直接文本节点匹配不命中——与页面历史表断言同口径）
     expect(screen.getByTestId('summary-ndcg10')).toHaveTextContent('0.48')
     expect(screen.getByTestId('summary-p10')).toHaveTextContent('0.52')
     expect(screen.getByTestId('summary-r20')).toHaveTextContent('0.35')
     expect(screen.getByTestId('summary-coverage-median')).toHaveTextContent('0.5')
     expect(screen.getByTestId('summary-spearman-macro')).toHaveTextContent('0.42')
+    // 卡题=实际取格 θ（回退后如实标注，不标约定值）
+    expect(screen.getByText('nDCG@10(θ0.4)')).toBeInTheDocument()
+    expect(screen.getByText('P@10(θ0.4)')).toBeInTheDocument()
+    expect(screen.getByText('R@20(θ0.6)')).toBeInTheDocument()
   })
 
   it('θ×K 网格表：数据行数齐全、±CI 统一格式、CI 缺失只出值、全 null 行五个「暂无」', () => {
@@ -245,6 +249,42 @@ describe('ClosedEvalReport 报告视图', () => {
     expect(randomRow).toHaveTextContent('0.02') // P@10 = θ=0.4 的 precision_random
     expect(randomRow).toHaveTextContent('0.1') // R@20 = 回退 θ=0.6 的 recall_random
     expect(within(randomRow).getByText('暂无')).toBeInTheDocument() // 契约无 ndcg_random
+    // 基线列头标约定字面量（列级表头三行共用，无法逐格标实际 θ）
+    expect(screen.getByText('P@10(θ0.2)')).toBeInTheDocument()
+    expect(screen.getByText('R@20(θ0.8)')).toBeInTheDocument()
+    expect(screen.getByText('nDCG@10(θ0.2)')).toBeInTheDocument()
+  })
+
+  it('统一取格目标命中：θ0.2/θ0.8 档存在时直取（非回退），卡题标实际 θ', () => {
+    // K=10 有 θ0.2 档（0.5/0.45）与 θ0.4 档（0.9/0.88）——直取更近的 0.2；
+    // K=20 有 θ0.8 档（r=0.3）与 θ0.4 档（r=0.8）——直取 0.8 档
+    const report: ClosedEvalReportData = {
+      ...MINIMAL_REPORT,
+      grid: [
+        { theta: 0.2, k: 10, n_valid: 2, precision: 0.5, recall: 0.4,
+          ndcg: 0.45, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.03, recall_random: 0.05 },
+        { theta: 0.4, k: 10, n_valid: 2, precision: 0.9, recall: 0.8,
+          ndcg: 0.88, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.02, recall_random: 0.04 },
+        { theta: 0.8, k: 20, n_valid: 2, precision: 0.2, recall: 0.3,
+          ndcg: 0.25, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.01, recall_random: 0.02 },
+        { theta: 0.4, k: 20, n_valid: 2, precision: 0.4, recall: 0.8,
+          ndcg: 0.6, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.01, recall_random: 0.1 },
+      ],
+    }
+    render(<ClosedEvalReport report={report} runId={RUN_ID} />)
+
+    // 直取目标档（若取 θ0.4 档则是 0.9/0.88/0.8——断言值即区分直取与回退）
+    expect(screen.getByTestId('summary-p10')).toHaveTextContent('0.5')
+    expect(screen.getByTestId('summary-ndcg10')).toHaveTextContent('0.45')
+    expect(screen.getByTestId('summary-r20')).toHaveTextContent('0.3')
+    // 直取时卡题与基线列头同字面量（各一处）：P/nDCG 卡题+列头、R 卡题+列头
+    expect(screen.getAllByText('P@10(θ0.2)')).toHaveLength(2)
+    expect(screen.getAllByText('nDCG@10(θ0.2)')).toHaveLength(2)
+    expect(screen.getAllByText('R@20(θ0.8)')).toHaveLength(2)
   })
 
   it('覆盖分布：5 桶右开右闭边界计数正确，min/中位/max 一行文本', () => {

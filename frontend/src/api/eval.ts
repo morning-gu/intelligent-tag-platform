@@ -57,8 +57,9 @@ export interface RunStatus {
   error: string | null
 }
 
-/** 历史摘要行（与后端 RunSummaryOut 一致）：摘要四键取 θ=0.4、K=10/20 档
- * （无报告/无该档 → null，宁缺勿崩）；error 为失败留痕（终态 failed 才有）；
+/** 历史摘要行（与后端 RunSummaryOut 一致）：摘要四键按统一取格约定
+ * （P@10/nDCG@10 @θ≈0.2、R@20 @θ≈0.8 的最近有值格，custom-θ run 回退；
+ * 无报告/无有值格 → null，宁缺勿崩）；error 为失败留痕（终态 failed 才有）；
  * finished_at 终态时刻（老 run 无 → null）。 */
 export interface RunSummary {
   run_id: string
