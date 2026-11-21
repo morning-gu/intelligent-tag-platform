@@ -2,8 +2,10 @@
 
 client 层只管传输不做解析（client.py 的分工承诺），本模块把 LLM 文本
 解析为受校验的元素列表：
-- parse_closed_output（模式 A）：元素须含 tag_id、1–5 分的 applicability/
-  evidence_strength，以及包含 scene_id/evidence 摘要的 evidences 数组。
+- parse_closed_output（模式 A）：元素须含 tag_id、1–5 分的 applicability，
+  以及嵌套 evidence 对象——content/scene/frame 三个模态节各含 1–5 分的
+  evidence_strength 与 [{scene_id, evidence}] 的 evidences 数组
+  （2026-12 多模态融合评分）。
 
 模式 B（开放生成）自 2026-11 起改由 `generation/mtg/parse.py` 解析
 （多轮 + 合并 + judge 的契约与本文件不同），旧 `parse_open_output` 已随
@@ -30,8 +32,13 @@ class LLMParseError(Exception):
     """LLM 输出结构不符合契约（非 JSON / 非数组 / 缺键 / 分值越界）。"""
 
 
-# 模式 A 的新输出契约
-_CLOSED_REQUIRED = ("tag_id", "applicability", "evidence_strength", "evidences")
+# 模式 A 的新输出契约（2026-12 多模态融合）：顶层四键中的
+# evidence_strength/evidences 合并为嵌套 evidence 对象——内含
+# content/scene/frame 三个模态节，每节又含 evidence_strength（1–5）与
+# evidences（[{scene_id, evidence}]）。
+_CLOSED_REQUIRED = ("tag_id", "applicability", "evidence")
+# 三个模态节的固定顺序（与 settings.closed_evi_weights 权重顺序一致）
+_CLOSED_MODALITIES = ("content", "scene", "frame")
 
 
 def _bad_element(index: int, reason: str) -> LLMParseError:
@@ -53,10 +60,10 @@ def _parse_array(content: str, required: tuple[str, ...] = ()) -> list:
     随机加的 markdown 围栏再进 json.loads。
 
     单元素直返兜底：json_object 模式下模型若只选一个标签，可能直接返回
-    该标签对象（而非 [{...}]）。此时对象内唯一的列表值是 evidences，
-    旧逻辑会误把 evidences 列表当结果数组，导致校验看到证据卡缺全部键。
-    若 dict 本身含任意 required 键 → 判定为单元素直返，包成 [data] 返回。
-    空 dict {} 视为"模型未选中任何标签"，返回空列表。
+    该标签对象（而非 [{...}]）。此时对象内唯一的列表值可能是某模态节的
+    evidences，旧逻辑会误把 evidences 列表当结果数组，导致校验看到证据卡
+    缺全部键。若 dict 本身含任意 required 键 → 判定为单元素直返，包成
+    [data] 返回。空 dict {} 视为"模型未选中任何标签"，返回空列表。
     """
     try:
         data = json.loads(_strip_code_fence(content))
@@ -88,19 +95,24 @@ def _check_five_point_score(item: dict, key: str, index: int) -> None:
 
 
 def _validate_closed_items(data: list) -> list[dict]:
-    """逐元素校验新闭环契约及场景证据摘要。"""
+    """逐元素校验新闭环契约及三模态嵌套证据。
+
+    顶层结构：{tag_id, applicability, evidence:{content,scene,frame}}，
+    每个模态节 {evidence_strength: 1–5, evidences: [{scene_id, evidence}]}。
+    缺任一模态节视为结构不符（触发上层重试），畸形证据条目降级丢弃
+    （单条坏数据不应让整任务失败）。
+    """
     for index, item in enumerate(data):
         if not isinstance(item, dict):
             raise _bad_element(index, f"元素不是对象（{type(item).__name__}）")
         missing = [key for key in _CLOSED_REQUIRED if key not in item]
-        if "evidences" not in item and isinstance(item.get("evidence"), list):
-            # 生产实锤（2026-11-20 闭环评测首跑，147.3 vLLM 温度 0 + no-think，
-            # preset30 3/5 影片三连重试全灭）：模型偶发把证据数组键写成单数
-            # evidence（与内层证据条目键 evidence 同名，一字之差）。值为列表
-            # 时按别名归一为 evidences；非列表形态仍走严格缺键报错，两条键
-            # 并存时 evidences 优先、别名不介入。
-            item["evidences"] = item["evidence"]
-            missing = [key for key in missing if key != "evidences"]
+        if ("evidence" not in item and isinstance(item.get("evidences"), dict)):
+            # 别名兜底：旧契约顶层键是复数 evidences（数组），新契约是单数
+            # evidence（嵌套对象）。模型若把新嵌套结构挂在旧键名 evidences
+            # 下（值为 dict），按别名归一为 evidence；值为列表是彻头彻尾的
+            # 旧格式输出，新契约下仍走严格缺键报错触发重试。
+            item["evidence"] = item["evidences"]
+            missing = [key for key in missing if key != "evidence"]
         if missing:
             raise _bad_element(index, f"缺少键: {missing}")
         tag_id = item["tag_id"]
@@ -113,30 +125,60 @@ def _validate_closed_items(data: list) -> list[dict]:
         if not tag_id.strip():
             raise _bad_element(index, "tag_id 不是非空字符串")
         _check_five_point_score(item, "applicability", index)
-        _check_five_point_score(item, "evidence_strength", index)
-        evidences = item["evidences"]
-        if not isinstance(evidences, list):
-            raise _bad_element(index, "evidences 不是列表")
-        clean_evidences: list[dict] = []
-        for evidence_index, evidence in enumerate(evidences):
-            # 非对象证据项（模型偶发在数组里插裸 scene_id 字符串——728 批次
-            # 全量重放实锤的唯一 parse 失败模式）降级为丢弃：单条畸形不应
-            # 让整任务失败，与 runner 对未知 scene_id 证据的忽略语义一致
-            if not isinstance(evidence, dict):
-                continue
-            if "scene_id" not in evidence or "evidence" not in evidence:
+        evidence = item["evidence"]
+        if not isinstance(evidence, dict):
+            raise _bad_element(index, "evidence 不是对象")
+        for modality in _CLOSED_MODALITIES:
+            if modality not in evidence:
+                raise _bad_element(index, f"evidence 缺少模态节: {modality}")
+            section = evidence[modality]
+            if not isinstance(section, dict):
                 raise _bad_element(
-                    index, f"evidences[{evidence_index}] 缺少 scene_id/evidence")
-            if not isinstance(evidence["scene_id"], str) or \
-                    not evidence["scene_id"].strip():
-                raise _bad_element(
-                    index, f"evidences[{evidence_index}].scene_id 不是非空字符串")
-            if not isinstance(evidence["evidence"], str) or \
-                    not evidence["evidence"].strip():
-                raise _bad_element(
-                    index, f"evidences[{evidence_index}].evidence 不是非空字符串")
-            clean_evidences.append(evidence)
-        item["evidences"] = clean_evidences
+                    index, f"evidence.{modality} 不是对象"
+                    f"（{type(section).__name__}）")
+            _check_five_point_score(section, "evidence_strength", index)
+            if "evidences" not in section:
+                # 别名兜底（2026-11 生产实锤的键名漂移在嵌套层的对应形态）：
+                # 模态节内的证据数组键偶发写成单数 evidence（与内层证据条目
+                # 键同名，一字之差）。仅容忍「值为列表」的漂移并归一为
+                # evidences；值为字符串等非列表仍按缺键严格拒绝——不给畸形
+                # 数据静默降级的开口子。
+                alias = section.get("evidence")
+                if isinstance(alias, list):
+                    section["evidences"] = alias
+                else:
+                    raise _bad_element(
+                        index, f"evidence.{modality} 缺少键: ['evidences']")
+            entries = section["evidences"]
+            if not isinstance(entries, list):
+                raise _bad_element(index, f"evidence.{modality}.evidences 不是列表")
+            clean_entries: list[dict] = []
+            for entry_index, entry in enumerate(entries):
+                # 非对象证据项（模型偶发在数组里插裸 scene_id 字符串——728
+                # 批次全量重放实锤的唯一 parse 失败模式）降级为丢弃：单条
+                # 畸形不应让整任务失败，与 runner 对未知 scene_id 证据的
+                # 忽略语义一致
+                if not isinstance(entry, dict):
+                    continue
+                if "scene_id" not in entry or "evidence" not in entry:
+                    raise _bad_element(
+                        index,
+                        f"evidence.{modality}.evidences[{entry_index}]"
+                        " 缺少 scene_id/evidence")
+                if not isinstance(entry["scene_id"], str) or \
+                        not entry["scene_id"].strip():
+                    raise _bad_element(
+                        index,
+                        f"evidence.{modality}.evidences[{entry_index}].scene_id"
+                        " 不是非空字符串")
+                if not isinstance(entry["evidence"], str) or \
+                        not entry["evidence"].strip():
+                    raise _bad_element(
+                        index,
+                        f"evidence.{modality}.evidences[{entry_index}].evidence"
+                        " 不是非空字符串")
+                clean_entries.append(entry)
+            section["evidences"] = clean_entries
     return data
 
 

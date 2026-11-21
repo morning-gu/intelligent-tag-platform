@@ -42,11 +42,14 @@ def test_mock_closed_item_shape():
     items = json.loads(MockLLMClient().complete(msgs, "run_1").content)
     assert items != []  # 防哈希扰动再退化成空转通过（false-green）
     for it in items:
-        assert {"tag_id", "applicability", "evidence_strength", "evidences"} <= set(it)
+        assert {"tag_id", "applicability", "evidence"} <= set(it)
         assert it["applicability"] in {4, 5}
-        assert it["evidence_strength"] in {4, 5}
-        # prompt 无场景行（仅候选分组节）→ evidence 兜底空列表（Task 6 兜底语义）
-        assert it["evidences"] == []
+        # v8 嵌套三模态节：每节 evidence_strength 1–5 + evidences 数组
+        for modality in ("content", "scene", "frame"):
+            section = it["evidence"][modality]
+            assert section["evidence_strength"] in {4, 5}
+            # prompt 无场景行（仅候选分组节）→ 各模态 evidences 兜底空列表
+            assert section["evidences"] == []
 
 
 # ---------- MockLLMClient：场景证据（Task 6，runner 渲染文本路径） ----------
@@ -63,8 +66,12 @@ _SCENE_DATA = [
 
 
 def _expected_evidence(run_id: str, key: str) -> list[dict]:
-    """复算 Mock 场景证据选取：sha256(evidence|run_id|key) 前 8 hex → 均匀
-    [0,1) 按场景数分桶（与 llm/mock.py _pick_evidence 同式，钉死哈希键与映射）。"""
+    """复算 Mock 场景证据选取：sha256(evidence|...) 前 8 hex → 均匀
+    [0,1) 按场景数分桶（与 llm/mock.py _pick_evidence 同式）。
+
+    v8：哈希键带模态维度 evidence|{modality}|{run_id}|{key}——三模态
+    互不耦合，同一标签可从三个模态选到不同场景。
+    """
     h = hashlib.sha256(f"evidence|{run_id}|{key}".encode("utf-8")).hexdigest()
     sid, start, end, desc = _SCENE_DATA[int(int(h[:8], 16) / 0x1_0000_0000
                                             * len(_SCENE_DATA))]
@@ -73,18 +80,20 @@ def _expected_evidence(run_id: str, key: str) -> list[dict]:
 
 
 def test_mock_closed_scene_evidence():
-    """模式 A 场景证据（Task 6）：选中标签 evidence 为一元素证据卡，取自按
-    sha256(evidence|run_id|tag_id) 选中的场景行（scene_id/时间戳来自该行）。"""
+    """模式 A 场景证据（v8 嵌套）：选中标签各模态节按
+    sha256(evidence|{modality}|{run_id}|{tag_id}) 各自确定性选一条场景，
+    哈希键带模态维度，三模态选取互不耦合。"""
     prompt = ("《示例电影》\n摘要：影片整体剧情摘要\n" + "\n".join(_SCENE_LINES)
               + "\n" + _group_prompt(
                   [{"tag_id": "tag_001", "tag_name": "悬疑", "description": "以悬念为核心"}]))
     items = json.loads(MockLLMClient().complete(
         [{"role": "user", "content": prompt}], "run_1").content)
     assert len(items) == 1  # run_1: sha256(run_1tag_001) < 0.4 必选中
-    assert items[0]["evidences"] == [{
-        "scene_id": item["scene_id"],
-        "evidence": item["description"],
-    } for item in _expected_evidence("run_1", "tag_001")]
+    for modality in ("content", "scene", "frame"):
+        assert items[0]["evidence"][modality]["evidences"] == [{
+            "scene_id": item["scene_id"],
+            "evidence": item["description"],
+        } for item in _expected_evidence(f"{modality}|run_1", "tag_001")]
 
 
 # ---------- MockLLMClient：开放式生成（mtg）与 judge 两条分支 ----------
