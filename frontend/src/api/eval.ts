@@ -241,8 +241,8 @@ export interface MovieSummaryRow {
 }
 
 /** 单片摘要包层（与后端 MovieSummaryOut 一致，增补 2026-11-22 拆 θ）：
- * theta_p/theta_r 为 P 门与 R 门实际取值（query 参数或最接近 0.4 的缺省
- * 档）；thetas 为该 run 网格档（选择器选项源）；前端表头按这些键拼字面量
+ * theta_p/theta_r 为 P 门与 R 门实际取值（query 参数或统一取格约定的缺省
+ * θ≈0.2/θ≈0.8）；thetas 为该 run 网格档（选择器选项源）；前端表头按这些键拼字面量
  * （P@{k_p}(θ{theta_p}) / R@{k_r}(θ{theta_r})）。 */
 export interface MovieSummaryPayload {
   theta_p: number

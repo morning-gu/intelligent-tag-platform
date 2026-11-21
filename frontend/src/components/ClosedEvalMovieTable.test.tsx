@@ -393,7 +393,7 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(3))
     expect(mockedGetRunMovies).toHaveBeenLastCalledWith('run-B')
     await screen.findByText('tt0000001')
-    expect(screen.getByTestId('theta-p-select').textContent).toContain('0.2')
+    expect(screen.getByTestId('theta-p-select').textContent).toContain('0.2')  // 缺省取格 θ_p
 
     // 明细取数不带 θ（默认门）
     fireEvent.click(expandIconOf(rowOf('tt0000001')))

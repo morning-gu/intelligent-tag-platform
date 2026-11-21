@@ -58,14 +58,22 @@ function naText(v: string | null): string {
 
 /** 网格取格：指定 K 的有值格中 θ 最接近 0.4（并列取小 θ）；全无值 → null。
  * 「有值」逐字段判定——θ=0.4 格无有效影片（指标 null）时回退最近有值格。 */
-function pickCell(
+/** 统一取格：该字段「有值」的格中 θ 最接近目标的一格（并列取小；距离按
+ * 1e9 取整再比——与后端 closed_eval._pick_valued_cell / movie_breakdown
+ * .pick_theta 同规则，浮点表示噪声不击穿并列；无有值格 → null）。
+ * 卡值与卡题 θ 一律从本函数的同一格取（终审 Important：行存在但该字段
+ * null 时按字段回退，题注如实标回退档 θ）。 */
+function pickRow(
   rows: GridRow[],
   k: number,
+  field: 'precision' | 'recall' | 'ndcg' | 'precision_random' | 'recall_random',
   thetaTarget: number,
 ): GridRow | null {
+  const distance = (theta: number) =>
+    Math.round(Math.abs(theta - thetaTarget) * 1e9) / 1e9
   const valued = rows
-    .filter((r) => r.k === k && r.theta !== null)
-    .sort((a, b) => Math.abs(a.theta - thetaTarget) - Math.abs(b.theta - thetaTarget) || a.theta - b.theta)
+    .filter((r) => r.k === k && r[field] !== null)
+    .sort((a, b) => distance(a.theta) - distance(b.theta) || a.theta - b.theta)
   return valued.length > 0 ? valued[0] : null
 }
 
@@ -75,10 +83,7 @@ function pickField(
   field: 'precision' | 'recall' | 'ndcg' | 'precision_random' | 'recall_random',
   thetaTarget: number,
 ): number | null {
-  const valued = rows
-    .filter((r) => r.k === k && r[field] !== null)
-    .sort((a, b) => Math.abs(a.theta - thetaTarget) - Math.abs(b.theta - thetaTarget) || a.theta - b.theta)
-  return valued.length > 0 ? valued[0][field] : null
+  return pickRow(rows, k, field, thetaTarget)?.[field] ?? null
 }
 
 /** 指标 ±CI 渲染：值 null → 暂无；CI 缺失只出值；统一 `0.42 ± [0.31, 0.53]`。 */
@@ -147,16 +152,19 @@ export default function ClosedEvalReport({
   const prior = report.baselines.prior
   // 汇总五键：统一取格约定（P@10/nDCG@10 = θ≈0.2 的最近有值格 @K=10、
   // R@20 = θ≈0.8 的最近有值格 @K=20）；卡题标实际取格 θ（无格回退约定字面量）
-  const ndcg10 = pickField(grid, K_P, 'ndcg', THETA_P_TARGET)
-  const p10 = pickField(grid, K_P, 'precision', THETA_P_TARGET)
-  const r20 = pickField(grid, K_R, 'recall', THETA_R_TARGET)
-  const thetaPickedP = pickCell(grid, K_P, THETA_P_TARGET)?.theta ?? THETA_P_TARGET
-  const thetaPickedR = pickCell(grid, K_R, THETA_R_TARGET)?.theta ?? THETA_R_TARGET
+  // 每卡各自取格（值与题注 θ 同源同格）：P 卡与 nDCG 卡可能落在不同 θ 档
+  // （某档 precision null 而 ndcg 有值），各自如实标注
+  const p10Row = pickRow(grid, K_P, 'precision', THETA_P_TARGET)
+  const ndcg10Row = pickRow(grid, K_P, 'ndcg', THETA_P_TARGET)
+  const r20Row = pickRow(grid, K_R, 'recall', THETA_R_TARGET)
+  const p10 = p10Row?.precision ?? null
+  const ndcg10 = ndcg10Row?.ndcg ?? null
+  const r20 = r20Row?.recall ?? null
 
   const summary = [
-    { key: 'ndcg10', title: `nDCG@10(θ${thetaPickedP})`, value: ndcg10 },
-    { key: 'p10', title: `P@10(θ${thetaPickedP})`, value: p10 },
-    { key: 'r20', title: `R@20(θ${thetaPickedR})`, value: r20 },
+    { key: 'ndcg10', title: `nDCG@10(θ${ndcg10Row?.theta ?? THETA_P_TARGET})`, value: ndcg10 },
+    { key: 'p10', title: `P@10(θ${p10Row?.theta ?? THETA_P_TARGET})`, value: p10 },
+    { key: 'r20', title: `R@20(θ${r20Row?.theta ?? THETA_R_TARGET})`, value: r20 },
     { key: 'coverage-median', title: '覆盖中位', value: report.coverage.median },
     { key: 'spearman-macro', title: 'Spearman 宏', value: report.spearman.macro },
   ]

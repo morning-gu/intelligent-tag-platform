@@ -7,7 +7,7 @@ ks=[5,10,20] → 缺省 θ_p=0.2（DEFAULT_THETA_P）、θ_r=0.6（0.8 的最近
 
 1. **None≠0**——θ-空 / 无交集 / 失败片的 p/r/spearman 是 None（算不出），
    不是 0（得 0 分）；
-2. **对账**——单片 P 与闭环网格 (θ=0.4, k=10) 格 precision 用同一原语、
+2. **对账**——单片 P 与闭环网格 (θ=0.2, k=10) 格 precision 用同一原语、
    同一样本构造，均值精确相等（θ-空/无交集/失败片两侧同被排除）；
 3. **防御性**——produced 输入序不影响指标与明细；空间外条目不占 P@K
    的坑、不进计分清单。
@@ -268,9 +268,9 @@ def test_reconciliation_with_grid():
 THETAS_SPLIT = [0.2, 0.4, 0.6, 0.8]  # 拆 θ 夹具：P 门与 R 门可各取一档
 
 
-def test_default_split_equals_single_theta_behavior():
-    """缺省（不带新参）= 旧单 θ 行为：theta_p==theta_r==pick_theta，payload
-    换键不加戏；明细三组逐字段与旧口径一致。"""
+def test_default_split_matches_unified_convention():
+    """缺省（不带新参）= 统一取格约定：theta_p≈0.2、theta_r≈0.8（四档网格
+    精确命中）；payload 换键不加戏；明细三组按约定门逐字段钉死。"""
     gt = {"gA": 0.81, "gB": 0.77, "gC": 0.61, "gD": 0.1}
     row = _row("m1", gt, [_prod("gC", 0.95), _prod("gD", 0.90),
                           _prod("out1", 0.50)])

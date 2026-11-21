@@ -287,6 +287,32 @@ describe('ClosedEvalReport 报告视图', () => {
     expect(screen.getAllByText('R@20(θ0.8)')).toHaveLength(2)
   })
 
+  it('卡题 θ 与卡值同源：目标行存在但该字段无值 → 值回退最近有值档、卡题如实标回退 θ（终审 Important）', () => {
+    // R@20 现实场景：θ0.8 行存在但 recall=null（高 θ 档 n_valid=0 常态）、
+    // θ0.6 行有值 → 值取 0.6 格 0.35，卡题必须标 θ0.6（不得标 θ0.8）
+    const report: ClosedEvalReportData = {
+      ...MINIMAL_REPORT,
+      grid: [
+        { theta: 0.2, k: 10, n_valid: 2, precision: 0.5, recall: 0.4,
+          ndcg: 0.45, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.03, recall_random: 0.05 },
+        { theta: 0.8, k: 20, n_valid: 0, precision: null, recall: null,
+          ndcg: null, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: null, recall_random: null },
+        { theta: 0.6, k: 20, n_valid: 2, precision: 0.3, recall: 0.35,
+          ndcg: 0.4, precision_ci: null, recall_ci: null, ndcg_ci: null,
+          precision_random: 0.01, recall_random: 0.06 },
+      ],
+    }
+    render(<ClosedEvalReport report={report} runId={RUN_ID} />)
+
+    expect(screen.getByTestId('summary-r20')).toHaveTextContent('0.35')
+    // 断言收进汇总卡作用域——基线列头的约定字面量 R@20(θ0.8) 恒在，不在否定范围
+    const summaryRow = screen.getByTestId('summary-row')
+    expect(within(summaryRow).getByText('R@20(θ0.6)')).toBeInTheDocument()  // 如实标回退档
+    expect(within(summaryRow).queryByText('R@20(θ0.8)')).not.toBeInTheDocument()
+  })
+
   it('覆盖分布：5 桶右开右闭边界计数正确，min/中位/max 一行文本', () => {
     render(<ClosedEvalReport report={REPORT} runId={RUN_ID} />)
 
