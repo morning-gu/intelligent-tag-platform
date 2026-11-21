@@ -606,7 +606,7 @@ def test_result_out_falls_back_to_tag_id_for_legacy_row():
     上一轮已落库的行指向旧 tag_catalog 的 id，切库后查不到名称；这类行
     必须回退到 tag_id，否则资产标签视图会出现无名标签。
     """
-    from tagplatform.api.routers.generation import _result_out
+    from tagplatform.orchestration._shared import _result_out
     from tagplatform.capabilities.storage.models import PreAssetTag
 
     row = PreAssetTag(asset_id='a1', target_type='content', target_id='a1',

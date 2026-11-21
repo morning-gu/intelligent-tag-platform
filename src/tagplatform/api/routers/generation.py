@@ -25,20 +25,25 @@ v2 变更（doc §3.4-3.6，契约速查）：
 queued（提交受理语义），实际终态经 GET 查询。
 """
 
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_executor, get_quality_executor, get_session
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.services.eval.tag_quality import DEFAULT_MODEL
-from tagplatform.services.tags.library import TagLibrary, try_load_library
+from tagplatform.orchestration._shared import (
+    AssetTagOut,
+    GenerationResultOut,
+    _dir_info,
+    _result_out,
+    _tag_info,
+)
 from tagplatform.services.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry
@@ -108,39 +113,6 @@ class GenerationTaskOut(BaseModel):
     finished_at: UtcDatetime | None = None
 
 
-class EvidenceOut(BaseModel):
-    """单条证据明细（与 generation.Evidence 字段一一对应）。"""
-
-    scene_id: str
-    start_ms: int
-    end_ms: int
-    description: str
-
-
-class GenerationResultOut(BaseModel):
-    """生成结果摘要行：id 为 pre_asset_tag 行主键（审核操作路由与前端行操作
-    的定位键）；tag_name 展示解析 candidate_name 优先、目录名回退。"""
-
-    id: int
-    tag_name: str
-    # 库内标签 id（closed 行/已合并行非空）；开放生成的新词行是 None
-    tag_id: str | None = None
-    # 行内候选名（开放生成新词非空；closed 行是 None）
-    candidate_name: str | None = None
-    origin: str
-    relevance_score: float | None = None
-    confidence: float | None = None
-    review_status: str
-    # 挂载粒度：由标签所属目录的 applicable_scope 决定
-    target_type: str = "content"
-    # 所属目录（JSON 标签库）：新词必填，catalog 行取标签自身目录
-    dir_id: str | None = None
-    dir_name: str | None = None
-    # 目录全路径（L1/…/末级）；审核中心同样展示这一列，两边口径一致
-    dir_path: str | None = None
-    evidence: list[EvidenceOut] = []
-
-
 class GenerationTaskDetail(GenerationTaskOut):
     """任务详情：在列表字段之上附该任务全部结果摘要行。"""
 
@@ -153,35 +125,6 @@ class GenerationTaskRetryResponse(BaseModel):
 
     task_id: str
     status: str
-
-
-class AssetTagOut(BaseModel):
-    """资产正式挂载行（`asset_tag`）：审核通过后复制过来的挂载关系。
-
-    - `id`：挂载行主键（审核接口返回的是**被审核的 pre 行**主键，两者语义
-      不同，前端不要跨接口比较）；
-    - `tag_name` 是库内规范名（审核 modify 的临时改名留在 pre 侧，正式挂载
-      按 doc §3.6/§6.3 复制 define 现值）；
-    - `origin` 由同键 pre 行回填（正式表不存来源），无对应 pre 行时为 None；
-    - 目录列由 `tag_define → tag_catalog` 实时解析；
-    - 评分/证据/审核状态是审核侧字段：挂载视图不带（恒 None/空），保留这些
-      字段是为了让审核接口能复用同一个响应模型。
-    """
-
-    id: int
-    tag_id: str | None = None
-    tag_name: str
-    candidate_name: str | None = None
-    origin: str | None = None
-    relevance_score: float | None = None
-    confidence: float | None = None
-    review_status: str = "approved"
-    target_type: str = "content"
-    dir_id: str | None = None
-    dir_name: str | None = None
-    dir_path: str | None = None
-    evidence: list[EvidenceOut] = []
-    created_at: UtcDatetime | None = None
 
 
 # ---------- 组装辅助 ----------
@@ -223,94 +166,6 @@ def _resolve_target_asset(session: Session, asset_id: str) -> MediaAsset:
             status_code=422,
             detail=f"资产 {asset_id} 无识别内容，其父级资产 {target} 也未完成内容识别")
     raise HTTPException(status_code=422, detail=f"资产 {asset_id} 无识别内容")
-
-
-def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
-    """evidence_json → 证据列表；空/损坏 JSON/条目 shape 非法（缺必填字段
-    或类型不符 → ValidationError）一律按空列表兜底（终审 deferred 落地：
-    审核列表与任务详情两条消费路径对坏证据均不再 500）。"""
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    try:
-        return [EvidenceOut(**item) for item in data if isinstance(item, dict)]
-    except ValidationError:
-        return []
-
-
-def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
-    """行内 tag_id → 目录信息（名称/类型/目录），读 `tag_catalog`/`tag_define`
-    的库视图（v2 起标签库就是这两张表，不再有 JSON 文件）。"""
-    library = try_load_library()
-    tag_ids = {r.tag_id for r in rows if r.tag_id}
-    if library is None or not tag_ids:
-        return {}
-    info: dict[str, dict] = {}
-    for tag_id in tag_ids:
-        definition = library.tag(tag_id)
-        if definition is None:
-            continue
-        directory = library.directory(definition.dir_id)
-        info[tag_id] = {
-            "tag_name": definition.tag_name,
-            "tag_type": definition.tag_type,
-            "dir_id": definition.dir_id,
-            "dir_name": directory.dir_name if directory else None,
-        }
-    return info
-
-
-def _dir_info(dir_id: str | None) -> tuple[str | None, str | None, str | None]:
-    """dir_id → (dir_name, dir_path, 全路径最后一级名)；库不可用/目录缺失时
-    全部返回 None（调用方按"没有目录"展示）。"""
-    library = try_load_library()
-    if library is None or not dir_id:
-        return None, None, None
-    directory = library.directory(dir_id)
-    if directory is None:
-        return None, None, None
-    path = library.path_of(dir_id)
-    return directory.dir_name, ("/".join(path) if path else None), None
-
-
-def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
-    """pre_asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。
-
-    tag_name 展示解析与审核列表同规：candidate_name 非空优先（审核 modify
-    落在行内的展示字段，改了什么显示什么），否则回退库内标签名。
-    """
-    definition = info.get(row.tag_id or "", {})
-    # 三级回退：行内展示名 → 库内标签名 → tag_id。历史行（上一轮落在旧
-    # tag_catalog 的 id）在库里查不到，回退成 id，不能显示成空字符串。
-    tag_name = (row.candidate_name or definition.get("tag_name")
-                or row.tag_id or "")
-    dir_id = row.candidate_dir_id or definition.get("dir_id")
-    dir_name = definition.get("dir_name")
-    dir_path: str | None = None
-    if dir_id and not dir_name:
-        dir_name, dir_path, _ = _dir_info(dir_id)
-    elif dir_id:
-        _, dir_path, _ = _dir_info(dir_id)
-    return GenerationResultOut(
-        id=row.id,
-        tag_name=tag_name,
-        tag_id=row.tag_id,
-        candidate_name=row.candidate_name,
-        origin=row.origin,
-        relevance_score=row.relevance_score,
-        confidence=row.confidence,
-        review_status=row.review_status,
-        target_type=row.target_type,
-        dir_id=dir_id,
-        dir_name=dir_name,
-        dir_path=dir_path,
-        evidence=_parse_evidence(row.evidence_json),
-    )
 
 
 # ---------- 路由 ----------

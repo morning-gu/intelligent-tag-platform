@@ -14,13 +14,9 @@ tag_define（经 dir_id 挂目录）、正式挂载在 asset_tag。
 协议转换与错误映射（解析失败/坏表头 → 422；未知 tag_id → 404）。
 """
 
-import io
 import json
-import zipfile
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -36,47 +32,13 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
+from tagplatform.orchestration._shared import ImportSummary, _build_export_archive
 from tagplatform.services.tags.governance import run_governance
 from tagplatform.tasks.tag_import import TagImportFileError, parse_upload
 
 router = APIRouter(prefix="/api/v1/tags")
 
 # ---------- 响应模型 ----------
-
-class IssueOut(BaseModel):
-    """单条治理问题明细（与 governance.Issue 字段一一对应）。"""
-
-    tag_name: str
-    code: str
-    detail: str
-    similar_to: str | None = None
-
-
-class ParseErrorOut(BaseModel):
-    """单行解析失败明细（与 governance.excel.RowError 字段一一对应）。"""
-
-    row_number: int
-    tag_name: str | None = None
-    code: str
-    detail: str
-
-
-class ImportSummary(BaseModel):
-    """导入结果摘要：total/inserted/skipped 计数 + issues/parse_errors 明细列表。
-
-    语义与 tag_import_task.result_summary（治理流水线写入）一致：total 为
-    传入治理的**标签定义行**数（目录行落 tag_catalog 不计入；行级解析错误
-    的行不进 rows，不计入），inserted 仅计标签行，skipped = total -
-    inserted，issues 为治理问题明细（与入库行不相交）；
-    parse_errors 为行级解析错误明细，计数以列表长度为准。
-    """
-
-    total: int
-    inserted: int
-    skipped: int
-    issues: list[IssueOut]
-    parse_errors: list[ParseErrorOut] = []
-
 
 class ImportResponse(BaseModel):
     """导入响应：本批导入任务号 + 结果摘要（v1 batch_id 字段退役）。"""
@@ -324,72 +286,6 @@ def export_tags(
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="tags-export.zip"'},
     )
-
-
-def _tag_path(tag: TagDefine, dirs_by_id: dict[str, TagCatalog]) -> list[str]:
-    """叶子全路径名：根→直属目录的目录名链 + 叶子标签名（含叶子，沿 v1）。"""
-    ancestors: list[str] = []
-    current: TagCatalog | None = dirs_by_id.get(tag.dir_id)
-    while current is not None:
-        ancestors.append(current.dir_name)
-        current = dirs_by_id.get(current.parent_id) if current.parent_id else None
-    ancestors.reverse()
-    return [*ancestors, tag.tag_name]
-
-
-def _build_export_archive(
-    export_tags: list[TagDefine], dirs_by_id: dict[str, TagCatalog]
-) -> bytes:
-    """叶子标签行 + 目录祖先链 → zip（xlsx 六列 + xml 嵌套，v1 格式逐字）。
-
-    xlsx 三级列取路径前三段（含叶子名，沿 v1 的 path 计算口径），xml 按
-    路径嵌套 level1/level2/…、叶子为 <tag> 节点；标签生成方式列固定
-    "系统生成"（v1 常量）。
-    """
-    workbook = openpyxl.Workbook()
-    worksheet = workbook.active
-    worksheet.title = "标签"
-    worksheet.append(["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述", "标签生成方式"])
-    for tag in export_tags:
-        path = _tag_path(tag, dirs_by_id)
-        levels = (path + ["", "", ""])[:3]
-        worksheet.append([*levels, tag.tag_name, tag.description, "系统生成"])
-
-    workbook_output = io.BytesIO()
-    workbook.save(workbook_output)
-
-    xml_root = ET.Element("tags")
-    xml_nodes: dict[tuple[str, ...], ET.Element] = {}
-    for tag in export_tags:
-        path = _tag_path(tag, dirs_by_id)
-        if len(path) == 1:
-            ET.SubElement(
-                xml_root,
-                "tag",
-                {"type": "system", "description": tag.description or ""},
-            ).text = path[0]
-            continue
-
-        parent = xml_root
-        for depth, name in enumerate(path[:-1], start=1):
-            key = tuple(path[:depth])
-            node = xml_nodes.get(key)
-            if node is None:
-                node = ET.SubElement(parent, f"level{depth}", {"name": name})
-                xml_nodes[key] = node
-            parent = node
-        ET.SubElement(
-            parent,
-            "tag",
-            {"type": "system", "description": tag.description or ""},
-        ).text = path[-1]
-
-    xml_output = ET.tostring(xml_root, encoding="utf-8", xml_declaration=True)
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("tags-export.xlsx", workbook_output.getvalue())
-        archive.writestr("tags-export.xml", xml_output)
-    return output.getvalue()
 
 
 @router.get("/{node_id}", response_model=TagNodeDetail)

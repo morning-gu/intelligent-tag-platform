@@ -37,17 +37,17 @@ from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
 from tagplatform.api.depends import get_current_user
-from tagplatform.api.routers.generation import (
+from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, UserAccount
+from tagplatform.services.tags.library import try_load_library
+from tagplatform.services.generation.persist import SYSTEM_REVIEWER
+from tagplatform.services.generation.review import ConflictError, apply_review
+from tagplatform.orchestration._shared import (
     AssetTagOut,
     EvidenceOut,
     _parse_evidence,
     _result_out,
     _tag_info,
 )
-from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, UserAccount
-from tagplatform.services.tags.library import try_load_library
-from tagplatform.services.generation.persist import SYSTEM_REVIEWER
-from tagplatform.services.generation.review import ConflictError, apply_review
 
 router = APIRouter(prefix="/api/v1")
 

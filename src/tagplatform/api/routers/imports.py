@@ -24,7 +24,6 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session, get_tag_import_executor
-from tagplatform.api.routers.tags import ImportSummary, _build_export_archive
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.capabilities.storage.models import (
     AssetTag,
@@ -34,6 +33,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
+from tagplatform.orchestration._shared import ImportSummary, _build_export_archive
 from tagplatform.tasks.tag_import import TagImportExecutor
 
 router = APIRouter(prefix="/api/v1/import/tasks")
