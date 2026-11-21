@@ -16,9 +16,14 @@ from tagplatform.settings import get_settings
 
 config = context.config
 
-# 应用 alembic.ini 中的日志配置
+# 应用 alembic.ini 中的日志配置。
+# disable_existing_loggers=False：fileConfig 默认会把"配置文件没提到"的
+# 已存在 logger 全部标记 disabled（进程级、不可恢复）。迁移测试与应用进程
+# 同池跑时，tagplatform.* 的 logger 早已创建——一旦被禁，之后整个进程不再
+# 产出任何日志（caplog 断言全灭）。alembic 只在 CLI/测试里运行，这里只需
+# 自己的 handler 正常工作，不该动别人的 logger。
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 
 def _database_path() -> str:

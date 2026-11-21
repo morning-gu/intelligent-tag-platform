@@ -3,11 +3,15 @@
 流程（设计文档 §4.2）：按目录范围召回候选 → 剔除 dir_asset 目录的候选
 （该类目录标签由元数据导入/联网搜索获取，不做内容语义打分）→ 空候选
 显式失败（提示先导入标签库）→ 候选**按目录分组**、每组以 JSON 追加到
-渲染后的 prompt 正文之后（组含目录名称/描述，标签含 id/名称/描述）→ 逐组调用 LLM 判定 → 契约校验
-解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c = 0.2/0.5/0.3；
-Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1；G 为 Sapp≥0.5 门控，
-A≤2 整条丢弃）→ 门内按 Sf 降序截断（max_tags 为单目录上限）→
-合并各组结果 → ProducedTag(origin=
+渲染后的 prompt 正文之后（组含目录名称/描述，标签含 id/名称/描述）→
+逐组调用 LLM 判定（组内按 closed_batch_size 分批，防单组标签过多导致
+输出截断；解析失败追加格式纠正提示重调本批一次，仍失败抛错落任务失败）
+→ 契约校验解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c =
+0.2/0.5/0.3；Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1；G 为
+Sapp≥0.75 门控，A≤3 整条丢弃）→ 挂载解析前置（证据展开 + 目录粒度 →
+挂载点，解析不出的判定在选择前丢弃、不占名额）→ 全局选择（max_tags =
+全局输出上限 M：每组 Sf 最高 1 条保底，保底间按 Sf 竞争截断，剩余按
+Sf 降序补足 M−N）→ 映射 ProducedTag(origin=
 "catalog")。producer 不写库：结果落库是执行器（Task 8）的职责。
 
 v2 增量（2026-11）：
@@ -25,13 +29,27 @@ v4 增量（2026-12）：LLM 判定改带 1–5 分的 applicability/evidence_st
 (E−1)/4，作为证据维度的独立读数随行保留。
 
 v5 增量（2026-12）：组内候选再按 `closed_batch_size`（默认 1）分批送
-LLM（每批一次调用，防单组标签过多导致输出截断）；组内全部批次完成后按
-tag_id 去重合并（首次出现优先），再统一走门控、终分与 max_tags 截断——
-批只影响调用切分，不改变组级语义。
+LLM（每批一次调用，防单组标签过多导致输出截断）；同批解析失败追加
+格式纠正提示重调一次（详见 v7）。门控收紧为 Sapp≥0.75（applicability≥4，
+A=3 起整条丢弃）；max_tags 语义从单目录上限改为**全局输出上限 M**——
+每组 Sf 最高 1 条保底，组数超 M 时保底间按 Sf 竞争截断，剩余判定按 Sf
+降序补足；编造 tag_id 的过滤前置到打分前（不再占走组内保底名额后才被
+剔除）；重复判定按 tag_id 去重保留 Sf 最高分（天然涵盖跨批重复）。
 
 v6 增量（2026-12）：dir_asset 目录（元数据导入/联网搜索来源）的标签跳过
 内容语义打分——召回后按目录逐个过滤（dir_type 不沿子目录继承，与
 allows_new_tags 同口径）；范围内仅剩 dir_asset 目录时按空候选显式失败。
+挂载解析前置到全局选择**之前**——解析不出挂载点的判定在选择阶段即淘汰、
+不占 M 名额（修复"选满 30 只出 28"：角色目录标签在多角色内容上挂载必败，
+原先在第 6 步后置丢弃且不回填，缺额不补）；门控丢弃、挂载丢弃、编造 id
+丢弃三处补 warning 日志，选择完成打一条 INFO 汇总（组头/补足/各类丢弃
+计数）。
+
+v7 增量（2026-12）：组级解析重试加固——真实端点偶发返回缺键元素（合法
+JSON 非截断），原先一次坏输出就让整任务作废且零线索。现在每批解析失败
+先记 warning（含 dir_id 与原始输出前 400 字），追加格式纠正提示重调本
+批一次，仍失败才抛 LLMParseError；传输失败不在此层重试（client 层已有
+退避）。严格语义不宽容降级：与 mtg/judge 的解析契约同口径。
 
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
@@ -52,11 +70,20 @@ from tagplatform.generation.base import (
 )
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.library import DIR_ASSET
-from tagplatform.llm.parsing import parse_closed_output
-from tagplatform.mounting import resolve_mount
+from tagplatform.llm.parsing import LLMParseError, parse_closed_output
+from tagplatform.mounting import Mount, resolve_mount
 from tagplatform.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+# 解析重试的格式纠正提示（重调本组一次；与 mtg/judge 的 _RETRY_HINT 同思路）
+_RETRY_HINT = (
+    "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
+    '每个元素必须同时包含 "tag_id"（字符串）、"applicability" 与 '
+    '"evidence_strength"（均为 1–5 整数）、"evidences"（数组，元素含 '
+    '"scene_id" 与 "evidence" 字符串）。不要用对象包装、不要任何解释文字'
+    "或 Markdown 代码块。"
+)
 
 
 class ClosedTagProducer:
@@ -93,15 +120,20 @@ class ClosedTagProducer:
         # 5. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
         #    单组标签过多易截断模型输出，组内再按 closed_batch_size 分批，
         #    每批送同构组对象（目录信息相同、tags 为该批子集，批次按召回
-        #    序连续切片）。组内全部批次完成后合并判定（tag_id 去重，首次
-        #    出现优先——防真实模型跨批重复判定），再统一门控截断。
-        #    run_id 沿用任务级 id（Mock 哈希采样键不变）
+        #    序连续切片）。每批解析失败追加格式纠正提示重调本批一次（v7），
+        #    仍失败抛错落任务失败；传输失败不重试（client 层已有退避）。
+        #    判定按 tag_id 去重保留 Sf 最高分（天然涵盖跨批重复——真实
+        #    模型可能跨批重复判定同一标签）；组内不截断，全局选择统一在
+        #    5.5 步进行。run_id 沿用任务级 id（Mock 哈希采样键不变）。
+        #    丢弃计数贯穿全流程：门控（A≤3）/编造 id/挂载失败三类
         items: list[tuple[float, dict]] = []
+        dropped_gate = 0
+        dropped_fabricated = 0
         batch_size = max(1, get_settings().closed_batch_size)
         for dir_id, members in groups.items():
             directory = library.directory(dir_id)
-            group_parsed: list[dict] = []
-            seen: set[str] = set()
+            member_ids = {c.tag_id for c in members}
+            scored_by_tag: dict[str, tuple[float, dict]] = {}
             for start in range(0, len(members), batch_size):
                 batch = members[start:start + batch_size]
                 group_payload = {
@@ -122,41 +154,95 @@ class ClosedTagProducer:
                     + "\n\n## 候选标签分组\n"
                     + json.dumps(group_payload, ensure_ascii=False, indent=2)
                 )
-                resp = llm.complete([{"role": "user", "content": prompt}],
-                                    spec.run_id)
-                # 传输失败 → 任务失败语义由执行器落库；此处显式抛错透出原因
-                if not resp.ok:
-                    raise RuntimeError(f"LLM 调用失败: {resp.raw.get('error')}")
-                for it in parse_closed_output(resp.content):
-                    if it["tag_id"] in seen:
-                        continue  # 跨批重复判定：首次出现优先
-                    seen.add(it["tag_id"])
-                    group_parsed.append(it)
-            logger.debug("闭环目录 %s 解析出 %d 条判定", dir_id,
-                         len(group_parsed))
-            # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
-            #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦分；
-            #    G 为 Sapp≥0.5 的门控（A≥3 放行，A≤2 → Sf=0 整条丢弃）。
-            #    Sf 与标签成对保留，按 Sf 降序截断（max_tags 为单目录上限）
-            scored: list[tuple[float, dict]] = []
-            for it in group_parsed:
-                if it["applicability"] < 3:
-                    continue  # Sapp=(A−1)/4 < 0.5：门控关闭，G=0 → Sf=0
-                candidate = by_id.get(it["tag_id"])
-                s_emb = candidate.score if candidate is not None else 0.0
-                s_app = (it["applicability"] - 1) / 4
-                s_evi = (it["evidence_strength"] - 1) / 4
-                scored.append((0.2 * s_emb + 0.5 * s_app + 0.3 * s_evi, it))
-            scored.sort(key=lambda pair: -pair[0])
-            items.extend(scored[: spec.policy.max_tags])
-        # 7. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
-        #    catalog 来源 tag_id 必有，候选目录直接取库
-        produced: list[ProducedTag] = []
-        scenes_by_id = {scene.scene_id: scene for scene in spec.content.content.scenes}
+                # 5a. 单批调用与解析重试（v7）：真实端点偶发返回缺键元素，
+                #     一次坏输出不再让整任务作废——记 warning（含 dir_id
+                #     与原始输出前 400 字，此前零线索），追加格式纠正提示
+                #     重调本批一次，仍失败才抛错。传输失败不在本层重试
+                #     （client 层已做退避重试），此处带组语境直接抛错。
+                parsed: list[dict] | None = None
+                parse_error: Exception | None = None
+                last_raw = ""
+                for attempt in range(2):
+                    request = ([{"role": "user", "content": prompt}]
+                               if attempt == 0 else
+                               [{"role": "user",
+                                 "content": prompt + _RETRY_HINT}])
+                    resp = llm.complete(request, spec.run_id)
+                    # 传输失败 → 任务失败语义由执行器落库；此处显式抛错
+                    # 透出原因（带组语境，便于定位是哪个目录组的调用坏了）
+                    if not resp.ok:
+                        raise RuntimeError(
+                            f"LLM 调用失败（目录组 {dir_id}）: "
+                            f"{resp.raw.get('error')}")
+                    try:
+                        parsed = parse_closed_output(resp.content)
+                        break
+                    except LLMParseError as exc:
+                        parse_error = exc
+                        last_raw = resp.content or ""
+                        logger.warning(
+                            "闭环目录 %s 第 %d 次输出解析失败：%s；原始输出"
+                            "前 400 字：%r", dir_id, attempt + 1, exc,
+                            last_raw[:400])
+                if parsed is None:
+                    raise LLMParseError(
+                        f"目录组 {dir_id} 重试后仍解析失败: {parse_error}；"
+                        f"最后一次原始输出前 400 字：{last_raw[:400]!r}")
+                # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
+                #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦
+                #    分；G 为 Sapp≥0.75 的门控（A≥4 放行，A≤3 → Sf=0 整条
+                #    丢弃）。Sf 与标签成对保留。编造 tag_id 在打分前剔除
+                #    （否则会先占走组内保底名额再被丢，导致该组一条都不出）
+                logger.debug("闭环目录 %s 本批解析出 %d 条判定", dir_id,
+                             len(parsed))
+                for it in parsed:
+                    if it["applicability"] < 4:
+                        # Sapp=(A−1)/4 < 0.75：门控关闭，G=0 → Sf=0 丢弃
+                        dropped_gate += 1
+                        logger.warning(
+                            "闭环目录 %s 标签 %s 门控不过"
+                            "（applicability=%d < 4），已丢弃", dir_id,
+                            it.get("tag_id"), it["applicability"])
+                        continue
+                    if it["tag_id"] not in member_ids:
+                        # 编造或越组引用（本组 prompt 只提供本组标签）：在
+                        # 打分前剔除，避免先占走组内保底名额才被丢，或经
+                        # 别组重复入选
+                        dropped_fabricated += 1
+                        logger.warning(
+                            "闭环目录 %s 判定引用本组候选外标签 %s，已丢弃",
+                            dir_id, it["tag_id"])
+                        continue
+                    candidate = by_id[it["tag_id"]]
+                    s_app = (it["applicability"] - 1) / 4
+                    s_evi = (it["evidence_strength"] - 1) / 4
+                    sf = (0.2 * candidate.score + 0.5 * s_app
+                          + 0.3 * s_evi)
+                    prev = scored_by_tag.get(it["tag_id"])
+                    if prev is not None:
+                        # tag_id 去重：契约不拒绝重复输出，persist 也不
+                        # 去重；保留 Sf 最高分（涵盖跨批重复判定）
+                        if sf <= prev[0]:
+                            continue
+                        logger.warning(
+                            "闭环目录 %s 重复判定标签 %s，仅保留最高分",
+                            dir_id, it["tag_id"])
+                    scored_by_tag[it["tag_id"]] = (sf, it)
+            scored = sorted(scored_by_tag.values(), key=lambda pair: -pair[0])
+            logger.debug("闭环目录 %s 合并去重后 %d 条判定", dir_id,
+                         len(scored))
+            items.extend(scored)
+        # 5.4 挂载解析前置（v6）：证据展开 + 目录粒度 → 挂载点。解析不出
+        #     挂载点（典型：角色目录标签在多角色内容上定位不到唯一角色）
+        #     的判定在**全局选择之前**淘汰，不占 M 名额——修复原先在第 6
+        #     步后置丢弃且不回填导致的"选满 30 只出 28"缺额；宁可丢，不
+        #     挂错。item 结构从 (sf, it) 扩成 (sf, it, evidence, mount)
+        scenes_by_id = {scene.scene_id: scene
+                        for scene in spec.content.content.scenes}
+        mounted: list[tuple[float, dict, list[Evidence], Mount]] = []
+        dropped_unmountable = 0
         for sf, it in items:
-            candidate = by_id.get(it["tag_id"])
-            if candidate is None:
-                continue  # 模型编了不存在的 tag_id：契约外，丢弃
+            candidate = by_id[it["tag_id"]]  # 编造 id 已在打分前过滤
             evidence = []
             for item in it["evidences"]:
                 scene = scenes_by_id.get(item["scene_id"])
@@ -174,7 +260,50 @@ class ClosedTagProducer:
             mount = resolve_mount(candidate.scope, spec.asset_id,
                                   spec.content, evidence)
             if mount is None:
-                continue  # 角色级解析不出唯一角色，宁可丢
+                dropped_unmountable += 1
+                logger.warning(
+                    "闭环标签 %s（目录 %s，scope=%s）解析不出挂载点，"
+                    "已在全局选择前丢弃，不占输出名额",
+                    it["tag_id"], candidate.dir_id, candidate.scope)
+                continue
+            mounted.append((sf, it, evidence, mount))
+        items = mounted
+        # 5.5 全局选择（max_tags = 全局输出上限 M）：每组 Sf 最高 1 条作组
+        #     保底；组数超 M 时保底间按 Sf 竞争截断，严格不超 M；剩余判定
+        #     按 Sf 降序取前 M−len(保底) 补足。选择发生在挂载解析**之后**
+        #     （v6），不可挂载的判定已被淘汰，选出的每一条都能落库。M 钳
+        #     到 ≥0：直接调 API 传负数时避免负切片产生截尾怪相（前端
+        #     InputNumber 已 min=1）
+        max_tags = max(spec.policy.max_tags, 0)
+        best_per_dir: dict[str, tuple] = {}
+        for entry in items:
+            dir_id = by_id[entry[1]["tag_id"]].dir_id
+            kept = best_per_dir.get(dir_id)
+            if kept is None or entry[0] > kept[0]:
+                best_per_dir[dir_id] = entry
+        tops = sorted(best_per_dir.values(),
+                      key=lambda entry: -entry[0])[:max_tags]
+        top_ids = {entry[1]["tag_id"] for entry in tops}
+        rest = sorted((entry for entry in items
+                       if entry[1]["tag_id"] not in top_ids),
+                      key=lambda entry: -entry[0])
+        # 输出整体按 Sf 降序：保底与补足合并后重排（入库行序 = 相关度
+        # 降序的既有口径，v5 起如此）
+        selected = sorted(tops + rest[: max(max_tags - len(tops), 0)],
+                         key=lambda entry: -entry[0])
+        # 5.6 选择汇总：一条日志回答"为什么只出了 N 条"——进入选择的判定
+        #     数、组保底数、补足数、最终输出数，以及三类丢弃计数
+        logger.info(
+            "闭环全局选择完成：进入选择 %d 条 → 组保底 %d + 补足 %d = 输出 "
+            "%d 条（上限 M=%d）；丢弃：门控不过 %d、挂载失败 %d、"
+            "编造/越组 id %d",
+            len(items), len(tops), len(selected) - len(tops), len(selected),
+            max_tags, dropped_gate, dropped_unmountable, dropped_fabricated)
+        # 6. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
+        #    catalog 来源 tag_id 必有，候选目录直接取库
+        produced: list[ProducedTag] = []
+        for sf, it, evidence, mount in selected:
+            candidate = by_id[it["tag_id"]]  # 编造 id 已在打分前过滤
             produced.append(ProducedTag(
                 origin="catalog",
                 tag_id=candidate.tag_id,

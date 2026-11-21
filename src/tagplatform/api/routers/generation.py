@@ -55,7 +55,9 @@ class GenerationPolicyIn(BaseModel):
     """生成策略请求体：缺省值与 GenerationPolicy（生成引擎契约）一致。
 
     `dir_ids` 限定本次生成的目录范围（空 = 全库）；`allow_new_tags=False`
-    时只产出命中库内标签的行；`max_tags_per_dir` 限制单目录产出条数。
+    时只产出命中库内标签的行；closed 模式下 `max_tags` 为全局输出上限
+    （每组最高分 1 条保底、保底间按分竞争截断，剩余按分补足），
+    `max_tags_per_dir` 仅 open 模式使用。
     """
 
     max_tags: int = 30

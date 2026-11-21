@@ -9,8 +9,8 @@
 - ClosedTagProducer：库缺失/空候选 → ValueError；dir_asset 目录的候选
   召回后剔除（不建组、不调 LLM、不产出，范围内全是 asset 目录按空
   候选显式失败）；终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)（门控
-  Sapp≥0.5，组内按 Sf 降序截断），Sf 与标签
-  成对绑定（relevance_score）；结果是 catalog 行，带目录与挂载点（目录
+  Sapp≥0.75，全局选择 max_tags=全局上限 M），Sf 与标签成对绑定
+  （relevance_score）；结果是 catalog 行，带目录与挂载点（目录
   applicable_scope → content/scene/character）。
 """
 
@@ -52,18 +52,26 @@ _LIB_TAGS = [
 
 def _seed_library(*, status: dict | None = None,
                   extra: list[dict] | None = None,
-                  dirs: list[dict] | None = None) -> None:
+                  dirs: list[dict] | None = None,
+                  extra_dirs: list[dict] | None = None,
+                  extra_tags: list[tuple] | None = None) -> None:
     """写一套干净的两目录库（dir_mood 动态、dir_genre 静态）。
 
     `dirs` 传入整份目录列表时原样落库（`extra` 仍是追加标签），供
-    dir_asset 过滤等需要额外目录类型的用例使用。
+    dir_asset 过滤等需要额外目录类型的用例使用；extra_dirs/extra_tags
+    供挂载用例追加 scene/character scope 目录与标签（主目录集保持
+    content scope 不变，老用例零改动）。
     """
     status = status or {}
-    all_dirs = _DEFAULT_DIRS if dirs is None else dirs
+    all_dirs = (_DEFAULT_DIRS if dirs is None else dirs) \
+        + list(extra_dirs or [])
     tags = [{"tag_id": tag_id, "dir_id": dir_id, "tag_name": name,
              "tag_type": "val_fixed", "description": desc,
              "status": status.get(tag_id, "active")}
             for tag_id, name, dir_id, desc in _LIB_TAGS]
+    tags += [{"tag_id": tag_id, "dir_id": dir_id, "tag_name": name,
+              "tag_type": "val_fixed", "description": desc, "status": "active"}
+             for tag_id, name, dir_id, desc in extra_tags or []]
     write_library(library_root(), dirs=all_dirs,
                   tags=tags + list(extra or []))
 
@@ -221,7 +229,11 @@ def _build_spec(session: Session, content_fixture, run_id: str,
 
 
 class _ScriptedLLM:
-    """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。"""
+    """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。
+
+    组 JSON 用 raw_decode 解析前缀：v7 重试 prompt 在 JSON 之后追加格式
+    纠正提示，整段 json.loads 会因尾巴文本报 Extra data。
+    """
 
     def __init__(self, responses: dict[str, list[dict]]):
         self._responses = responses
@@ -229,7 +241,7 @@ class _ScriptedLLM:
     def complete(self, messages, run_id):
         tail = messages[0]["content"].partition(
             "\n\n## 候选标签分组\n")[2]
-        dir_id = json.loads(tail)["dir_id"]
+        dir_id = json.JSONDecoder().raw_decode(tail)[0]["dir_id"]
         return LLMResponse(
             content=json.dumps(self._responses[dir_id], ensure_ascii=False),
             usage={}, raw={}, ok=True)
@@ -309,17 +321,18 @@ def test_closed_produce_batches_within_group(session, content_fixture,
     批次感知 scripted LLM：按 prompt 尾部组 JSON 的 tags 子集查表回放
     （_ScriptedLLM 按 dir_id 回放、不感知批次，无法验证切分）。断言：
     每目录调用数 = ceil(成员数/2)、各批目录信息一致且 tags 为连续切片、
-    并集 = 组成员；批只切调用，组级合并门控截断语义不变。
+    并集 = 组成员；批只切调用，组级合并（门控 A≥4 + tag_id 去重保最高
+    分）语义不变。
     """
     _seed_library()
     monkeypatch.setattr(closed_module, "get_settings",
                         lambda: Settings(closed_batch_size=2))
     spec = _build_spec(session, content_fixture, run_id="r5",
-                       policy=GenerationPolicy(max_tags=1))
-    # dir_genre 3 条 → 2 批；dir_mood 3 条 → 2 批。tag_001/tag_005 的 Sf
-    # 组内最高（A=5,E=5 拉满）；6 条全过门控，正确实现组级合并后每目录
-    # 只留 1 条胜者。若错做成"逐批截断"，3 条分 2 批、每批都有过门控的
-    # 标签 → 每目录至少多漏 1 条，下面的输出断言即可分辨
+                       policy=GenerationPolicy(max_tags=2))
+    # dir_genre 3 条 → 2 批；dir_mood 3 条 → 2 批。tag_001/tag_005 的
+    # Sapp/Sevi 拉满（A=5,E=5）组内最高；A=3 的 4 条被门控（A≥4）丢弃。
+    # 全局 M=2：两组各出 1 条保底胜者恰填满 M。若错做成"逐批截断"或
+    # 门控沿用 A≥3，3 条分 2 批、6 条全存活 → 输出多于 2 条，断言可分辨
     responses = {
         "tag_001": [{"tag_id": "tag_001", "applicability": 5,
                      "evidence_strength": 5, "evidences": []}],
@@ -382,7 +395,7 @@ def test_closed_produce_batches_within_group(session, content_fixture,
                 assert set(tag) == {"tag_id", "tag_name", "description"}
 
     # 合并后门控：两组各留全场 Sf 最高的 tag_001/tag_005（跨批竞争胜出，
-    # 证明截断发生在组级合并之后而非逐批）；期望值用镜像召回 Semb 现算
+    # 证明门控与去重发生在组级合并之后而非逐批）；期望值用镜像召回 Semb 现算
     semb = {c.tag_id: c.score for c in candidates}
     for tid in ("tag_001", "tag_005"):
         expected_sf = 0.2 * semb[tid] + 0.5 * 1.0 + 0.3 * 1.0
@@ -391,11 +404,11 @@ def test_closed_produce_batches_within_group(session, content_fixture,
     assert [t.tag_id for t in out] == ["tag_001", "tag_005"]
 
 
-def test_closed_produce_scores_and_caps_per_group(session, content_fixture):
-    """终分 Sf 门内降序、组内截断 max_tags=1；Sf 与标签成对绑定。
+def test_closed_produce_scores_and_selects_globally(session, content_fixture):
+    """终分 Sf 全局降序、max_tags=1 时组保底间按 Sf 竞争截断。
 
     期望值不手算 mock 余弦：用与 produce 同口径的镜像召回拿 Semb，按
-    Sf = 0.2·Semb + 0.5·Sapp + 0.3·Sevi 现算每组胜者（mock 确定性）。
+    Sf = 0.2·Semb + 0.5·Sapp + 0.3·Sevi 现算（mock 确定性）。
     """
     _seed_library()
     spec = _build_spec(session, content_fixture, run_id="r3",
@@ -427,47 +440,344 @@ def test_closed_produce_scores_and_caps_per_group(session, content_fixture):
         try_load_library(), MOCK_EMBEDDER,
         embed_content_texts(content_fixture), top_k=50)
     semb = {c.tag_id: c.score for c in candidates}
-    group_order = list(dict.fromkeys(c.dir_id for c in candidates))
 
     def _sf(item: dict) -> float:
         return (0.2 * semb[item["tag_id"]]
                 + 0.5 * (item["applicability"] - 1) / 4
                 + 0.3 * (item["evidence_strength"] - 1) / 4)
 
-    # A=3 恰过门控（Sapp=0.5 → G=1）参与排序；组内按 Sf 取最高，组序=召回序
-    expected = [
-        max((it for it in responses[d] if it["applicability"] >= 3), key=_sf)
-        for d in group_order
-    ]
-    assert [t.tag_id for t in out] == [it["tag_id"] for it in expected]
-    # 截断发生在组内：单目录上限 1，两组各 1 条（合并后不再二次截断）
-    assert len(out) == 2
-    assert {t.dir_id for t in out} == {"dir_genre", "dir_mood"}
+    # 门控 A≥4：tag_001（A=3）整条丢弃；两组各剩 tag_002/tag_003 与
+    # tag_004/tag_005，全局 M=1 → 两组保底按 Sf 竞争，只留最高 1 条
+    gated = [it for group in responses.values()
+             for it in group if it["applicability"] >= 4]
+    winner = max(gated, key=_sf)
+    assert [t.tag_id for t in out] == [winner["tag_id"]]
+    assert len(out) == 1
     # Sf 与标签成对（relevance_score）；confidence 仍为 (E−1)/4 独立读数
-    for row, it in zip(out, expected):
-        assert row.relevance_score == pytest.approx(_sf(it))
-        assert row.confidence == (it["evidence_strength"] - 1) / 4
-    scene = content_fixture.content.scenes[0]
-    by_tag = {t.tag_id: t for t in out}
-    assert by_tag["tag_005"].evidence == [Evidence(
-        scene_id=scene.scene_id,
-        start_ms=scene.time_range.start_ms,
-        end_ms=scene.time_range.end_ms,
-        description="场景摘要",
-    )]
+    assert out[0].relevance_score == pytest.approx(_sf(winner))
+    assert out[0].confidence == (winner["evidence_strength"] - 1) / 4
+    # Sf 理论值域 [0.375, 1]：A=4 保底 0.5·0.75
+    assert 0.375 <= out[0].relevance_score <= 1.0
+    # 带场景 evidence 的判定完整落行（解析契约：scene_id → 场景时间轴展开）
+    if winner["tag_id"] == "tag_005":
+        scene = content_fixture.content.scenes[0]
+        assert out[0].evidence == [Evidence(
+            scene_id=scene.scene_id,
+            start_ms=scene.time_range.start_ms,
+            end_ms=scene.time_range.end_ms,
+            description="场景摘要",
+        )]
 
 
-def test_closed_produce_gate_drops_applicability_below_three(
+def test_closed_produce_global_selection_rules(session, content_fixture):
+    """全局选择规则：每组保底 1 条 + 剩余按 Sf 降序补足 M−N。"""
+    _seed_library()
+    # 设计：高分组（dir_genre）3 条全过门控、低分组（dir_mood）只有 1 条
+    # 过门控作组代表。M=3：两组代表保底（每组最高分），第三条从剩余 2 条
+    # 中取全局 Sf 最高——即使它来自高分组、低分组的组内次高不顶替它。
+    spec = _build_spec(session, content_fixture, run_id="r5",
+                       policy=GenerationPolicy(max_tags=3))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},  # 全场最高
+            {"tag_id": "tag_002", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},  # 与 001 同 API 分，
+            #  胜负取决于 Semb——不做假设，断言从镜像召回现算
+            {"tag_id": "tag_003", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},  # 组内垫底
+        ],
+        "dir_mood": [
+            # 组代表候选 tag_004：A=4/E=4，但 dir_mood 只有它过门控，
+            #  即使全局 Sf 低于 dir_genre 次高，组保底也必须保它
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+            {"tag_id": "tag_005", "applicability": 3,
+             "evidence_strength": 5, "evidences": []},  # 门控外：丢弃
+        ],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    candidates = recall_candidates(
+        try_load_library(), MOCK_EMBEDDER,
+        embed_content_texts(content_fixture), top_k=50)
+    semb = {c.tag_id: c.score for c in candidates}
+
+    def _sf(item: dict) -> float:
+        return (0.2 * semb[item["tag_id"]]
+                + 0.5 * (item["applicability"] - 1) / 4
+                + 0.3 * (item["evidence_strength"] - 1) / 4)
+
+    gated = [it for g in responses.values() for it in g
+             if it["applicability"] >= 4]
+    assert len(out) == 3
+    # 低分组代表 tag_004 必在：组保底不受高分组次高挤压
+    assert {t.tag_id for t in out} == {"tag_001", "tag_002", "tag_004"}
+    # 另外两条 = dir_genre 的组最高与次高（本场景恰为组内 Sf 前二）
+    genre_top2 = sorted(
+        (it for it in responses["dir_genre"] if it["applicability"] >= 4),
+        key=_sf, reverse=True)[:2]
+    assert {t.tag_id for t in out} == {it["tag_id"] for it in genre_top2} | {"tag_004"}
+    # 输出整体按 Sf 降序（入库行序 = 相关度降序口径）
+    scores = [t.relevance_score for t in out]
+    assert scores == sorted(scores, reverse=True)
+    for row in out:
+        src = next(it for it in gated if it["tag_id"] == row.tag_id)
+        assert row.relevance_score == pytest.approx(_sf(src))
+        assert row.confidence == (src["evidence_strength"] - 1) / 4
+
+
+def test_closed_produce_groups_compete_when_exceeding_max(
         session, content_fixture):
-    """门控 G：Sapp<0.5（A≤2）→ G=0 整条丢弃；A=3 恰在门线上保留。"""
+    """N>M：组保底间按 Sf 竞争截断，严格不超 M，且不再补入。"""
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r6",
+                       policy=GenerationPolicy(max_tags=1))
+    responses = {
+        "dir_genre": [{"tag_id": "tag_003", "applicability": 5,
+                       "evidence_strength": 1, "evidences": []}],
+        "dir_mood": [{"tag_id": "tag_004", "applicability": 5,
+                      "evidence_strength": 5, "evidences": []}],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # tag_004 的 Sf = 0.2·Semb + 0.5 + 0.3 ≥ 0.8；tag_003 的 Sf 上界
+    # 0.2 + 0.5 + 0 = 0.7 < 0.8 → 保底竞争 tag_004 胜出
+    assert [t.tag_id for t in out] == ["tag_004"]
+    assert len(out) == 1  # 严格 ≤ M
+
+
+def test_closed_produce_fabricated_id_filtered_before_scoring(
+        session, content_fixture):
+    """编造 tag_id 在打分前剔除：不占组保底名额，次高真实标签顶替入选。"""
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r7",
+                       policy=GenerationPolicy(max_tags=10))
+    responses = {
+        "dir_genre": [
+            # 编造 id 给满分：若参与选择会抢走本组唯一保底名额
+            {"tag_id": "tag_fake", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "tag_001", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+        ],
+        "dir_mood": [
+            # 越组引用（tag_001 属 dir_genre）：同样前置剔除，不重复入选
+            {"tag_id": "tag_001", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+        ],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # tag_fake 丢弃；dir_genre 保底 = tag_001；dir_mood 的越组 tag_001 被剔，
+    # 保底 = tag_004 → 全局 {tag_001, tag_004}，tag_001 只出现一次
+    assert {t.tag_id for t in out} == {"tag_001", "tag_004"}
+    assert [t.tag_id for t in out].count("tag_001") == 1
+
+
+def test_closed_produce_parse_retry_recovers(
+        session, content_fixture, caplog, monkeypatch):
+    """v7 组级解析重试：某组首次返回缺键元素 → 记 warning 后带提示重调
+    本组一次，重试返回合法 → 任务不失败，该组正常贡献，其他组零重调。
+
+    批大小 50（整组一批）：断言的是"组级"重试次数；默认批大小 1 下每
+    标签一批，调用计数会变成批数×重试，无法验证组级语义。"""
+    import logging
+
+    _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r11",
+                       policy=GenerationPolicy(max_tags=10))
+    good = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 4,
+             "evidence_strength": 4, "evidences": []}],
+        "dir_mood": [
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence_strength": 4, "evidences": []}],
+    }
+
+    class _FlakyLLM(_ScriptedLLM):
+        """dir_genre 首次返回缺 applicability 的坏元素，重调返回合法；
+        dir_mood 始终合法（用调用计数区分，与 run_id 无关）。"""
+
+        def __init__(self):
+            super().__init__(good)
+            self.calls: dict[str, int] = {}
+            self.retry_prompt: str | None = None
+
+        def complete(self, messages, run_id):
+            tail = messages[0]["content"].partition(
+                "\n\n## 候选标签分组\n")[2]
+            # 重试 prompt 在组 JSON 后追加 hint：raw_decode 只解析前缀
+            group = json.JSONDecoder().raw_decode(tail)[0]
+            dir_id = group["dir_id"]
+            self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
+            if dir_id == "dir_genre" and self.calls[dir_id] == 1:
+                # 复现线上失败形态：缺 applicability 键（合法 JSON 非截断）
+                return LLMResponse(
+                    content=json.dumps(
+                        [{"tag_id": "tag_001",
+                          "evidence_strength": 5, "evidences": []}],
+                        ensure_ascii=False),
+                    usage={}, raw={}, ok=True)
+            if "无法解析" in messages[0]["content"]:
+                self.retry_prompt = messages[0]["content"]
+            return super().complete(messages, run_id)
+
+    llm = _FlakyLLM()
+    with caplog.at_level(logging.WARNING,
+                         logger="tagplatform.generation.closed"):
+        out = ClosedTagProducer().produce(spec, session,
+                                          llm, MOCK_EMBEDDER)
+    # 重试后该组正常贡献：两组标签都在，任务未失败
+    assert {t.tag_id for t in out} == {"tag_001", "tag_004"}
+    # 坏组恰好调了 2 次（1 次失败 + 1 次重试），好组 1 次（零重调）
+    assert llm.calls == {"dir_genre": 2, "dir_mood": 1}
+    # 首次解析失败有 warning（含 dir_id 与错误语义）
+    assert any("解析失败" in r.message and "dir_genre" in r.message
+               for r in caplog.records)
+    # 重试 prompt = 原 prompt + 格式纠正提示（组对象 JSON 仍在可解析前缀）
+    assert llm.retry_prompt is not None
+    tail = llm.retry_prompt.partition("\n\n## 候选标签分组\n")[2]
+    group = json.JSONDecoder().raw_decode(tail)[0]
+    assert group["dir_id"] == "dir_genre"
+
+
+def test_closed_produce_parse_retry_exhaustion_raises(
+        session, content_fixture, monkeypatch):
+    """v7 重试耗尽：连续两次坏输出 → 抛 LLMParseError，消息含 dir_id 与
+    最后一次原始输出摘录（任务 error 字段可定位是哪个组、什么输出）。
+
+    批大小 50（整组一批）：默认 1 下每个单标签批都会坏、都会重试，调用
+    计数与错误消息的组语义断言无法成立。"""
+    _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r12",
+                       policy=GenerationPolicy(max_tags=10))
+    bad = [{"tag_id": "tag_001", "evidence_strength": 5, "evidences": []}]
+
+    class _AlwaysBadLLM(_ScriptedLLM):
+        def __init__(self):
+            super().__init__({})
+            self.calls: dict[str, int] = {}
+
+        def complete(self, messages, run_id):
+            tail = messages[0]["content"].partition(
+                "\n\n## 候选标签分组\n")[2]
+            group = json.JSONDecoder().raw_decode(tail)[0]
+            dir_id = group["dir_id"]
+            self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
+            return LLMResponse(
+                content=json.dumps(bad, ensure_ascii=False),
+                usage={}, raw={}, ok=True)
+
+    llm = _AlwaysBadLLM()
+    with pytest.raises(LLMParseError, match="dir_genre") as excinfo:
+        ClosedTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
+    # 坏组恰好重试了一次（2 次调用）后放弃
+    assert llm.calls["dir_genre"] == 2
+    # 错误消息含最后一次原始输出摘录（坏元素文本在内，可对账定位）
+    assert "重试后仍解析失败" in str(excinfo.value)
+    assert "evidence_strength" in str(excinfo.value)
+
+
+def _seed_scoped_library() -> None:
+    """三目录库：dir_genre/dir_mood（content）+ dir_char（character）。"""
+    _seed_library(extra_dirs=[{
+        "dir_id": "dir_char", "parent_id": None, "level": 1,
+        "dir_name": "角色标签", "dir_type": "dir_dynamic",
+        "applicable_scope": "character", "description": "角色原型与人设",
+        "aliases": []}], extra_tags=[
+        ("tag_101", "英雄", "dir_char", "承担主线使命的正派角色")])
+
+
+def test_closed_produce_unmountable_dropped_before_selection(
+        session, content_fixture, caplog):
+    """v6 前置修复：挂载失败的判定在全局选择**前**淘汰，不占 M 名额。
+
+    复现线上"选满 30 只出 28"：角色目录标签在多角色内容上解析不出唯一
+    挂载点。M=2 时若仍按老流程（先选后排挂载），tag_101 会以组头身份占走
+    一个名额再被丢弃，输出只剩 1 条；前置后由可挂载的组头顶替，输出 2 条。
+    分值设计让胜负与 mock Semb 无关：A5/E5 组 Sf ∈ [0.6, 1.0]、A4/E1 组
+    ∈ [0.175, 0.575]，区间不重叠，结果确定。
+    """
+    import logging
+
+    _seed_scoped_library()
+    # 多角色场景：character scope 定位不到唯一角色（挂载必败）
+    for scene in content_fixture.content.scenes:
+        scene.character_ids = ["char_a", "char_b"]
+    spec = _build_spec(session, content_fixture, run_id="r9",
+                       policy=GenerationPolicy(max_tags=2))
+    responses = {
+        # 角色目录组头：全局最高分，老流程必占 M 名额后被丢弃
+        "dir_char": [
+            {"tag_id": "tag_101", "applicability": 5, "evidence_strength": 5,
+             "evidences": [{"scene_id": "scene_001", "evidence": "主角孤胆"}]}],
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 5,
+             "evidences": []}],
+        "dir_mood": [
+            {"tag_id": "tag_004", "applicability": 4, "evidence_strength": 1,
+             "evidences": []}],
+    }
+    with caplog.at_level(logging.INFO, logger="tagplatform.generation.closed"):
+        out = ClosedTagProducer().produce(spec, session,
+                                          _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # tag_101 挂载失败在前置阶段淘汰：M=2 名额由两个可挂载组头占满
+    assert len(out) == 2
+    assert {t.tag_id for t in out} == {"tag_001", "tag_004"}
+    assert all(t.target_type == "content" for t in out)
+    # 淘汰有 warning、选择完成有 INFO 汇总（两类丢弃各可追溯一条日志）
+    assert any("解析不出挂载点" in r.message for r in caplog.records)
+    assert any("闭环全局选择完成" in r.message for r in caplog.records)
+
+
+def test_closed_produce_unmountable_scene_unknown_evidence_backfills(
+        session, content_fixture):
+    """v6 前置修复（scene 维度）：证据引用未知场景 → 挂载失败前置淘汰，
+    M=1 名额回填给次高的可挂载组头（老流程会选它占位后再丢，输出 0 条）。"""
+    _seed_library(extra_dirs=[{
+        "dir_id": "dir_scene", "parent_id": None, "level": 1,
+        "dir_name": "名场面", "dir_type": "dir_dynamic",
+        "applicable_scope": "scene", "description": "具体情节事件",
+        "aliases": []}], extra_tags=[
+        ("tag_201", "剧情反转", "dir_scene", "关键时刻的情节反转")])
+    spec = _build_spec(session, content_fixture, run_id="r10",
+                       policy=GenerationPolicy(max_tags=1))
+    responses = {
+        # 全局最高分，但证据场景不存在 → 挂载不出 scene 挂载点
+        "dir_scene": [
+            {"tag_id": "tag_201", "applicability": 5, "evidence_strength": 5,
+             "evidences": [{"scene_id": "scene_999", "evidence": "不存在的场景"}]}],
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 4, "evidence_strength": 1,
+             "evidences": []}],
+        "dir_mood": [],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    # tag_201 前置淘汰，M=1 回填给 tag_001（老流程：tag_201 占位后丢弃 → 空）
+    assert [t.tag_id for t in out] == ["tag_001"]
+    assert out[0].target_type == "content"
+
+
+def test_closed_produce_gate_drops_applicability_below_four(
+        session, content_fixture):
+    """门控 G：Sapp<0.75（A≤3）→ G=0 整条丢弃；A=4 恰在门线上保留。"""
     _seed_library()
     spec = _build_spec(session, content_fixture, run_id="r4",
                        policy=GenerationPolicy(max_tags=10))
     responses = {
         "dir_genre": [
-            {"tag_id": "tag_001", "applicability": 3,
+            {"tag_id": "tag_001", "applicability": 4,
              "evidence_strength": 5, "evidences": []},
-            {"tag_id": "tag_002", "applicability": 2,
+            {"tag_id": "tag_002", "applicability": 3,
              "evidence_strength": 5, "evidences": []},
         ],
         "dir_mood": [
@@ -479,16 +789,52 @@ def test_closed_produce_gate_drops_applicability_below_three(
     }
     out = ClosedTagProducer().produce(spec, session,
                                       _ScriptedLLM(responses), MOCK_EMBEDDER)
-    # max_tags=10 富余：A∈{1,2} 被丢只能因门控，A=3 恰好放行
+    # max_tags=10 富余：A∈{1,3} 被丢只能因门控，A=4 恰好放行
     assert {t.tag_id for t in out} == {"tag_001", "tag_004"}
     semb = {c.tag_id: c.score for c in recall_candidates(
         try_load_library(), MOCK_EMBEDDER,
         embed_content_texts(content_fixture), top_k=50)}
     by_tag = {t.tag_id: t for t in out}
-    # 权重算术显式展开：Sf = 0.2·Semb + 0.5·((3−1)/4) + 0.3·((5−1)/4)
+    # 权重算术显式展开：Sf = 0.2·Semb + 0.5·((4−1)/4) + 0.3·((5−1)/4)
     assert by_tag["tag_001"].relevance_score == pytest.approx(
-        0.2 * semb["tag_001"] + 0.5 * 0.5 + 0.3 * 1.0)
+        0.2 * semb["tag_001"] + 0.5 * 0.75 + 0.3 * 1.0)
     assert by_tag["tag_001"].confidence == 1.0
+
+
+def test_closed_produce_dedups_repeated_judgments(session, content_fixture):
+    """同组重复判定同一标签：只保留最高分一条，不产生重复行。"""
+    _seed_library()
+    spec = _build_spec(session, content_fixture, run_id="r8",
+                       policy=GenerationPolicy(max_tags=10))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+            # 同标签重复判定、分数更低 → 被去重
+            {"tag_id": "tag_001", "applicability": 4,
+             "evidence_strength": 2, "evidences": []},
+        ],
+        "dir_mood": [
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+            # 同标签重复判定、分数更高 → 覆盖前一条
+            {"tag_id": "tag_004", "applicability": 5,
+             "evidence_strength": 5, "evidences": []},
+        ],
+    }
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER)
+    assert [t.tag_id for t in out].count("tag_001") == 1
+    assert [t.tag_id for t in out].count("tag_004") == 1
+    candidates = recall_candidates(
+        try_load_library(), MOCK_EMBEDDER,
+        embed_content_texts(content_fixture), top_k=50)
+    semb = {c.tag_id: c.score for c in candidates}
+    by_tag = {t.tag_id: t for t in out}
+    # tag_004 保留的是高分判定：Sf 用 A=5/E=5 现算
+    assert by_tag["tag_004"].relevance_score == pytest.approx(
+        0.2 * semb["tag_004"] + 0.5 * 1.0 + 0.3 * 1.0)
+    assert by_tag["tag_004"].confidence == 1.0
 
 
 def test_closed_no_candidates_raises(session, content_fixture):

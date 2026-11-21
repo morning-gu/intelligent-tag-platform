@@ -258,6 +258,14 @@ def run_generation_task(
         # 7. 结果入库（不 commit）：persist_tags 内部先清同 origin 的 pending
         #    行再逐条插入，重跑不会在审核队列里叠加历史候选
         summary = persist_tags(session, asset_id, task.task_id, tags, task.mode)
+        # persist 口径留痕：产出 N 条 ≠ 入库 N 条——命中资产既有行（任何
+        # origin、任何状态）会被静默跳过且不留痕，"选了 M 个只入库 k 个"
+        # 的排查两次都扑在这个观测盲点上，故每次必打、零跳过也打
+        logger.info(
+            "任务 %s 入库汇总：产出 %d 条 → 新插 %d 条（自动通过 %d、"
+            "挂载 %d）、撞既有行跳过 %d 条",
+            task.task_id, len(tags), summary.inserted,
+            summary.auto_approved, summary.mounted, summary.skipped_finalized)
         if summary.cleared:
             logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
                         asset_id, summary.cleared)
