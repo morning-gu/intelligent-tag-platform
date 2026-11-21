@@ -23,7 +23,13 @@ WORKDIR /app
 # 依赖清单由 tomllib 现解析，避免 pyproject 与 Dockerfile 双份清单漂移
 # （仅 project.dependencies，dev 依赖不进运行时镜像）。
 COPY pyproject.toml ./
-RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/deps.txt \
+# torch 先从官方 CPU 索引单独装：两台部署机（154.212/147.3）均无 NVIDIA GPU，
+# 默认 pypi 轮子捆绑的 CUDA 全家桶是 ~8G 死重（镜像 9.9G 的主因；147.3 根分区
+# 仅 7.1G 放不下）。装好 CPU torch 后，sentence-transformers 等依赖解析到已
+# 满足的版本，不再拉 nvidia-* 轮子。download.pytorch.org 两台均直连可达
+# （2026-11-23 实测 HTTP/2 200）。
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch \
+ && python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > /tmp/deps.txt \
  && pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/deps.txt
 
 # 运行时环境：HF 缓存由 docker run 挂到 /hf-cache；.env 挂到 /app/.env
