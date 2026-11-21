@@ -1,8 +1,9 @@
 """媒体域编排：上传/文件名预检/构建任务/进度页/视频流——orchestration/media 域。
 
 用例清单（原 api/routers/media.py 与 api/routers/video.py 的读路径与装配
-逻辑，Task 11 原样下沉；SQL 与装配零语义变化，Task 12 再做进度页外置静态
-文件改造）：
+逻辑，Task 11 原样下沉；进度页 task_id 注入已改双上下文转义（HTML 位
+html.escape / JS 位 json.dumps+\\u），XSS 注入模式根治，URL 与响应行为
+不变——Task 12）：
 
 - `match_media`         按文件名预检（数据集索引 → 资产标题兜底两级匹配）
 - `upload_media`        上传视频登记资产（冲突 409 护栏 ×2、落盘、命中建任务）
@@ -15,6 +16,7 @@ Content-Length 头早拒（413）是纯协议守卫，留在接入层 router（e
 upload_size_limit）；核心层流式累计超限兜底在本层 save_upload 错误映射。
 """
 
+import html
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -262,12 +264,12 @@ h1{font-size:18px;margin:0 0 4px}
 code{background:#f6f8fa;padding:1px 5px;border-radius:4px;font-size:13px}
 </style></head><body>
 <h1>资产生成进度</h1>
-<div class="meta">任务 <code>__TASK__</code></div>
+<div class="meta">任务 <code>__TASK_HTML__</code></div>
 <div class="bar"><div class="fill" id="fill"></div></div>
 <div id="line" class="meta">读取中…</div>
 <div id="extra" class="meta" style="margin-top:14px"></div>
 <script>
-const TASK = "__TASK__";
+const TASK = __TASK_JS__;
 async function tick(){
   try{
     const r = await fetch("/api/v1/media/build-tasks/" + TASK, {credentials:"include"});
@@ -293,11 +295,31 @@ tick();
 </script></body></html>"""
 
 
+def _render_progress_page(task_id: str) -> str:
+    """task_id 双上下文转义注入（Task 12 XSS 根治，URL 与响应行为不变）。
+
+    原 `str.replace("__TASK__", task_id)` 裸拼是 XSS 注入模式（恶意
+    task_id 可逃逸 HTML/JS 上下文）；注入点按上下文分别转义：
+    - HTML 文本位（<code>）：html.escape（quote=True，& < > " ' 全转义）；
+    - JS 字符串位（const TASK）：json.dumps 提供引号/反斜杠安全，再
+      把 < > & 转 \\u 转义——script 元素内容是 HTML 解析器的 raw text
+      （实体不解码），只有 \\u 形式能同时防 `</script>` 逃逸与语法破坏。
+    """
+    html_safe = html.escape(task_id, quote=True)
+    js_safe = (json.dumps(task_id)
+               .replace("<", "\\u003c")
+               .replace(">", "\\u003e")
+               .replace("&", "\\u0026"))
+    return (_PROGRESS_PAGE
+            .replace("__TASK_HTML__", html_safe)
+            .replace("__TASK_JS__", js_safe))
+
+
 def build_task_view(session: Session, task_id: str) -> HTMLResponse:
     """进度页（不依赖前端构建）：浏览器打开即自动轮询，替代 dist 里缺失的进度条。"""
     if session.get(AssetBuildTask, task_id) is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    return HTMLResponse(_PROGRESS_PAGE.replace("__TASK__", task_id))
+    return HTMLResponse(_render_progress_page(task_id))
 
 
 # ---------- 用例：视频流（原 api/routers/video.py 的读路径与流式装配）----------

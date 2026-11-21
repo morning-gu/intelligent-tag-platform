@@ -1,8 +1,8 @@
 """标签域编排：标签库查询/导入/生命周期/导出 + 标签库统计视图。
 
 用例清单（原 api/routers/tags.py 与 api/routers/library.py 的读路径 SQL 与
-装配逻辑，Task 11 原样下沉；SQL 与装配零语义变化，Task 12 再做 list
-分页/导出分批改造）：
+装配逻辑，Task 11 原样下沉；list 分页已 SQL LIMIT/OFFSET 下推 + total 计
+数、导出已分批/按需装配（产物字节不变），Task 12）：
 
 - `import_tag_file`  上传标签 Excel/XML：解析 → 治理双表入库 → 任务号与摘要
 - `list_tags`        混合树列表（目录/标签合并、scope 递归、q 过滤、分页）
@@ -78,9 +78,15 @@ class TagNodeDetail(TagNodeOut):
 
 
 class TagListResponse(BaseModel):
-    """混合树列表响应（分页经 limit/offset，默认 100/0）。"""
+    """混合树列表响应（分页经 limit/offset，默认 100/0）。
+
+    total（Task 12 白名单内唯一响应结构变化）：过滤后节点总数——分页切口
+    前的候选集大小（kind/q/parent_id/scope_id 过滤口径内），SQL COUNT
+    计算；前端同步在 Task 14。
+    """
 
     items: list[TagNodeOut]
+    total: int
 
 
 class TagDeleteResponse(BaseModel):
@@ -156,7 +162,7 @@ def list_tags(
     limit: int,
     offset: int,
 ) -> TagListResponse:
-    """混合树列表：目录与标签合并（目录先、名字序），分页在合并列表上切。
+    """混合树列表：目录与标签合并（目录先、名字序），SQL LIMIT/OFFSET 分页。
 
     - 无过滤：全部目录 + 全部标签；
     - root：仅顶层目录（标签必挂目录，不存在根标签）；
@@ -166,6 +172,11 @@ def list_tags(
       不在结果内；
     - q：目录与标签的 name+aliases 子串（LIKE 转义沿 v1）；
     - kind：dir|tag 二值过滤；v1 的自由 type 分类随 tag_type 枚举化退役。
+
+    分页（Task 12 白名单改造）：合并列表 = [目录段（名字序）] + [标签段
+    （名字序）]，两段各自 SQL ORDER BY + OFFSET/LIMIT 切窗口（原实现两表
+    全量 ORM 物化 + Python 合并排序后切片）；total = 两段过滤后计数之和
+    （COUNT 下推 SQL），分页切口前口径。
     """
     dir_query = session.query(TagCatalog)
     tag_query = session.query(TagDefine)
@@ -201,39 +212,71 @@ def list_tags(
                 TagDefine.aliases.like(pattern, escape="\\"),
             ))
 
-    dir_rows: list[TagCatalog] = dir_query.all() if kind in (None, "dir") else []
-    tag_rows: list[TagDefine] = (
-        tag_query.all() if kind in (None, "tag") and tag_query is not None else [])
+    include_dirs = kind in (None, "dir")
+    include_tags = kind in (None, "tag") and tag_query is not None
 
-    # 目录 has_children 按全库判定（与本层过滤无关）：有子目录或挂有标签
-    occupied: set[str] = set()
-    if dir_rows:
-        occupied = {
+    # 分页切口前口径的总数：两段过滤后计数（COUNT 下推 SQL）
+    dir_total = dir_query.count() if include_dirs else 0
+    tag_total = tag_query.count() if include_tags else 0
+    total = dir_total + tag_total
+
+    # 窗口 [offset, offset+limit) 在两段上的落位：目录段在前，标签段接续
+    dir_nodes: list[TagNodeOut] = []
+    tag_nodes: list[TagNodeOut] = []
+    if include_dirs and offset < dir_total:
+        dir_rows: list[TagCatalog] = (
+            dir_query.order_by(TagCatalog.dir_name)
+            .offset(offset).limit(min(limit, dir_total - offset)).all()
+        )
+        # 目录 has_children 按全库判定（与本层过滤无关）：有子目录或挂有标签
+        occupied: set[str] = {
             pid for (pid,) in session.query(TagCatalog.parent_id).filter(
                 TagCatalog.parent_id.isnot(None)).distinct()
         } | {
             did for (did,) in session.query(TagDefine.dir_id).distinct()
         }
+        dir_nodes = [
+            TagNodeOut(
+                id=d.dir_id, name=d.dir_name, kind="dir", dir_type=d.dir_type,
+                description=d.description, parent_id=d.parent_id, status=None,
+                has_children=d.dir_id in occupied, aliases=parse_aliases(d.aliases),
+            )
+            for d in dir_rows
+        ]
+    if include_tags:
+        tag_window_start = max(0, offset - dir_total)
+        tag_window_end = offset + limit - dir_total
+        if tag_window_end > tag_window_start:
+            tag_rows: list[TagDefine] = (
+                tag_query.order_by(TagDefine.tag_name)
+                .offset(tag_window_start).limit(tag_window_end - tag_window_start).all()
+            )
+            tag_nodes = [
+                TagNodeOut(
+                    id=t.tag_id, name=t.tag_name, kind="tag", dir_type=None,
+                    description=t.description, parent_id=t.dir_id, status=t.status,
+                    has_children=False, aliases=parse_aliases(t.aliases),
+                )
+                for t in tag_rows
+            ]
+    return TagListResponse(items=[*dir_nodes, *tag_nodes], total=total)
 
-    dir_nodes = [
-        TagNodeOut(
-            id=d.dir_id, name=d.dir_name, kind="dir", dir_type=d.dir_type,
-            description=d.description, parent_id=d.parent_id, status=None,
-            has_children=d.dir_id in occupied, aliases=parse_aliases(d.aliases),
-        )
-        for d in dir_rows
-    ]
-    tag_nodes = [
-        TagNodeOut(
-            id=t.tag_id, name=t.tag_name, kind="tag", dir_type=None,
-            description=t.description, parent_id=t.dir_id, status=t.status,
-            has_children=False, aliases=parse_aliases(t.aliases),
-        )
-        for t in tag_rows
-    ]
-    nodes = (sorted(dir_nodes, key=lambda n: n.name)
-             + sorted(tag_nodes, key=lambda n: n.name))
-    return TagListResponse(items=nodes[offset:offset + limit])
+
+def _descendant_dir_ids(session: Session, frontier: set[str]) -> set[str]:
+    """frontier 目录集的全部后代 dir_id（分层 SQL 扩散，目录树按需加载）。
+
+    原 export_tags 的 Python BFS（全目录 ORM 物化 + children 森林 + 逐点
+    下钻）改按层批量查 parent_id IN（Task 12 分批改造；与 list_tags 的
+    递归 CTE 同语义，选代际扩散是为 q 命中目录集合并入同一遍查询）。
+    """
+    result: set[str] = set()
+    pending = {d for d in frontier if d}
+    while pending:
+        rows = session.query(TagCatalog.dir_id).filter(
+            TagCatalog.parent_id.in_(pending)).all()
+        pending = {d for (d,) in rows if d not in result}
+        result |= pending
+    return result
 
 
 def export_tags(
@@ -245,51 +288,71 @@ def export_tags(
     tag_catalog 链；scope_id 为目录时导出该目录及其子树下全部标签（含直挂
     标签，v1「该目录及其全部标签」语义）；q 命中目录导出其子树叶子、命中
     标签导出该标签本身；未知目录 → 404。
+
+    分批/按需改造（Task 12，行为不变——产物由共享 _build_export_archive
+    构造，选型说明见函数尾注）：两表全量 ORM 物化 + Python BFS 退役——
+    - scope 子树：分层 SQL 扩散（_descendant_dir_ids）；
+    - q 目录命中：仅投影 (dir_id, dir_name, aliases) 三列流式扫描 + Python
+      casefold 判定（SQLite LIKE 无法等价 unicode casefold，为保选择语义
+      逐字不变保留 Python 侧判定——轻量元组，非 ORM 实体）；
+    - 叶子：按 tag_id 序分批（yield_per）仅物化选中行；
+    - 祖先链：逐层按 PK 批量加载（只取叶子所需目录，非全树）。
+    产物字节不变：xlsx/xml 归档仍由 _build_export_archive 全量内存构造
+    （openpyxl/zipfile 无真流式出口，数据装配侧消除全量物化）。
     """
-    all_dirs = session.query(TagCatalog).all()
-    dirs_by_id = {d.dir_id: d for d in all_dirs}
-    children: dict[str | None, list[TagCatalog]] = {}
-    for d in all_dirs:
-        children.setdefault(d.parent_id, []).append(d)
-
-    def descendant_dirs(dir_id: str) -> set[str]:
-        result: set[str] = set()
-        pending = [dir_id]
-        while pending:
-            current = pending.pop()
-            for child_dir in children.get(current, []):
-                if child_dir.dir_id not in result:
-                    result.add(child_dir.dir_id)
-                    pending.append(child_dir.dir_id)
-        return result
-
-    all_tags = session.query(TagDefine).order_by(TagDefine.tag_id).all()
     if scope_id is not None:
-        if scope_id not in dirs_by_id:
+        if session.get(TagCatalog, scope_id) is None:
             raise HTTPException(status_code=404, detail=f"目录不存在：{scope_id}")
-        selected_dirs = {scope_id} | descendant_dirs(scope_id)
-        selected_tags = {t.tag_id for t in all_tags if t.dir_id in selected_dirs}
-    else:
-        selected_dirs = set(dirs_by_id)
-        selected_tags = {t.tag_id for t in all_tags}
+        selected_dirs = {scope_id} | _descendant_dir_ids(session, {scope_id})
 
+    keep_dirs: set[str] = set()
     if q:
         keyword = q.casefold()
-        keep_dirs: set[str] = set()
-        for d in all_dirs:
-            if (keyword in d.dir_name.casefold()
-                    or (d.aliases is not None and keyword in d.aliases.casefold())):
-                keep_dirs |= {d.dir_id} | descendant_dirs(d.dir_id)
-        keep_dirs &= selected_dirs
-        keep_tags = {
-            t.tag_id for t in all_tags
-            if keyword in t.tag_name.casefold()
-            or (t.aliases is not None and keyword in t.aliases.casefold())
-        }
-        keep_tags |= {t.tag_id for t in all_tags if t.dir_id in keep_dirs}
-        selected_tags = keep_tags & selected_tags
+        # q 目录命中：三列投影流式扫描（原实现全表 ORM 物化 + casefold）
+        for dir_id, dir_name, aliases in (
+            session.query(TagCatalog.dir_id, TagCatalog.dir_name,
+                          TagCatalog.aliases).yield_per(500)
+        ):
+            if (keyword in dir_name.casefold()
+                    or (aliases is not None and keyword in aliases.casefold())):
+                keep_dirs.add(dir_id)
+        keep_dirs |= _descendant_dir_ids(session, keep_dirs)
+        if scope_id is not None:
+            keep_dirs &= selected_dirs
 
-    export_leaves = [t for t in all_tags if t.tag_id in selected_tags]
+    # 叶子选取：scope 过滤（SQL）∩（q 标签命中 ∪ q 目录命中子树）
+    leaves_query = session.query(TagDefine).order_by(TagDefine.tag_id)
+    if scope_id is not None:
+        leaves_query = leaves_query.filter(TagDefine.dir_id.in_(selected_dirs))
+    if q:
+        keyword = q.casefold()
+        # q 标签命中：三列投影流式扫描（scope 给定时只在候选目录内扫——
+        # 命中目录域外的标签最终也会被 scope 交集排除，语义不变）
+        tag_scan = session.query(TagDefine.tag_id, TagDefine.tag_name,
+                                 TagDefine.aliases)
+        if scope_id is not None:
+            tag_scan = tag_scan.filter(TagDefine.dir_id.in_(selected_dirs))
+        keep_tag_ids: set[str] = set()
+        for tag_id, tag_name, aliases in tag_scan.yield_per(500):
+            if (keyword in tag_name.casefold()
+                    or (aliases is not None and keyword in aliases.casefold())):
+                keep_tag_ids.add(tag_id)
+        leaves_query = leaves_query.filter(or_(
+            TagDefine.tag_id.in_(keep_tag_ids),
+            TagDefine.dir_id.in_(keep_dirs),
+        ))
+    export_leaves: list[TagDefine] = list(leaves_query.yield_per(500))
+
+    # 祖先链按需加载：逐层按 PK 批量取（只取叶子所需，非全树物化）
+    dirs_by_id: dict[str, TagCatalog] = {}
+    pending = {t.dir_id for t in export_leaves if t.dir_id}
+    while pending:
+        rows = session.query(TagCatalog).filter(
+            TagCatalog.dir_id.in_(pending)).all()
+        dirs_by_id.update((d.dir_id, d) for d in rows)
+        pending = {d.parent_id for d in rows
+                   if d.parent_id and d.parent_id not in dirs_by_id}
+
     return Response(
         content=_build_export_archive(export_leaves, dirs_by_id),
         media_type="application/zip",

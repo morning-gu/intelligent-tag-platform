@@ -9,6 +9,7 @@ created_at（UTC）均显式赋值，沿用平台通行约定；role 取值 admi
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tagplatform.services.auth.password import hash_password
@@ -21,7 +22,12 @@ ADMIN_ROLE = "admin"
 
 def create_user(session: Session, username: str, password: str,
                 role: str) -> UserAccount:
-    """创建用户账号并提交；重名抛 ValueError（唯一性由服务层先行校验）。"""
+    """创建用户账号并提交；重名抛 ValueError（唯一性由服务层先行校验）。
+
+    竞态兜底（Task 12）：服务层重名校验通过后、提交前并发请求插入同名行
+    ——username UNIQUE 约束拒第二笔 commit（IntegrityError），此处回滚并
+    转同一 ValueError（调用方路由映射 409），不再泄漏为 500。
+    """
     if get_user_by_username(session, username) is not None:
         raise ValueError(f"用户名已存在：{username}")
     user = UserAccount(
@@ -32,7 +38,11 @@ def create_user(session: Session, username: str, password: str,
         created_at=datetime.now(timezone.utc),
     )
     session.add(user)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise ValueError(f"用户名已存在：{username}") from None
     return user
 
 

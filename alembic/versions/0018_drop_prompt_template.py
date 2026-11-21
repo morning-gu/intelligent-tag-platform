@@ -1,7 +1,7 @@
 """drop prompt_template（prompt 本地化，四层重构 Task 3）
 
 Revision ID: 0018
-Revises: 0016
+Revises: 0017
 Create Date: 2026-11-21
 
 Prompt 文案本地化为代码常量（tagplatform.capabilities.prompts.templates，
@@ -31,7 +31,7 @@ from tagplatform.capabilities.prompts.templates import (
 
 # revision identifiers, used by Alembic.
 revision: str = "0018"
-down_revision: Union[str, Sequence[str], None] = "0016"
+down_revision: Union[str, Sequence[str], None] = "0017"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

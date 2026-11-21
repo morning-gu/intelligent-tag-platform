@@ -1,7 +1,8 @@
 """生成任务生命周期编排（创建/列表/详情/重跑）——orchestration/tasks 域。
 
 用例清单（原 api/routers/generation.py 的任务端点内嵌逻辑，Task 11 原样
-下沉；SQL 与装配零语义变化，Task 12 再做端点白名单改造）：
+下沉；详情行装配已端点级单次库加载——入口 try_load_library 一次传参，
+消逐行 _result_out→_dir_info 的 O(行×库) N+1，Task 12）：
 
 - `create_generation_tasks`  批量创建生成任务并提交执行（mode 注册表校验、
   场景资产归并上溯、逐资产建 queued 任务、executor 提交、重读真实状态）
@@ -30,6 +31,7 @@ from tagplatform.orchestration._shared import (
 )
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.services.generation import list_producers
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.tasks import TaskExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry
 
@@ -238,7 +240,10 @@ def get_task_detail(session: Session, task_id: str) -> GenerationTaskDetail:
         .order_by(PreAssetTag.id)  # 入库行序（producer 产出序：相关度降序截断后）
         .all()
     )
-    info = _tag_info(rows)
+    # 端点级单次库加载（Task 12 消 N+1）：入口 load 一次传参，逐行
+    # _result_out 的目录解析共用同一份库视图
+    library = try_load_library(session)
+    info = _tag_info(rows, library)
     return GenerationTaskDetail(
         task_id=task.task_id,
         asset_id=task.asset_id,
@@ -249,7 +254,7 @@ def get_task_detail(session: Session, task_id: str) -> GenerationTaskDetail:
         error=task.error,
         created_at=task.created_at,
         finished_at=task.finished_at,
-        results=[_result_out(row, info) for row in rows],
+        results=[_result_out(row, info, library) for row in rows],
         quality_evaluation=quality_report(session, task),
     )
 

@@ -29,7 +29,7 @@ from pydantic import BaseModel, WrapSerializer, ValidationError
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import PreAssetTag, TagCatalog, TagDefine
-from tagplatform.services.tags.library import try_load_library
+from tagplatform.services.tags.library import TagLibrary, try_load_library
 
 
 # ---------- 响应时间戳口径 ----------
@@ -134,10 +134,16 @@ def _parse_evidence(raw: str | None) -> list[EvidenceOut]:
         return []
 
 
-def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
+def _tag_info(rows: list[PreAssetTag],
+              library: TagLibrary | None = None) -> dict[str, dict]:
     """行内 tag_id → 目录信息（名称/类型/目录），读 `tag_catalog`/`tag_define`
-    的库视图（v2 起标签库就是这两张表，不再有 JSON 文件）。"""
-    library = try_load_library()
+    的库视图（v2 起标签库就是这两张表，不再有 JSON 文件）。
+
+    library 参数（Task 12 消 N+1）：编排函数入口单次库加载后传参——None
+    时内部兜底 try_load_library()（白名单外调用点沿用旧路径，零改动）。
+    """
+    if library is None:
+        library = try_load_library()
     tag_ids = {r.tag_id for r in rows if r.tag_id}
     if library is None or not tag_ids:
         return {}
@@ -156,10 +162,16 @@ def _tag_info(rows: list[PreAssetTag]) -> dict[str, dict]:
     return info
 
 
-def _dir_info(dir_id: str | None) -> tuple[str | None, str | None, str | None]:
+def _dir_info(dir_id: str | None,
+              library: TagLibrary | None = None) -> tuple[str | None, str | None, str | None]:
     """dir_id → (dir_name, dir_path, 全路径最后一级名)；库不可用/目录缺失时
-    全部返回 None（调用方按"没有目录"展示）。"""
-    library = try_load_library()
+    全部返回 None（调用方按"没有目录"展示）。
+
+    library 参数（Task 12 消 N+1）：同 _tag_info——编排函数入口单次库
+    加载后传参；None 时内部兜底 try_load_library()（旧行为）。
+    """
+    if library is None:
+        library = try_load_library()
     if library is None or not dir_id:
         return None, None, None
     directory = library.directory(dir_id)
@@ -169,11 +181,14 @@ def _dir_info(dir_id: str | None) -> tuple[str | None, str | None, str | None]:
     return directory.dir_name, ("/".join(path) if path else None), None
 
 
-def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
+def _result_out(row: PreAssetTag, info: dict[str, dict],
+                library: TagLibrary | None = None) -> GenerationResultOut:
     """pre_asset_tag 行 → 结果摘要（详情 results 与资产标签视图共用）。
 
     tag_name 展示解析与审核列表同规：candidate_name 非空优先（审核 modify
     落在行内的展示字段，改了什么显示什么），否则回退库内标签名。
+    library 参数（Task 12 消 N+1）：透传给 _dir_info（编排函数入口单次
+    加载传参；None 时 _dir_info 内部兜底旧路径）。
     """
     definition = info.get(row.tag_id or "", {})
     # 三级回退：行内展示名 → 库内标签名 → tag_id。历史行（上一轮落在旧
@@ -184,9 +199,9 @@ def _result_out(row: PreAssetTag, info: dict[str, dict]) -> GenerationResultOut:
     dir_name = definition.get("dir_name")
     dir_path: str | None = None
     if dir_id and not dir_name:
-        dir_name, dir_path, _ = _dir_info(dir_id)
+        dir_name, dir_path, _ = _dir_info(dir_id, library)
     elif dir_id:
-        _, dir_path, _ = _dir_info(dir_id)
+        _, dir_path, _ = _dir_info(dir_id, library)
     return GenerationResultOut(
         id=row.id,
         tag_name=tag_name,

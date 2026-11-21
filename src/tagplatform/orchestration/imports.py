@@ -1,7 +1,8 @@
 """标签导入任务域编排（接收/列表/详情/导出/撤销）——orchestration/imports 域。
 
 用例清单（原 api/routers/imports.py 的读路径 SQL 与装配逻辑，Task 11 原样
-下沉；批次反查仍是全表扫描 + JSON 文本 Python 侧过滤，Task 12 SQL 化）：
+下沉；批次反查已 SQL 化——0017 批键列 task_id + 索引命中，不再全表扫描
++ after_json 文本 Python 过滤，Task 12）：
 
 - `create_import_task`  接收上传建任务（解析入库由后台线程执行）
 - `list_import_tasks`   全部导入任务（created_at 降序）
@@ -59,12 +60,15 @@ class ImportTaskDetailOut(ImportTaskOut):
 def _batch_entries(task_id: str, session: Session) -> list[tuple[TagChangeLog, dict]]:
     """反查本批审计行：[(change_log, 解析后的 after_json)]。
 
-    扫描 action='import' 的变更日志、按 after_json.task_id 匹配（治理
-    流水线写入的反查键，替代 v1 的 batch_id）；after_json 损坏行跳过。
+    反查走 0017 批键列 task_id（治理流水线写入 + 存量行迁移回填，索引
+    idx_change_log_task 命中——Task 12 前是全表扫描后逐行 JSON 解析
+    after_json 文本匹配）；after_json 仍需解析供 kind/tag_id 消费，坏
+    JSON 行跳过（批键列为 NULL 的行本就不会被命中，语义与旧实现一致）。
     """
     entries: list[tuple[TagChangeLog, dict]] = []
     for log in session.query(TagChangeLog).filter(
         TagChangeLog.action == "import",
+        TagChangeLog.task_id == task_id,
     ).all():
         if not log.after_json:
             continue
@@ -72,8 +76,7 @@ def _batch_entries(task_id: str, session: Session) -> list[tuple[TagChangeLog, d
             after = json.loads(log.after_json)
         except json.JSONDecodeError:
             continue
-        if after.get("task_id") == task_id:
-            entries.append((log, after))
+        entries.append((log, after))
     return entries
 
 

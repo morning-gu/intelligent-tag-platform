@@ -175,6 +175,20 @@ def test_import_task_list_and_detail(client):
     assert client.get("/api/v1/import/tasks/task_none").status_code == 404
 
 
+def test_import_writes_indexed_task_id_column(client):
+    """0017 批键列：action='import' 审计行直接落 task_id 列（批次反查走
+    索引，消全表扫描 + after_json 文本匹配，Task 12）。"""
+    task_id = client.post("/api/v1/tags/import",
+                          files={"file": ("t.xlsx", XLSX_BYTES)}).json()["task_id"]
+    with client.app.state.session_factory() as s:
+        rows = s.query(TagChangeLog).filter(
+            TagChangeLog.action == "import",
+            TagChangeLog.task_id == task_id).all()
+        # 扁平模板一批 = 「未分类」目录行 + 悬疑标签行，两行审计均带批键
+        assert len(rows) == 2
+        assert all(r.task_id == task_id for r in rows)
+
+
 def test_revoke_removes_imported_tags_and_dirs(client):
     factory = client.app.state.session_factory
     imported = client.post("/api/v1/tags/import",

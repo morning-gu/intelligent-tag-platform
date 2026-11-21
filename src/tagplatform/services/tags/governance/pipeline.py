@@ -44,7 +44,9 @@ flush——自引用外键无 relationship()，保证父行先落库）。判定
 
 审计：每个新建目录/标签行写 tag_change_log(action='import')，after_json
 带 task_id（revoke/export 反查键，替代 v1 的 batch_id 字段名）与 kind
-（'dir'|'tag'，撤销需区分删除对象——目录行复用不记日志）。
+（'dir'|'tag'，撤销需区分删除对象——目录行复用不记日志）。task_id 同时
+落 0017 批键列（索引 idx_change_log_task）——批次反查走索引列，不再
+全表扫描后逐行解析 after_json 文本匹配（Task 12）。
 
 记账不变量（v2 口径）：每行要么产生新实体（inserted / 变更日志）、要么
 幂等复用已有目录、要么有 issue。
@@ -475,6 +477,7 @@ def _insert_planned_rows(session: Session, now: datetime, task_id: str,
             after_json=json.dumps(after, ensure_ascii=False),
             operator=_OPERATOR,
             created_at=now,
+            task_id=task_id,
         ))
 
     # 2) 「未分类」根目录：有扁平标签落点、批内无同名根目录计划且库内没有
@@ -507,6 +510,7 @@ def _insert_planned_rows(session: Session, now: datetime, task_id: str,
             after_json=json.dumps(after, ensure_ascii=False),
             operator=_OPERATOR,
             created_at=now,
+            task_id=task_id,
         ))
 
     # 3) 标签：逐行插入 / 复活（dir_id 已就绪），逐行 flush + 变更日志
@@ -558,6 +562,7 @@ def _insert_planned_rows(session: Session, now: datetime, task_id: str,
             after_json=json.dumps(after, ensure_ascii=False),
             operator=_OPERATOR,
             created_at=now,
+            task_id=task_id,
         ))
         inserted.append(v.tag_id)
     return inserted

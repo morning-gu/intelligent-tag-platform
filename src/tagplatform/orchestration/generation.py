@@ -1,7 +1,8 @@
 """资产正式挂载视图编排（GET /assets/{asset_id}/tags）——orchestration/generation 域。
 
 用例清单（原 api/routers/generation.py 的资产标签端点内嵌逻辑，Task 11
-原样下沉；SQL 与装配零语义变化，Task 12 消 _dir_info N+1）：
+原样下沉；目录解析已端点级单次库加载——入口 try_load_library 一次传参，
+消逐挂载 _dir_info 的 O(行×库) N+1，Task 12）：
 
 - `list_asset_tags`  资产正式挂载标签（读 asset_tag 权威口径，origin/候选名
   由同键 pre 行回填，目录列按 tag_define → tag_catalog 解析；未知资产 → 404）
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag
 from tagplatform.orchestration._shared import AssetTagOut, _dir_info, _tag_info
+from tagplatform.services.tags.library import try_load_library
 
 
 def list_asset_tags(session: Session, asset_id: str) -> list[AssetTagOut]:
@@ -50,7 +52,10 @@ def list_asset_tags(session: Session, asset_id: str) -> list[AssetTagOut]:
         (p.target_type, p.target_id, p.candidate_name): p
         for p in pre_rows if p.candidate_name
     }
-    info = _tag_info(pre_rows)
+    # 端点级单次库加载（Task 12 消 N+1）：入口 load 一次传参，目录解析
+    # （_tag_info/_dir_info）共用同一份库视图，不再逐挂载各自全量读两表
+    library = try_load_library(session)
+    info = _tag_info(pre_rows, library)
     out: list[AssetTagOut] = []
     for mount in mounts:
         pre = pres.get((mount.target_type, mount.target_id, mount.tag_id))
@@ -60,7 +65,7 @@ def list_asset_tags(session: Session, asset_id: str) -> list[AssetTagOut]:
         # 目录：新词候选挂在 pre 的 candidate_dir_id；库内标签走 tag_define.dir_id
         dir_id = (pre.candidate_dir_id if pre is not None else None) or \
             info.get(mount.tag_id, {}).get("dir_id")
-        dir_name, dir_path, _ = _dir_info(dir_id)
+        dir_name, dir_path, _ = _dir_info(dir_id, library)
         out.append(AssetTagOut(
             id=mount.id,
             tag_id=mount.tag_id,

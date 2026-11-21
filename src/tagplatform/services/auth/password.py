@@ -43,3 +43,16 @@ def verify_password(pwd: str, stored: str) -> bool:
         return hmac.compare_digest(digest.hex(), hash_hex)
     except (ValueError, TypeError, AttributeError):
         return False
+
+
+# 固定 dummy 存储串（字面量冻结，Task 12 auth 加固）：登录"用户不存在"
+# 路径对它执行一次真实代价的 verify_password（完整 200_000 轮 pbkdf2），
+# 抹平"用户存在但密码错（真 verify）vs 用户不存在（旧实现零 verify）"
+# 的响应时序差——账号存在性探测侧信道消除。明文 "tagplatform-timing-
+# equalizer" 的一次性 hash_password 产物（格式契约与 hash_password 咬合）。
+DUMMY_VERIFY_HASH = (
+    "pbkdf2$200000$0d9791bf6bd7e4d31297d79824ece224$"
+    "75ac8f5992b776f1e8353abe778d7e3fd07801599b12ecfab68edce47bed10b1"
+)
+assert verify_password("tagplatform-timing-equalizer", DUMMY_VERIFY_HASH)
+"""模块加载期自检：字面量与校验器契约咬合（手改/坏格式在 import 即炸）。"""

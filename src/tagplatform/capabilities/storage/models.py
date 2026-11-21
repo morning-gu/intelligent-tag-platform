@@ -396,6 +396,7 @@ class TagChangeLog(Base):
             name="ck_tag_change_log_action",
         ),
         Index("idx_change_log_tag", "tag_id"),
+        Index("idx_change_log_task", "task_id"),
     )
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -406,6 +407,11 @@ class TagChangeLog(Base):
     after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 导入批键（0017）：action='import' 行的来源导入任务号（治理流水线
+    # 写入；存量行经 0017 迁移从 after_json 回填）。批次反查（撤销/导出）
+    # 走该索引列，替代 after_json 全表文本匹配。其余动作行为 NULL
+    # （无外键，同 tag_id 契约——任务删除后日志仍可指向该任务号）。
+    task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class UserAccount(Base):

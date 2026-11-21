@@ -3,7 +3,7 @@
 三条主线：
 1. 彩排升级：临时文件库程序化升到 0006 → 手工插外键链完整的 v1 数据
    （账号、目录父/子、资产（父/子两行）+上下文+生成任务、挂载两行、
-   change_log）→ upgrade 0016 → 断言旧业务表消失、user_account / prompt
+   change_log）→ upgrade 0017 → 断言旧业务表消失、user_account / prompt
    3 行种子 / media_asset 两行原样保留、v2 新表结构与 db.models 逐字对拍
    （列/NOT NULL/默认值/CHECK/索引名，media_asset 含 §3.1 定稿 CHECK 与
    两个索引——升级库与 create_all 库同构）、合法行可插且非法枚举 / FK
@@ -58,7 +58,7 @@ V2_NEW_TABLES = {
 }
 # 其中全新建（v1 无同名表）的 4 张——downgrade 后必须彻底消失
 V2_NEW_ONLY = V2_NEW_TABLES - {"tag_catalog", "asset_tag", "tag_change_log"}
-# 0007 物理不动的表 + 只补两列的 media_asset（彩排升级止于 0016——
+# 0007 物理不动的表 + 只补两列的 media_asset（彩排升级止于 0017——
 # prompt_template 尚未被 0018 drop，种子保留断言在此钉死）
 UNTOUCHED_TABLES = {"user_account", "prompt_template", "asset_build_task", "media_asset"}
 
@@ -179,6 +179,7 @@ EXPECTED_COLUMNS = {
         ("after_json", "TEXT", 0, None),
         ("operator", "TEXT", 0, None),
         ("created_at", "DATETIME", 0, None),
+        ("task_id", "TEXT", 0, None),
     ],
 }
 
@@ -247,6 +248,7 @@ EXPECTED_INDEXES = {
     "idx_asset_tag_tag",
     "idx_import_task_status",
     "idx_change_log_tag",
+    "idx_change_log_task",
 }
 
 
@@ -454,17 +456,18 @@ def _invalid_enum_rows() -> list:
 
 
 def test_0007_upgrade_rehearsal(rehearsal):
-    """带数据彩排：0006 带数据升 0016——旧表消失 / 种子保留 / 结构对拍 / 约束兜底。
+    """带数据彩排：0006 带数据升 0017——旧表消失 / 种子保留 / 结构对拍 / 约束兜底。
 
-    升级止于 0016（Task 1/2 冻结链的末端）：彩排主题是 0007 v2 重建对
-    未动表与种子的保留，prompt_template 在 0018（drop）之前的链路上
-    必须原样——升级到 head 反而会把断言对象删掉。
+    升级止于 0017（prompt_template 尚未被 0018 drop 的链路末端；0017 起
+    tag_change_log 含 Task 12 批键列 task_id——models.py 与迁移链在该
+    版本重新对齐，结构对拍基准因此延伸到 0017）。prompt_template 在 0018
+    （drop）之前的链路上必须原样——升级到 head 反而会把断言对象删掉。
     """
     cfg, db_path = rehearsal
     command.upgrade(cfg, "0006")
     _seed_v1_data(db_path)
 
-    command.upgrade(cfg, "0016")
+    command.upgrade(cfg, "0017")
 
     # ---- 表集合：旧业务表消失、v2 新表齐备、保留表不动 ----
     names = _table_names(db_path)

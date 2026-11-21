@@ -5,7 +5,11 @@
 令牌编解码与账号管理逻辑，供 api 层与 lifespan 引导复用。
 """
 
-from tagplatform.services.auth.password import hash_password, verify_password
+from tagplatform.services.auth.password import (
+    DUMMY_VERIFY_HASH,
+    hash_password,
+    verify_password,
+)
 from tagplatform.services.auth.service import (
     bootstrap_admin,
     create_user,
@@ -16,6 +20,7 @@ from tagplatform.services.auth.session import create_session_token, parse_sessio
 __all__ = [
     "hash_password",
     "verify_password",
+    "DUMMY_VERIFY_HASH",
     "create_session_token",
     "parse_session_token",
     "create_user",

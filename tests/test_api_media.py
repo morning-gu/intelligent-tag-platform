@@ -242,6 +242,55 @@ def test_upload_unauthenticated_401(client):
     assert resp.status_code == 401
 
 
+# ---------- 进度页 task_id 注入转义（Task 12 XSS 根治） ----------
+
+
+def test_progress_page_escapes_task_id(client):
+    """进度页 task_id 双上下文转义：HTML 文本位 html.escape、JS 字符串位
+    JSON+\\u 转义——载荷原文不落任何上下文（URL 与响应行为不变，仅改
+    注入方式）。
+
+    端到端用不含 `/` 的载荷（ASGI 在路由匹配前解码 %2F，带斜杠的 task_id
+    本就无法经路径参数寻址——框架级行为，与注入转义无关）；`</script>`
+    逃逸形态由单元级断言覆盖（_render_progress_page 直调）。
+    """
+    from datetime import datetime, timezone
+    from urllib.parse import quote
+
+    from tagplatform.capabilities.storage.models import AssetBuildTask
+
+    payload_id = 'x"><img src=q onerror=alert(1)>'
+    now = datetime.now(timezone.utc)
+    with client.app.state.session_factory() as s:
+        s.add(MediaAsset(asset_id="asset_xss0001", asset_type="movie",
+                         title="xss 影片", created_at=now))
+        s.flush()  # 父行先落库再插任务行（跨表外键）
+        s.add(AssetBuildTask(task_id=payload_id, asset_id="asset_xss0001",
+                             movie_id="mv_xss", status="queued",
+                             created_at=now))
+        s.commit()
+
+    resp = client.get(
+        f"/api/v1/media/build-tasks/{quote(payload_id, safe='')}/view")
+    assert resp.status_code == 200
+    # XSS 载荷不得以可执行形态出现（两处注入点全覆盖）
+    assert "<img src=q onerror=alert(1)>" not in resp.text
+    assert "&lt;img src=q onerror=alert(1)&gt;" in resp.text  # HTML 位已转义
+    assert "\\u003e\\u003cimg" in resp.text                    # JS 位已 \\u 转义
+    # 页面结构完好：轮询脚本与任务行仍渲染
+    assert "build-tasks/" in resp.text
+
+
+def test_progress_page_render_never_emits_raw_script_breakout():
+    """`</script>` 逃逸载荷直调渲染器：script 元素内只允许 \\u 转义形态
+    （HTML 实体在 script raw text 内不解码，必须用 \\u 防逃逸）。"""
+    from tagplatform.orchestration.media import _render_progress_page
+
+    out = _render_progress_page('</script><script>alert(1)</script>')
+    assert "<script>alert(1)</script>" not in out
+    assert "\\u003c/script\\u003e\\u003cscript\\u003e" in out
+
+
 # ---------- asset_id 绑定（2026-11 上游对接） ----------
 
 

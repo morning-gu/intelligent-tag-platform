@@ -118,6 +118,40 @@ def test_login_unknown_user_401(client):
     assert resp.json() == {"detail": "用户名或密码错误"}
 
 
+def test_login_cookie_samesite_lax(client):
+    """会话 cookie 带 samesite=lax（CSRF 防线，Task 12 auth 加固）。"""
+    resp = client.post("/api/v1/auth/login",
+                       json={"username": "admin", "password": "admin123"})
+    assert resp.status_code == 200
+    assert "samesite=lax" in resp.headers["set-cookie"].lower()
+
+
+def test_login_unknown_user_runs_dummy_verify(client, monkeypatch):
+    """用户不存在路径也执行一次真实代价的密码校验（固定 dummy 存储串），
+    抹平"用户存在但密码错（真 verify）vs 用户不存在（旧代码零 verify）"
+    的响应时序差——账号存在性探测侧信道消除（Task 12 auth 加固）。"""
+    from tagplatform.api.routers import auth as auth_router
+    from tagplatform.services.auth import DUMMY_VERIFY_HASH
+
+    calls: list[tuple[str, str]] = []
+    real = auth_router.verify_password
+
+    def spy(pwd, stored):
+        calls.append((pwd, stored))
+        return real(pwd, stored)
+
+    monkeypatch.setattr(auth_router, "verify_password", spy)
+    resp = client.post("/api/v1/auth/login",
+                       json={"username": "nobody", "password": "guess-1"})
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "用户名或密码错误"}
+    # 旧行为（零 verify）在此 RED：用户不存在时也必须走一次 verify_password
+    assert len(calls) == 1
+    pwd, stored = calls[0]
+    assert pwd == "guess-1"
+    assert stored == DUMMY_VERIFY_HASH  # 固定 dummy 串（真实 pbkdf2 代价）
+
+
 def test_login_empty_password_401(client):
     """空密码输入 → 401（B1 遗留守卫：verify_password 对空串可正常比对
     通过，不守卫则空密码 admin 可登录）。"""
@@ -241,6 +275,28 @@ def test_create_user_duplicate_username_409(client):
     payload = {"username": "dup", "password": "pw-dup-1", "role": "reviewer"}
     assert client.post("/api/v1/users", json=payload).status_code == 200
     assert client.post("/api/v1/users", json=payload).status_code == 409
+
+
+def test_create_user_unique_race_409(client, monkeypatch):
+    """建号竞态：服务层重名校验通过后、提交前并发插入同名行（username
+    UNIQUE 约束拒第二笔 commit）→ IntegrityError 兜底转 ValueError →
+    路由 409，不再泄漏为 500（Task 12）。
+
+    竞态窗口模拟：monkeypatch 服务层 get_user_by_username 恒返回 None
+    （重名预检被绕过），同名行实际已存在 → 提交撞唯一索引。
+    """
+    from tagplatform.services.auth import service as auth_service
+
+    payload = {"username": "racer", "password": "pw-race-1", "role": "reviewer"}
+    assert client.post("/api/v1/users", json=payload).status_code == 200
+    monkeypatch.setattr(auth_service, "get_user_by_username",
+                        lambda *args, **kwargs: None)
+    resp = client.post("/api/v1/users", json=payload)
+    assert resp.status_code == 409
+    assert "racer" in resp.json()["detail"]
+    # 竞态落库状态一致：仍只有一个 racer（失败事务已回滚）
+    listing = client.get("/api/v1/users").json()["items"]
+    assert [u["username"] for u in listing if u["username"] == "racer"] == ["racer"]
 
 
 def test_create_user_empty_fields_422(client):

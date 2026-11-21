@@ -1,7 +1,8 @@
 """审核域编排：审核操作（单条/批量）与审核列表/筛选。
 
 用例清单（原 api/routers/review.py 的内嵌查询装配与批量循环，Task 11 原样
-下沉；SQL 与装配零语义变化，Task 12 再做列表分页/批键列改造）：
+下沉；列表分页/筛选本就 SQL 侧完成，行批键 task_id 列在库已久——本域端点
+不在四层重构 Task 12 白名单内，零改动）：
 
 - `submit_review`       单条审核四动作（apply_review 服务调用 + 行摘要装配）
 - `submit_review_batch` 批量审核逐条独立执行（失败不中断、per-item detail）

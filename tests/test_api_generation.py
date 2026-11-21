@@ -616,3 +616,70 @@ def test_result_out_falls_back_to_tag_id_for_legacy_row():
     out = _result_out(row, {})
     assert out.tag_name == 'tag_legacy_0001'
     assert out.dir_id is None and out.dir_name is None
+
+
+# ---------- Task 12：N+1 消除（端点级单次库加载） ----------
+
+
+def _run_closed_task(client) -> str:
+    """预置库/内容并跑一个 closed 任务到 succeeded，返回 task_id。"""
+    _import_catalog(client)
+    _import_content(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": ["movie_001"], "mode": "closed",
+        "policy": {"max_tags": 30, "min_confidence": 0.5}})
+    assert resp.status_code == 200
+    item = resp.json()["tasks"][0]
+    assert item["status"] == "succeeded"
+    return item["task_id"]
+
+
+def _spy_shared_library_load(monkeypatch):
+    """对标签库加载计数（打点在 services.tags.library.load_library——所有
+    try_load_library 包装与其余编排模块的 from-import 都经由该模块全局
+    调用，补丁对全部加载路径生效）。"""
+    from tagplatform.services.tags import library as library_mod
+
+    real = library_mod.load_library
+    calls: list[int] = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(library_mod, "load_library", spy)
+    return calls
+
+
+def test_task_detail_single_library_load_per_request(client, monkeypatch):
+    """任务详情（GET /generation/tasks/{id}）一次请求只做一次标签库加载
+    （Task 12 消 N+1：编排入口 load 一次传参；旧行为 _tag_info 一次 +
+    逐行 _result_out→_dir_info 各自 try_load_library）。"""
+    task_id = _run_closed_task(client)
+    calls = _spy_shared_library_load(monkeypatch)
+
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}")
+    assert detail.status_code == 200
+    results = detail.json()["results"]
+    assert len(results) >= 1  # 多行装配场景成立
+    # 旧行为（_tag_info + 逐行 _dir_info）在此 RED：计数 > 1
+    assert len(calls) == 1
+
+
+def test_asset_tags_single_library_load_per_request(client, monkeypatch):
+    """资产挂载视图（GET /assets/{id}/tags）一次请求只做一次标签库加载
+    （Task 12 消 N+1：旧行为 _tag_info 一次 + 逐挂载 _dir_info 各自加载）。"""
+    task_id = _run_closed_task(client)
+    # 审核通过第一行 → asset_tag 正式挂载非空（视图逐行解析目录）
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}")
+    row_id = detail.json()["results"][0]["id"]
+    review = client.post(f"/api/v1/asset-tags/{row_id}/review",
+                         json={"action": "approve"})
+    assert review.status_code == 200
+    calls = _spy_shared_library_load(monkeypatch)
+
+    resp = client.get("/api/v1/assets/movie_001/tags")
+    assert resp.status_code == 200
+    assert len(resp.json()) >= 1
+    # 旧行为在此 RED：计数 > 1
+    assert len(calls) == 1
