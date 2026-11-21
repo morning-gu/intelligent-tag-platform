@@ -1,9 +1,10 @@
-"""模式 A 封闭式标签提取测试：库召回、输出解析与 ClosedTagProducer。
+"""模式 A 封闭式标签提取测试：混合召回、输出解析与 ClosedTagProducer。
 
-覆盖契约（v2：库来自 JSON）：
+覆盖契约：
 - embed_content_texts：[剧情摘要, 各场景描述] 查询文本列表；
-- recall_candidates：按目录分组召回（组内跨 query 取最高分 top_k，跨组
-  合并去重），排除 deprecate / 占位行，范围 dir_ids 生效，空库返回 []；
+- recall_candidates：向量 + BM25（标签名/描述/别名）双通道，按 tag_id
+  归一去重，RRF 排序并返回全局 top_k；排除 deprecate / 占位行，范围
+  dir_ids 生效，空库返回 []；候选 score 保留余弦供闭环终分使用；
 - parse_closed_output：键集与分值域校验、坏结构抛 LLMParseError；
 - ClosedTagProducer：库缺失/空候选 → ValueError；dir_asset 目录的候选
   召回后剔除（不建组、不调 LLM、不产出，范围内全是 asset 目录按空
@@ -15,6 +16,7 @@
 
 import json
 
+import numpy as np
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
@@ -23,7 +25,13 @@ from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
 from tagplatform.generation import closed as closed_module
 from tagplatform.generation.closed import ClosedTagProducer
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
-from tagplatform.library import DIR_ASSET, TagLibrary, try_load_library
+from tagplatform.library import (
+    DIR_ASSET,
+    Directory,
+    TagDef,
+    TagLibrary,
+    try_load_library,
+)
 from tagplatform.llm.client import LLMResponse
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.prompts import get_active_prompt, render_prompt
@@ -99,18 +107,72 @@ def test_embed_content_texts(content_fixture):
     assert queries[1:] == [s.description for s in content_fixture.content.scenes]
 
 
-# ---- recall_candidates：按目录分组 / 去重 / 范围 ----
+# ---- recall_candidates：混合召回 / 全局 top-k / 去重 / 范围 ----
 
 
-def test_closed_recall_groups_and_dedup():
+def test_closed_recall_global_top_k_and_dedup():
     _seed_library()
     cats = recall_candidates(try_load_library(), MOCK_EMBEDDER, ["悬疑推理"],
-                             top_k=2)
-    # 每组 top-2 × 2 组 = 4，跨组按 tag_id 去重
+                             top_k=4)
     assert len({c.tag_id for c in cats}) == len(cats) == 4
-    assert {c.dir_id for c in cats} == {"dir_genre", "dir_mood"}
     # 每条都带目录与挂载粒度（新词归属与 target_type 的依据）
     assert all(c.dir_id and c.scope == "content" for c in cats)
+
+
+class _FixedRecallEmbedder:
+    def __init__(self, passage_vectors: dict[str, list[float]]):
+        self.passage_vectors = passage_vectors
+
+    def embed(self, texts: list[str], *, role: str) -> np.ndarray:
+        if role == "passage":
+            vectors = [self.passage_vectors[text] for text in texts]
+        else:
+            vectors = [[1.0, 0.0] for _ in texts]
+        return np.asarray(vectors, dtype=np.float32)
+
+
+def _hybrid_recall_library() -> TagLibrary:
+    return TagLibrary(
+        [
+            Directory("dir_vector", "向量目录"),
+            Directory("dir_keyword", "关键词目录"),
+        ],
+        [
+            TagDef("tag_vector", "dir_vector", "悬疑", description="制造谜团"),
+            TagDef(
+                "tag_revenge",
+                "dir_keyword",
+                "复仇",
+                description="主角追查凶手",
+                aliases=("报仇",),
+            ),
+        ],
+    )
+
+
+def test_closed_recall_fuses_keyword_alias_and_normalizes_to_tag_id():
+    embedder = _FixedRecallEmbedder({
+        "悬疑": [1.0, 0.0],
+        "复仇": [0.8, 0.6],
+    })
+    candidates = recall_candidates(
+        _hybrid_recall_library(), embedder, ["报仇"], top_k=1)
+
+    assert len(candidates) == 1
+    assert candidates[0].tag_id == "tag_revenge"
+    assert candidates[0].tag_name == "复仇"
+    assert candidates[0].score == pytest.approx(0.8)
+
+
+def test_closed_recall_bm25_matches_tag_description():
+    embedder = _FixedRecallEmbedder({
+        "悬疑": [1.0, 0.0],
+        "复仇": [0.8, 0.6],
+    })
+    candidates = recall_candidates(
+        _hybrid_recall_library(), embedder, ["追查凶手"], top_k=1)
+
+    assert [candidate.tag_id for candidate in candidates] == ["tag_revenge"]
 
 
 def test_closed_recall_empty_library():
