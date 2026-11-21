@@ -267,6 +267,7 @@ Expected: 零命中（能力层零出层依赖）
 **Files:**
 - Move: `content_import.py`、`content_template.py`、`ingest.py`、`movie_import.py`、`media.py`、`content_io.py`（若 Task 2 未整体迁）→ `services/content/`
 - Move: `src/tagplatform/assets/` → `services/content/assets/`（builder.py 667 行：`build_movie` 拆函数、函数体内 `import threading` 提模块级、`build_many` 的 print → logger）
+- Move: `src/tagplatform/asset_build.py` → `services/content/`（Task 6 裁决：主体是业务编排——匹配启发式与 execute 状态更新交织，整体迁移；含 test_api_asset_build 的 monkeypatch 目标更新）
 - Test: 既有 `test_assets_builder.py` 等（builder 拆分行为零变化，全绿即验收）
 
 **Interfaces:**
