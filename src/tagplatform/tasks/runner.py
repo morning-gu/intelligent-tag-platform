@@ -2,7 +2,7 @@
 
 四层重构 Task 6 定稿：本模块是**纯任务管理器**，只管任务生命周期——
 线程池封装（TaskExecutor：submit_batch/submit/shutdown，workers=0 同步
-模式）、进程重启孤儿清理（reset_orphan_running）。单任务的完整执行
+模式）、进程重启孤儿清理（reset_orphan_running / reset_orphan_tasks）。单任务的完整执行
 序列（状态机 + 装配 → produce → persist，八步流程与事务语义）在
 `tagplatform.services.generation.execute.run_generation_task`，本模块
 线程体只调它——装配+produce+persist 业务序列住服务层（spec「tasks
@@ -11,20 +11,27 @@ execute.py docstring）。
 
 TaskExecutor 为线程池封装：线程内独立 session（SQLite 文件库跨线程可见，
 :memory: 不可），异常吞并记日志；workers=0 同步执行（T9 钉死的测试模式）。
-reset_orphan_running 供 create_app 启动时清理进程重启留下的 running 孤儿。
+reset_orphan_running / reset_orphan_tasks 供 create_app 启动时清理进程重启
+留下的在途孤儿（生成任务 running；资产构建 running 与标签导入 processing）。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from tagplatform.capabilities.storage.models import TagGenerationTask
+from tagplatform.capabilities.storage.models import (
+    AssetBuildTask,
+    TagGenerationTask,
+    TagImportTask,
+)
 from tagplatform.services.generation.execute import run_generation_task
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.tasks.tag_quality import QualityExecutor
@@ -108,3 +115,36 @@ def reset_orphan_running(session: Session) -> int:
         task.finished_at = now
     session.commit()
     return len(orphans)
+
+
+def reset_orphan_tasks(engine: Engine) -> int:
+    """进程重启后的非生成类孤儿清理：资产构建与标签导入任务复位 failed。
+
+    AssetBuildTask 的 running 行与 TagImportTask 的在途行（processing，
+    其 "running" 等位状态）复位为 failed（error="进程重启中断"，措辞对齐
+    reset_orphan_running）；TagImportTask 无 error 列，说明写
+    result_summary JSON（与导入失败收尾同构）。收引擎、内部自建独立
+    session 一次事务提交（lifespan 启动时调用），返回复位总数。
+    """
+    with Session(engine) as session:
+        now = datetime.now(timezone.utc)
+        builds = (
+            session.query(AssetBuildTask)
+            .filter(AssetBuildTask.status == "running")
+            .all()
+        )
+        for task in builds:
+            task.status = "failed"
+            task.error = "进程重启中断"
+            task.finished_at = now
+        imports = (
+            session.query(TagImportTask)
+            .filter(TagImportTask.status == "processing")
+            .all()
+        )
+        for task in imports:
+            task.status = "failed"
+            task.result_summary = json.dumps({"error": "进程重启中断"},
+                                             ensure_ascii=False)
+        session.commit()
+        return len(builds) + len(imports)

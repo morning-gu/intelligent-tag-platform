@@ -13,9 +13,11 @@
 from tagplatform.tasks.runner import (
     TaskExecutor,
     reset_orphan_running,
+    reset_orphan_tasks,
 )
 
 __all__ = [
     "TaskExecutor",
     "reset_orphan_running",
+    "reset_orphan_tasks",
 ]

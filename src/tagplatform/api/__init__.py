@@ -41,7 +41,7 @@ from tagplatform.capabilities.storage import create_engine_for, make_session_fac
 from tagplatform.capabilities.embed import Embedder, build_embedder
 from tagplatform.capabilities.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
-from tagplatform.tasks import TaskExecutor, reset_orphan_running
+from tagplatform.tasks import TaskExecutor, reset_orphan_running, reset_orphan_tasks
 from tagplatform.tasks.tag_import import TagImportExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor
 
@@ -134,8 +134,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     - LLM 客户端按 use_mock_llm 构建单例（mock 零网络，测试与冒烟）。
     lifespan：启动时先做首管理员引导（空表创建 admin，密码取
     TAGPLT_ADMIN_PASSWORD，默认 admin123），随后按 generation_workers 构建
-    TaskExecutor（0 = 同步执行）并孤儿清理（running 任务复位 failed）；关停
-    时关线程池等待在途任务结束。
+    TaskExecutor（0 = 同步执行）并孤儿清理（生成任务 running、资产构建
+    running 与标签导入 processing 一并复位 failed）；关停时关线程池等待
+    在途任务结束。
     """
     if settings is None:
         settings = get_settings()
@@ -164,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             with app.state.session_factory() as session:
                 reset_orphan_running(session)
-            app.state.tag_import_executor.reset_interrupted()
+            reset_orphan_tasks(app.state.engine)
             app.state.quality_executor.resume_pending()
             yield
         finally:

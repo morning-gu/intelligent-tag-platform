@@ -1,8 +1,9 @@
 """标签文件解析与后台导入任务。
 
 四层重构 Task 6 起住 tasks/（执行器横切层）：TagImportExecutor 是导入
-任务的线程池执行器（提交/复位/关停），parse_upload 是上传文件的格式
-分发薄壳（xml/xlsx 判定 + 错误转译）——真正的解析与治理业务在
+任务的线程池执行器（提交/关停；启动期孤儿复位已并入 runner 的
+reset_orphan_tasks，Task 13），parse_upload 是上传文件的格式分发薄壳
+（xml/xlsx 判定 + 错误转译）——真正的解析与治理业务在
 `tagplatform.services.tags.governance`（Task 8 归位），本模块
 零业务实现。
 """
@@ -47,16 +48,6 @@ class TagImportExecutor:
         self._session_factory = session_factory
         self._embedder = embedder
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tag-import")
-
-    def reset_interrupted(self) -> None:
-        with self._session_factory.begin() as session:
-            session.execute(
-                update(TagImportTask).where(TagImportTask.status == "processing").values(
-                    status="failed",
-                    result_summary=json.dumps({"error": "服务重启中断了导入，请重新上传文件"},
-                                              ensure_ascii=False),
-                )
-            )
 
     def submit(self, file_name: str, data: bytes) -> TagImportTask:
         task = TagImportTask(
