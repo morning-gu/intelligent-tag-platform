@@ -137,20 +137,35 @@ def _as_tuple(values) -> tuple[str, ...]:
     return tuple(str(v) for v in values if str(v).strip())
 
 
-def _alias_list(value) -> list:
-    """DB 的 aliases 是 JSON 数组文本；也容忍"a,b"老格式与已解析的 list。"""
+def parse_aliases(value, *, normalize: bool = False) -> list:
+    """DB 的 aliases 是 JSON 数组文本；也容忍"a,b"老格式与已解析的 list。
+
+    统一别名解析器（四层重构 Task 9）：JSON 优先——`[` 开头的文本先按
+    JSON 解析，坏 JSON（JSONDecodeError）回落逗号切分。ingest（services/
+    content/ingest）与本模块共用这一份实现，同一段历史文本两侧读出同一
+    别名集（旧行为 ingest 对坏 JSON 返回空列表，与 library 不一致，统一后
+    以本实现为准）。
+
+    normalize=True 对解析结果做 str 化 + 空白项过滤（ingest 落库/展示语义；
+    本模块内部经 `_as_tuple` 后处理得到同样效果，故构造处也显式传 True）；
+    False 返回解析出的原样列表。
+    """
     if not value:
         return []
     if isinstance(value, (list, tuple)):
-        return list(value)
-    text = str(value).strip()
-    if text.startswith("["):
+        items = list(value)
+    else:
+        text = str(value).strip()
+        if not text.startswith("["):
+            return [part.strip() for part in text.split(",") if part.strip()]
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             return [part.strip() for part in text.split(",") if part.strip()]
-        return list(parsed) if isinstance(parsed, list) else []
-    return [part.strip() for part in text.split(",") if part.strip()]
+        items = parsed if isinstance(parsed, list) else []
+    if normalize:
+        return [str(v) for v in items if str(v).strip()]
+    return items
 
 
 class TagLibrary:
@@ -283,7 +298,7 @@ class TagLibrary:
                     applicable_scope=str(row.applicable_scope or SCOPE_CONTENT),
                     parent_id=row.parent_id,
                     description=str(row.description or ""),
-                    aliases=_as_tuple(_alias_list(row.aliases)),
+                    aliases=_as_tuple(parse_aliases(row.aliases, normalize=True)),
                 )
             )
         for index, directory in enumerate(dirs):
@@ -307,7 +322,7 @@ class TagLibrary:
                 tag_name=str(row.tag_name),
                 tag_type=str(row.tag_type or "val_fixed"),
                 description=str(row.description or ""),
-                aliases=_as_tuple(_alias_list(row.aliases)),
+                aliases=_as_tuple(parse_aliases(row.aliases, normalize=True)),
                 status=str(row.status or "active"),
             )
             for row in tag_rows

@@ -152,7 +152,7 @@ def test_upload_413_streaming_early_reject(media_client, tmp_path, monkeypatch):
     伪造 Content-Length: 50（≤ 64）骗过早拒路径，实际文件体 100 字节
     超限，由核心层流式累计拦截。
     """
-    from tagplatform import media  # 延迟 import：路由未实现时其余用例先红
+    from tagplatform.services.content import media  # 延迟 import：路由未实现时其余用例先红
 
     monkeypatch.setattr(media, "MAX_UPLOAD_BYTES", 64)
     resp = _upload(media_client, content=b"x" * 100,
@@ -211,7 +211,7 @@ def test_reupload_same_asset_overwrites_one_file(media_client, tmp_path):
 
 def test_upload_413_keeps_previous_file_intact(media_client, tmp_path, monkeypatch):
     """覆盖上传中途 413：旧文件必须完好（先写 .part 再原子替换）。"""
-    from tagplatform import media
+    from tagplatform.services.content import media
 
     ok = _upload(media_client, name="clip.mp4", content=b"original",
                  data={"asset_id": "asset_00000002"})

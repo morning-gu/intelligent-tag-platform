@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, StrictInt, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from tagplatform.content_io import load_content
+from tagplatform.services.content.content_io import load_content
 from tagplatform.capabilities.storage.models import TagDefine, TagGenerationTask, TagQualityEvaluation
 from tagplatform.services.generation.base import GenerationSpec
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch

@@ -9,6 +9,12 @@ v2 起标签库就是 `tag_catalog` / `tag_define` 两张正式表（早期 JSON
 `/ingest/preview` 对应改成"最近入库记录"的只读视图（读变更日志），字段与
 旧的预览行保持一致，前端与调用方无需改动。
 
+别名文本解析（JSON 数组 / 老逗号格式 / 已解析 list）统一走
+`services.tags.library.parse_aliases`——四层重构 Task 9 把本模块与 library
+的两份解析器合成一份：JSON 优先、坏 JSON 回落逗号切分（旧行为本模块对
+坏 JSON 返回空列表，与 library 不一致，统一后以 library 语义为准）；
+`normalize=True` 保留原 `_aliases` 的 str 化 + 空白项过滤语义。
+
 分层红线：本模块不 import fastapi（设计文档 §9.4）。
 """
 
@@ -22,28 +28,13 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
-from tagplatform.services.tags.library import TagLibrary
+from tagplatform.services.tags.library import TagLibrary, parse_aliases
 
 TAG_TYPES = ("val_fixed", "val_generalized")
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _aliases(value) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, (list, tuple)):
-        return [str(v) for v in value if str(v).strip()]
-    text = str(value).strip()
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return []
-        return [str(v) for v in parsed if str(v).strip()]
-    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _dump(aliases: list[str]) -> str | None:
@@ -68,7 +59,7 @@ def _row_dict(row: TagDefine, dir_name: str | None, source: dict | None,
         "tag_name": row.tag_name,
         "tag_type": row.tag_type,
         "description": row.description or "",
-        "aliases": _aliases(row.aliases),
+        "aliases": parse_aliases(row.aliases, normalize=True),
         "status": row.status,
         "created": created,
         "source": source or {},
@@ -146,7 +137,7 @@ def record_alias(session: Session, *, tag_id: str, alias: str,
     row = session.get(TagDefine, tag_id)
     if row is None:
         raise ValueError(f"标签不存在: {tag_id}")
-    current = _aliases(row.aliases)
+    current = parse_aliases(row.aliases, normalize=True)
     if alias in current:
         return False
     updated = [*current, alias]

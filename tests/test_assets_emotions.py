@@ -1,7 +1,7 @@
 """情绪词表测试：中文名 ↔ 大写码，词表外的词一律丢弃。"""
 import pytest
 
-from tagplatform.assets.emotions import (
+from tagplatform.services.content.assets.emotions import (
     FEELINGS,
     MOODS,
     prompt_catalog,

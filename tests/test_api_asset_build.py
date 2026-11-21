@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from tagplatform import asset_build
-from tagplatform.assets import source_tag
-from tagplatform.content_io import load_content
+from tagplatform.services.content import asset_build
+from tagplatform.services.content.assets import source_tag
+from tagplatform.services.content.content_io import load_content
 from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset
 from tagplatform.capabilities.llm import LLMResponse
 

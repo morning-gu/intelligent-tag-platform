@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from tagplatform.content_import import import_content, resolve_video_path
+from tagplatform.services.content.content_import import import_content, resolve_video_path
 from tagplatform.capabilities.storage.models import MediaAsset
 
 

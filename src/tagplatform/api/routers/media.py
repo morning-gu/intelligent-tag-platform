@@ -11,7 +11,7 @@
 router 一致经 create_app include 时统一挂 protected_deps。
 
 薄路由层：后缀白名单 / 大小上限 / uuid 存盘 / 资产行登记在核心层
-tagplatform.media；匹配与生成编排在 tagplatform.asset_build；本 router 只做
+tagplatform.services.content.media；匹配与生成编排在 tagplatform.services.content.asset_build；本 router 只做
 multipart 提取与错误映射：
 - 后缀非白名单（UnsupportedVideoFormat）→ 422 {"detail": "不支持的视频格式"}；
 - 超上限（UploadTooLarge）→ 413，两条拦截路径（Content-Length 头早拒 +
@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from tagplatform import asset_build, media
+from tagplatform.services.content import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.capabilities.storage.models import AssetBuildTask, MediaAsset

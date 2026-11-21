@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from tagplatform.assets.builder import pick_keyframes
-from tagplatform.movie_import import resolve_scene_frames as imported_scene_frames
+from tagplatform.services.content.assets.builder import pick_keyframes
+from tagplatform.services.content.movie_import import resolve_scene_frames as imported_scene_frames
 from tagplatform.schemas import ContentJSON
 
 _STORY_SUFFIX_RE = re.compile(r"_story_(\d+)$")

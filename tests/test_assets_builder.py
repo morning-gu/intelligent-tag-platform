@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from tagplatform.capabilities.adapters.vision import to_content_json
-from tagplatform.assets import (
+from tagplatform.services.content.assets import (
     ASSET_BUILDER_VERSION,
     AssetBuilder,
     CastIndex,
@@ -36,7 +36,7 @@ from tagplatform.assets import (
     plan_scenes,
     source_tag,
 )
-from tagplatform.assets.subtitles import SubtitleLine
+from tagplatform.services.content.assets.subtitles import SubtitleLine
 from tagplatform.capabilities.llm import LLMResponse
 from tagplatform.schemas.upstream import parse_upstream
 
@@ -148,7 +148,7 @@ def test_parse_srt_skips_bad_blocks():
 
 
 def test_clean_text_strips_sdh_marks():
-    from tagplatform.assets.subtitles import clean_text
+    from tagplatform.services.content.assets.subtitles import clean_text
     assert clean_text("[door slams]") == "[door slams]"      # 纯音效行保留
     assert clean_text("Oh, God. - [Thud]") == "Oh, God."
     assert clean_text("- Yes. - No.") == "Yes. No."

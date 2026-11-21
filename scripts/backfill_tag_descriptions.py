@@ -31,7 +31,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.content_io import load_content
+from tagplatform.services.content.content_io import load_content
 from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 from tagplatform.capabilities.storage.models import (
     MediaAsset,

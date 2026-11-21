@@ -20,7 +20,7 @@ import pytest
 from conftest import MOCK_EMBEDDER
 
 from tagplatform.api import get_session  # noqa: F401  (确保 API 包可导入)
-from tagplatform.ingest import record_alias, record_tag_definition
+from tagplatform.services.content.ingest import record_alias, record_tag_definition
 from tagplatform.services.tags.library import (
     DIR_ASSET,
     DIR_DYNAMIC,
@@ -407,6 +407,56 @@ def test_record_alias_appends_and_dedupes(session):
     assert "报仇" in (log.after_json or "")
     with pytest.raises(ValueError, match="标签不存在"):
         record_alias(session, tag_id="tag_nope", alias="x")
+
+
+# ------------------------------------------------ aliases 解析器统一（Task 9）
+
+
+def test_parse_aliases_unified_semantics():
+    """统一别名解析器：JSON 优先，坏 JSON 回落逗号切分。
+
+    旧行为分叉：ingest._aliases 遇坏 JSON 返回 []，library._alias_list 回落
+    逗号切分——同一段历史文本两侧读出不同别名集。统一后 library 语义胜出，
+    ingest 复用同一实现（normalize=True 保留空白项过滤 + str 化语义）。
+    """
+    from tagplatform.services.tags.library import parse_aliases
+
+    assert parse_aliases('["悬疑", "推理"]') == ["悬疑", "推理"]   # JSON 优先
+    assert parse_aliases("[悬疑,推理") == ["[悬疑", "推理"]        # 坏 JSON → 逗号回落
+    assert parse_aliases("悬疑, 推理") == ["悬疑", "推理"]          # 老逗号格式
+    assert parse_aliases(["悬疑", " ", "", "推理"],
+                         normalize=True) == ["悬疑", "推理"]        # 空白项过滤
+    assert parse_aliases(["悬疑", 3], normalize=True) == ["悬疑", "3"]  # str 化
+    assert parse_aliases(["悬疑", 3]) == ["悬疑", 3]               # 不 normalize 保留原样
+    assert parse_aliases(None) == []
+    assert parse_aliases("") == []
+    assert parse_aliases("[]") == []
+
+
+def test_bad_json_aliases_read_identically_on_both_sides(session):
+    """同一段坏 JSON，ingest 与 library 两侧读出同一别名集（统一语义钉死）。
+
+    ingest 侧经 record_tag_definition 命中既有行（payload["aliases"]）；
+    library 侧经 TagLibrary 读（TagDef.aliases 元组）。统一前 ingest 对
+    坏 JSON 返回 []，与 library 的逗号回落结果不一致。
+    """
+    from datetime import datetime, timezone
+
+    from tagplatform.capabilities.storage.models import TagDefine
+
+    bad = "[悬疑,推理"    # [ 开头但不是合法 JSON（历史逗号格式的坏写法）
+    now = datetime.now(timezone.utc)
+    session.add(TagDefine(tag_id="tag_badjson", dir_id="dir_theme",
+                          tag_name="坏JSON别名", tag_type="val_fixed",
+                          description="", aliases=bad, status="active",
+                          created_at=now, updated_at=now))
+    session.commit()
+
+    library = try_load_library(session)
+    assert library.tag("tag_badjson").aliases == ("[悬疑", "推理")
+    payload = record_tag_definition(session, library, tag_name="坏JSON别名",
+                                    dir_id="dir_theme")
+    assert payload["aliases"] == ["[悬疑", "推理"]
 
 
 # ---------------------------------------------------------------- API

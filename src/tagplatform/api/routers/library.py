@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
-from tagplatform.ingest import recent_ingest
+from tagplatform.services.content.ingest import recent_ingest
 from tagplatform.services.tags.library import try_load_library
 
 router = APIRouter(prefix="/api/v1")

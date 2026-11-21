@@ -1,6 +1,6 @@
 ﻿"""资产构建包出口：数据集影片 → 上游契约格式的资产 JSON。"""
 
-from tagplatform.assets.builder import (
+from tagplatform.services.content.assets.builder import (
     ASSET_BUILDER_VERSION,
     AssetBuilder,
     CastIndex,
@@ -17,14 +17,14 @@ from tagplatform.assets.builder import (
     source_tag,
     summary_messages,
 )
-from tagplatform.assets.emotions import (
+from tagplatform.services.content.assets.emotions import (
     FEELINGS,
     MOODS,
     prompt_catalog,
     to_emotion,
     to_emotions,
 )
-from tagplatform.assets.dataset import (
+from tagplatform.services.content.assets.dataset import (
     MatchResult,
     MovieEntry,
     build_index,
@@ -32,7 +32,7 @@ from tagplatform.assets.dataset import (
     normalize,
     parse_filename,
 )
-from tagplatform.assets.subtitles import (
+from tagplatform.services.content.assets.subtitles import (
     SubtitleLine,
     lines_for_scene,
     load_subtitles,

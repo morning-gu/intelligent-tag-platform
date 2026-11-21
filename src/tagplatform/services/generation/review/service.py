@@ -2,7 +2,7 @@
 
 动作语义（v2 设计文档 §6.2 + 本期目录归属口径）：
 - approve：`review_status → approved`；若该行是库外新词，按候选目录登记一条
-  "待写 tag_define"的入库预览行（`tagplatform.ingest`，本地 JSON）；
+  "待写 tag_define"的入库预览行（`tagplatform.services.content.ingest`）；
 - reject：`review_status → rejected`；
 - modify：payload 字段写回行内（名称/描述/目录），随后**直接按通过处理**
   ——v2 把“修改”定义为“改完即可入库”，不再回 pending 重排；
@@ -32,7 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import AssetTag, PreAssetTag, TagDefine
-from tagplatform.ingest import record_alias, record_tag_definition
+from tagplatform.services.content.ingest import record_alias, record_tag_definition
 from tagplatform.services.tags.library import TagLibrary, try_load_library
 
 logger = logging.getLogger(__name__)

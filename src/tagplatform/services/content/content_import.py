@@ -44,8 +44,8 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from tagplatform.content_io import dump_for_storage, is_upstream_shape
-from tagplatform.content_template import to_template, to_template_from_content
+from tagplatform.services.content.content_io import dump_for_storage, is_upstream_shape
+from tagplatform.services.content.content_template import to_template, to_template_from_content
 from tagplatform.capabilities.storage.models import (
     PreAssetTag,
     MediaAsset,

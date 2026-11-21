@@ -29,8 +29,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tagplatform.assets.emotions import to_emotion
-from tagplatform.content_io import is_upstream_shape
+from tagplatform.services.content.assets.emotions import to_emotion
+from tagplatform.services.content.content_io import is_upstream_shape
 from tagplatform.schemas.content import ContentJSON, parse_content
 from tagplatform.schemas.upstream import UpstreamPayload, parse_upstream
 

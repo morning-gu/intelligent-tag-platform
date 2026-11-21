@@ -85,7 +85,7 @@ from tagplatform.services.generation.closed.recall import embed_content_texts, r
 from tagplatform.services.tags.library import DIR_ASSET
 from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
 from tagplatform.services.tags.mounting import Mount, resolve_mount
-from tagplatform.movie_import import resolve_scene_frames
+from tagplatform.services.content.movie_import import resolve_scene_frames
 from tagplatform.settings import get_settings
 
 logger = logging.getLogger(__name__)

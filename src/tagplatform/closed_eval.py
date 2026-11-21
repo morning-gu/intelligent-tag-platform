@@ -91,7 +91,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tagplatform.content_io import load_content
+from tagplatform.services.content.content_io import load_content
 from tagplatform.eval.closed_ranking import (
     DEFAULT_K_P,
     DEFAULT_K_R,

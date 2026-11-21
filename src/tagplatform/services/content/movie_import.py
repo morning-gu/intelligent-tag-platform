@@ -42,9 +42,9 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.adapters.vision import to_content_json
-from tagplatform.content_import import import_content as import_content_svc
-from tagplatform.content_io import is_upstream_shape
-from tagplatform.content_template import to_template
+from tagplatform.services.content.content_import import import_content as import_content_svc
+from tagplatform.services.content.content_io import is_upstream_shape
+from tagplatform.services.content.content_template import to_template
 from tagplatform.capabilities.storage.models import MediaAsset
 from tagplatform.schemas.upstream import parse_upstream
 

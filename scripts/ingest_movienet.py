@@ -260,7 +260,7 @@ def _import_payloads(out: Path, video_root: str | None = None) -> dict:
     from sqlalchemy.orm import Session  # noqa: F401  (类型提示用)
 
     from tagplatform.capabilities.adapters.vision import to_content_json
-    from tagplatform.content_import import import_content
+    from tagplatform.services.content.content_import import import_content
     from tagplatform.capabilities.storage import create_engine_for, make_session_factory
     from tagplatform.schemas.upstream import parse_upstream
     from tagplatform.settings import get_settings

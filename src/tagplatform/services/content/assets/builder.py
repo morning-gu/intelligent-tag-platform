@@ -36,14 +36,19 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tagplatform.assets.dataset import normalize
-from tagplatform.assets.emotions import FEELINGS, MOODS, prompt_catalog, to_emotions
-from tagplatform.assets.subtitles import SubtitleLine, lines_for_scene, load_subtitles
+from tagplatform.services.content.assets.dataset import normalize
+from tagplatform.services.content.assets.emotions import FEELINGS, MOODS, prompt_catalog, to_emotions
+from tagplatform.services.content.assets.subtitles import SubtitleLine, lines_for_scene, load_subtitles
+
+logger = logging.getLogger(__name__)
 
 FRAME_NAME_RE = re.compile(r"shot_(\d+)_img_(\d+)\.jpg$")
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
@@ -488,6 +493,96 @@ def _add_usage(a: dict, b: dict) -> dict:
     return {**a, **{k: int(a.get(k, 0) or 0) + int(b.get(k, 0) or 0) for k in keys}}
 
 
+# ---------------------------------------------------------------- 编排分段
+# build_movie 拆出的四段（四层重构 Task 9）：读盘 → 分析 → 统计 → 落盘，
+# 函数体逐字搬移，行为零变化（test_assets_builder.py 全绿即验收）。
+
+@dataclass
+class _MovieInputs:
+    """build_movie 的读盘段产物：meta/annotation/字幕一次读齐（未经模型）。"""
+
+    meta: dict
+    title: str
+    year: str
+    genres: list[str]
+    cast: CastIndex
+    cast_names: list[str]
+    plans: list[ScenePlan]
+
+
+def _load_inputs(root: Path, movie_id: str, subtitles_zip: Path, k: int,
+                 dialogue_limit: int) -> _MovieInputs:
+    """读盘段：meta/annotation/字幕 → 场景规划（一次模型调用都不发）。"""
+    meta = json.loads((root / "meta_data" / "meta" / f"{movie_id}.json")
+                      .read_text(encoding="utf-8"))
+    annotation = json.loads(
+        (root / "annotation_data" / "annotation" / f"{movie_id}.json")
+        .read_text(encoding="utf-8"))
+    title, year, genres = _meta_facts(meta, movie_id)
+    cast_entries = _cast_entries(meta)
+    cast = CastIndex(cast_entries)
+    cast_names = [name for name, _ in cast_entries]
+    subtitles = load_subtitles(subtitles_zip, movie_id)
+    plans = plan_scenes(root, movie_id, annotation, k,
+                        subtitles=subtitles, dialogue_limit=dialogue_limit)
+    return _MovieInputs(meta=meta, title=title, year=year, genres=genres,
+                        cast=cast, cast_names=cast_names, plans=plans)
+
+
+def _analyze_scenes(builder: AssetBuilder, plans: list[ScenePlan],
+                    title: str, year: str, genres: list[str],
+                    cast_names: list[str], cast: CastIndex) -> list[tuple]:
+    """分析段：单线程顺序或线程池并发跑逐场景分析（progress_cb 按完成数推进）。"""
+    if builder.workers == 1:
+        return [builder.analyze_scene(p, title, year, genres, cast_names, cast)
+                for p in plans]
+    lock = threading.Lock()
+    total = len(plans)
+    done = [0]
+
+    def _run(plan: ScenePlan):
+        pair = builder.analyze_scene(plan, title, year, genres,
+                                     cast_names, cast)
+        if builder.progress_cb is not None:
+            with lock:
+                done[0] += 1
+                current = done[0]
+            builder.progress_cb(current, total)
+        return pair
+
+    with ThreadPoolExecutor(max_workers=builder.workers) as pool:
+        return list(pool.map(_run, plans))
+
+
+def _record_scene_stats(stats: MovieStats, plans: list[ScenePlan],
+                        pairs, infer: bool) -> list[dict]:
+    """统计段：逐场景 usage 累加进 stats + 收集降级场景；返回场景对象列表。"""
+    scenes: list[dict] = []
+    for plan, (scene, usage) in zip(plans, pairs):
+        stats.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+        stats.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+        # 纯事实模式（infer=False）下氛围本来就该为空，不算降级
+        if infer and (not scene["description"] or not scene["emotion"]):
+            stats.failed_scenes.append(plan.scene_id)
+        scenes.append(scene)
+    return scenes
+
+
+def _write_asset(out_path: Path, movie_id: str, title: str, language,
+                 plans: list[ScenePlan], summary: str, cast: CastIndex,
+                 scenes: list[dict]) -> Path:
+    """落盘段：统一编号 → 组装资产 JSON → 写文件；返回落盘路径。"""
+    renumber_ids(scenes)
+    duration_ms = plans[-1].end_ms if plans else 0
+    # language 只在数据集确实给了才填，不替它猜
+    asset = assemble_asset(movie_id, title, language, duration_ms,
+                           summary, cast, scenes)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(asset, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    return out_path
+
+
 class AssetBuilder:
     """单部影片 → 上游模板格式的资产 JSON。客户端注入，便于离线测试。"""
 
@@ -578,18 +673,9 @@ class AssetBuilder:
             stats.elapsed_s = time.time() - started
             return stats
 
-        meta = json.loads((self.root / "meta_data" / "meta" / f"{movie_id}.json")
-                          .read_text(encoding="utf-8"))
-        annotation = json.loads(
-            (self.root / "annotation_data" / "annotation" / f"{movie_id}.json")
-            .read_text(encoding="utf-8"))
-        title, year, genres = _meta_facts(meta, movie_id)
-        cast_entries = _cast_entries(meta)
-        cast_names = [name for name, _ in cast_entries]
-        cast = CastIndex(cast_entries)
-        subtitles = load_subtitles(self.subtitles_zip, movie_id)
-        plans = plan_scenes(self.root, movie_id, annotation, self.k,
-                            subtitles=subtitles, dialogue_limit=self.dialogue_limit)
+        inputs = _load_inputs(self.root, movie_id, self.subtitles_zip,
+                              self.k, self.dialogue_limit)
+        plans = inputs.plans
         stats.scenes = len(plans)
         stats.scenes_with_frames = sum(1 for p in plans if p.frames)
         stats.scenes_with_dialogues = sum(1 for p in plans if p.dialogues)
@@ -597,42 +683,14 @@ class AssetBuilder:
             # 先报总数：前端一开始就能显示「0/6」，不必等第一个场景跑完
             self.progress_cb(0, len(plans))
 
-        if self.workers == 1:
-            pairs = [self.analyze_scene(p, title, year, genres, cast_names, cast)
-                     for p in plans]
-        else:
-            import threading
-            from concurrent.futures import ThreadPoolExecutor
-
-            lock = threading.Lock()
-            total = len(plans)
-            done = [0]
-
-            def _run(plan: ScenePlan):
-                pair = self.analyze_scene(plan, title, year, genres,
-                                          cast_names, cast)
-                if self.progress_cb is not None:
-                    with lock:
-                        done[0] += 1
-                        current = done[0]
-                    self.progress_cb(current, total)
-                return pair
-
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                pairs = list(pool.map(_run, plans))
-
-        scenes: list[dict] = []
-        for plan, (scene, usage) in zip(plans, pairs):
-            stats.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
-            stats.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
-            # 纯事实模式（infer=False）下氛围本来就该为空，不算降级
-            if self.infer and (not scene["description"] or not scene["emotion"]):
-                stats.failed_scenes.append(plan.scene_id)
-            scenes.append(scene)
+        pairs = _analyze_scenes(self, plans, inputs.title, inputs.year,
+                                inputs.genres, inputs.cast_names, inputs.cast)
+        scenes = _record_scene_stats(stats, plans, pairs, self.infer)
 
         fallback = "；".join(s["description"] for s in scenes[:3])[:400]
-        summary, usage = self._summarize(movie_id, title, year, genres,
-                                         _synopsis(meta), fallback)
+        summary, usage = self._summarize(movie_id, inputs.title, inputs.year,
+                                         inputs.genres, _synopsis(inputs.meta),
+                                         fallback)
         stats.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
         stats.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
         if not summary:
@@ -640,15 +698,9 @@ class AssetBuilder:
         elif summary == fallback:
             stats.failed_scenes.append("__summary_fallback__")
 
-        renumber_ids(scenes)
-        duration_ms = plans[-1].end_ms if plans else 0
-        # language 只在数据集确实给了才填，不替它猜
-        asset = assemble_asset(movie_id, title, meta.get("language"),
-                               duration_ms, summary, cast, scenes)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(asset, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-        stats.output = str(out_path)
+        stats.output = str(_write_asset(out_path, movie_id, inputs.title,
+                                        inputs.meta.get("language"), plans,
+                                        summary, inputs.cast, scenes))
         stats.elapsed_s = time.time() - started
         return stats
 
@@ -657,7 +709,8 @@ class AssetBuilder:
         for movie_id in movie_ids:
             stats = self.build_movie(movie_id, force=force)
             results.append(stats.as_dict())
-            print(json.dumps(stats.as_dict(), ensure_ascii=False))
+            logger.info("movie %s done: %s", movie_id,
+                        json.dumps(stats.as_dict(), ensure_ascii=False))
         manifest = {"total": len(results), "movies": results,
                     "prompt_tokens": sum(r["prompt_tokens"] for r in results),
                     "completion_tokens": sum(r["completion_tokens"] for r in results)}

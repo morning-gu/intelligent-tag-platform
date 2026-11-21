@@ -10,6 +10,7 @@
 
 任务直接 failed（`gen_99d1dd463f89`）。这条用例把整条 runner 链路
 （stub producer → persist_tags → record_alias → commit）跑一遍，钉住签名。
+（模块现住 `tagplatform.services.content.ingest`——四层重构 Task 9 归位。）
 """
 
 import json
@@ -120,7 +121,7 @@ def test_record_alias_signature_is_session_first():
     """record_alias 的第一个位置参数必须是 Session（防止签名再次漂移）。"""
     import inspect
 
-    from tagplatform.ingest import record_alias
+    from tagplatform.services.content.ingest import record_alias
 
     params = list(inspect.signature(record_alias).parameters.values())
     assert params[0].name == "session"
