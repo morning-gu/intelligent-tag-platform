@@ -26,7 +26,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
@@ -276,33 +276,17 @@ def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
     return evidence
 
 
-def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
-                        judge_client=None) -> list[ProducedTag]:
-    """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
-    settings = get_settings()
-    started = time.monotonic()
-    contents = spec.content
+def _sample_client(spec: GenerationSpec, client, stage, template):
+    """按 stage 包装采样客户端（prompt_samples 开启时记录提示样本）。"""
+    if spec.prompt_samples is None:
+        return client
+    return SampledPromptClient(client, spec.prompt_samples, stage, template)
 
-    def sample(client, stage, template):
-        if spec.prompt_samples is None:
-            return client
-        return SampledPromptClient(client, spec.prompt_samples, stage, template)
 
-    # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
-    # 见 `eval/ablation.py` 的纪律说明。
-    modalities = settings.mtg_modality_set
-    frames = (keyframes_mod.plan_scene_frames(
-        contents, settings.dataset_root,
-        per_scene=settings.mtg_frames_per_scene,
-        max_frames=settings.mtg_max_frames,
-        movie_asset_root=settings.movie_asset_root,
-        extra_roots=settings.movie_asset_extra_roots,
-    ) if "video" in modalities else {})
-    spec.frames_by_scene = frames
-    frame_count = sum(len(v) for v in frames.values())
-    usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
-
-    # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
+def _load_library_context(settings: Settings, spec: GenerationSpec, embedder,
+                          contents) -> tuple[object | None, list, list[str],
+                                             list[dict]]:
+    """小节 0：加载只读标签库、向量索引、库内提示与可扩展目录清单（绝不写库）。"""
     # 库来自 JSON 模拟（spec.library），按任务的目录范围过滤；向量按
     # 库/模型/范围缓存，同一进程内不重复嵌入。
     tag_library = spec.library if settings.open_library_enabled else None
@@ -317,52 +301,84 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     # 且落在范围内的目录。
     dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
                 if settings.open_dir_hint_max > 0 else [])
+    return tag_library, library, hints, dir_hint
 
-    # ---- 1. 逐场生成 → 全片综合 ----
+
+@dataclass
+class _GenerationLimits:
+    """小节 1 的产出配额：队列截断上限与单轮请求条数（小节 1/5/6 共用）。"""
+    limit: int
+    total_limit: int
+    scene_limit: int
+    scene_request_limit: int
+    film_request_limit: int
+
+
+def _plan_generation_limits(settings: Settings, spec: GenerationSpec,
+                            contents) -> _GenerationLimits | None:
+    """小节 1 开头：按策略上限计算逐场/全片两级配额；无可产出时返回 None。"""
     scenes = contents.content.scenes
     limit = max(0, min(settings.mtg_max_final_tags, spec.policy.max_tags))
     total_limit = min(spec.policy.max_tags, 2 * limit)
     if total_limit <= 0 or not scenes:
-        return []
+        return None
     scene_limit = (total_limit if len(scenes) == 1 else
                    min(len(scenes), 5, max(1, total_limit // 3)))
     scene_request_limit = min(3, scene_limit) if len(scenes) == 1 else 1
     film_request_limit = (max(1, min(total_limit, settings.mtg_max_candidates_per_run)
                               - scene_limit) if len(scenes) >= 2 else 0)
+    return _GenerationLimits(limit=limit, total_limit=total_limit,
+                             scene_limit=scene_limit,
+                             scene_request_limit=scene_request_limit,
+                             film_request_limit=film_request_limit)
+
+
+def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
+                    *, spec, usage, scene_ids, parsed_calls
+                    ) -> tuple[list[dict], int]:
+    """单轮生成调用 → 过滤后的候选条目；顺带累计 usage 与成功解析轮数。"""
+    response = client.complete(messages, f"{spec.run_id}:{suffix}")
+    _add_usage(usage, response.usage)
+    if not response.ok:
+        raise RuntimeError(f"LLM 调用失败（{suffix}）: {response.raw.get('error')}")
+    try:
+        items = parse_generation_items(response.content, max_items=None)
+        parsed_calls += 1
+    except ValueError as exc:
+        logger.warning("生成输出解析失败（%s）：%s", suffix, exc)
+        items = []
+
+    valid = []
+    for item in items:
+        if item["scope"] not in (None, scope):
+            continue
+        ids = list(dict.fromkeys(s for s in item["scenes"] if s in scene_ids))
+        if scope == "scene":
+            if scene_id not in ids:
+                continue
+            ids = [scene_id]
+        elif len(ids) < 2:
+            continue
+        valid.append({**item, "scope": scope, "scenes": ids})
+        if len(valid) == max_items:
+            break
+    return valid, parsed_calls
+
+
+def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
+                           contents, frames, modalities, usage: dict,
+                           hints: list[str], dir_hint: list[dict],
+                           limits: _GenerationLimits
+                           ) -> tuple[list[dict], list[dict], list[dict]]:
+    """小节 1：逐场生成 → 全片综合（两轮 LLM 调用，产出 runs 审计与两级候选）。"""
+    scenes = contents.content.scenes
+    scene_request_limit = limits.scene_request_limit
+    film_request_limit = limits.film_request_limit
     scene_ids = {scene.scene_id for scene in scenes}
     runs: list[dict] = []
-    scene_client = sample(llm, "generation_scene", partial(build_generation_template, "scene"))
-    film_client = sample(llm, "generation_film", partial(build_generation_template, "film"))
+    scene_client = _sample_client(spec, llm, "generation_scene", partial(build_generation_template, "scene"))
+    film_client = _sample_client(spec, llm, "generation_film", partial(build_generation_template, "film"))
     parsed_calls = 0
-
-    def generate(client, messages, suffix, max_items, scope, scene_id=None):
-        nonlocal parsed_calls
-        response = client.complete(messages, f"{spec.run_id}:{suffix}")
-        _add_usage(usage, response.usage)
-        if not response.ok:
-            raise RuntimeError(f"LLM 调用失败（{suffix}）: {response.raw.get('error')}")
-        try:
-            items = parse_generation_items(response.content, max_items=None)
-            parsed_calls += 1
-        except ValueError as exc:
-            logger.warning("生成输出解析失败（%s）：%s", suffix, exc)
-            items = []
-
-        valid = []
-        for item in items:
-            if item["scope"] not in (None, scope):
-                continue
-            ids = list(dict.fromkeys(s for s in item["scenes"] if s in scene_ids))
-            if scope == "scene":
-                if scene_id not in ids:
-                    continue
-                ids = [scene_id]
-            elif len(ids) < 2:
-                continue
-            valid.append({**item, "scope": scope, "scenes": ids})
-            if len(valid) == max_items:
-                break
-        return valid
 
     scene_usage = usage.copy()
     per_scene = {}
@@ -370,9 +386,10 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         messages = build_scene_generation_messages(
             scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
             dir_hint=dir_hint, modalities=modalities)
-        per_scene[scene.scene_id] = generate(
+        per_scene[scene.scene_id], parsed_calls = _generate_items(
             scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
-            "scene", scene_id=scene.scene_id)
+            "scene", scene_id=scene.scene_id, spec=spec, usage=usage,
+            scene_ids=scene_ids, parsed_calls=parsed_calls)
         logger.info("mtg 场景 %d/%d %s：%d 个候选", index + 1, len(scenes),
                     scene.scene_id, len(per_scene[scene.scene_id]))
 
@@ -390,7 +407,9 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
             contents, frames, max_tags=film_request_limit, scene_tags=per_scene,
             library_hint=hints, dir_hint=dir_hint, modalities=modalities)
         film_usage = usage.copy()
-        film_entries = generate(film_client, messages, "film", film_request_limit, "film")
+        film_entries, parsed_calls = _generate_items(
+            film_client, messages, "film", film_request_limit, "film",
+            spec=spec, usage=usage, scene_ids=scene_ids, parsed_calls=parsed_calls)
         runs.append({
             "run": 1, "scope": "film", "items": len(film_entries),
             "tags": [item["tag"] for item in film_entries],
@@ -400,19 +419,28 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
 
     if not parsed_calls:
         raise RuntimeError("各轮生成均无法解析为 JSON")
+    return runs, scene_entries, film_entries
 
-    # ---- 2. 两级候选合并 ----
-    # 同名候选优先保留影片级生成的理由和释义。
+
+def _merge_two_level_candidates(settings: Settings, embedder,
+                                film_entries: list[dict],
+                                scene_entries: list[dict]) -> list[MergedCandidate]:
+    """小节 2：两级候选合并（同名候选优先保留影片级生成的理由和释义）。"""
     entries = ([{**item, "run": 1} for item in film_entries]
                + [{**item, "run": 0} for item in scene_entries])
-    merged = merge_candidates(entries, embedder, settings.mtg_merge_threshold)
+    return merge_candidates(entries, embedder, settings.mtg_merge_threshold)
 
-    # ---- 3. judge ----
+
+def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
+                             judge_client, contents, merged, modalities,
+                             usage: dict, frame_count: int, started: float
+                             ) -> tuple[dict[str, dict], dict]:
+    """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。"""
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
-        client = sample(judge_client or _make_judge_client(settings, llm),
-                        "judge", build_judge_template)
+        client = _sample_client(spec, judge_client or _make_judge_client(settings, llm),
+                                "judge", build_judge_template)
         payload = [{"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
                     "reason": m.reason, "scenes": list(m.scenes)}
                    for m in merged]
@@ -434,8 +462,12 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                 "elapsed_s": round(time.monotonic() - started, 1),
             })
             raise
+    return verdicts, judge_usage
 
-    # ---- 4. 过滤 + 证据 + 目录匹配 ----
+
+def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
+                       modalities, merged) -> tuple[list, list[dict]]:
+    """小节 4：过滤 + 证据 + 目录匹配（judge 判决/把握度/场景证据逐条把关）。"""
     scene_index = {scene.scene_id: scene for scene in contents.content.scenes}
     if settings.mtg_judge_enabled:
         # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
@@ -470,12 +502,14 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                             "why": "全片级但只有单场支撑"})
             continue
         accepted.append((candidate, verdict, evidence))
+    return accepted, dropped
 
-    # ---- 5. 库内对齐、复核、排序、截断、落库归属 ----
-    # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
-    # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
+
+def _align_and_verify_candidates(settings: Settings, spec: GenerationSpec, llm,
+                                 embedder, library: list, accepted: list
+                                 ) -> tuple[dict[str, Alignment], dict, dict]:
+    """小节 5 前段：库内对齐分档 + 疑似对子 LLM 复核（结论只进排序与审计）。"""
     alignment: dict[str, Alignment] = {}
-    replacements: list[dict] = []
     verify_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     verify_trace: dict = {}
     if library and accepted:
@@ -491,8 +525,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                      for name, item in alignment.items()
                      if item.band == BAND_SUSPECT and item.matched_name]
             if pairs:
-                client = sample(_make_verify_client(settings, llm),
-                                "verify", build_verify_template)
+                client = _sample_client(spec, _make_verify_client(settings, llm),
+                                        "verify", build_verify_template)
                 verdict_map = verify_pairs(client, pairs, run_id=spec.run_id,
                                            usage=verify_usage, trace=verify_trace)
                 for name, same in verdict_map.items():
@@ -507,44 +541,60 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                             reason=f"{item.reason}；复核判非同一概念")
                     else:
                         alignment[name] = replace(item, same_concept=same)
+    return alignment, verify_usage, verify_trace
 
-    def _band_rank(tag: str) -> int:
-        item = alignment.get(tag)
-        return BAND_RANK[item.band] if item is not None else BAND_RANK["new"]
 
-    def _rank(item) -> tuple[int, int, float, int]:
-        """队列排序：重要度 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
+def _band_rank(alignment: dict[str, Alignment], tag: str) -> int:
+    """候选标签的库内分档序号（未参与对齐的按新词计）。"""
+    item = alignment.get(tag)
+    return BAND_RANK[item.band] if item is not None else BAND_RANK["new"]
 
-        先看重要度而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
-        对影片重要；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
-        而 core 的"视角反转"被挤掉。分档插在重要度之后、把握之前：
-        同样重要的两条，优先留库外新词。
-        """
-        candidate, verdict, _ = item
-        importance = _IMPORTANCE_RANK.get((verdict or {}).get("importance"), 0)
-        confidence = verdict["confidence"] if verdict else 0.8
-        return (-importance, -_band_rank(candidate.tag), -confidence,
-                -candidate.runs)
 
-    accepted.sort(key=_rank)
+def _rank(alignment: dict[str, Alignment], item
+          ) -> tuple[int, int, float, int]:
+    """队列排序：重要度 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
 
-    def _plan(candidate) -> tuple[Alignment | None, bool]:
-        """(对齐结论, 是否替换成库内标签)。
+    先看重要度而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
+    对影片重要；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
+    而 core 的"视角反转"被挤掉。分档插在重要度之后、把握之前：
+    同样重要的两条，优先留库外新词。
+    """
+    candidate, verdict, _ = item
+    importance = _IMPORTANCE_RANK.get((verdict or {}).get("importance"), 0)
+    confidence = verdict["confidence"] if verdict else 0.8
+    return (-importance, -_band_rank(alignment, candidate.tag), -confidence,
+            -candidate.runs)
 
-        同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
-        疑似 → 复核通过 + 替换开关打开才换成库内标准名。
-        """
-        item = alignment.get(candidate.tag)
-        same_name = bool(item is not None and item.band == BAND_DUPLICATE
-                         and item.matched_tag_id)
-        replace_suspect = bool(item is not None
-                               and settings.open_library_replace_enabled
-                               and item.band == BAND_SUSPECT
-                               and item.same_concept is True
-                               and item.matched_tag_id)
-        return item, same_name or replace_suspect
 
-    plans = {candidate.tag: _plan(candidate) for candidate, _, _ in accepted}
+def _plan(alignment: dict[str, Alignment], settings: Settings,
+          candidate) -> tuple[Alignment | None, bool]:
+    """(对齐结论, 是否替换成库内标签)。
+
+    同名 → 一律算库内标签（替换开关不影响这条：名字本来一样）；
+    疑似 → 复核通过 + 替换开关打开才换成库内标准名。
+    """
+    item = alignment.get(candidate.tag)
+    same_name = bool(item is not None and item.band == BAND_DUPLICATE
+                     and item.matched_tag_id)
+    replace_suspect = bool(item is not None
+                           and settings.open_library_replace_enabled
+                           and item.band == BAND_SUSPECT
+                           and item.same_concept is True
+                           and item.matched_tag_id)
+    return item, same_name or replace_suspect
+
+
+def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
+                       accepted: list, limits: _GenerationLimits
+                       ) -> tuple[list, list[dict], dict]:
+    """小节 5 中段：按重要度/分档排序，再按总量、来源与场景级配额截断。"""
+    total_limit = limits.total_limit
+    limit = limits.limit
+    scene_limit = limits.scene_limit
+    accepted.sort(key=partial(_rank, alignment))
+
+    plans = {candidate.tag: _plan(alignment, settings, candidate)
+             for candidate, _, _ in accepted}
     # 按原排序分配名额，同时执行总量、来源和场景级配额。
     by_origin: dict[bool, list] = {False: [], True: []}
     truncated = []
@@ -561,7 +611,13 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         kept_count += 1
         scene_count += candidate.scope == "scene"
     accepted = by_origin[False] + by_origin[True]
+    return accepted, truncated, plans
 
+
+def _assign_tag_dirs(spec: GenerationSpec, contents, embedder, library: list,
+                     tag_library, accepted: list, plans: dict, dropped: list[dict]
+                     ) -> tuple[list[ProducedTag], list[dict], list[dict]]:
+    """小节 5 尾段：落库归属——库内替换生成 ProducedTag，新词按模型指定目录/向量回退归类。"""
     tags: list[ProducedTag] = []
     tag_rows: list[dict] = []
     # 新词要落到"可扩展目录"里：先批量嵌入候选名，再逐个按目录描述相似度归属
@@ -571,6 +627,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                    if new_names else [])
     vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
     per_dir_count: dict[str, int] = {}
+    replacements: list[dict] = []
     for candidate, verdict, evidence in accepted:
         confidence = verdict["confidence"] if verdict else 0.8
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
@@ -701,12 +758,12 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                          "target_type": mount.target_type,
                          "confidence": confidence,
                          "evidence": [e.scene_id for e in evidence]})
+    return tags, tag_rows, replacements
 
-    # ---- 5.5 描述通用化 ----
-    # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"
-    # 的通用释义。模型照提示给了 desc 就直接用；没给或写得像剧情（含片名/
-    # 人名/场景/“本片”）的，这里批量补写一次；补不出来就留空——宁可没有描述，
-    # 也不把某一部片的剧情当标签释义落库。
+
+def _generalize_descriptions(spec: GenerationSpec, llm, contents, tags,
+                             tag_library) -> dict:
+    """小节 5.5：描述通用化——剧情味描述批量补写成通用释义，补不出就留空。"""
     names = content_names(contents)
     needs_desc = [tag for tag in tags
                   if tag.origin == "generated"
@@ -715,7 +772,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     desc_filled: dict[str, str] = {}
     if needs_desc:
         desc_filled = fill_descriptions(
-            sample(llm, "description", build_description_template),
+            _sample_client(spec, llm, "description", build_description_template),
             [{"tag": tag.tag_name,
               "dir": (" / ".join(tag_library.path_of(tag.dir_id))
                       if tag_library is not None and tag.dir_id else None)}
@@ -729,10 +786,25 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         "empty": len(needs_desc) - len(desc_filled),
         "usage": desc_usage,
     }
+    return descriptions_summary
 
-    # ---- 6. 审计落盘 ----
-    elapsed = time.monotonic() - started
-    report = {
+
+def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
+                  elapsed: float, modalities, frame_count: int,
+                  runs: list[dict], limits: _GenerationLimits, library: list,
+                  hints: list[str], dir_hint: list[dict], usage: dict,
+                  judge_usage: dict, merged, verdicts: dict[str, dict],
+                  tag_rows: list[dict], alignment: dict[str, Alignment],
+                  replacements: list[dict], verify_trace: dict,
+                  verify_usage: dict, truncated: list,
+                  descriptions_summary: dict, dropped: list[dict]) -> dict:
+    """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
+    limit = limits.limit
+    total_limit = limits.total_limit
+    scene_limit = limits.scene_limit
+    scene_request_limit = limits.scene_request_limit
+    film_request_limit = limits.film_request_limit
+    return {
         "version": MTG_VERSION,
         "task_id": spec.task_id,
         "asset_id": spec.asset_id,
@@ -807,6 +879,79 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         "dropped": dropped,
         "elapsed_s": round(elapsed, 1),
     }
+
+
+def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
+                        judge_client=None) -> list[ProducedTag]:
+    """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
+    settings = get_settings()
+    started = time.monotonic()
+    contents = spec.content
+
+    # 输入模态（默认三种全开）。消融实验只改这一项，其余参数一律不动——
+    # 见 `eval/ablation.py` 的纪律说明。
+    modalities = settings.mtg_modality_set
+    frames = (keyframes_mod.plan_scene_frames(
+        contents, settings.dataset_root,
+        per_scene=settings.mtg_frames_per_scene,
+        max_frames=settings.mtg_max_frames,
+        movie_asset_root=settings.movie_asset_root,
+        extra_roots=settings.movie_asset_extra_roots,
+    ) if "video" in modalities else {})
+    spec.frames_by_scene = frames
+    frame_count = sum(len(v) for v in frames.values())
+    usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+    # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
+    tag_library, library, hints, dir_hint = _load_library_context(
+        settings, spec, embedder, contents)
+
+    # ---- 1. 逐场生成 → 全片综合 ----
+    limits = _plan_generation_limits(settings, spec, contents)
+    if limits is None:
+        return []
+    runs, scene_entries, film_entries = _run_generation_rounds(
+        settings, spec, llm, contents, frames, modalities, usage, hints,
+        dir_hint, limits)
+
+    # ---- 2. 两级候选合并 ----
+    merged = _merge_two_level_candidates(settings, embedder, film_entries,
+                                         scene_entries)
+
+    # ---- 3. judge ----
+    verdicts, judge_usage = _judge_merged_candidates(
+        settings, spec, llm, judge_client, contents, merged, modalities,
+        usage, frame_count, started)
+
+    # ---- 4. 过滤 + 证据 + 目录匹配 ----
+    accepted, dropped = _filter_candidates(settings, contents, verdicts,
+                                           modalities, merged)
+
+    # ---- 5. 库内对齐、复核、排序、截断、落库归属 ----
+    # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
+    # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
+    alignment, verify_usage, verify_trace = _align_and_verify_candidates(
+        settings, spec, llm, embedder, library, accepted)
+    accepted, truncated, plans = _rank_and_truncate(settings, alignment,
+                                                    accepted, limits)
+    tags, tag_rows, replacements = _assign_tag_dirs(
+        spec, contents, embedder, library, tag_library, accepted, plans, dropped)
+
+    # ---- 5.5 描述通用化 ----
+    # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"
+    # 的通用释义。模型照提示给了 desc 就直接用；没给或写得像剧情（含片名/
+    # 人名/场景/“本片”）的，这里批量补写一次；补不出来就留空——宁可没有描述，
+    # 也不把某一部片的剧情当标签释义落库。
+    descriptions_summary = _generalize_descriptions(spec, llm, contents, tags,
+                                                    tag_library)
+
+    # ---- 6. 审计落盘 ----
+    elapsed = time.monotonic() - started
+    report = _build_report(settings, spec, llm, contents, elapsed, modalities,
+                           frame_count, runs, limits, library, hints, dir_hint,
+                           usage, judge_usage, merged, verdicts, tag_rows,
+                           alignment, replacements, verify_trace, verify_usage,
+                           truncated, descriptions_summary, dropped)
     _write_report(settings, spec.task_id, report)
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
                 len(runs), frame_count, len(merged), len(tags), elapsed)
