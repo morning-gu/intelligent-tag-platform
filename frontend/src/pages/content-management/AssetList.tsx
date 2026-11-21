@@ -28,7 +28,8 @@ import {
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { fetchAssets, type AssetSummary } from '../api/assets'
+import { fetchAssets, type AssetSummary } from '../../api/assets'
+import { ApiError } from '../../api/client'
 import {
   fetchBuildTask,
   matchMedia,
@@ -36,15 +37,15 @@ import {
   type BuildTask,
   type MediaMatchResult,
   type MediaUploadResult,
-} from '../api/media'
-import { formatTimestamp } from '../api/review'
-import { formatTime } from '../api/time'
+} from '../../api/media'
+import { formatTimestamp } from '../../api/review'
+import { formatTime } from '../../api/time'
 import {
   browseDirs,
   bulkImportMovieDirs,
   type DirEntry,
   type MovieImportResult,
-} from '../api/movieImport'
+} from '../../api/movieImport'
 
 /** 资产类型中文展示（取值域与内容 JSON 契约的 Literal 一致）。 */
 const ASSET_TYPE_LABELS: Record<string, string> = {
@@ -265,8 +266,14 @@ export default function AssetList() {
       closeUpload()
       await loadAssets()
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '上传失败'
-      message.error(msg.includes('413') ? '文件超过 2GB 上传上限' : msg)
+      // 413 按状态码识别（ApiError.status；media.ts 上传走 XHR 同样抛
+      // ApiError）——不再对 message 做 "413" 子串匹配（后端 detail 或
+      // 网关 HTML 里的无关数字会误触发），统一给出可行动文案
+      if (err instanceof ApiError && err.status === 413) {
+        message.error('文件超过 2GB 上传上限')
+      } else {
+        message.error(err instanceof Error ? err.message : '上传失败')
+      }
     } finally {
       setUploading(false)
     }

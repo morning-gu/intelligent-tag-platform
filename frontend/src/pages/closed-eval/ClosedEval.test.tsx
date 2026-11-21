@@ -15,7 +15,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ClosedEval from './ClosedEval'
-import { ApiError } from '../api/client'
+import { ApiError } from '../../api/client'
 import {
   cancelRun,
   deleteRun,
@@ -32,10 +32,10 @@ import {
   type MovieRef,
   type RunStatus,
   type RunSummary,
-} from '../api/eval'
+} from '../../api/eval'
 
-vi.mock('../api/eval', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/eval')>()
+vi.mock('../../api/eval', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/eval')>()
   return {
     ...actual,
     listDatasets: vi.fn(),

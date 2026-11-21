@@ -4,11 +4,11 @@
 import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Quality from './Quality'
-import { apiFetch } from '../api/client'
-import type { ConfidenceBucket, DirCoverageRow, MetricsSummary } from '../api/metrics'
+import { apiFetch } from '../../api/client'
+import type { ConfidenceBucket, DirCoverageRow, MetricsSummary } from '../../api/metrics'
 
-vi.mock('../api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/client')>()
+vi.mock('../../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
 })
 

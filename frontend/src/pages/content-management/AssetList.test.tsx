@@ -3,17 +3,18 @@
 // - 场景描述在列表里截断预览，点行进入详情路由；
 // - 标题搜索传参（提交触发而非输入即触发）；
 // - 上传：未命中 → 占位登记提示；命中 → Modal 内轮询生成进度并刷新列表；
-// - 422/413 失败透出后端 detail 且不刷新列表（nginx HTML 413 特判）。
+// - 422 失败透出后端 detail、413 按 ApiError.status 统一 2GB 上限提示，
+//   均不刷新列表（JSON detail 与 nginx HTML 两种 413 响应同口径）。
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetList from './AssetList'
-import { apiFetch } from '../api/client'
-import type { AssetSummary } from '../api/assets'
-import type { BuildTask, MediaMatchResult, MediaUploadResult } from '../api/media'
+import { apiFetch } from '../../api/client'
+import type { AssetSummary } from '../../api/assets'
+import type { BuildTask, MediaMatchResult, MediaUploadResult } from '../../api/media'
 
-vi.mock('../api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/client')>()
+vi.mock('../../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
 })
 
@@ -541,7 +542,7 @@ describe('上传视频与生成进度', () => {
     expect(screen.getByText(/已选择：新片\.mkv/)).toBeInTheDocument() // 已选文件保留供重试
   })
 
-  it('上传失败（413 超 2GB 上限）：透出后端 detail，列表不刷新', async () => {
+  it('上传失败（413 超 2GB 上限，JSON detail）：按 ApiError.status 识别，统一 2GB 上限提示，列表不刷新', async () => {
     mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
@@ -551,13 +552,15 @@ describe('上传视频与生成进度', () => {
     await waitFor(() => expect(activeXhr).not.toBeNull())
     await finishUpload(413, JSON.stringify({ detail: '文件大小超出上传上限' }))
 
-    expect(await screen.findByText('文件大小超出上传上限')).toBeInTheDocument()
+    // 两条 413 用例的提示文案统一后，前一条用例的 message 通知可能仍留在
+    // antd message 门户里——按"至少出现一条"断言
+    expect((await screen.findAllByText('文件超过 2GB 上传上限')).length).toBeGreaterThan(0)
     expect(assetsCallCount()).toBe(1)
   })
 
-  it('上传失败（413 且响应为 HTML，nginx 环境）：回落文案特判为 2GB 上限提示，列表不刷新', async () => {
+  it('上传失败（413 且响应为 HTML，nginx 环境）：按 ApiError.status 识别为 2GB 上限提示，列表不刷新', async () => {
     // 真实 nginx 413 返回 HTML：解析不出 detail，回落 "请求失败（HTTP 413）"
-    // ——组件按 413 字样换成可行动文案
+    // ——组件按 ApiError.status === 413（非 message 子串匹配）换成可行动文案
     mockUploadApis()
     renderAssetList()
     await screen.findByText('电影')
@@ -567,7 +570,8 @@ describe('上传视频与生成进度', () => {
     await waitFor(() => expect(activeXhr).not.toBeNull())
     await finishUpload(413, '<html><body>413 Request Entity Too Large</body></html>')
 
-    expect(await screen.findByText('文件超过 2GB 上传上限')).toBeInTheDocument()
+    // 同上：JSON-detail 用例的同文案通知可能残留，按"至少一条"断言
+    expect((await screen.findAllByText('文件超过 2GB 上传上限')).length).toBeGreaterThan(0)
     expect(assetsCallCount()).toBe(1)
     expect(screen.getByText('选择视频文件')).toBeInTheDocument() // Modal 保留可重试
   })

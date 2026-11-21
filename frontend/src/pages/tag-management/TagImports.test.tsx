@@ -3,11 +3,11 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { Modal } from 'antd'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import TagImports from './TagImports'
-import { ApiError, apiFetch } from '../api/client'
-import type { ImportTaskDetail, ImportTaskSummary } from '../api/imports'
+import { ApiError, apiFetch } from '../../api/client'
+import type { ImportTaskDetail, ImportTaskSummary } from '../../api/imports'
 
-vi.mock('../api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/client')>()
+vi.mock('../../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
 })
 

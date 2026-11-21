@@ -32,7 +32,7 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { fetchAssets, type AssetSummary } from '../api/assets'
+import { fetchAssets, type AssetSummary } from '../../api/assets'
 import {
   createGenerationTasks,
   DEFAULT_QUALITY_MODEL,
@@ -42,10 +42,11 @@ import {
   type GenerationPolicyPayload,
   type GenerationTaskDetail,
   type GenerationTaskSummary,
-} from '../api/tasks'
-import { formatTime } from '../api/time'
-import TaskTagResults from '../components/TaskTagResults'
-import TagQualityEvaluation from '../components/TagQualityEvaluation'
+} from '../../api/tasks'
+import { formatTime } from '../../api/time'
+import TaskTagResults from '../../components/TaskTagResults'
+import TagQualityEvaluation from '../../components/TagQualityEvaluation'
+import { ORIGIN_COLORS, ORIGIN_LABELS } from '../../shared/labels'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -62,10 +63,6 @@ const TASK_STATUS_COLORS: Record<string, string> = {
   succeeded: 'green',
   failed: 'red',
 }
-
-/** 生成模式中文展示与 Tag 颜色（契约固定枚举 closed/open）。 */
-const MODE_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-const MODE_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
 
 /** 创建弹窗表单值：资产非空多选 + mode（默认开放）+ 可选策略两项。 */
 interface CreateFormValues {
@@ -266,7 +263,7 @@ export default function GenerationTasks() {
       title: '模式',
       dataIndex: 'mode',
       render: (v: string) => (
-        <Tag color={MODE_COLORS[v] ?? 'default'}>{MODE_LABELS[v] ?? v}</Tag>
+        <Tag color={ORIGIN_COLORS[v] ?? 'default'}>{ORIGIN_LABELS[v] ?? v}</Tag>
       ),
     },
     {
@@ -336,7 +333,7 @@ export default function GenerationTasks() {
             aria-label="模式筛选"
             value={mode}
             onChange={(v) => setMode(v)}
-            options={Object.entries(MODE_LABELS).map(([value, label]) => ({ value, label }))}
+            options={Object.entries(ORIGIN_LABELS).map(([value, label]) => ({ value, label }))}
             allowClear
             placeholder="模式"
             style={{ width: 120 }}
@@ -387,8 +384,8 @@ export default function GenerationTasks() {
           <Form.Item name="mode" label="模式" initialValue="open">
             <Radio.Group
               options={[
-                { value: 'open', label: '开放' },
-                { value: 'closed', label: '闭环' },
+                { value: 'open', label: ORIGIN_LABELS.open },
+                { value: 'closed', label: ORIGIN_LABELS.closed },
               ]}
             />
           </Form.Item>

@@ -33,7 +33,7 @@ import {
   deleteTag,
   type TagNode,
   type TagNodeDetail,
-} from '../api/catalog'
+} from '../../api/catalog'
 
 /** 标签状态中文展示与 Tag 颜色（active/deprecated 与 v2 治理流水线入库语义
  * 一致；目录节点 status 恒 null，两表均不查值直接显示 "—"）。 */

@@ -2,7 +2,7 @@
 // 与批量）、/tags 标准标签搜索的类型契约与取数函数 + 证据时间戳格式化。
 // 类型形状与后端 tagplatform/api/routers/review.py、tags.py 的 Pydantic
 // 模型一致；审核操作的 409 并发冲突经 client 的 ApiError.status 识别。
-import { apiFetch } from './client'
+import { apiFetch, buildSearchParams } from './client'
 
 /** 标签来源（= 任务模式：closed 闭环 / open 开放）。 */
 export type TagOrigin = 'closed' | 'open'
@@ -103,13 +103,7 @@ export interface ReviewItemQuery {
 
 /** 审核列表：后端默认 confidence 升序（低分先审），page/page_size 分页。 */
 export function fetchReviewItems(query: ReviewItemQuery = {}): Promise<ReviewItemsResponse> {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== '') {
-      params.set(key, String(value))
-    }
-  }
-  const search = params.toString()
+  const search = buildSearchParams(query).toString()
   return apiFetch<ReviewItemsResponse>(`/api/v1/review/items${search ? `?${search}` : ''}`)
 }
 

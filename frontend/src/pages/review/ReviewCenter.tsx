@@ -34,8 +34,8 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError } from '../api/client'
-import { fetchTagCatalog, type TagNode } from '../api/catalog'
+import { ApiError } from '../../api/client'
+import { fetchTagCatalog, type TagNode } from '../../api/catalog'
 import {
   batchReviewAssetTags,
   fetchReviewFilters,
@@ -44,45 +44,21 @@ import {
   type ReviewActionPayload,
   type ReviewFilters,
   type ReviewItem,
-} from '../api/review'
-import EvidenceCard from '../components/EvidenceCard'
+} from '../../api/review'
+import EvidenceCard from '../../components/EvidenceCard'
+import {
+  ORIGIN_COLORS,
+  ORIGIN_FALLBACK,
+  ORIGIN_LABELS,
+  REVIEW_STATUS_COLORS,
+  REVIEW_STATUS_FALLBACK,
+  REVIEW_STATUS_LABELS,
+  TARGET_TYPE_LABELS,
+} from '../../shared/labels'
 
 /** 一次拉取上限：审核队列按影片分组展示，分组需要完整行集，故用大
  * page_size 一次取回；超出时页面提示收窄筛选。 */
 const GROUPED_PAGE_SIZE = 500
-
-/** 审核状态中文展示（键集与后端契约固定枚举一致；merged 已退役）。 */
-const STATUS_LABELS: Record<string, string> = {
-  pending: '待审核',
-  approved: '已通过',
-  rejected: '已拒绝',
-}
-
-/** 审核状态 Tag 颜色（pending 金 / approved 绿 / rejected 红）。 */
-const STATUS_COLORS: Record<string, string> = {
-  pending: 'gold',
-  approved: 'green',
-  rejected: 'red',
-}
-
-/** 筛选项接口不可用时的状态下拉兜底（保持页面可用）。 */
-const STATUS_FALLBACK = ['pending', 'approved', 'rejected']
-
-/** 来源中文展示（origin 即模式：closed 闭环 / open 开放）。 */
-const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-
-/** 来源 Tag 颜色（沿 v1 模式列配色：闭环蓝 / 开放紫）。 */
-const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
-
-/** 挂载粒度中文展示（目录 applicable_scope 的落库结果）。 */
-const TARGET_TYPE_LABELS: Record<string, string> = {
-  content: '整片',
-  scene: '单场景',
-  character: '人物',
-}
-
-/** 来源下拉兜底（origins 为契约固定枚举，filters 失败时仍可筛）。 */
-const ORIGIN_FALLBACK = ['closed', 'open']
 
 /** 修改弹窗表单值（候选名/候选描述至少其一 + 可选备注；提交即通过）。 */
 interface ModifyFormValues {
@@ -319,9 +295,9 @@ export default function ReviewCenter() {
     }
   }
 
-  const statusOptions = (filters?.statuses ?? STATUS_FALLBACK).map((s) => ({
+  const statusOptions = (filters?.statuses ?? REVIEW_STATUS_FALLBACK).map((s) => ({
     value: s,
-    label: STATUS_LABELS[s] ?? s,
+    label: REVIEW_STATUS_LABELS[s] ?? s,
   }))
   const originOptions = (filters?.modes ?? ORIGIN_FALLBACK).map((o) => ({
     value: o,
@@ -376,7 +352,7 @@ export default function ReviewCenter() {
       title: '状态',
       dataIndex: 'review_status',
       render: (v: string) => (
-        <Tag color={STATUS_COLORS[v] ?? 'default'}>{STATUS_LABELS[v] ?? v}</Tag>
+        <Tag color={REVIEW_STATUS_COLORS[v] ?? 'default'}>{REVIEW_STATUS_LABELS[v] ?? v}</Tag>
       ),
     },
     {

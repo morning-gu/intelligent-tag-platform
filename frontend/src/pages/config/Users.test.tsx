@@ -5,11 +5,11 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Users from './Users'
-import { ApiError, apiFetch } from '../api/client'
-import type { ManagedUser } from '../api/users'
+import { ApiError, apiFetch } from '../../api/client'
+import type { ManagedUser } from '../../api/users'
 
-vi.mock('../api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/client')>()
+vi.mock('../../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
 })
 

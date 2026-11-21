@@ -3,7 +3,7 @@
 // 拉取；占比类字段 null（分母为 0）展示为"暂无"。
 import { Alert, Card, Empty, Spin, Statistic } from 'antd'
 import { useEffect, useState } from 'react'
-import BarChart from '../components/BarChart'
+import BarChart from '../../components/BarChart'
 import {
   fetchConfidenceDistribution,
   fetchMetricsSummary,
@@ -14,7 +14,7 @@ import {
   type DirCoverageRow,
   type MetricsSummary,
   type ReviewStats,
-} from '../api/metrics'
+} from '../../api/metrics'
 
 /** 页面一次装配的全部指标数据（三端点齐活才渲染）。 */
 interface QualityData {

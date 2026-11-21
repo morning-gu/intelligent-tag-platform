@@ -25,8 +25,8 @@ import {
   type ImportSummary,
   type ImportTaskDetail,
   type ImportTaskSummary,
-} from '../api/imports'
-import { formatTime } from '../api/time'
+} from '../../api/imports'
+import { formatTime } from '../../api/time'
 
 // 上传请求跨页面切换继续，重新进入页面时仍能读取上传状态。
 let uploadState = { uploading: false, finishedUploads: 0 }

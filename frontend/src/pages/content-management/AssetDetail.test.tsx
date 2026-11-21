@@ -11,11 +11,11 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetDetail from './AssetDetail'
-import { ApiError, apiFetch } from '../api/client'
-import type { AssetDetailData, AssetMount, ContentContext } from '../api/assets'
+import { ApiError, apiFetch } from '../../api/client'
+import type { AssetDetailData, AssetMount, ContentContext } from '../../api/assets'
 
-vi.mock('../api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../api/client')>()
+vi.mock('../../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
 })
 

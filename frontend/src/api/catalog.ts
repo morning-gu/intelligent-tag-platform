@@ -2,9 +2,10 @@
 // scope_id/kind/limit/offset）、单条详情、生命周期三端点与导出的类型契约
 // 与取数函数。类型形状与后端 tagplatform/api/routers/tags.py 的
 // TagNodeOut/TagNodeDetail 一致：目录与标签统一节点形状（kind 区分种类），
-// 列表视图即展开 aliases；列表无 total 字段，分页由调用方按"多取一条
-// 探测"策略组装。v1 的自由 type 分类随 tag_type 枚举化退役。
-import { apiFetch } from './client'
+// 列表视图即展开 aliases；total 为过滤后节点总数（Task 12 白名单内的唯一
+// 响应结构变化，分页切口前的候选集大小）。v1 的自由 type 分类随
+// tag_type 枚举化退役。
+import { apiFetch, buildSearchParams } from './client'
 
 /** 节点种类：目录或标签（后端 kind Query 参数同词表）。 */
 export type TagKind = 'dir' | 'tag'
@@ -48,22 +49,17 @@ export interface TagCatalogQuery {
   offset?: number
 }
 
-/** GET /tags 响应：仅 items（无 total，分页探测由调用方处理）。 */
+/** GET /tags 响应：items + total（过滤后节点总数，后端 Task 12 起返回；
+ * 调用方按 items 组装分页，total 可用于展示/对账）。 */
 export interface TagCatalogListResponse {
   items: TagNode[]
+  total: number
 }
 
 /** 混合树列表：目录与标签合并（目录先、名字序），q 对 name 与 aliases
  * 子串匹配，limit/offset 分页（后端默认 100/0）。 */
 export function fetchTagCatalog(query: TagCatalogQuery = {}): Promise<TagCatalogListResponse> {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === '' || value === false) {
-      continue
-    }
-    params.set(key, String(value))
-  }
-  const search = params.toString()
+  const search = buildSearchParams(query).toString()
   return apiFetch<TagCatalogListResponse>(`/api/v1/tags${search ? `?${search}` : ''}`)
 }
 
@@ -96,11 +92,7 @@ export function deleteTag(tagId: string): Promise<TagDeleteResponse> {
 
 /** 下载当前目录作用域或名称筛选结果的 Excel/XML 压缩包。 */
 export async function downloadTagCatalog(query: Pick<TagCatalogQuery, 'q' | 'scope_id'> = {}): Promise<Blob> {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== '') params.set(key, value)
-  }
-  const search = params.toString()
+  const search = buildSearchParams(query).toString()
   const response = await fetch(`/api/v1/tags/export${search ? `?${search}` : ''}`, {
     credentials: 'include',
   })

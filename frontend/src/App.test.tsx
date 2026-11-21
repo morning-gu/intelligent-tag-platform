@@ -119,11 +119,13 @@ function mockAdminApis() {
       }
     }
     if (path === '/api/v1/prompts') {
+      // 只读契约视图（Task 14）：无版本字段，仅 mode/正文/占位符白名单与必需项
       return [
         {
-          id: 1, mode: 'closed', version: 1,
-          template_text: '模板 {content} {candidates}', is_active: true,
-          created_at: null,
+          mode: 'closed',
+          template_text: '模板 {content} {candidates}',
+          allowed_fields: ['title'],
+          required_placeholders: ['{content}', '{candidates}'],
         },
       ]
     }
@@ -170,10 +172,10 @@ describe('路由装配（Layout → AdminRoute → 页面）', () => {
     expect(await screen.findByText('创建用户')).toBeInTheDocument()
   })
 
-  it('admin 访问 /model-config：渲染出 Prompt 版本管理与运行配置', async () => {
+  it('admin 访问 /model-config：渲染出 Prompt 模板（只读）与运行配置', async () => {
     mockAdminApis()
     renderAt('/model-config')
-    expect(await screen.findByText('Prompt 版本管理')).toBeInTheDocument()
+    expect(await screen.findByText('Prompt 模板')).toBeInTheDocument()
     expect(screen.getByText('当前运行配置')).toBeInTheDocument()
   })
 

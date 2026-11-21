@@ -19,8 +19,8 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { createUser, fetchUsers, type CreateUserPayload, type ManagedUser } from '../api/users'
-import { formatTime } from '../api/time'
+import { createUser, fetchUsers, type CreateUserPayload, type ManagedUser } from '../../api/users'
+import { formatTime } from '../../api/time'
 
 /** 角色 Tag 中文展示与颜色（键集与后端 role 取值一致）。 */
 const ROLE_LABELS: Record<string, string> = {

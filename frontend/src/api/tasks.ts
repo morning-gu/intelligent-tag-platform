@@ -5,7 +5,7 @@
 // closed|open）；列表按 created_at 降序、limit/offset 分页（后端默认
 // 100/0，前端一次拉默认页即可）；重试仅 failed 可用（422/404 经 client
 // 的 ApiError.message 透出后端 detail）。
-import { apiFetch } from './client'
+import { apiFetch, buildSearchParams } from './client'
 import type { ReviewEvidence, ReviewStatus, TagOrigin } from './review'
 
 /** 任务列表行（与后端 GenerationTaskOut 一致；v2 任务外键直连
@@ -152,13 +152,7 @@ export interface GenerationTaskQuery {
 export function fetchGenerationTasks(
   query: GenerationTaskQuery = {},
 ): Promise<GenerationTaskSummary[]> {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== '') {
-      params.set(key, value)
-    }
-  }
-  const search = params.toString()
+  const search = buildSearchParams(query).toString()
   return apiFetch<GenerationTaskSummary[]>(
     `/api/v1/generation/tasks${search ? `?${search}` : ''}`,
   )

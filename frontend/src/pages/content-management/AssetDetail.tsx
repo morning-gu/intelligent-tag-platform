@@ -22,18 +22,13 @@ import {
   type AssetMount,
   type AssetScene,
   type ContentContext,
-} from '../api/assets'
-import { ApiError } from '../api/client'
-import { formatTimestamp } from '../api/review'
-import { formatTime } from '../api/time'
-import SceneTimeline from '../components/SceneTimeline'
-import VideoPlayer, { type VideoPlayerHandle } from '../components/VideoPlayer'
-
-/** 来源中文展示（origin 词表 closed|open，与审核中心同规）。 */
-const ORIGIN_LABELS: Record<string, string> = { closed: '闭环', open: '开放' }
-
-/** 来源 Tag 颜色（沿审核中心配色：闭环蓝 / 开放紫）。 */
-const ORIGIN_COLORS: Record<string, string> = { closed: 'blue', open: 'purple' }
+} from '../../api/assets'
+import { ApiError } from '../../api/client'
+import { formatTimestamp } from '../../api/review'
+import { formatTime } from '../../api/time'
+import SceneTimeline from '../../components/SceneTimeline'
+import VideoPlayer, { type VideoPlayerHandle } from '../../components/VideoPlayer'
+import { ORIGIN_COLORS, ORIGIN_LABELS } from '../../shared/labels'
 
 /** 内容加载的非致命失败标记：404 = 未完成内容识别（空态降级），
  * 其他 = 加载失败（警示透出错误文案）。 */

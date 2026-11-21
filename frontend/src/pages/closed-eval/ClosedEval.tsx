@@ -34,7 +34,7 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError } from '../api/client'
+import { ApiError } from '../../api/client'
 import {
   cancelRun,
   deleteRun,
@@ -53,9 +53,9 @@ import {
   type RunStatus,
   type RunSummary,
   type StartRunRequest,
-} from '../api/eval'
-import { formatTime } from '../api/time'
-import ClosedEvalReportView from '../components/ClosedEvalReport'
+} from '../../api/eval'
+import { formatTime } from '../../api/time'
+import ClosedEvalReportView from '../../components/ClosedEvalReport'
 
 /** 轮询间隔：单片 1–3 分钟量级的进度节奏，2s 足够跟手（spec §6）。 */
 const POLL_INTERVAL_MS = 2000
