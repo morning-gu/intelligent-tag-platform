@@ -312,11 +312,18 @@ CREATE TABLE tag_change_log (
     before_json TEXT,
     after_json  TEXT,
     operator    TEXT,
-    created_at  DATETIME
+    created_at  DATETIME,
+    task_id     TEXT
 );
 
 CREATE INDEX idx_change_log_tag ON tag_change_log(tag_id);
+CREATE INDEX idx_change_log_task ON tag_change_log(task_id);
 ```
+
+`task_id` 为导入批键（0017 迁移加列）：`action='import'` 行的来源导入任务
+号（治理流水线写入；存量行经 0017 从 `after_json` 回填，坏 JSON/缺键留
+NULL），批次反查走该索引列，替代 `after_json` 全表文本匹配；其余动作行为
+NULL。无外键，同 `tag_id` 契约——任务删除后日志仍可指向该任务号。
 
 ### 3.9 prompt_template — Prompt 模板
 

@@ -6,7 +6,7 @@
 
 - `submit_review`       单条审核四动作（apply_review 服务调用 + 行摘要装配）
 - `submit_review_batch` 批量审核逐条独立执行（失败不中断、per-item detail）
-- `list_review_queue`   审核中心列表（七筛选参数、confidence 升序、分页）
+- `list_review_queue`   审核中心列表（八筛选参数、confidence 升序、分页）
 - `get_review_filters`  筛选下拉（库内 tag_types/dirs + 契约固定枚举）
 
 错误映射随逻辑下沉本层原样保留：单条 404（行不存在）/409（ConflictError：
@@ -186,7 +186,7 @@ def list_review_queue(
     page: int,
     page_size: int,
 ) -> ReviewItemsResponse:
-    """审核列表：待审核/已审行，七筛选参数自由组合。
+    """审核列表：待审核/已审行，八筛选参数自由组合。
 
     join media_asset（asset_title）/tag_catalog（库内标签名与类型）；mode 与
     origin 同义（行的产出来源即任务模式）；默认 confidence 升序（低分先审，

@@ -11,8 +11,8 @@
 - reviewer 取会话用户名（client fixture 已 admin 登录）。
 
 审核列表：
-- 七筛选参数（status/confidence_min/confidence_max/tag_type/mode/asset_id/
-  origin），默认 confidence 升序；
+- 八筛选参数（status/confidence_min/confidence_max/tag_type/mode/asset_id/
+  origin/dir_id），默认 confidence 升序；
 - tag_type 只来自库内标签（库外新词无类型），mode 与 origin 同义；
 - 行形状含 target_type（本期恒 content）与 reviewer_id / review_comment。
 """

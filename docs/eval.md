@@ -153,7 +153,7 @@ judge 的引用核对也使用同一 `modalities` 口径：关掉台词后再拿
 
 ---
 
-## 4. 闭环排序评测（`eval/closed_ranking.py` + `closed_eval.py`）
+## 4. 闭环排序评测（`eval/closed_ranking.py` + `services/eval/` 三分）
 
 回答的问题：**闭环任务给一部片打的标签，排得准不准、分数有没有排序意义、覆盖全不全？**
 
@@ -161,7 +161,9 @@ judge 的引用核对也使用同一 `modalities` 口径：关掉台词后再拿
 把闭环产出当作一次检索：每部成功片一条样本，在（相关门槛 θ × 截断深度 K）
 网格上算 P@K / R@K / nDCG@K 宏平均，另报 Spearman 秩相关、覆盖率分布与
 随机/先验两条基线。指标装配在 `eval/closed_ranking.py`（纯标准库，与前三节
-同款红线）；干跑运行器与报告组装在 `closed_eval.py`（服务层，与生产共用
+同款红线）；原单文件 `closed_eval.py` 已四层重构三分进 `services/eval/`：
+数据集读与选片在 `dataset.py`、干跑运行器（`ClosedEvalService`）在
+`service.py`、报告组装/渲染/落盘在 `report.py`（服务层，与生产共用
 `assemble_spec` → `ClosedTagProducer.produce` 组装段，全程 DB 零写入，
 报告只落 `settings.eval_output_root/<run_id>/`）。
 

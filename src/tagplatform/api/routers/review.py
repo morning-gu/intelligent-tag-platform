@@ -2,7 +2,7 @@
 
 接入层只做协议转换：请求模型声明校验（action 由 Literal 声明，非法 →
 422 action 级失败整请求拒绝）→ 调编排 → 返回。四动作语义、批量逐条独立
-执行、审核列表七筛选查询与行装配全部在 tagplatform.orchestration.review
+执行、审核列表八筛选查询与行装配全部在 tagplatform.orchestration.review
 （用例清单见该模块 docstring）。
 
 错误映射随逻辑在编排层原样保留：行不存在 404（编排层先行查库；服务层
@@ -85,7 +85,7 @@ def list_review_items(
     page_size: int = Query(50, ge=1),
     session: Session = Depends(get_session),
 ) -> ReviewItemsResponse:
-    """审核列表：待审核/已审行，七筛选参数自由组合（低分先审）。"""
+    """审核列表：待审核/已审行，八筛选参数自由组合（低分先审）。"""
     return review_orch.list_review_queue(
         session, status, confidence_min, confidence_max, tag_type, mode,
         asset_id, origin, dir_id, page, page_size)
