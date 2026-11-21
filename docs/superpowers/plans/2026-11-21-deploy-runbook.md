@@ -19,8 +19,9 @@
 
 ## 1. 切换序列（容器化，一次停服窗口）
 
-顺序总览：**cancel 在途评测 → 停旧 systemd 服务 → DB/media 备份 → 构建镜像
-（建议窗口前预构建）→ 起新容器（迁移随入口）→ smoke**。
+顺序总览：**cancel 在途评测 → 采集 smoke 基线（§4.1，停服前）→ 停旧
+systemd 服务 → DB/media 备份 → 构建镜像（建议窗口前预构建）→ 起新容器
+（迁移随入口）→ smoke**。
 
 ### 1.1 窗口前预构建（可选，缩短停机）
 
@@ -47,17 +48,28 @@ curl -s -c /tmp/jar -X POST http://127.0.0.1:8100/api/v1/auth/login \
   -d '{"username":"admin","password":"<TAGPLT_ADMIN_PASSWORD>"}'
 
 # 列出历史 run，找 status=running 的 run_id
-curl -s -b /tmp/jar http://127.0.0.1:8100/api/v1/eval/runs
+curl -s -b /tmp/jar http://127.0.0.1:8100/api/v1/eval/closed/runs
 
 # 逐个 cancel（对每个 running 的 run_id）
-curl -s -b /tmp/jar -X POST http://127.0.0.1:8100/api/v1/eval/runs/<run_id>/cancel
+curl -s -b /tmp/jar -X POST http://127.0.0.1:8100/api/v1/eval/closed/runs/<run_id>/cancel
 
 # 轮询至终态（canceled/failed/完成）后再停服；
 # 若窗口不等：直接停服后 meta.status=running 的 run 会被新进程历史扫描标
 # interrupted——已知语义，重跑即可
 ```
 
-### 1.3 停旧 systemd 服务
+### 1.3 采集 smoke 基线（停服前，登录 cookie 同 §1.2）
+
+基线必须在**旧服务仍在跑时**采集——停服后再采，比对对象就变成新服务
+自身，白名单外差异静默漏检（逐字比对失效）。登录复用 §1.2 的 cookie jar：
+
+```bash
+mkdir -p /backup/smoke-before
+curl -s http://127.0.0.1:8100/openapi.json > /backup/smoke-before/openapi.json
+# 登录态逐端点采样与带参端点取样：命令与端点清单见 §4.1
+```
+
+### 1.4 停旧 systemd 服务
 
 ```bash
 sudo systemctl stop tagplatform
@@ -66,7 +78,7 @@ sudo systemctl status tagplatform   # 确认 inactive；8100 端口已释放
 
 停服后旧进程不再接受写入；**暂不 disable**（回退路径 §2.1 仍用它）。
 
-### 1.4 取 DB 与 media 备份（停写入后）
+### 1.5 取 DB 与 media 备份（停写入后）
 
 ```bash
 mkdir -p /backup/switch-$(date +%F)
@@ -79,7 +91,7 @@ sqlite3 /backup/switch-$(date +%F)/tagplatform.db "SELECT version_num FROM alemb
 回退的"标准路径"还原这份备份（§2.1）；"零丢失路径"不还原备份、改走
 downgrade（§2.2）。
 
-### 1.5 起新容器（迁移随入口执行）
+### 1.6 起新容器（迁移随入口执行）
 
 生产库路径、密钥、LLM 网关等经挂载的 `/app/.env` 提供（pydantic-settings
 env_file 相对进程 CWD=/app 解析，Dockerfile 已内置）。**必须确保
@@ -107,7 +119,7 @@ curl http://127.0.0.1:8100/health   # 期望 {"status":"ok"}
 - 首次启动若 HF 模型缓存为空且 `HF_HUB_OFFLINE=1`，需先把宿主现有 HF 缓存
   拷入挂载目录（`HF_HOME=/hf-cache`）。
 
-### 1.6 smoke（切换后验证）
+### 1.7 smoke（切换后验证）
 
 见 §4：白名单外端点基线比对 + prompt 渲染逐字比对。全过 → 窗口结束；
 不过 → 回退 §2。
@@ -194,7 +206,7 @@ docker stop tagplatform && docker rm tagplatform
 
 ## 4. smoke 明细
 
-### 4.1 基线采集（切换前，旧服务仍在跑）
+### 4.1 基线采集（§1.3 步骤的完整明细；仅限停服前执行）
 
 ```bash
 mkdir -p /backup/smoke-before
@@ -203,8 +215,7 @@ curl -s http://127.0.0.1:8100/openapi.json > /backup/smoke-before/openapi.json
 # 登录（同 §1.2），逐端点采样到 /backup/smoke-before/
 # 无路径参数的 GET 端点可直接循环：
 python3 - <<'PY'
-import json, urllib.request
-base = "http://127.0.0.1:8100"
+import json
 paths = json.load(open("/backup/smoke-before/openapi.json"))["paths"]
 for p, ops in paths.items():
     if "get" in ops and "{" not in p:
