@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 
-from tagplatform.governance.models import (
+from tagplatform.services.tags.governance.models import (
     BadCell,
     ImportParseResult,
     REQUIRED_COLUMNS,

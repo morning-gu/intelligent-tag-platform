@@ -38,7 +38,7 @@ from tagplatform.api import get_executor, get_quality_executor, get_session
 from tagplatform.api.schemas import UtcDatetime
 from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.eval.tag_quality import DEFAULT_MODEL
-from tagplatform.library import TagLibrary, try_load_library
+from tagplatform.services.tags.library import TagLibrary, try_load_library
 from tagplatform.services.generation import list_producers
 from tagplatform.tasks import TaskExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry

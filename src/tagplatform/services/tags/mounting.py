@@ -8,7 +8,12 @@
 - `character` → 角色，target_id = 证据场景里唯一的 character_id（多个角色
   时无法确定归属，返回 None 由调用方丢弃并记原因）。
 
-解析不出挂载点时返回 None——宁可丢一条候选，也不要把标签挂错实体。
+scope 支持组合值（"content,scene,character"——治理导入主路径与 DB 默认值的
+写法）：经 `library.parse_scope` 解析成粒度集合后按"证据能支撑的最细粒度"
+解析——character（证据场景唯一角色）> scene（首个证据场景）> content
+（整片）；单值目录行为与历史实现一致（细粒度解析不出且不含 content →
+返回 None）。解析不出挂载点时返回 None——宁可丢一条候选，也不要把标签
+挂错实体。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
@@ -16,9 +21,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tagplatform.services.generation.base import Evidence
-from tagplatform.library import SCOPE_CHARACTER, SCOPE_SCENE
 from tagplatform.schemas import ContentJSON
+from tagplatform.services.generation.base import Evidence
+from tagplatform.services.tags.library import (
+    SCOPE_CHARACTER,
+    SCOPE_CONTENT,
+    SCOPE_SCENE,
+    parse_scope,
+)
 
 
 @dataclass(frozen=True)
@@ -39,15 +49,9 @@ def _scene_ids(content: ContentJSON) -> dict[str, list[str]]:
 
 def resolve_mount(scope: str, asset_id: str, content: ContentJSON,
                   evidence: list[Evidence]) -> Mount | None:
-    """按目录适用范围解析挂载点；解析不出返回 None。"""
-    if scope == SCOPE_SCENE:
-        scenes = _scene_ids(content)
-        for item in evidence:
-            if item.scene_id in scenes:
-                return Mount(target_type="scene", target_id=item.scene_id)
-        return None
-
-    if scope == SCOPE_CHARACTER:
+    """按目录适用范围解析挂载点；解析不出返回 None（组合值语义见模块 docstring）。"""
+    scopes = parse_scope(scope)
+    if SCOPE_CHARACTER in scopes:
         scenes = _scene_ids(content)
         candidates: list[str] = []
         for item in evidence:
@@ -56,6 +60,14 @@ def resolve_mount(scope: str, asset_id: str, content: ContentJSON,
                     candidates.append(character_id)
         if len(candidates) == 1:
             return Mount(target_type="character", target_id=candidates[0])
-        return None
 
-    return Mount(target_type="content", target_id=asset_id)
+    if SCOPE_SCENE in scopes:
+        scenes = _scene_ids(content)
+        for item in evidence:
+            if item.scene_id in scenes:
+                return Mount(target_type="scene", target_id=item.scene_id)
+
+    if SCOPE_CONTENT in scopes or not scopes:
+        # 目录声明整片可挂（或 scope 全非法/为空——历史兜底口径）
+        return Mount(target_type="content", target_id=asset_id)
+    return None

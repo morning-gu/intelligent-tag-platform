@@ -23,7 +23,7 @@ from tagplatform.services.generation.open.mtg.descriptions import (
     is_general,
 )
 from tagplatform.services.generation.open.producer import OpenTagProducer
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.settings import Settings
 

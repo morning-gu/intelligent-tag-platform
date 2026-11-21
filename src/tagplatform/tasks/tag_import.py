@@ -3,7 +3,7 @@
 四层重构 Task 6 起住 tasks/（执行器横切层）：TagImportExecutor 是导入
 任务的线程池执行器（提交/复位/关停），parse_upload 是上传文件的格式
 分发薄壳（xml/xlsx 判定 + 错误转译）——真正的解析与治理业务在
-tagplatform.governance（Task 8 起归 services/tags/governance），本模块
+`tagplatform.services.tags.governance`（Task 8 归位），本模块
 零业务实现。
 """
 
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tagplatform.capabilities.storage.models import TagImportTask
 from tagplatform.capabilities.embed import Embedder
-from tagplatform.governance import ImportParseResult, parse_tag_excel, parse_tag_xml, run_governance
+from tagplatform.services.tags.governance import ImportParseResult, parse_tag_excel, parse_tag_xml, run_governance
 
 logger = logging.getLogger(__name__)
 

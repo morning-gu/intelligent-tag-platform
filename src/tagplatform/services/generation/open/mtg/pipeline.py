@@ -65,12 +65,12 @@ from tagplatform.services.generation.open.mtg.prompts import (
     render_content,
 )
 from tagplatform.services.generation.open.mtg.verify import build_verify_template, verify_pairs
-from tagplatform.library import (
+from tagplatform.services.tags.library import (
     DirAssignment,
     library_index,
     rank_dir_assignments,
 )
-from tagplatform.mounting import resolve_mount
+from tagplatform.services.tags.mounting import resolve_mount
 from tagplatform.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)

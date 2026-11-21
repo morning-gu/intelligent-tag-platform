@@ -16,7 +16,7 @@ from tagplatform.capabilities.storage.models import TagDefine, TagGenerationTask
 from tagplatform.services.generation.base import GenerationSpec
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts, render_content
-from tagplatform.library import TagLibrary
+from tagplatform.services.tags.library import TagLibrary
 from tagplatform.services.generation.persist import PersistSummary
 from tagplatform.schemas import ContentJSON
 

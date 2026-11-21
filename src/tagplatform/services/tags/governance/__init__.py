@@ -2,10 +2,10 @@
 
 分层红线：本包不得 import fastapi（设计文档 §9.4）。`TagRow` /
 `parse_tag_excel` 定义在 `excel` 子模块，供治理流水线与 API 层统一
-从 `tagplatform.governance` 引用。
+从 `tagplatform.services.tags.governance` 引用。
 """
 
-from tagplatform.governance.excel import (
+from tagplatform.services.tags.governance.excel import (
     ExcelParseResult,
     ImportParseResult,
     MANUAL_TAG_TYPE,
@@ -13,10 +13,9 @@ from tagplatform.governance.excel import (
     RowError,
     TagRow,
     parse_tag_excel,
-    print_parse_result,
 )
-from tagplatform.governance.xml import parse_tag_xml
-from tagplatform.governance.pipeline import (
+from tagplatform.services.tags.governance.xml import parse_tag_xml
+from tagplatform.services.tags.governance.pipeline import (
     GovernanceResult,
     Issue,
     run_governance,
@@ -33,6 +32,5 @@ __all__ = [
     "TagRow",
     "parse_tag_excel",
     "parse_tag_xml",
-    "print_parse_result",
     "run_governance",
 ]

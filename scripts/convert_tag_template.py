@@ -48,7 +48,7 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tagplatform.governance.xml import parse_tag_xml  # noqa: E402
+from tagplatform.services.tags.governance.xml import parse_tag_xml  # noqa: E402
 
 # sheet 名与列头（列头单元格形如 "目录ID\n(dir_id)"，取换行前段匹配）
 DIR_SHEET = "标签目录"

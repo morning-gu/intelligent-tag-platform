@@ -179,7 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 标签库直接读 tag_catalog / tag_define：把 app 引擎绑成"当前数据源"，
     # 生成线程池里的工作线程也因此取到同一个库视图（见 library.bind_engine）
     # （局部导入避免与 routers.library 重名）
-    from tagplatform import library as library_module
+    from tagplatform.services.tags import library as library_module
 
     library_module.bind_engine(app.state.engine)
     app.state.embedder = build_embedder(settings)

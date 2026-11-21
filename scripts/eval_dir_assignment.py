@@ -85,7 +85,7 @@ from tagplatform.eval import (
     lift,
     random_baseline,
 )
-from tagplatform.library import (
+from tagplatform.services.tags.library import (
     _DIR_SAMPLE_TAGS,
     TagLibrary,
     _is_placeholder,

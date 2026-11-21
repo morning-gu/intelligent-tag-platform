@@ -35,7 +35,7 @@ _TAGS: list[dict] = []
 
 def _clear_cache() -> None:
     """库改写后清掉进程内缓存（库 mtime 缓存 + 向量索引缓存）。"""
-    from tagplatform import library as library_mod
+    from tagplatform.services.tags import library as library_mod
 
     library_mod._CACHE.clear()
     library_mod._INDEX_CACHE.clear()
@@ -110,7 +110,7 @@ def write_library(root: str | Path | None = None, dirs=None, tags=None, *,
 def bind_engine(engine) -> None:
     """把测试库引擎登记进来：之后每次 `write_library` 改写库时同步镜像入库。
 
-    同时把引擎绑成 `tagplatform.library` 的"当前数据源"——标签库已改为
+    同时把引擎绑成 `tagplatform.services.tags.library` 的"当前数据源"——标签库已改为
     直接读 tag_catalog / tag_define，测试里的 try_load_library() 因此读到
     的就是这套临时库。
 
@@ -118,7 +118,7 @@ def bind_engine(engine) -> None:
     `write_library(...)` 触发；不灌的话库里是空的，main 侧「空库」用例
     （治理/重嵌入/迁移）才不会被测试夹具的行数污染。
     """
-    from tagplatform import library as library_mod
+    from tagplatform.services.tags import library as library_mod
 
     if engine not in _BOUND_ENGINES:
         _BOUND_ENGINES.append(engine)
@@ -127,7 +127,7 @@ def bind_engine(engine) -> None:
 
 def unbind_engine(engine) -> None:
     """测试结束解绑（引擎即将 dispose，避免后续写库打到已关闭连接）。"""
-    from tagplatform import library as library_mod
+    from tagplatform.services.tags import library as library_mod
 
     try:
         _BOUND_ENGINES.remove(engine)

@@ -49,7 +49,7 @@ from tagplatform.closed_eval import (
 from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.eval.movie_breakdown import breakdown_movie, summarize_movies
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1/eval/closed")

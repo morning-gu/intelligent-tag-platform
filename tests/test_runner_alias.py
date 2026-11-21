@@ -1,7 +1,7 @@
 """回归：命中库内标签（`origin="catalog"` + `alias_name`）时登记别名。
 
 事故现场（2026-11-10，8101 真机）：合并 main 后 `record_alias` 从
-`tagplatform.library` 搬进 `tagplatform.ingest`，第一个参数由「标签库对象」
+`tagplatform.services.tags.library` 搬进 `tagplatform.ingest`，第一个参数由「标签库对象」
 变成「ORM Session」（别名从 JSON 库落进 `tag_define.aliases` 表），
 而 `tasks/runner.py` 仍按老签名传 `library`，于是 open 生成一旦出现
 「相似并入」的候选就

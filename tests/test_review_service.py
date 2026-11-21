@@ -18,7 +18,7 @@
 import pytest
 
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag
-from tagplatform.library import DIR_ASSET
+from tagplatform.services.tags.library import DIR_ASSET
 from tagplatform.services.generation.review import ConflictError, apply_review
 from tests.library_fixture import add_dirs
 

@@ -18,7 +18,7 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 from tests.library_fixture import add_tags
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline

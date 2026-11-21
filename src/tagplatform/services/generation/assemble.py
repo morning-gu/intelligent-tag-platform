@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.prompts import get_prompt, render_prompt
-from tagplatform.library import TagLibrary, try_load_library
+from tagplatform.services.tags.library import TagLibrary, try_load_library
 from tagplatform.schemas import ContentJSON
 from tagplatform.services.generation.base import (
     GenerationPolicy,

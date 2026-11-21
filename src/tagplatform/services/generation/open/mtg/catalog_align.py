@@ -36,7 +36,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagDefine
-from tagplatform.library import LibraryTag, is_deprecated  # 定义在 library，避免循环导入
+from tagplatform.services.tags.library import LibraryTag, is_deprecated  # 定义在 library，避免循环导入
 from tagplatform.services.generation.open.mtg.merge import normalize_tag
 from tagplatform.schemas import ContentJSON
 from tagplatform.vectors import decode_vector

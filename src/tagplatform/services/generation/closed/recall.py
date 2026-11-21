@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tagplatform.library import TagLibrary, library_index
+from tagplatform.services.tags.library import TagLibrary, library_index
 from tagplatform.schemas import ContentJSON
 
 _RRF_K = 60

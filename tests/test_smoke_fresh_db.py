@@ -181,7 +181,7 @@ def test_fresh_db_smoke_full_chain(smoke_client):
     # 30 枚导入标签全量召回（top_k=50 ≥ 每目录 10 枚）
     from tagplatform.content_io import load_content
     from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
-    from tagplatform.library import load_library
+    from tagplatform.services.tags.library import load_library
     with client.app.state.session_factory() as s:
         content = load_content(s.get(MediaAsset, asset_id).content_json)
         candidates = recall_candidates(load_library(s),

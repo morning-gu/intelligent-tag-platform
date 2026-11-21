@@ -19,7 +19,7 @@ from tests.library_fixture import add_tags
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.services.generation.closed.recall import recall_candidates
 from tagplatform.services.generation.execute import run_generation_task
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 
 
 class RecordingEmbedder:

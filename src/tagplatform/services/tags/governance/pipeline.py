@@ -55,14 +55,14 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 import numpy as np
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
-from tagplatform.governance.excel import RowError, TagRow
+from tagplatform.services.tags.governance.excel import RowError, TagRow
 from tagplatform.vectors import encode_vector
 
 # 扁平标签行（parent_tag 为空）落入的自动根目录
@@ -142,6 +142,25 @@ class _ValidTag:
     reactivate: TagDefine | None  # 非 None = 复活该库内停用行（UPDATE 而非 INSERT）
 
 
+@dataclass(eq=False)
+class _DirPlanState:
+    """目录判定段的共享累积状态（原 run_governance 两个嵌套闭包捕获的
+    外层可变状态的显式载体，Task 8 拆分）：
+
+    - checked：已检查/已拦截的目录行下标（原 checked_dir）；
+    - plans：行下标 → 落位计划；
+    - plan_by_name：裸名 → 首个同名目录行计划；
+    - plan_by_key：(父目录 id, 目录名) → 计划（幂等复用查表）；
+    - checked_plans：拓扑序（父先于子），插入阶段按序消费。
+    """
+
+    checked: set[int] = field(default_factory=set)
+    plans: dict[int, _DirPlan] = field(default_factory=dict)
+    plan_by_name: dict[str, _DirPlan] = field(default_factory=dict)
+    plan_by_key: dict[tuple[str | None, str], _DirPlan] = field(default_factory=dict)
+    checked_plans: list[_DirPlan] = field(default_factory=list)
+
+
 def _normalize_scope(raw: str | None) -> str:
     """目录 applicable_scope 归一：content/scene/character 组合（逗号或
     | 分隔、去重、规范序），空/全非法回退三值全选（CHECK 兜底）。"""
@@ -193,167 +212,106 @@ def batch_dir_items(rows: list[TagRow]) -> list[tuple[int, TagRow]]:
             if is_directory_row(r, referenced_names)]
 
 
-def run_governance(rows: list[TagRow], session: Session, embedder,
-                   config: GovernanceConfig | None = None, *,
-                   task: TagImportTask | None = None,
-                   file_name: str = "governance",
-                   parse_errors: list[RowError] | None = None) -> GovernanceResult:
-    """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
-    审计日志落库并提交。
+def _alias_conflict(r: TagRow, i: int, *, db_define_names: set[str],
+                    tag_name_owners: dict[str, list[int]],
+                    alias_owners: dict[str, list[int]],
+                    ) -> tuple[str | None, str | None]:
+    """别名撞库内标签名 / 撞批内其他标签行名 / 批内共享（预扫描）。
 
-    config 参数保留仅为既有调用方（tests、API 路由）签名兼容；
-    semantic_similar 检查退役后其阈值不再参与判定，配置对象被忽略。
+    （原为 run_governance 嵌套闭包，Task 8 拆分为模块级函数：三个只读
+    外层状态改为显式传参，判定体逐字随迁。）
     """
-    now = datetime.now(timezone.utc)
-    if task is None:
-        task = TagImportTask(
-            task_id=f"task_{uuid.uuid4().hex[:8]}", file_name=file_name, created_at=now,
-        )
-    task_id = task.task_id
+    for alias in (r.aliases or []):
+        if alias in db_define_names:
+            return alias, f"别名「{alias}」与库内标签名称冲突"
+        # 撞批内其他标签行名（owners 含自身下标，须排除 i；别名与本行
+        # 同名但无其他行同名时不冲突——自别名合法）
+        if any(owner != i for owner in tag_name_owners.get(alias, [])):
+            return alias, f"别名「{alias}」与本批其他标签名称冲突"
+        if any(owner != i for owner in alias_owners.get(alias, [])):
+            return alias, f"别名「{alias}」与本批其他行共享"
+    return None, None
 
-    # ---------- 库内基线 ----------
-    db_dirs = session.query(TagCatalog).all()
-    # 裸名解析：根目录优先、同级按 dir_id 稳定（多目录同名时取首个，
-    # 与 v1 batch_by_name/db_by_name 的"按名解析"语义一脉相承）
-    db_dir_by_name: dict[str, TagCatalog] = {}
-    for d in sorted(db_dirs, key=lambda d: (d.parent_id is not None, d.dir_id)):
-        db_dir_by_name.setdefault(d.dir_name, d)
-    # (父目录 id, 目录名) → 目录行：目录幂等复用查表（根目录 NULL 键由
-    # 服务层查重——UNIQUE 对 NULL 互不区分，沿 v1 0006 口径）
-    db_dir_by_key: dict[tuple[str | None, str], TagCatalog] = {}
-    for d in db_dirs:
-        db_dir_by_key.setdefault((d.parent_id, d.dir_name), d)
 
-    db_defines = session.query(TagDefine).all()
-    db_define_by_key = {(t.dir_id, t.tag_name): t for t in db_defines}
-    db_define_names = {t.tag_name for t in db_defines if t.status != "deprecated"}
+def _check_dir_row(i: int, r: TagRow, parent_index: int | None,
+                   state: _DirPlanState, issues: list[tuple[int, Issue]], *,
+                   batch_vecs, db_dir_by_name, db_dir_by_key,
+                   db_define_names, tag_name_owners, alias_owners) -> None:
+    """单个目录行的依赖序检查：alias_conflict → 父解析 → 幂等复用/计划。
 
-    # ---------- 批内分类：显式目录标记优先，其余按"被引用名"推断 ----------
-    # 解析层知道行是目录（双表模板目录 sheet / 层级列 / XML level 节点）时
-    # 带 is_dir=True，空目录因此不再退化为标签行；未表态的行（旧扁平模板、
-    # 直接构造 TagRow 的调用方）仍按名称被引用来推断，行为与 v2 初版一致。
-    referenced_names = referenced_dir_names(rows)
-    dir_items = batch_dir_items(rows)
-    dir_indexes = {i for i, _r in dir_items}
-    tag_name_owners: dict[str, list[int]] = {}
-    for i, r in enumerate(rows):
-        if i not in dir_indexes:
-            tag_name_owners.setdefault(r.tag_name, []).append(i)
+    父行已检查但无计划（被拒）→ 本行 parent_not_found 并级联——其批内
+    子孙下一轮因父无计划而同样走此分支，零静默搁浅。
+    （原为 run_governance 嵌套闭包，Task 8 拆分：6 个外层可变状态收进
+    `_DirPlanState` 显式传递，判定体逐字随迁。）
+    """
+    state.checked.add(i)
+    vec = batch_vecs[i]
 
-    # 别名归属预扫描（批内全局，v1 语义：共享别名判冲突，全部行参与）
-    alias_owners: dict[str, list[int]] = {}
-    for i, r in enumerate(rows):
-        # TagRow.aliases 标注 list[str]，但直接构造可传 None：按"None = 无
-        # 别名"兼容
-        for alias in (r.aliases or []):
-            alias_owners.setdefault(alias, []).append(i)
+    # 1) alias_conflict（目录行别名同样不得撞标签名/批内共享）
+    conflict_alias, conflict_detail = _alias_conflict(
+        r, i, db_define_names=db_define_names,
+        tag_name_owners=tag_name_owners, alias_owners=alias_owners)
+    if conflict_alias is not None:
+        issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
+        return
 
-    def _alias_conflict(r: TagRow, i: int) -> tuple[str | None, str | None]:
-        """别名撞库内标签名 / 撞批内其他标签行名 / 批内共享（预扫描）。"""
-        for alias in (r.aliases or []):
-            if alias in db_define_names:
-                return alias, f"别名「{alias}」与库内标签名称冲突"
-            # 撞批内其他标签行名（owners 含自身下标，须排除 i；别名与本行
-            # 同名但无其他行同名时不冲突——自别名合法）
-            if any(owner != i for owner in tag_name_owners.get(alias, [])):
-                return alias, f"别名「{alias}」与本批其他标签名称冲突"
-            if any(owner != i for owner in alias_owners.get(alias, [])):
-                return alias, f"别名「{alias}」与本批其他行共享"
-        return None, None
-
-    # ---------- 批量编码：全部待检行一次 embed ----------
-    # 判定阶段的语义检查与第二遍插入共用同一批向量；扁平标签行需要自动
-    # 「未分类」目录且库内没有时，其文本作为尾项并入同一批调用（仍是
-    # 单次批量编码，无逐行调用）。向量与行按下标对齐，尾项向量单独取用。
-    # role=passage：入库向量成为被检索语料（与召回/归一的 query 侧相对）。
-    uncat_existing = db_dir_by_name.get(_UNCATEGORIZED_DIR_NAME)
-    # 「未分类」落点回退值（库内 > 新建）：批内层级根目录恰名「未分类」
-    # 时在 pass A 后改指批内计划（见 uncat_plan 回填）——扁平行复用该
-    # 批内目录，不重复建第二个同名根目录
-    uncat_dir_id = (uncat_existing.dir_id if uncat_existing is not None
-                    else f"dir_{uuid.uuid4().hex[:8]}")
-    needs_uncat = any(
-        r.parent_tag is None and i not in dir_indexes for i, r in enumerate(rows)
-    )
-    uncat_vec: np.ndarray | None = None
-    texts = [f"{r.tag_name}。{r.description}" for r in rows]
-    if needs_uncat and uncat_existing is None:
-        texts.append(f"{_UNCATEGORIZED_DIR_NAME}。")
-    batch_vecs = embedder.embed(texts, role="passage") if texts else []
-    if needs_uncat and uncat_existing is None and len(batch_vecs) > len(rows):
-        uncat_vec = batch_vecs[len(rows)]
-
-    issues: list[tuple[int, Issue]] = []  # (行下标, issue)——最终按行序回排
-
-    def _check_dir_row(i: int, r: TagRow, parent_index: int | None) -> None:
-        """单个目录行的依赖序检查：alias_conflict → 父解析 → 幂等复用/计划。
-
-        父行已检查但无计划（被拒）→ 本行 parent_not_found 并级联——其批内
-        子孙下一轮因父无计划而同样走此分支，零静默搁浅。
-        """
-        checked_dir.add(i)
-        vec = batch_vecs[i]
-
-        # 1) alias_conflict（目录行别名同样不得撞标签名/批内共享）
-        conflict_alias, conflict_detail = _alias_conflict(r, i)
-        if conflict_alias is not None:
-            issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
-            return
-
-        # 2) 父解析：批内目录行计划 / 库内同名目录 / 根
-        parent_plan: _DirPlan | None = None
-        parent_db_id: str | None = None
-        if r.parent_tag is not None:
-            if parent_index is not None:
-                parent_plan = plans.get(parent_index)
-                if parent_plan is None:
-                    # 父目录行在本批未通过校验：本行拦截，子孙级联
-                    issues.append((i, Issue(
-                        r.tag_name, "parent_not_found",
-                        f"父目录「{r.parent_tag}」在本批未通过校验")))
-                    return
-            else:
-                db_parent = db_dir_by_name.get(r.parent_tag)
-                if db_parent is None:
-                    issues.append((i, Issue(
-                        r.tag_name, "parent_not_found",
-                        f"父目录「{r.parent_tag}」不在库内或本批")))
-                    return
-                parent_db_id = db_parent.dir_id
-
-        # 3) 幂等复用：同 (父目录, 目录名) 的批内计划 / 库内目录直接复用
-        parent_id = (parent_plan.dir_id if parent_plan is not None
-                     else parent_db_id)
-        key = (parent_id, r.tag_name)
-        dedup = plan_by_key.get(key)
-        if dedup is not None:
-            plan_by_name.setdefault(r.tag_name, dedup)
-            return
-        db_reuse = db_dir_by_key.get(key)
-        if db_reuse is not None:
-            plan = _DirPlan(row=r, vec=vec, dir_id=db_reuse.dir_id,
-                            parent_plan=parent_plan, parent_db_id=parent_db_id,
-                            reused=True)
+    # 2) 父解析：批内目录行计划 / 库内同名目录 / 根
+    parent_plan: _DirPlan | None = None
+    parent_db_id: str | None = None
+    if r.parent_tag is not None:
+        if parent_index is not None:
+            parent_plan = state.plans.get(parent_index)
+            if parent_plan is None:
+                # 父目录行在本批未通过校验：本行拦截，子孙级联
+                issues.append((i, Issue(
+                    r.tag_name, "parent_not_found",
+                    f"父目录「{r.parent_tag}」在本批未通过校验")))
+                return
         else:
-            plan = _DirPlan(row=r, vec=vec,
-                            dir_id=(r.tag_id if r.tag_id
-                                    else f"dir_{uuid.uuid4().hex[:8]}"),
-                            parent_plan=parent_plan, parent_db_id=parent_db_id,
-                            reused=False)
-        plans[i] = plan
-        plan_by_name.setdefault(r.tag_name, plan)
-        plan_by_key[key] = plan
-        checked_plans.append(plan)
+            db_parent = db_dir_by_name.get(r.parent_tag)
+            if db_parent is None:
+                issues.append((i, Issue(
+                    r.tag_name, "parent_not_found",
+                    f"父目录「{r.parent_tag}」不在库内或本批")))
+                return
+            parent_db_id = db_parent.dir_id
 
-    # ---------- 第一遍 A：目录行按父链依赖序检查（父计划就绪才判子行） ----------
-    # 目录行不能按行序直判（子行可能先于父行出现），按依赖序反复扫描：
-    # 父目录行已决（有计划或已被拒）才检查本行；永不能就绪的行即批内环
-    # 链成员（含链入环的行），整链报 parent_cycle。
-    checked_dir: set[int] = set()
-    plans: dict[int, _DirPlan] = {}  # 行下标 → 计划
-    plan_by_name: dict[str, _DirPlan] = {}  # 裸名 → 首个同名目录行计划
-    plan_by_key: dict[tuple[str | None, str], _DirPlan] = {}  # (父id, 名) → 计划
-    checked_plans: list[_DirPlan] = []  # 拓扑序（父先于子），插入阶段按序消费
+    # 3) 幂等复用：同 (父目录, 目录名) 的批内计划 / 库内目录直接复用
+    parent_id = (parent_plan.dir_id if parent_plan is not None
+                 else parent_db_id)
+    key = (parent_id, r.tag_name)
+    dedup = state.plan_by_key.get(key)
+    if dedup is not None:
+        state.plan_by_name.setdefault(r.tag_name, dedup)
+        return
+    db_reuse = db_dir_by_key.get(key)
+    if db_reuse is not None:
+        plan = _DirPlan(row=r, vec=vec, dir_id=db_reuse.dir_id,
+                        parent_plan=parent_plan, parent_db_id=parent_db_id,
+                        reused=True)
+    else:
+        plan = _DirPlan(row=r, vec=vec,
+                        dir_id=(r.tag_id if r.tag_id
+                                else f"dir_{uuid.uuid4().hex[:8]}"),
+                        parent_plan=parent_plan, parent_db_id=parent_db_id,
+                        reused=False)
+    state.plans[i] = plan
+    state.plan_by_name.setdefault(r.tag_name, plan)
+    state.plan_by_key[key] = plan
+    state.checked_plans.append(plan)
+
+
+def _check_dir_rows_by_dependency(
+        dir_items: list[tuple[int, TagRow]], state: _DirPlanState,
+        issues: list[tuple[int, Issue]], *, batch_vecs,
+        db_dir_by_name, db_dir_by_key, db_define_names,
+        tag_name_owners, alias_owners) -> None:
+    """第一遍 A：目录行按父链依赖序检查（父计划就绪才判子行）。
+
+    目录行不能按行序直判（子行可能先于父行出现），按依赖序反复扫描：
+    父目录行已决（有计划或已被拒）才检查本行；永不能就绪的行即批内环
+    链成员（含链入环的行），整链报 parent_cycle。
+    """
     item_by_name: dict[str, tuple[int, TagRow]] = {}
     for i, r in dir_items:
         item_by_name.setdefault(r.tag_name, (i, r))
@@ -364,11 +322,17 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         still_pending: list[tuple[int, TagRow]] = []
         for i, r in remaining:
             parent_item = item_by_name.get(r.parent_tag) if r.parent_tag else None
-            if parent_item is not None and parent_item[0] not in checked_dir:
+            if parent_item is not None and parent_item[0] not in state.checked:
                 still_pending.append((i, r))  # 父目录行未决，等下一轮
                 continue
             progressed = True
-            _check_dir_row(i, r, parent_item[0] if parent_item else None)
+            _check_dir_row(i, r, parent_item[0] if parent_item else None,
+                           state, issues, batch_vecs=batch_vecs,
+                           db_dir_by_name=db_dir_by_name,
+                           db_dir_by_key=db_dir_by_key,
+                           db_define_names=db_define_names,
+                           tag_name_owners=tag_name_owners,
+                           alias_owners=alias_owners)
         remaining = still_pending
         if not progressed:
             break
@@ -376,16 +340,21 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
         # 批内父链成环（含链入环的行）：目录行整链拦截
         issues.append((i, Issue(
             r.tag_name, "parent_cycle", f"批内父链成环（涉及「{r.parent_tag}」）")))
-        checked_dir.add(i)
+        state.checked.add(i)
 
-    # 「未分类」解析回填：批内层级根目录恰名「未分类」时，扁平行复用该
-    # 批内目录计划（plan_by_key 根键），不自动新建第二个同名根目录；
-    # 批内无此计划（或该行被拒）时维持库内/新建回退值
-    uncat_plan = plan_by_key.get((None, _UNCATEGORIZED_DIR_NAME))
-    if uncat_plan is not None:
-        uncat_dir_id = uncat_plan.dir_id
 
-    # ---------- 第一遍 B：标签行按行序检查，判定即停 ----------
+def _check_tag_rows(rows: list[TagRow], dir_indexes: set[int],
+                    plan_by_name: dict[str, _DirPlan], db_dir_by_name,
+                    db_define_by_key, db_define_names: set[str],
+                    tag_name_owners: dict[str, list[int]],
+                    alias_owners: dict[str, list[int]],
+                    uncat_dir_id: str, batch_vecs,
+                    issues: list[tuple[int, Issue]]) -> list[_ValidTag]:
+    """第一遍 B：标签行按行序检查，判定即停。
+
+    （Task 8 拆分：目录计划查表、库内索引与别名三表显式传参，判定体
+    逐字随迁；issues 由调用方持有、就地 append。）
+    """
     valid_tags: list[_ValidTag] = []
     claimed: set[tuple[str, str]] = set()  # (目标目录标识, 标签名) 批内占用
 
@@ -429,7 +398,9 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             continue
 
         # 2) alias_conflict（目录行与标签行同规则：别名不得撞标签名）
-        conflict_alias, conflict_detail = _alias_conflict(r, i)
+        conflict_alias, conflict_detail = _alias_conflict(
+            r, i, db_define_names=db_define_names,
+            tag_name_owners=tag_name_owners, alias_owners=alias_owners)
         if conflict_alias is not None:
             issues.append((i, Issue(r.tag_name, "alias_conflict", conflict_detail)))
             continue
@@ -454,8 +425,19 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             reactivate=reactivate,
         ))
         claimed.add((claim_key, r.tag_name))
+    return valid_tags
 
-    # ---------- 第二遍：双表拓扑序统一插入（逐行 flush 保证父行先落库） ----------
+
+def _insert_planned_rows(session: Session, now: datetime, task_id: str,
+                         checked_plans: list[_DirPlan],
+                         valid_tags: list[_ValidTag], *, needs_uncat: bool,
+                         uncat_existing, uncat_plan, uncat_dir_id: str,
+                         uncat_vec) -> list[str]:
+    """第二遍：双表拓扑序统一插入（逐行 flush 保证父行先落库）。
+
+    （Task 8 拆分：判定产物 checked_plans/valid_tags 与「未分类」回退值
+    显式传参，插入体逐字随迁。）
+    """
     inserted: list[str] = []
 
     # 1) 目录：按拓扑序插入未复用计划（自引用外键无 relationship()，逐行
@@ -578,13 +560,16 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
             created_at=now,
         ))
         inserted.append(v.tag_id)
+    return inserted
 
-    # ---------- 导入任务摘要落库并提交 ----------
-    # total 仅计标签定义行（目录行不计）：同 inserted/skipped 的标签行
-    # 口径——目录创建属结构落位，不进计数（如 37 目录 + 514 标签的模板
-    # 文件 total=514 而非 551）
-    total = len(rows) - len(dir_items)
-    ordered_issues = [issue for _i, issue in sorted(issues, key=lambda pair: pair[0])]
+
+def _write_import_summary(session: Session, task: TagImportTask, total: int,
+                          ordered_issues: list[Issue], inserted: list[str],
+                          parse_errors: list[RowError] | None) -> None:
+    """导入任务摘要落库并提交（status=completed + result_summary JSON）。
+
+    （Task 8 拆分：判定/插入产物与 total 显式传参，摘要体逐字随迁。）
+    """
     summary = {
         "total": total,
         "inserted": len(inserted),
@@ -597,4 +582,154 @@ def run_governance(rows: list[TagRow], session: Session, embedder,
     task.result_summary = json.dumps(summary, ensure_ascii=False)
     session.add(task)
     session.commit()
+
+
+def _load_db_baseline(session: Session) -> tuple[
+        dict[str, TagCatalog], dict[tuple[str | None, str], TagCatalog],
+        dict[tuple[str, str], TagDefine], set[str]]:
+    """库内基线：目录/标签的解析索引（原 run_governance 首段逐字随迁）。
+
+    - 裸名解析：根目录优先、同级按 dir_id 稳定（多目录同名时取首个，
+      与 v1 batch_by_name/db_by_name 的"按名解析"语义一脉相承）；
+    - (父目录 id, 目录名) → 目录行：目录幂等复用查表（根目录 NULL 键由
+      服务层查重——UNIQUE 对 NULL 互不区分，沿 v1 0006 口径）。
+    """
+    db_dirs = session.query(TagCatalog).all()
+    db_dir_by_name: dict[str, TagCatalog] = {}
+    for d in sorted(db_dirs, key=lambda d: (d.parent_id is not None, d.dir_id)):
+        db_dir_by_name.setdefault(d.dir_name, d)
+    db_dir_by_key: dict[tuple[str | None, str], TagCatalog] = {}
+    for d in db_dirs:
+        db_dir_by_key.setdefault((d.parent_id, d.dir_name), d)
+
+    db_defines = session.query(TagDefine).all()
+    db_define_by_key = {(t.dir_id, t.tag_name): t for t in db_defines}
+    db_define_names = {t.tag_name for t in db_defines if t.status != "deprecated"}
+    return db_dir_by_name, db_dir_by_key, db_define_by_key, db_define_names
+
+
+def _classify_batch_rows(rows: list[TagRow]) -> tuple[
+        list[tuple[int, TagRow]], set[int], dict[str, list[int]],
+        dict[str, list[int]]]:
+    """批内分类：显式目录标记优先，其余按"被引用名"推断 + 别名归属预扫描。
+
+    解析层知道行是目录（双表模板目录 sheet / 层级列 / XML level 节点）时
+    带 is_dir=True，空目录因此不再退化为标签行；未表态的行（旧扁平模板、
+    直接构造 TagRow 的调用方）仍按名称被引用来推断，行为与 v2 初版一致。
+    （原 run_governance 段逐字随迁；别名预扫描 v1 语义：共享别名判冲突，
+    全部行参与。）
+    """
+    referenced_names = referenced_dir_names(rows)
+    dir_items = batch_dir_items(rows)
+    dir_indexes = {i for i, _r in dir_items}
+    tag_name_owners: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        if i not in dir_indexes:
+            tag_name_owners.setdefault(r.tag_name, []).append(i)
+
+    alias_owners: dict[str, list[int]] = {}
+    for i, r in enumerate(rows):
+        # TagRow.aliases 标注 list[str]，但直接构造可传 None：按"None = 无
+        # 别名"兼容
+        for alias in (r.aliases or []):
+            alias_owners.setdefault(alias, []).append(i)
+    return dir_items, dir_indexes, tag_name_owners, alias_owners
+
+
+def _embed_rows(rows: list[TagRow], dir_indexes: set[int], embedder,
+                db_dir_by_name: dict[str, TagCatalog]) -> tuple[
+        TagCatalog | None, str, bool, np.ndarray | None, list]:
+    """批量编码：全部待检行一次 embed（判定与插入共用同一批向量）。
+
+    扁平标签行需要自动「未分类」目录且库内没有时，其文本作为尾项并入
+    同一批调用（仍是单次批量编码，无逐行调用）。向量与行按下标对齐，
+    尾项向量单独取用。role=passage：入库向量成为被检索语料（与召回/
+    归一的 query 侧相对）。
+    （原 run_governance 段逐字随迁；「未分类」落点回退值（库内 > 新建）
+    在 pass A 后可被批内计划改指，见 run_governance 的 uncat_plan 回填。）
+    """
+    uncat_existing = db_dir_by_name.get(_UNCATEGORIZED_DIR_NAME)
+    uncat_dir_id = (uncat_existing.dir_id if uncat_existing is not None
+                    else f"dir_{uuid.uuid4().hex[:8]}")
+    needs_uncat = any(
+        r.parent_tag is None and i not in dir_indexes for i, r in enumerate(rows)
+    )
+    uncat_vec: np.ndarray | None = None
+    texts = [f"{r.tag_name}。{r.description}" for r in rows]
+    if needs_uncat and uncat_existing is None:
+        texts.append(f"{_UNCATEGORIZED_DIR_NAME}。")
+    batch_vecs = embedder.embed(texts, role="passage") if texts else []
+    if needs_uncat and uncat_existing is None and len(batch_vecs) > len(rows):
+        uncat_vec = batch_vecs[len(rows)]
+    return uncat_existing, uncat_dir_id, needs_uncat, uncat_vec, batch_vecs
+
+
+def run_governance(rows: list[TagRow], session: Session, embedder,
+                   config: GovernanceConfig | None = None, *,
+                   task: TagImportTask | None = None,
+                   file_name: str = "governance",
+                   parse_errors: list[RowError] | None = None) -> GovernanceResult:
+    """治理一批标签行：分类落位 → 校验 → 双表拓扑序入库 → 任务摘要与
+    审计日志落库并提交。
+
+    config 参数保留仅为既有调用方（tests、API 路由）签名兼容；
+    semantic_similar 检查退役后其阈值不再参与判定，配置对象被忽略。
+    """
+    now = datetime.now(timezone.utc)
+    if task is None:
+        task = TagImportTask(
+            task_id=f"task_{uuid.uuid4().hex[:8]}", file_name=file_name, created_at=now,
+        )
+    task_id = task.task_id
+
+    # ---------- 库内基线 ----------
+    (db_dir_by_name, db_dir_by_key, db_define_by_key,
+     db_define_names) = _load_db_baseline(session)
+
+    # ---------- 批内分类：显式目录标记优先，其余按"被引用名"推断 ----------
+    dir_items, dir_indexes, tag_name_owners, alias_owners = _classify_batch_rows(rows)
+
+    # ---------- 批量编码：全部待检行一次 embed ----------
+    (uncat_existing, uncat_dir_id, needs_uncat, uncat_vec,
+     batch_vecs) = _embed_rows(rows, dir_indexes, embedder, db_dir_by_name)
+
+    issues: list[tuple[int, Issue]] = []  # (行下标, issue)——最终按行序回排
+
+    # ---------- 第一遍 A：目录行按父链依赖序检查（父计划就绪才判子行） ----------
+    # 两个嵌套闭包（_alias_conflict/_check_dir_row）与其共享的 6 个外层可变
+    # 状态已拆为模块级函数 + _DirPlanState（Task 8），原实现逐字随迁。
+    state = _DirPlanState()
+    _check_dir_rows_by_dependency(
+        dir_items, state, issues, batch_vecs=batch_vecs,
+        db_dir_by_name=db_dir_by_name, db_dir_by_key=db_dir_by_key,
+        db_define_names=db_define_names, tag_name_owners=tag_name_owners,
+        alias_owners=alias_owners)
+
+    # 「未分类」解析回填：批内层级根目录恰名「未分类」时，扁平行复用该
+    # 批内目录计划（plan_by_key 根键），不自动新建第二个同名根目录；
+    # 批内无此计划（或该行被拒）时维持库内/新建回退值
+    uncat_plan = state.plan_by_key.get((None, _UNCATEGORIZED_DIR_NAME))
+    if uncat_plan is not None:
+        uncat_dir_id = uncat_plan.dir_id
+
+    # ---------- 第一遍 B：标签行按行序检查，判定即停 ----------
+    valid_tags = _check_tag_rows(
+        rows, dir_indexes, state.plan_by_name, db_dir_by_name,
+        db_define_by_key, db_define_names, tag_name_owners, alias_owners,
+        uncat_dir_id, batch_vecs, issues)
+
+    # ---------- 第二遍：双表拓扑序统一插入（逐行 flush 保证父行先落库） ----------
+    inserted = _insert_planned_rows(
+        session, now, task_id, state.checked_plans, valid_tags,
+        needs_uncat=needs_uncat, uncat_existing=uncat_existing,
+        uncat_plan=uncat_plan, uncat_dir_id=uncat_dir_id, uncat_vec=uncat_vec)
+
+    # ---------- 导入任务摘要落库并提交 ----------
+    # total 仅计标签定义行（目录行不计）：同 inserted/skipped 的标签行
+    # 口径——目录创建属结构落位，不进计数（如 37 目录 + 514 标签的模板
+    # 文件 total=514 而非 551）
+    total = len(rows) - len(dir_items)
+    ordered_issues = [issue for _i, issue in sorted(issues, key=lambda pair: pair[0])]
+    _write_import_summary(session, task, total, ordered_issues, inserted,
+                          parse_errors)
     return GovernanceResult(task_id=task_id, inserted=inserted, issues=ordered_issues)

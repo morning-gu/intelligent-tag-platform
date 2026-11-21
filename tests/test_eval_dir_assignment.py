@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from conftest import MOCK_EMBEDDER
 
-from tagplatform.library import _DIR_SAMPLE_TAGS, try_load_library
+from tagplatform.services.tags.library import _DIR_SAMPLE_TAGS, try_load_library
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "eval_dir_assignment.py"

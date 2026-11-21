@@ -30,8 +30,8 @@ import pytest
 
 from conftest import MOCK_EMBEDDER
 from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
-from tagplatform.governance import TagRow, run_governance
-from tagplatform.governance.pipeline import (
+from tagplatform.services.tags.governance import TagRow, parse_tag_excel, run_governance
+from tagplatform.services.tags.governance.pipeline import (
     GovernanceConfig,
     is_directory_row,
     referenced_dir_names,
@@ -83,6 +83,36 @@ def test_is_dir_marker_overrides_reference_inference():
     assert is_directory_row(by_name["剧情"], referenced) is True
     assert is_directory_row(by_name["冒名标签"], referenced) is False  # False 优先
     assert is_directory_row(by_name["被引用"], referenced) is True  # None→被引用
+
+
+# ---------- 解析输出净化（Task 8：excel.py pprint 调试残留删除） ----------
+
+def test_parse_tag_excel_prints_nothing(capsys):
+    """治理解析三条生产路径（扁平/层级/双表模板）都不再打印 stdout。
+
+    excel.py 曾在三处解析路径尾部 pprint 整个解析结果（调试残留），
+    经 API 上传导入时会污染服务日志与任务输出。
+    """
+    from tests.test_excel_dual_sheet_parse import build_dual_xlsx
+    from tests.test_excel_parse import build_xlsx
+
+    parse_tag_excel(build_xlsx([
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["悬疑", "val_fixed", "以悬念为核心", "剧情", "悬念,推理", "active"],
+    ]))
+    assert capsys.readouterr().out == ""
+    parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述",
+         "标签生成方式"],
+        ["内容", "剧情", None, "反转", "结局出人意料", None],
+    ]))
+    assert capsys.readouterr().out == ""
+    parse_tag_excel(build_dual_xlsx(
+        dir_rows=[[None, 1, None, "内容特征标签", "dir_static", "content",
+                   "目录描述", ""]],
+        tag_rows=[["tag_x", "悬疑", "内容特征标签", "val_fixed", "以悬念为核心", ""]],
+    ))
+    assert capsys.readouterr().out == ""
 
 
 # ---------- 落位拆分（Review Focus 5） ----------

@@ -25,7 +25,7 @@ from tagplatform.services.generation import Evidence, GenerationPolicy, Generati
 from tagplatform.services.generation.closed import producer as closed_module
 from tagplatform.services.generation.closed.producer import ClosedTagProducer
 from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
-from tagplatform.library import (
+from tagplatform.services.tags.library import (
     DIR_ASSET,
     Directory,
     TagDef,

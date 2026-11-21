@@ -25,7 +25,7 @@ from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
 from tagplatform.services.generation.open.mtg.merge import merge_candidates
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.settings import Settings
 from tests.library_fixture import add_tags
 

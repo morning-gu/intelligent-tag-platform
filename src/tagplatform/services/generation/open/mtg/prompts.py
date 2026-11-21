@@ -36,6 +36,18 @@ DIMENSIONS: dict[str, str] = {
 # 目录挂载粒度 → 提示词里的中文说明（只影响措辞，不参与校验）
 _SCOPE_LABELS = {"content": "整片", "scene": "单场景", "character": "人物"}
 
+
+def _scope_label(scope: str | None) -> str:
+    """目录 scope 文本 → 提示词粒度标签。
+
+    组合值（"content,scene,character"——治理导入目录的默认写法）逐词取
+    标签后以"/"连接；未知词原样保留（与旧 .get 兜底一致）。
+    """
+    tokens = [t.strip() for t in (scope or "").split(",") if t.strip()]
+    if not tokens:
+        return scope or ""
+    return "/".join(_SCOPE_LABELS.get(token, token) for token in tokens)
+
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
 
@@ -205,7 +217,7 @@ def _dir_hint_block(dirs: list[dict]) -> str:
     """
     lines = []
     for entry in dirs:
-        label = _SCOPE_LABELS.get(entry.get("scope") or "", entry.get("scope") or "")
+        label = _scope_label(entry.get("scope"))
         lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
     return (
         "## 可以放新标签的目录\n"

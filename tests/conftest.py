@@ -44,7 +44,7 @@ def tag_library(tmp_path):
     fixture 之后会再绑它们自己的引擎并灌默认行（那一步受
     `@pytest.mark.empty_library` 控制，避免污染"空库"用例）。
     """
-    from tagplatform import library as library_mod
+    from tagplatform.services.tags import library as library_mod
     from tagplatform.capabilities.storage import create_engine_for
     from tagplatform.capabilities.storage.models import Base
     from tests.library_fixture import bind_engine, unbind_engine, write_library

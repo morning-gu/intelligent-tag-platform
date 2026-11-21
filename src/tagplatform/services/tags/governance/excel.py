@@ -39,11 +39,10 @@
 """
 
 import io
-from pprint import pprint
 
 import openpyxl
 
-from tagplatform.governance.models import (
+from tagplatform.services.tags.governance.models import (
     BadCell as _BadCell,
     ExcelParseResult,
     ImportParseResult,
@@ -83,17 +82,7 @@ __all__ = [
     "DUAL_DIR_COLUMNS",
     "DUAL_TAG_COLUMNS",
     "parse_tag_excel",
-    "print_parse_result",
 ]
-
-
-def print_parse_result(result: ExcelParseResult) -> None:
-    """以易读的结构打印 Excel 解析结果。"""
-    pprint({
-        "rows": [row.__dict__ for row in result.rows],
-        "errors": [error.__dict__ for error in result.errors],
-        "header_error": result.header_error,
-    }, sort_dicts=False)
 
 
 def _build_header_map(first_row: tuple) -> dict[str, int]:
@@ -323,7 +312,6 @@ def _parse_dual_sheet_excel(workbook) -> ExcelParseResult:
     _tag_sheet, _tag_header_row, _tag_header_map = specs[1]
     _parse_dual_tag_sheet(
         workbook[_tag_sheet], _tag_header_map, _tag_header_row, result)
-    print_parse_result(result)
     return result
 
 
@@ -432,7 +420,6 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
                 return ExcelParseResult(
                     header_error=f"表头缺少必需列：{'、'.join(missing)}")
             result = _parse_hierarchy_excel(worksheet, header_map)
-            print_parse_result(result)
             return result
 
         missing = [name for name in REQUIRED_COLUMNS if name not in header_map]
@@ -483,7 +470,6 @@ def parse_tag_excel(data: bytes) -> ExcelParseResult:
                 continue
 
             result.rows.append(build_tag_row(texts))
-        print_parse_result(result)
         return result
     finally:
         workbook.close()

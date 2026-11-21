@@ -45,7 +45,7 @@ from tagplatform.api.routers.generation import (
     _tag_info,
 )
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, UserAccount
-from tagplatform.library import try_load_library
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.services.generation.persist import SYSTEM_REVIEWER
 from tagplatform.services.generation.review import ConflictError, apply_review
 

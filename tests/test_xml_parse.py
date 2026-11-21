@@ -1,6 +1,6 @@
 """XML 标签导入解析测试。"""
 
-from tagplatform.governance import parse_tag_xml
+from tagplatform.services.tags.governance import parse_tag_xml
 
 
 def test_xml_matches_excel_result_shape():

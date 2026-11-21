@@ -10,7 +10,7 @@ tag_define（经 dir_id 挂目录）、正式挂载在 asset_tag。
   tag_catalog 链（imports.py 的批次导出共用 _build_export_archive）。
 
 薄路由层：导入解析（按扩展名选择 Excel/XML）→ 治理（run_governance）→
-响应模型，业务规则全部在 tagplatform.governance 与 DB 层，router 只做
+响应模型，业务规则全部在 tagplatform.services.tags.governance 与 DB 层，router 只做
 协议转换与错误映射（解析失败/坏表头 → 422；未知 tag_id → 404）。
 """
 
@@ -36,7 +36,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
-from tagplatform.governance import run_governance
+from tagplatform.services.tags.governance import run_governance
 from tagplatform.tasks.tag_import import TagImportFileError, parse_upload
 
 router = APIRouter(prefix="/api/v1/tags")

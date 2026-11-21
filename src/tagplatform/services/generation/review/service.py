@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import AssetTag, PreAssetTag, TagDefine
 from tagplatform.ingest import record_alias, record_tag_definition
-from tagplatform.library import TagLibrary, try_load_library
+from tagplatform.services.tags.library import TagLibrary, try_load_library
 
 logger = logging.getLogger(__name__)
 
