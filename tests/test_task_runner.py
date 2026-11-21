@@ -21,7 +21,8 @@
 
 Mock 技巧（与 llm/mock.py 咬合）：
 - MockLLM 模式 A 按 sha256(run_id + tag_id) < 0.4 独立采样选中，分值为
-  4 或 5；run_id 由 runner 内部 uuid 生成不可控——成功路径测试播种 30 枚候选，零选中
+  4 或 5；run_id 由执行序列（execute.py）内部 uuid 生成不可控——成功路径
+  测试播种 30 枚候选，零选中
   概率 0.6^30 ≈ 2e-7，构造上消除 flake；默认 policy 解析路径由失败类测试
   覆盖（produce 异常前 policy 已解析）。
 """
@@ -43,11 +44,8 @@ from tagplatform.capabilities.storage.models import (
     TagGenerationTask,
 )
 from tagplatform.capabilities.llm.client import LLMResponse
-from tagplatform.tasks import (
-    TaskExecutor,
-    reset_orphan_running,
-    run_generation_task,
-)
+from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.tasks import TaskExecutor, reset_orphan_running
 from tagplatform.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
@@ -229,7 +227,7 @@ def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch
         sess.flush()
         raise ValueError("persist 中途失败（桩）")
 
-    monkeypatch.setattr("tagplatform.tasks.runner.persist_tags", boom)
+    monkeypatch.setattr("tagplatform.services.generation.execute.persist_tags", boom)
     t = _make_task(session)
     run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert t.status == "failed" and "persist 中途失败" in t.error

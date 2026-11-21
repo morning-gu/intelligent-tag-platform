@@ -10,7 +10,7 @@
 分层红线：本包不得 import fastapi（设计文档 §9.4）。
 """
 
-from tagplatform.filtering.base import (
+from tagplatform.services.generation.filtering.base import (
     FilterContext,
     FilterOutcome,
     StageReport,
@@ -19,8 +19,8 @@ from tagplatform.filtering.base import (
     register_filter,
     run_filter_chain,
 )
-from tagplatform.filtering.fence import InfoFenceFilter
-from tagplatform.filtering.quality import QualityFilter
+from tagplatform.services.generation.filtering.fence import InfoFenceFilter
+from tagplatform.services.generation.filtering.quality import QualityFilter
 
 # 默认责任链：质量评估 → 信息围栏（顺序即语义，勿调换）
 register_filter(QualityFilter())

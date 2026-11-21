@@ -37,7 +37,7 @@ from tagplatform.capabilities.storage.models import (
     TagImportTask,
 )
 from tagplatform.governance import run_governance
-from tagplatform.tag_import import TagImportFileError, parse_upload
+from tagplatform.tasks.tag_import import TagImportFileError, parse_upload
 
 router = APIRouter(prefix="/api/v1/tags")
 

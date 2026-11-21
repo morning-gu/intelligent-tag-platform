@@ -26,7 +26,7 @@ from tagplatform.capabilities.storage.models import (
     TagGenerationTask,
 )
 from tagplatform.services.generation import ProducedTag
-from tagplatform.tasks import run_generation_task
+from tagplatform.services.generation.execute import run_generation_task
 
 _CONTENT = {
     "schema_version": "1.0",

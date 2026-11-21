@@ -16,7 +16,7 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 from tagplatform.capabilities.adapters import get_adapter
 from tagplatform.content_import import import_content
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, TagGenerationTask
-from tagplatform.tasks import run_generation_task
+from tagplatform.services.generation.execute import run_generation_task
 
 UPSTREAM = {
     "schema_version": "1.0",

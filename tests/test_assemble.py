@@ -8,8 +8,8 @@
 - test_snapshot_isolation_after_db_change：context 装好后变更 DB 库行，
   context 与 build_spec 产出仍用旧库（评测快照语义的单元级验收；服务级
   验收见 test_closed_eval.py::test_run_uses_run_start_library_snapshot）；
-- test_generation_and_eval_share_assembly：生成（tasks/runner）与评测
-  （closed_eval）import 的装配函数同源（零漂移的结构保证）；
+- test_generation_and_eval_share_assembly：生成（services/generation/execute）
+  与评测（closed_eval）import 的装配函数同源（零漂移的结构保证）；
 - test_closed_build_spec_renders_template / test_policy_json_override /
   test_open_mode_skips_template：原 runner.assemble_spec 两测试的两级化
   迁移 + builds_prompt 规则钉死。
@@ -17,7 +17,7 @@
 
 import tagplatform.closed_eval as closed_eval_mod
 import tagplatform.services.generation.assemble as assemble_mod
-import tagplatform.tasks.runner as runner_mod
+import tagplatform.services.generation.execute as execute_mod
 from tagplatform.services.generation.assemble import (
     AssemblyContext,
     build_spec,
@@ -114,8 +114,8 @@ def test_snapshot_isolation_after_db_change(content_fixture):
 
 def test_generation_and_eval_share_assembly():
     """生成与评测同源：两条路径 import 的装配函数是同一对象。"""
-    assert runner_mod.load_assembly_context is assemble_mod.load_assembly_context
-    assert runner_mod.build_spec is assemble_mod.build_spec
+    assert execute_mod.load_assembly_context is assemble_mod.load_assembly_context
+    assert execute_mod.build_spec is assemble_mod.build_spec
     assert (closed_eval_mod.load_assembly_context
             is assemble_mod.load_assembly_context)
     assert closed_eval_mod.build_spec is assemble_mod.build_spec

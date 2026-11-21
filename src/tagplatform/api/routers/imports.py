@@ -34,7 +34,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
-from tagplatform.tag_import import TagImportExecutor
+from tagplatform.tasks.tag_import import TagImportExecutor
 
 router = APIRouter(prefix="/api/v1/import/tasks")
 

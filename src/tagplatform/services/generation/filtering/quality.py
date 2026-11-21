@@ -9,7 +9,7 @@
 
 占位语义：返回 `FilterOutcome(tags=list(tags))`，`note` 标记"未评估"，
 方便在日志/测试里区分"没丢东西"与"根本没评估"。未来落地时只改本模块
-的 `filter`，runner 与责任链骨架零改动。
+的 `filter`，执行序列与责任链骨架零改动。
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from tagplatform.filtering.base import FilterContext, FilterOutcome
 from tagplatform.services.generation.base import ProducedTag
+from tagplatform.services.generation.filtering.base import FilterContext, FilterOutcome
 
 logger = logging.getLogger(__name__)
 

@@ -41,8 +41,8 @@ from tagplatform.capabilities.storage import create_engine_for, make_session_fac
 from tagplatform.capabilities.embed import Embedder, build_embedder
 from tagplatform.capabilities.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
-from tagplatform.tag_import import TagImportExecutor
 from tagplatform.tasks import TaskExecutor, reset_orphan_running
+from tagplatform.tasks.tag_import import TagImportExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor
 
 

@@ -21,7 +21,7 @@ import pytest
 
 from tagplatform.capabilities.storage.models import AssetTag, MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.services.generation import Evidence, ProducedTag
-from tagplatform.results import PersistSummary, persist_tags
+from tagplatform.services.generation.persist import PersistSummary, persist_tags
 
 
 def _ptag(tag_id=None, name="悬疑", origin="catalog", conf=0.9, *,

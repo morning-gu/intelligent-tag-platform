@@ -1,4 +1,11 @@
-"""标签文件解析与后台导入任务。"""
+"""标签文件解析与后台导入任务。
+
+四层重构 Task 6 起住 tasks/（执行器横切层）：TagImportExecutor 是导入
+任务的线程池执行器（提交/复位/关停），parse_upload 是上传文件的格式
+分发薄壳（xml/xlsx 判定 + 错误转译）——真正的解析与治理业务在
+tagplatform.governance（Task 8 起归 services/tags/governance），本模块
+零业务实现。
+"""
 
 import json
 import logging

@@ -46,7 +46,7 @@ from tagplatform.api.routers.generation import (
 )
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, UserAccount
 from tagplatform.library import try_load_library
-from tagplatform.results import SYSTEM_REVIEWER
+from tagplatform.services.generation.persist import SYSTEM_REVIEWER
 from tagplatform.services.generation.review import ConflictError, apply_review
 
 router = APIRouter(prefix="/api/v1")

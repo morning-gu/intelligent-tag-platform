@@ -27,7 +27,6 @@ import openpyxl
 import pytest
 from sqlalchemy import event
 
-from tagplatform import tag_import
 from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
@@ -37,6 +36,7 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
+from tagplatform.tasks import tag_import
 
 # 本模块断言导入后的**精确行数**：测试夹具不得预置标签库默认行
 pytestmark = pytest.mark.empty_library

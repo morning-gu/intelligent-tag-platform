@@ -9,7 +9,7 @@
   （doc §6.1：跨轮次质量分析查审计文件，不查待审表）。
 
 占位语义：返回 `FilterOutcome(tags=list(tags))`，`note` 标记"未围栏"。
-未来落地时只改本模块的 `filter`，runner 与责任链骨架零改动。
+未来落地时只改本模块的 `filter`，执行序列与责任链骨架零改动。
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from tagplatform.filtering.base import FilterContext, FilterOutcome
 from tagplatform.services.generation.base import ProducedTag
+from tagplatform.services.generation.filtering.base import FilterContext, FilterOutcome
 
 logger = logging.getLogger(__name__)
 

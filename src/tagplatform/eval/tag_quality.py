@@ -17,7 +17,7 @@ from tagplatform.services.generation.base import GenerationSpec
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts, render_content
 from tagplatform.library import TagLibrary
-from tagplatform.results import PersistSummary
+from tagplatform.services.generation.persist import PersistSummary
 from tagplatform.schemas import ContentJSON
 
 logger = logging.getLogger(__name__)
