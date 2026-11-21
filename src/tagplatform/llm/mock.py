@@ -5,7 +5,8 @@ sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner �
 - 模式 A（封闭提取）：prompt 含 `## 候选标签分组` 节（ClosedTagProducer
   逐组再分批追加的候选分组 JSON）→ 解析组对象的 tags 列表（tag_id/tag_name 取
   JSON 键），按 sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的
-  四键（tag_id/applicability/evidence_strength/evidences）；
+  三键（tag_id/applicability/evidence，v8 起 evidence 为 content/scene/
+  frame 三模态嵌套节）；
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
   不含 tag_id（模式 B 的 tag_id 由匹配层赋，LLM 不产出）。
 
@@ -102,32 +103,43 @@ def _pick_evidence(scenes: list[dict], hash_key: str) -> list[dict]:
 
 
 def _closed_output(text: str, run_id: str) -> list[dict]:
-    """模式 A：解析候选分组 JSON，哈希采样选中项（确定性伪判定），逐标签附场景证据。
+    """模式 A：解析候选分组 JSON，哈希采样选中项（确定性伪判定），逐标签附三模态证据。
 
     ClosedTagProducer 按目录分组、组内再分批，以 `## 候选标签分组` 节
     追加组对象（dir_id/dir_name/dir_description/tags）；一批一次调用，本
     函数单次只解析一个组对象——批内 tags 列表即该批候选。场景行在
-    content 节（标志节之前），对全文解析即可。
+    content 节（标志节之前），对全文解析即可。v8 多模态融合：输出嵌套
+    evidence 对象，content/scene/frame 三模态节各含 evidence_strength 与
+    evidences（哈希键带模态维度，三模态打分/取证据互不耦合）。
     """
     tail = text.split(_CLOSED_MARKER, 1)[1].strip()
-    group = json.loads(tail)
+    # 多模态消息里关键帧 text part 跟在组 JSON 后面（_extract_text 拼接
+    # 全部文本 part），raw_decode 只取第一个完整 JSON 值，余文不管
+    group = json.JSONDecoder().raw_decode(tail)[0]
     scenes = _parse_scenes(text)
     items = []
     for tag in group.get("tags", []):
         tag_id = str(tag["tag_id"])
         if _hash_unit(run_id + tag_id) >= _SELECT_PROB:
             continue
-        evidence = _pick_evidence(scenes, f"evidence|{run_id}|{tag_id}")
+        evidence: dict[str, dict] = {}
+        for modality in ("content", "scene", "frame"):
+            picked = _pick_evidence(
+                scenes, f"evidence|{modality}|{run_id}|{tag_id}")
+            evidence[modality] = {
+                "evidence_strength": _score_five_point(
+                    f"evidence_strength|{modality}|{run_id}|{tag_id}"),
+                "evidences": [
+                    {"scene_id": item["scene_id"],
+                     "evidence": item["description"]}
+                    for item in picked
+                ],
+            }
         items.append({
             "tag_id": tag_id,
             "applicability": _score_five_point(
                 f"applicability|{run_id}|{tag_id}"),
-            "evidence_strength": _score_five_point(
-                f"evidence_strength|{run_id}|{tag_id}"),
-            "evidences": [
-                {"scene_id": item["scene_id"], "evidence": item["description"]}
-                for item in evidence
-            ],
+            "evidence": evidence,
         })
     return items
 

@@ -137,11 +137,12 @@ def test_generation_e2e_closed_succeeded(client):
     assert first["review_status"] == "pending"
     assert 0.5 <= first["confidence"] <= 1.0
     assert 0.0 <= first["relevance_score"] <= 1.0
-    # MockLLM 场景证据（Task 6）：runner 渲染文本 prompt 含场景行 → 证据卡
-    # 一元素非空，数据来自该场景行（fixture 单场景：scene_001 [120000-180000]）
-    assert first["evidence"] == [{
+    # MockLLM 场景证据（v8）：closed 行证据 = 三模态（content/scene/frame）
+    # 各一条卡展平；fixture 单场景 → 三模态都取同一场景行（恒定）
+    expected_card = {
         "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
-        "description": "两名人物在仓库中发生激烈争执"}]
+        "description": "两名人物在仓库中发生激烈争执"}
+    assert first["evidence"] == [expected_card] * 3
 
     # pending 行不写正式挂载：等审核通过后由 review 服务挂载
     tags_resp = client.get("/api/v1/assets/movie_001/tags")
@@ -230,7 +231,7 @@ def test_generation_e2e_open_generated_rows(client):
         assert isinstance(row["relevance_score"], float)
         assert 0.0 <= row["relevance_score"] <= 1.0
         assert row["review_status"] == "pending"
-        # MockLLM 场景证据（Task 6）：open 行证据卡同样来自场景行（单场景恒定）
+        # MockLLM 场景证据：open 行证据卡同样来自场景行（单场景恒定）
         assert row["evidence"] == [{
             "scene_id": "scene_001", "start_ms": 120000, "end_ms": 180000,
             "description": "两名人物在仓库中发生激烈争执"}]

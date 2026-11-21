@@ -39,6 +39,18 @@ from tagplatform.settings import Settings
 from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
 
+def _evi(ec: int, es: int, ef: int,
+         entries: list[dict] | None = None) -> dict:
+    """嵌套三模态 evidence 对象（v8 契约；entries 同进三模态节）。
+
+    entries 为 None 时各模态节 evidences 皆为空列表——绝大多数用例只
+    关心分值与门控/选择语义，证据展开有专项用例。
+    """
+    entries = entries or []
+    return {m: {"evidence_strength": s, "evidences": list(entries)}
+            for m, s in (("content", ec), ("scene", es), ("frame", ef))}
+
+
 # 两个目录 × 各 3 条：dir_genre（静态）/ dir_mood（动态）
 _LIB_TAGS = [
     ("tag_001", "悬疑", "dir_genre", "推理"),
@@ -335,17 +347,17 @@ def test_closed_produce_batches_within_group(session, content_fixture,
     # 门控沿用 A≥3，3 条分 2 批、6 条全存活 → 输出多于 2 条，断言可分辨
     responses = {
         "tag_001": [{"tag_id": "tag_001", "applicability": 5,
-                     "evidence_strength": 5, "evidences": []}],
+                     "evidence": _evi(5, 5, 5)}],
         "tag_002": [{"tag_id": "tag_002", "applicability": 3,
-                     "evidence_strength": 3, "evidences": []}],
+                     "evidence": _evi(3, 3, 3)}],
         "tag_003": [{"tag_id": "tag_003", "applicability": 3,
-                     "evidence_strength": 3, "evidences": []}],
+                     "evidence": _evi(3, 3, 3)}],
         "tag_004": [{"tag_id": "tag_004", "applicability": 3,
-                     "evidence_strength": 3, "evidences": []}],
+                     "evidence": _evi(3, 3, 3)}],
         "tag_005": [{"tag_id": "tag_005", "applicability": 5,
-                     "evidence_strength": 5, "evidences": []}],
+                     "evidence": _evi(5, 5, 5)}],
         "tag_006": [{"tag_id": "tag_006", "applicability": 3,
-                     "evidence_strength": 3, "evidences": []}],
+                     "evidence": _evi(3, 3, 3)}],
     }
 
     class _BatchScriptedLLM:
@@ -416,20 +428,20 @@ def test_closed_produce_scores_and_selects_globally(session, content_fixture):
     responses = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 3,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
             {"tag_id": "tag_002", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
             {"tag_id": "tag_003", "applicability": 5,
-             "evidence_strength": 2, "evidences": []},
+             "evidence": _evi(2, 2, 2)},
         ],
         "dir_mood": [
             {"tag_id": "tag_004", "applicability": 4,
-             "evidence_strength": 3, "evidences": []},
+             "evidence": _evi(3, 3, 3)},
             {"tag_id": "tag_005", "applicability": 5,
-             "evidence_strength": 4, "evidences": [{
+             "evidence": _evi(4, 4, 4, [{
                  "scene_id": content_fixture.content.scenes[0].scene_id,
                  "evidence": "场景摘要",
-             }]},
+             }])},
         ],
     }
 
@@ -442,9 +454,12 @@ def test_closed_produce_scores_and_selects_globally(session, content_fixture):
     semb = {c.tag_id: c.score for c in candidates}
 
     def _sf(item: dict) -> float:
-        return (0.2 * semb[item["tag_id"]]
-                + 0.5 * (item["applicability"] - 1) / 4
-                + 0.3 * (item["evidence_strength"] - 1) / 4)
+        # v8：Sevi 为三模态融合分（默认权重 0.3/0.3/0.4）
+        sev = (0.3 * (item["evidence"]["content"]["evidence_strength"] - 1) / 4
+               + 0.3 * (item["evidence"]["scene"]["evidence_strength"] - 1) / 4
+               + 0.4 * (item["evidence"]["frame"]["evidence_strength"] - 1) / 4)
+        return 0.2 * semb[item["tag_id"]] \
+            + 0.5 * (item["applicability"] - 1) / 4 + 0.3 * sev
 
     # 门控 A≥4：tag_001（A=3）整条丢弃；两组各剩 tag_002/tag_003 与
     # tag_004/tag_005，全局 M=1 → 两组保底按 Sf 竞争，只留最高 1 条
@@ -453,9 +468,12 @@ def test_closed_produce_scores_and_selects_globally(session, content_fixture):
     winner = max(gated, key=_sf)
     assert [t.tag_id for t in out] == [winner["tag_id"]]
     assert len(out) == 1
-    # Sf 与标签成对（relevance_score）；confidence 仍为 (E−1)/4 独立读数
+    # Sf 与标签成对（relevance_score）；confidence 为三模态融合 Sevi
     assert out[0].relevance_score == pytest.approx(_sf(winner))
-    assert out[0].confidence == (winner["evidence_strength"] - 1) / 4
+    assert out[0].confidence == pytest.approx(
+        0.3 * (winner["evidence"]["content"]["evidence_strength"] - 1) / 4
+        + 0.3 * (winner["evidence"]["scene"]["evidence_strength"] - 1) / 4
+        + 0.4 * (winner["evidence"]["frame"]["evidence_strength"] - 1) / 4)
     # Sf 理论值域 [0.375, 1]：A=4 保底 0.5·0.75
     assert 0.375 <= out[0].relevance_score <= 1.0
     # 带场景 evidence 的判定完整落行（解析契约：scene_id → 场景时间轴展开）
@@ -466,7 +484,7 @@ def test_closed_produce_scores_and_selects_globally(session, content_fixture):
             start_ms=scene.time_range.start_ms,
             end_ms=scene.time_range.end_ms,
             description="场景摘要",
-        )]
+        )] * 3  # _evi(entries) 同条目进三模态节 → 展平后 3 条
 
 
 def test_closed_produce_global_selection_rules(session, content_fixture):
@@ -480,20 +498,20 @@ def test_closed_produce_global_selection_rules(session, content_fixture):
     responses = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},  # 全场最高
+             "evidence": _evi(5, 5, 5)},  # 全场最高
             {"tag_id": "tag_002", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},  # 与 001 同 API 分，
+             "evidence": _evi(5, 5, 5)},  # 与 001 同 API 分，
             #  胜负取决于 Semb——不做假设，断言从镜像召回现算
             {"tag_id": "tag_003", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},  # 组内垫底
+             "evidence": _evi(4, 4, 4)},  # 组内垫底
         ],
         "dir_mood": [
-            # 组代表候选 tag_004：A=4/E=4，但 dir_mood 只有它过门控，
+            # 组代表候选 tag_004：A=4/三模态 4，但 dir_mood 只有它过门控，
             #  即使全局 Sf 低于 dir_genre 次高，组保底也必须保它
             {"tag_id": "tag_004", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
             {"tag_id": "tag_005", "applicability": 3,
-             "evidence_strength": 5, "evidences": []},  # 门控外：丢弃
+             "evidence": _evi(5, 5, 5)},  # 门控外：丢弃
         ],
     }
     out = ClosedTagProducer().produce(spec, session,
@@ -504,9 +522,11 @@ def test_closed_produce_global_selection_rules(session, content_fixture):
     semb = {c.tag_id: c.score for c in candidates}
 
     def _sf(item: dict) -> float:
+        sev = (0.3 * (item["evidence"]["content"]["evidence_strength"] - 1) / 4
+               + 0.3 * (item["evidence"]["scene"]["evidence_strength"] - 1) / 4
+               + 0.4 * (item["evidence"]["frame"]["evidence_strength"] - 1) / 4)
         return (0.2 * semb[item["tag_id"]]
-                + 0.5 * (item["applicability"] - 1) / 4
-                + 0.3 * (item["evidence_strength"] - 1) / 4)
+                + 0.5 * (item["applicability"] - 1) / 4 + 0.3 * sev)
 
     gated = [it for g in responses.values() for it in g
              if it["applicability"] >= 4]
@@ -521,10 +541,17 @@ def test_closed_produce_global_selection_rules(session, content_fixture):
     # 输出整体按 Sf 降序（入库行序 = 相关度降序口径）
     scores = [t.relevance_score for t in out]
     assert scores == sorted(scores, reverse=True)
+
+    def _sevi(item: dict) -> float:
+        return (0.3 * (item["evidence"]["content"]["evidence_strength"] - 1) / 4
+                + 0.3 * (item["evidence"]["scene"]["evidence_strength"] - 1) / 4
+                + 0.4 * (item["evidence"]["frame"]["evidence_strength"] - 1) / 4)
+
     for row in out:
         src = next(it for it in gated if it["tag_id"] == row.tag_id)
         assert row.relevance_score == pytest.approx(_sf(src))
-        assert row.confidence == (src["evidence_strength"] - 1) / 4
+        # confidence = 三模态融合 Sevi（与 Sf 里的 Sevi 项同口径）
+        assert row.confidence == pytest.approx(_sevi(src))
 
 
 def test_closed_produce_groups_compete_when_exceeding_max(
@@ -535,14 +562,14 @@ def test_closed_produce_groups_compete_when_exceeding_max(
                        policy=GenerationPolicy(max_tags=1))
     responses = {
         "dir_genre": [{"tag_id": "tag_003", "applicability": 5,
-                       "evidence_strength": 1, "evidences": []}],
+                       "evidence": _evi(1, 1, 1)}],
         "dir_mood": [{"tag_id": "tag_004", "applicability": 5,
-                      "evidence_strength": 5, "evidences": []}],
+                      "evidence": _evi(5, 5, 5)}],
     }
     out = ClosedTagProducer().produce(spec, session,
                                       _ScriptedLLM(responses), MOCK_EMBEDDER)
-    # tag_004 的 Sf = 0.2·Semb + 0.5 + 0.3 ≥ 0.8；tag_003 的 Sf 上界
-    # 0.2 + 0.5 + 0 = 0.7 < 0.8 → 保底竞争 tag_004 胜出
+    # tag_004 的 Sf = 0.2·Semb + 0.5 + 0.3 ≥ 0.8；tag_003 的 Sevi=0，
+    # Sf 上界 0.2 + 0.5 + 0 = 0.7 < 0.8 → 保底竞争 tag_004 胜出
     assert [t.tag_id for t in out] == ["tag_004"]
     assert len(out) == 1  # 严格 ≤ M
 
@@ -557,16 +584,16 @@ def test_closed_produce_fabricated_id_filtered_before_scoring(
         "dir_genre": [
             # 编造 id 给满分：若参与选择会抢走本组唯一保底名额
             {"tag_id": "tag_fake", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
             {"tag_id": "tag_001", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
         ],
         "dir_mood": [
             # 越组引用（tag_001 属 dir_genre）：同样前置剔除，不重复入选
             {"tag_id": "tag_001", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
             {"tag_id": "tag_004", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
         ],
     }
     out = ClosedTagProducer().produce(spec, session,
@@ -594,10 +621,10 @@ def test_closed_produce_parse_retry_recovers(
     good = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 4,
-             "evidence_strength": 4, "evidences": []}],
+             "evidence": _evi(4, 4, 4)}],
         "dir_mood": [
             {"tag_id": "tag_004", "applicability": 4,
-             "evidence_strength": 4, "evidences": []}],
+             "evidence": _evi(4, 4, 4)}],
     }
 
     class _FlakyLLM(_ScriptedLLM):
@@ -621,7 +648,7 @@ def test_closed_produce_parse_retry_recovers(
                 return LLMResponse(
                     content=json.dumps(
                         [{"tag_id": "tag_001",
-                          "evidence_strength": 5, "evidences": []}],
+                          "evidence": _evi(5, 5, 5)}],
                         ensure_ascii=False),
                     usage={}, raw={}, ok=True)
             if "无法解析" in messages[0]["content"]:
@@ -659,7 +686,7 @@ def test_closed_produce_parse_retry_exhaustion_raises(
                         lambda: Settings(closed_batch_size=50))
     spec = _build_spec(session, content_fixture, run_id="r12",
                        policy=GenerationPolicy(max_tags=10))
-    bad = [{"tag_id": "tag_001", "evidence_strength": 5, "evidences": []}]
+    bad = [{"tag_id": "tag_001", "evidence": _evi(5, 5, 5)}]
 
     class _AlwaysBadLLM(_ScriptedLLM):
         def __init__(self):
@@ -717,14 +744,15 @@ def test_closed_produce_unmountable_dropped_before_selection(
     responses = {
         # 角色目录组头：全局最高分，老流程必占 M 名额后被丢弃
         "dir_char": [
-            {"tag_id": "tag_101", "applicability": 5, "evidence_strength": 5,
-             "evidences": [{"scene_id": "scene_001", "evidence": "主角孤胆"}]}],
+            {"tag_id": "tag_101", "applicability": 5,
+             "evidence": _evi(5, 5, 5, [{"scene_id": "scene_001",
+                                         "evidence": "主角孤胆"}])}],
         "dir_genre": [
-            {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 5,
-             "evidences": []}],
+            {"tag_id": "tag_001", "applicability": 5,
+             "evidence": _evi(5, 5, 5)}],
         "dir_mood": [
-            {"tag_id": "tag_004", "applicability": 4, "evidence_strength": 1,
-             "evidences": []}],
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence": _evi(1, 1, 1)}],
     }
     with caplog.at_level(logging.INFO, logger="tagplatform.generation.closed"):
         out = ClosedTagProducer().produce(spec, session,
@@ -753,11 +781,12 @@ def test_closed_produce_unmountable_scene_unknown_evidence_backfills(
     responses = {
         # 全局最高分，但证据场景不存在 → 挂载不出 scene 挂载点
         "dir_scene": [
-            {"tag_id": "tag_201", "applicability": 5, "evidence_strength": 5,
-             "evidences": [{"scene_id": "scene_999", "evidence": "不存在的场景"}]}],
+            {"tag_id": "tag_201", "applicability": 5,
+             "evidence": _evi(5, 5, 5, [{"scene_id": "scene_999",
+                                         "evidence": "不存在的场景"}])}],
         "dir_genre": [
-            {"tag_id": "tag_001", "applicability": 4, "evidence_strength": 1,
-             "evidences": []}],
+            {"tag_id": "tag_001", "applicability": 4,
+             "evidence": _evi(1, 1, 1)}],
         "dir_mood": [],
     }
     out = ClosedTagProducer().produce(spec, session,
@@ -776,15 +805,15 @@ def test_closed_produce_gate_drops_applicability_below_four(
     responses = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 4,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
             {"tag_id": "tag_002", "applicability": 3,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
         ],
         "dir_mood": [
             {"tag_id": "tag_004", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
             {"tag_id": "tag_005", "applicability": 1,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
         ],
     }
     out = ClosedTagProducer().produce(spec, session,
@@ -795,10 +824,11 @@ def test_closed_produce_gate_drops_applicability_below_four(
         try_load_library(), MOCK_EMBEDDER,
         embed_content_texts(content_fixture), top_k=50)}
     by_tag = {t.tag_id: t for t in out}
-    # 权重算术显式展开：Sf = 0.2·Semb + 0.5·((4−1)/4) + 0.3·((5−1)/4)
+    # 权重算术显式展开：Sf = 0.2·Semb + 0.5·((4−1)/4) + 0.3·Sevi_fused，
+    # Sevi_fused = 0.3·1 + 0.3·1 + 0.4·1（三模态全 5 分 → 融合 1.0）
     assert by_tag["tag_001"].relevance_score == pytest.approx(
         0.2 * semb["tag_001"] + 0.5 * 0.75 + 0.3 * 1.0)
-    assert by_tag["tag_001"].confidence == 1.0
+    assert by_tag["tag_001"].confidence == pytest.approx(1.0)
 
 
 def test_closed_produce_dedups_repeated_judgments(session, content_fixture):
@@ -809,17 +839,17 @@ def test_closed_produce_dedups_repeated_judgments(session, content_fixture):
     responses = {
         "dir_genre": [
             {"tag_id": "tag_001", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
             # 同标签重复判定、分数更低 → 被去重
             {"tag_id": "tag_001", "applicability": 4,
-             "evidence_strength": 2, "evidences": []},
+             "evidence": _evi(2, 2, 2)},
         ],
         "dir_mood": [
             {"tag_id": "tag_004", "applicability": 4,
-             "evidence_strength": 4, "evidences": []},
+             "evidence": _evi(4, 4, 4)},
             # 同标签重复判定、分数更高 → 覆盖前一条
             {"tag_id": "tag_004", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": _evi(5, 5, 5)},
         ],
     }
     out = ClosedTagProducer().produce(spec, session,
@@ -831,10 +861,10 @@ def test_closed_produce_dedups_repeated_judgments(session, content_fixture):
         embed_content_texts(content_fixture), top_k=50)
     semb = {c.tag_id: c.score for c in candidates}
     by_tag = {t.tag_id: t for t in out}
-    # tag_004 保留的是高分判定：Sf 用 A=5/E=5 现算
+    # tag_004 保留的是高分判定：Sf 用 A=5/三模态全 5 现算（Sevi=1.0）
     assert by_tag["tag_004"].relevance_score == pytest.approx(
         0.2 * semb["tag_004"] + 0.5 * 1.0 + 0.3 * 1.0)
-    assert by_tag["tag_004"].confidence == 1.0
+    assert by_tag["tag_004"].confidence == pytest.approx(1.0)
 
 
 def test_closed_no_candidates_raises(session, content_fixture):
@@ -912,7 +942,18 @@ def test_closed_without_library_raises(session, content_fixture):
         ClosedTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
 
-# ---- parse_closed_output：模式 A 契约校验 ----
+# ---- parse_closed_output：模式 A 契约校验（v8 嵌套三模态 evidence） ----
+
+
+def _ev_dict(ec: int, es: int, ef: int,
+             entries: list[dict] | None = None) -> dict:
+    """与 _evi 同构的显式字面量（解析层测试不经过 _evi，避免同源假绿）。"""
+    entries = entries or []
+    return {
+        "content": {"evidence_strength": ec, "evidences": list(entries)},
+        "scene": {"evidence_strength": es, "evidences": list(entries)},
+        "frame": {"evidence_strength": ef, "evidences": list(entries)},
+    }
 
 
 def test_parse_closed_bad_structure():
@@ -921,29 +962,48 @@ def test_parse_closed_bad_structure():
     with pytest.raises(LLMParseError):
         parse_closed_output('[{"tag_id": "x"}]')  # 缺键
     with pytest.raises(LLMParseError):
-        parse_closed_output('[{"tag_id":"x","applicability":6,'
-                            '"evidence_strength":4,"evidences":[]}]')
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 6,
+             "evidence": _ev_dict(4, 4, 4)}]))  # applicability 越界
     with pytest.raises(LLMParseError):
-        parse_closed_output('[{"tag_id":"x","applicability":4.5,'
-                            '"evidence_strength":4,"evidences":[]}]')
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4.5,
+             "evidence": _ev_dict(4, 4, 4)}]))  # 非整数
     with pytest.raises(LLMParseError):
-        parse_closed_output('[{"tag_id":"x","applicability":4,'
-                            '"evidence_strength":4,"evidences":[{"scene_id":"s1"}]}]')
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4,
+             "evidence": _ev_dict(4, 6, 4)}]))  # 模态分越界
+    with pytest.raises(LLMParseError):
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4,
+             "evidence": {"content": {"evidence_strength": 4,
+                                      "evidences": []},
+                          # 缺 frame 模态节
+                          "scene": {"evidence_strength": 4,
+                                    "evidences": []}}}]))
+    with pytest.raises(LLMParseError):
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4,
+             "evidence": _ev_dict(4, 4, 4, [
+                 {"scene_id": "s1"}])}]))  # 证据条目缺 evidence 键
     with pytest.raises(LLMParseError):
         parse_closed_output("not json at all")  # 非 JSON 文本
 
 
 def test_parse_closed_happy_path():
     items = parse_closed_output(json.dumps([
-        {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 4,
-         "evidences": [{"scene_id": "s1", "evidence": "开场悬念"}]},
+        {"tag_id": "tag_001", "applicability": 5,
+         "evidence": _ev_dict(4, 4, 4, [{"scene_id": "s1",
+                                         "evidence": "开场悬念"}])},
         # 边界值 [1,5] 双侧含端点
-        {"tag_id": "tag_002", "applicability": 1, "evidence_strength": 1,
-         "evidences": []},
+        {"tag_id": "tag_002", "applicability": 1,
+         "evidence": _ev_dict(1, 1, 1)},
     ], ensure_ascii=False))
     assert items[0]["tag_id"] == "tag_001"
-    assert items[0]["evidences"][0]["scene_id"] == "s1"
+    assert (items[0]["evidence"]["content"]["evidences"][0]["scene_id"]
+            == "s1")
     assert items[1]["applicability"] == 1
+    assert items[1]["evidence"]["frame"]["evidence_strength"] == 1
 
 
 def test_parse_closed_strips_markdown_code_fence():
@@ -952,8 +1012,9 @@ def test_parse_closed_strips_markdown_code_fence():
     # "Expecting value: line 1 column 1 (char 0)" → 任务失败。
     # 围栏出现与否随采样波动（同 payload 上一次裸 JSON、这一次带围栏）。
     body = json.dumps([
-        {"tag_id": "tag_001", "applicability": 5, "evidence_strength": 4,
-         "evidences": [{"scene_id": "s1", "evidence": "开场悬念"}]},
+        {"tag_id": "tag_001", "applicability": 5,
+         "evidence": _ev_dict(4, 4, 4, [{"scene_id": "s1",
+                                         "evidence": "开场悬念"}])},
     ], ensure_ascii=False)
     fenced = f"```json\n{body}\n```"
     assert parse_closed_output(fenced)[0]["tag_id"] == "tag_001"
@@ -972,76 +1033,111 @@ def test_parse_closed_drops_bare_string_evidence_entries():
     # 抛错 → 21 分钟的 728 调用任务全军覆没。非对象证据项降级为丢弃，
     # 与 runner 对未知 scene_id 证据的忽略语义一致。
     items = parse_closed_output(json.dumps([
-        {"tag_id": "452", "applicability": 5, "evidence_strength": 5,
-         "evidences": [
+        {"tag_id": "452", "applicability": 5,
+         "evidence": _ev_dict(5, 5, 5, [
              {"scene_id": "scene_001", "evidence": "黑白转彩色"},
              "scene_002",
              {"scene_id": "scene_002", "evidence": "魔幻国度"},
-         ]},
+         ])},
     ], ensure_ascii=False))
     assert items[0]["tag_id"] == "452"
-    assert len(items[0]["evidences"]) == 2
-    assert items[0]["evidences"][1]["scene_id"] == "scene_002"
+    # 畸形裸字符串在三个模态节里各丢一条，每节留 2 条
+    for modality in ("content", "scene", "frame"):
+        assert len(items[0]["evidence"][modality]["evidences"]) == 2
+        assert (items[0]["evidence"][modality]["evidences"][1]["scene_id"]
+                == "scene_002")
     # 全部证据都被丢弃时项仍合法（evidences 空数组本就是合法契约）
     items2 = parse_closed_output(json.dumps([
-        {"tag_id": "709", "applicability": 1, "evidence_strength": 5,
-         "evidences": ["scene_001", "scene_002"]},
+        {"tag_id": "709", "applicability": 1,
+         "evidence": _ev_dict(5, 5, 5, ["scene_001", "scene_002"])},
     ], ensure_ascii=False))
-    assert items2[0]["evidences"] == []
+    assert all(items2[0]["evidence"][m]["evidences"] == []
+               for m in ("content", "scene", "frame"))
 
 
 def test_parse_closed_evidence_key_singular_alias():
-    # 闭环评测首跑实锤（2026-11-20，147.3 vLLM 温度 0 + no-think，preset30
-    # 3/5 影片三连重试全灭）：模型偶发把证据数组键写成单数 evidence（与
-    # 内层证据条目键 evidence 同名，一字之差），报「缺少键: ['evidences']」。
-    # 值为列表时按别名归一为 evidences。
+    # 闭环评测首跑实锤（2026-11-20，147.3 vLLM 温度 0 + no-think）：模型
+    # 偶发把模态节的证据数组键写成单数 evidence（与内层证据条目键
+    # evidence 同名，一字之差），报「缺少键: ['evidences']」。值为列表
+    # 时按别名归一为 evidences（v8：顶层单数 evidence 是嵌套对象本身）。
     items = parse_closed_output(json.dumps([
-        {"tag_id": "619", "applicability": 2, "evidence_strength": 4,
-         "evidence": [
-             {"scene_id": "scene_054", "evidence": "马头威胁"},
-             {"scene_id": "scene_148", "evidence": "收费站伏击"},
-         ]},
+        {"tag_id": "619", "applicability": 2,
+         "evidence": {
+             "content": {"evidence_strength": 4,
+                         "evidence": [{"scene_id": "scene_054",
+                                       "evidence": "马头威胁"}]},
+             "scene": {"evidence_strength": 4,
+                       "evidence": [{"scene_id": "scene_148",
+                                     "evidence": "收费站伏击"}]},
+             "frame": {"evidence_strength": 4,
+                       "evidence": [{"scene_id": "scene_054",
+                                     "evidence": "关键帧佐证"}]},
+         }},
     ], ensure_ascii=False))
     assert items[0]["tag_id"] == "619"
-    assert len(items[0]["evidences"]) == 2
-    assert items[0]["evidences"][0]["scene_id"] == "scene_054"
-    # 顶层单对象 + evidence 单数（server.log 实锤的完整生产形态）
+    for modality, sid in (("content", "scene_054"), ("scene", "scene_148"),
+                          ("frame", "scene_054")):
+        assert (items[0]["evidence"][modality]["evidences"][0]["scene_id"]
+                == sid)
+    # 顶层单对象（server.log 实锤的完整生产形态）：单元素直返兜底
     single = parse_closed_output(json.dumps(
-        {"tag_id": "553", "applicability": 4, "evidence_strength": 3,
-         "evidence": [{"scene_id": "scene_010", "evidence": "压迫感"}]},
+        {"tag_id": "553", "applicability": 4,
+         "evidence": _ev_dict(3, 3, 3, [{"scene_id": "scene_010",
+                                         "evidence": "压迫感"}])},
         ensure_ascii=False))
     assert single[0]["tag_id"] == "553"
-    assert single[0]["evidences"][0]["scene_id"] == "scene_010"
-    # 两条键并存时 evidences 优先，别名值不覆盖
-    both = parse_closed_output(json.dumps(
-        {"tag_id": "9", "applicability": 3, "evidence_strength": 3,
-         "evidence": [{"scene_id": "scene_999", "evidence": "不应被采用"}],
-         "evidences": [{"scene_id": "scene_001", "evidence": "正主"}]},
-        ensure_ascii=False))
-    assert both[0]["evidences"][0]["scene_id"] == "scene_001"
+    assert (single[0]["evidence"]["content"]["evidences"][0]["scene_id"]
+            == "scene_010")
+    # 模态节内两键并存时 evidences 优先，别名值不覆盖
+    both = parse_closed_output(json.dumps([
+        {"tag_id": "9", "applicability": 3,
+         "evidence": {
+             "content": {"evidence_strength": 3,
+                         "evidence": [{"scene_id": "scene_999",
+                                       "evidence": "不应被采用"}],
+                         "evidences": [{"scene_id": "scene_001",
+                                        "evidence": "正主"}]},
+             "scene": {"evidence_strength": 3, "evidences": []},
+             "frame": {"evidence_strength": 3, "evidences": []},
+         }},
+    ], ensure_ascii=False))
+    assert (both[0]["evidence"]["content"]["evidences"][0]["scene_id"]
+            == "scene_001")
 
 
 def test_parse_closed_evidence_alias_stays_strict_for_non_list():
-    # 别名仅容忍「值为列表」的键名漂移；evidence 是字符串等非列表形态
-    # 仍按缺 evidences 键严格拒绝，不给畸形数据开口子。
+    # 别名仅容忍「值为列表」的键名漂移；模态节内单数键值是字符串等非
+    # 列表形态仍按缺 evidences 键严格拒绝，不给畸形数据开口子。
     with pytest.raises(LLMParseError, match="缺少键"):
         parse_closed_output(json.dumps([
-            {"tag_id": "x", "applicability": 4, "evidence_strength": 4,
-             "evidence": "一段文字"},
+            {"tag_id": "x", "applicability": 4,
+             "evidence": {
+                 "content": {"evidence_strength": 4,
+                             "evidence": "一段文字"},
+                 "scene": {"evidence_strength": 4, "evidences": []},
+                 "frame": {"evidence_strength": 4, "evidences": []},
+             }},
         ], ensure_ascii=False))
     # 别名路径下证据条目里的裸字符串沿用 PR#25 丢弃语义
     items = parse_closed_output(json.dumps([
-        {"tag_id": "7", "applicability": 3, "evidence_strength": 3,
-         "evidence": ["scene_001",
-                      {"scene_id": "scene_002", "evidence": "实锤"}]},
+        {"tag_id": "7", "applicability": 3,
+         "evidence": {
+             "content": {"evidence_strength": 3, "evidences": [
+                 {"scene_id": "scene_001", "evidence": "实锤"}]},
+             "scene": {"evidence_strength": 3, "evidence": [
+                 "scene_001",
+                 {"scene_id": "scene_002", "evidence": "实锤"}]},
+             "frame": {"evidence_strength": 3, "evidences": []},
+         }},
     ], ensure_ascii=False))
-    assert items[0]["evidences"][0]["scene_id"] == "scene_002"
+    assert (items[0]["evidence"]["scene"]["evidences"][0]["scene_id"]
+            == "scene_002")
 
 
 def test_parse_closed_error_message_has_position():
     bad = json.dumps([
-        {"tag_id": "t", "applicability": 4, "evidence_strength": 4,
-         "evidences": []},
+        {"tag_id": "t", "applicability": 4,
+         "evidence": _ev_dict(4, 4, 4)},
         {"tag_id": "x"},  # 第 1 个（0 起）元素缺键
     ], ensure_ascii=False)
     with pytest.raises(LLMParseError) as exc_info:
@@ -1056,9 +1152,32 @@ def test_parse_closed_accepts_wrapped_array():
     "不是数组"会让整个任务失败；对象里恰好一个列表值即可安全解包。
     """
     item = {"tag_id": "tag_001", "applicability": 4,
-            "evidence_strength": 4, "evidences": []}
+            "evidence": _ev_dict(4, 4, 4)}
     items = parse_closed_output(json.dumps({"tags": [item]}, ensure_ascii=False))
     assert items == [item]
     # 多个列表值无法判断哪个是结果 → 仍然报错（不猜）
     with pytest.raises(LLMParseError, match="列表值数量为 2"):
         parse_closed_output(json.dumps({"tags": [item], "warnings": []}))
+
+
+def test_parse_closed_evidences_key_alias_dict_value():
+    """旧顶层键名 evidences 挂新嵌套结构（值为 dict）→ 归一为 evidence。"""
+    items = parse_closed_output(json.dumps([
+        {"tag_id": "8", "applicability": 4,
+         "evidences": _ev_dict(4, 4, 4, [{"scene_id": "scene_001",
+                                          "evidence": "旧键名"}])},
+    ], ensure_ascii=False))
+    assert items[0]["tag_id"] == "8"
+    assert (items[0]["evidence"]["frame"]["evidences"][0]["evidence"]
+            == "旧键名")
+
+
+def test_parse_closed_flat_format_rejected():
+    """旧扁平四键输出（顶层 evidence_strength/evidences 列表）→ 严格
+    报错触发重试：新契约下顶层必须有嵌套 evidence 对象；打分口径已变，
+    静默放行旧格式会按缺键崩溃或算错融合 Sevi。"""
+    with pytest.raises(LLMParseError, match="缺少键"):
+        parse_closed_output(json.dumps([
+            {"tag_id": "x", "applicability": 4,
+             "evidence_strength": 4, "evidences": []},
+        ], ensure_ascii=False))

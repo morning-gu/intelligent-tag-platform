@@ -202,11 +202,13 @@ class _PartialPersistLLM:
     model = "stub-1"
 
     def complete(self, messages, run_id):
+        sections = {m: {"evidence_strength": 5, "evidences": []}
+                    for m in ("content", "scene", "frame")}
         content = json.dumps([
             {"tag_id": "tag_g_00", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": sections},
             {"tag_id": "unknown-tag", "applicability": 5,
-             "evidence_strength": 5, "evidences": []},
+             "evidence": {k: dict(v) for k, v in sections.items()}},
         ], ensure_ascii=False)
         return LLMResponse(content=content, usage={}, raw={}, ok=True)
 

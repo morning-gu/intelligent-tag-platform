@@ -7,12 +7,13 @@
 逐组调用 LLM 判定（组内按 closed_batch_size 分批，防单组标签过多导致
 输出截断；解析失败追加格式纠正提示重调本批一次，仍失败抛错落任务失败）
 → 契约校验解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c =
-0.2/0.5/0.3；Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1；G 为
-Sapp≥0.75 门控，A≤3 整条丢弃）→ 挂载解析前置（证据展开 + 目录粒度 →
-挂载点，解析不出的判定在选择前丢弃、不占名额）→ 全局选择（max_tags =
-全局输出上限 M：每组 Sf 最高 1 条保底，保底间按 Sf 竞争截断，剩余按
-Sf 降序补足 M−N）→ 映射 ProducedTag(origin=
-"catalog")。producer 不写库：结果落库是执行器（Task 8）的职责。
+0.2/0.5/0.3；Semb=召回余弦、Sapp/Sevi 由 1–5 分线性映射到 0–1，Sevi 为
+content/scene/frame 三模态加权融合；G 为 Sapp≥0.75 门控，A≤3 整条
+丢弃）→ 挂载解析前置（证据展开 + 目录粒度 → 挂载点，解析不出的判定
+在选择前丢弃、不占名额）→ 全局选择（max_tags = 全局输出上限 M：每组
+Sf 最高 1 条保底，保底间按 Sf 竞争截断，剩余按 Sf 降序补足 M−N）→
+映射 ProducedTag(origin="catalog")。producer 不写库：结果落库是执行器
+（Task 8）的职责。
 
 v2 增量（2026-11）：
 - 候选来自**标签库 JSON**（`spec.library`），范围由 policy.dir_ids 限定；
@@ -25,8 +26,8 @@ prompt_text，改由本 producer 按目录分组、以 JSON 格式追加到正�
 
 v4 增量（2026-12）：LLM 判定改带 1–5 分的 applicability/evidence_strength；
 终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)，Semb 取召回候选自带的余弦
-分，Sf 与标签成对（落 ProducedTag.relevance_score）；confidence 仍为
-(E−1)/4，作为证据维度的独立读数随行保留。
+分，Sf 与标签成对（落 ProducedTag.relevance_score）；confidence 保留为
+证据维度的独立读数随行保存（v8 起为三模态融合 Sevi）。
 
 v5 增量（2026-12）：组内候选再按 `closed_batch_size`（默认 1）分批送
 LLM（每批一次调用，防单组标签过多导致输出截断）；同批解析失败追加
@@ -51,6 +52,16 @@ JSON 非截断），原先一次坏输出就让整任务作废且零线索。现
 批一次，仍失败才抛 LLMParseError；传输失败不在此层重试（client 层已有
 退避）。严格语义不宽容降级：与 mtg/judge 的解析契约同口径。
 
+v8 增量（2026-12 多模态融合评分）：Sevi 从单一 evidence_strength 改为
+三模态加权融合——content（剧情描述）/ scene（场景描述）/ frame（关键
+帧）各按 1–5 打分，融合分 Sevi = Σ w_m×(S_m−1)/4（权重
+`closed_evi_weights`，默认 0.3/0.3/0.4，本地计算不依赖模型算术）。LLM
+输出契约为嵌套 evidence 对象（三模态节各含 evidence_strength + evidences
+数组）。有帧可用时（`movie_asset_root` 下按 asset_id 反查）每场景取头/
+中/尾三帧，消息改多模态 parts（文本 + image_url），帧跨批复用；无帧
+（老资产/测试环境）自动退化为纯文本消息。三模态 evidences 条目展平成
+统一 Evidence 列表（scene_id 校验保留），confidence 改为融合 Sevi。
+
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -68,10 +79,13 @@ from tagplatform.generation.base import (
     ProducedTag,
     register_producer,
 )
+from tagplatform.generation.mtg.keyframes import _local_roots
+from tagplatform.generation.mtg.prompts import encode_image, keyframe_parts
 from tagplatform.generation.recall import embed_content_texts, recall_candidates
 from tagplatform.library import DIR_ASSET
 from tagplatform.llm.parsing import LLMParseError, parse_closed_output
 from tagplatform.mounting import Mount, resolve_mount
+from tagplatform.movie_import import resolve_scene_frames
 from tagplatform.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -79,11 +93,63 @@ logger = logging.getLogger(__name__)
 # 解析重试的格式纠正提示（重调本组一次；与 mtg/judge 的 _RETRY_HINT 同思路）
 _RETRY_HINT = (
     "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
-    '每个元素必须同时包含 "tag_id"（字符串）、"applicability" 与 '
-    '"evidence_strength"（均为 1–5 整数）、"evidences"（数组，元素含 '
-    '"scene_id" 与 "evidence" 字符串）。不要用对象包装、不要任何解释文字'
-    "或 Markdown 代码块。"
+    '每个元素必须同时包含 "tag_id"（字符串）、"applicability"（1–5 整数）'
+    '与 "evidence"（对象）。evidence 内必须含 "content"、"scene"、"frame"'
+    ' 三个模态节，每节含 "evidence_strength"（1–5 整数）与 "evidences"'
+    '（数组，元素含 "scene_id" 与 "evidence" 字符串）。不要用对象包装、'
+    "不要任何解释文字或 Markdown 代码块。"
 )
+
+
+def _pick_head_mid_tail(frames: tuple) -> list:
+    """场景帧序列 → 头/中/尾三帧（不足三张时去重收缩，保持顺序）。"""
+    if not frames:
+        return []
+    picked = [frames[0], frames[len(frames) // 2], frames[-1]]
+    seen: list = []
+    for frame in picked:
+        if frame not in seen:
+            seen.append(frame)
+    return seen
+
+
+def _resolve_frame_parts(spec: GenerationSpec) -> list[dict]:
+    """按 asset_id 反查帧目录，为每个场景构建头/中/尾关键帧消息 parts。
+
+    帧定位失败（根目录不存在/资产不在根下）不是错误：返回空列表，
+    消息组装退化为纯文本。每帧 parts 复用 mtg 的 keyframe_parts 格式
+    （〔关键帧〕场景 ID 第 N/M 张 + base64 image_url）。
+    """
+    settings = get_settings()
+    roots = _local_roots(settings.movie_asset_root,
+                         settings.movie_asset_extra_roots)
+    parts: list[dict] = []
+    found_scenes = 0
+    for scene in spec.content.content.scenes:
+        try:
+            frames = resolve_scene_frames(
+                roots, scene.scene_id, asset_id=spec.asset_id)
+        except OSError as exc:
+            logger.warning("场景 %s 帧定位失败：%s", scene.scene_id, exc)
+            continue
+        if not frames:
+            continue
+        found_scenes += 1
+        picked = _pick_head_mid_tail(frames)
+        for order, frame in enumerate(picked, start=1):
+            try:
+                encoded = encode_image(frame)
+            except (OSError, ValueError) as exc:
+                logger.warning("场景 %s 帧 %s 编码失败，跳过：%s",
+                               scene.scene_id, frame.name, exc)
+                continue
+            parts.extend(keyframe_parts(
+                scene.scene_id, order, len(picked), encoded))
+    if parts:
+        logger.info(
+            "闭环多模态输入就绪：%d 个场景命中关键帧，共 %d 张"
+            "（头/中/尾）", found_scenes, len(parts) // 2)
+    return parts
 
 
 class ClosedTagProducer:
@@ -117,6 +183,10 @@ class ClosedTagProducer:
         groups: dict[str, list] = {}
         for c in candidates:
             groups.setdefault(c.dir_id, []).append(c)
+        # 4.5 关键帧装配（v8）：produce 开头一次性解析全部场景帧并编码成
+        #     消息 parts，跨目录组/批次复用（每批全量重发）。无帧（老资产
+        #     或帧根未配置）退化为纯文本消息——与既有行为兼容。
+        frame_parts = _resolve_frame_parts(spec)
         # 5. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
         #    单组标签过多易截断模型输出，组内再按 closed_batch_size 分批，
         #    每批送同构组对象（目录信息相同、tags 为该批子集，批次按召回
@@ -130,6 +200,8 @@ class ClosedTagProducer:
         dropped_gate = 0
         dropped_fabricated = 0
         batch_size = max(1, get_settings().closed_batch_size)
+        # 三模态权重（v8）：Sevi = Σ w_m×(S_m−1)/4，本地计算融合分
+        w_content, w_scene, w_frame = get_settings().closed_evi_weight_values
         for dir_id, members in groups.items():
             directory = library.directory(dir_id)
             member_ids = {c.tag_id for c in members}
@@ -159,14 +231,20 @@ class ClosedTagProducer:
                 #     与原始输出前 400 字，此前零线索），追加格式纠正提示
                 #     重调本批一次，仍失败才抛错。传输失败不在本层重试
                 #     （client 层已做退避重试），此处带组语境直接抛错。
+                #     有帧时消息走多模态 parts（v8）：prompt 全文与重试
+                #     提示都在同一个 text part 里，帧 parts 跟在后面；
+                #     无帧保持纯字符串格式（与既有测试桩兼容）。
                 parsed: list[dict] | None = None
                 parse_error: Exception | None = None
                 last_raw = ""
                 for attempt in range(2):
-                    request = ([{"role": "user", "content": prompt}]
-                               if attempt == 0 else
-                               [{"role": "user",
-                                 "content": prompt + _RETRY_HINT}])
+                    text = prompt if attempt == 0 else prompt + _RETRY_HINT
+                    request = ([{"role": "user", "content": text}]
+                               if not frame_parts else
+                               [{"role": "user", "content": [
+                                   {"type": "text", "text": text},
+                                   *frame_parts,
+                               ]}])
                     resp = llm.complete(request, spec.run_id)
                     # 传输失败 → 任务失败语义由执行器落库；此处显式抛错
                     # 透出原因（带组语境，便于定位是哪个目录组的调用坏了）
@@ -188,11 +266,12 @@ class ClosedTagProducer:
                     raise LLMParseError(
                         f"目录组 {dir_id} 重试后仍解析失败: {parse_error}；"
                         f"最后一次原始输出前 400 字：{last_raw[:400]!r}")
-                # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp/Sevi 由 1–5 分
-                #    线性映射到 0–1（(X−1)/4），Semb 取召回候选自带的余弦
-                #    分；G 为 Sapp≥0.75 的门控（A≥4 放行，A≤3 → Sf=0 整条
-                #    丢弃）。Sf 与标签成对保留。编造 tag_id 在打分前剔除
-                #    （否则会先占走组内保底名额再被丢，导致该组一条都不出）
+                # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp 由 1–5 分线性
+                #    映射到 0–1（(A−1)/4），Semb 取召回候选自带的余弦分；
+                #    Sevi 为三模态融合分（v8）；G 为 Sapp≥0.75 的门控
+                #    （A≥4 放行，A≤3 → Sf=0 整条丢弃）。Sf 与标签成对
+                #    保留。编造 tag_id 在打分前剔除（否则会先占走组内保底
+                #    名额再被丢，导致该组一条都不出）
                 logger.debug("闭环目录 %s 本批解析出 %d 条判定", dir_id,
                              len(parsed))
                 for it in parsed:
@@ -215,7 +294,12 @@ class ClosedTagProducer:
                         continue
                     candidate = by_id[it["tag_id"]]
                     s_app = (it["applicability"] - 1) / 4
-                    s_evi = (it["evidence_strength"] - 1) / 4
+                    sections = it["evidence"]
+                    s_content = (sections["content"]["evidence_strength"] - 1) / 4
+                    s_scene = (sections["scene"]["evidence_strength"] - 1) / 4
+                    s_frame = (sections["frame"]["evidence_strength"] - 1) / 4
+                    s_evi = (w_content * s_content + w_scene * s_scene
+                             + w_frame * s_frame)
                     sf = (0.2 * candidate.score + 0.5 * s_app
                           + 0.3 * s_evi)
                     prev = scored_by_tag.get(it["tag_id"])
@@ -236,7 +320,9 @@ class ClosedTagProducer:
         #     挂载点（典型：角色目录标签在多角色内容上定位不到唯一角色）
         #     的判定在**全局选择之前**淘汰，不占 M 名额——修复原先在第 6
         #     步后置丢弃且不回填导致的"选满 30 只出 28"缺额；宁可丢，不
-        #     挂错。item 结构从 (sf, it) 扩成 (sf, it, evidence, mount)
+        #     挂错。v8：三模态 evidences 条目展平成统一 Evidence 列表
+        #     （顺序 content → scene → frame，条目 scene_id 校验保留）。
+        #     item 结构从 (sf, it) 扩成 (sf, it, evidence, mount)
         scenes_by_id = {scene.scene_id: scene
                         for scene in spec.content.content.scenes}
         mounted: list[tuple[float, dict, list[Evidence], Mount]] = []
@@ -244,19 +330,21 @@ class ClosedTagProducer:
         for sf, it in items:
             candidate = by_id[it["tag_id"]]  # 编造 id 已在打分前过滤
             evidence = []
-            for item in it["evidences"]:
-                scene = scenes_by_id.get(item["scene_id"])
-                if scene is None:
-                    logger.warning(
-                        "闭环标签 %s 的证据引用未知场景 %s，已忽略该证据",
-                        it["tag_id"], item["scene_id"])
-                    continue
-                evidence.append(Evidence(
-                    scene_id=scene.scene_id,
-                    start_ms=scene.time_range.start_ms,
-                    end_ms=scene.time_range.end_ms,
-                    description=item["evidence"],
-                ))
+            for modality in ("content", "scene", "frame"):
+                for item in it["evidence"][modality]["evidences"]:
+                    scene = scenes_by_id.get(item["scene_id"])
+                    if scene is None:
+                        logger.warning(
+                            "闭环标签 %s 的 %s 模态证据引用未知场景 %s，"
+                            "已忽略该证据", it["tag_id"], modality,
+                            item["scene_id"])
+                        continue
+                    evidence.append(Evidence(
+                        scene_id=scene.scene_id,
+                        start_ms=scene.time_range.start_ms,
+                        end_ms=scene.time_range.end_ms,
+                        description=item["evidence"],
+                    ))
             mount = resolve_mount(candidate.scope, spec.asset_id,
                                   spec.content, evidence)
             if mount is None:
@@ -300,10 +388,15 @@ class ClosedTagProducer:
             len(items), len(tops), len(selected) - len(tops), len(selected),
             max_tags, dropped_gate, dropped_unmountable, dropped_fabricated)
         # 6. 映射为审核前中间态：Sf 成对绑定到标签（relevance_score）；
-        #    catalog 来源 tag_id 必有，候选目录直接取库
+        #    catalog 来源 tag_id 必有，候选目录直接取库。v8：confidence
+        #    改为三模态融合 Sevi（与 Sf 里的 Sevi 项同口径）
         produced: list[ProducedTag] = []
         for sf, it, evidence, mount in selected:
             candidate = by_id[it["tag_id"]]  # 编造 id 已在打分前过滤
+            sections = it["evidence"]
+            s_evi = (w_content * (sections["content"]["evidence_strength"] - 1) / 4
+                     + w_scene * (sections["scene"]["evidence_strength"] - 1) / 4
+                     + w_frame * (sections["frame"]["evidence_strength"] - 1) / 4)
             produced.append(ProducedTag(
                 origin="catalog",
                 tag_id=candidate.tag_id,
@@ -311,7 +404,7 @@ class ClosedTagProducer:
                 candidate_type=None,
                 candidate_description=None,
                 relevance_score=sf,
-                confidence=(it["evidence_strength"] - 1) / 4,
+                confidence=s_evi,
                 evidence=evidence,
                 dir_id=candidate.dir_id,
                 target_type=mount.target_type,

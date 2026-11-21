@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # 模式 A 判定：目录组内候选标签分批上限（每批一次 LLM 调用，防输出
     # 截断）；组内全部批次完成后才合并门控截断。<=0 视为 1
     closed_batch_size: int = 1
+    # 封闭式生成的三模态证据权重（逗号分隔，顺序固定 content,scene,frame）：
+    # 融合分 Sevi = Σ w_m×(S_m−1)/4。权重和会归一化处理，3:3:4 写成
+    # "0.3,0.3,0.4" 或 "3,3,4" 均可（TAGPLT_CLOSED_EVI_WEIGHTS 可覆盖）
+    closed_evi_weights: str = "0.3,0.3,0.4"
     # 模式 B 归一匹配阈值：与库内标签相似度 >= 该值（含等于）归入 catalog
     open_match_threshold: float = 0.85
     # 生成任务线程池大小；0 = 同步执行（测试与单步调试）
@@ -157,6 +161,26 @@ class Settings(BaseSettings):
                 f"mtg_modalities 含未知模态 {sorted(unknown)}，"
                 f"只支持 {list(MODALITIES)}")
         return frozenset(names)
+
+    @property
+    def closed_evi_weight_values(self) -> tuple[float, float, float]:
+        """`closed_evi_weights` → 归一化三模态权重 (content, scene, frame)。
+
+        权重和为 0 视为配置错误（无从归一化）；解析失败在启动/首次取值时
+        就报错，不让任务跑到一半才发现写错了。
+        """
+        try:
+            raw = [float(part) for part in self.closed_evi_weights.split(",")
+                   if part.strip()]
+        except ValueError as exc:
+            raise ValueError(
+                f"closed_evi_weights 无法解析: {self.closed_evi_weights!r}") from exc
+        if len(raw) != 3 or any(w < 0 for w in raw) or sum(raw) <= 0:
+            raise ValueError(
+                "closed_evi_weights 需为三个非负数（content,scene,frame），"
+                f"当前: {self.closed_evi_weights!r}")
+        total = sum(raw)
+        return (raw[0] / total, raw[1] / total, raw[2] / total)
 
     # ---------- 阶段 7：用标签库提升开放生成质量（2026-11） ----------
     # 总开关：关掉 = 回到"不看库"的旧行为（提示不注入、分档不做、排序不含分档）
