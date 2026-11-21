@@ -37,6 +37,11 @@ COPY src/ ./src/
 COPY alembic/ alembic.ini run_server.py ./
 COPY --from=frontend /build/dist ./frontend/dist
 
+# 权限归一化：COPY 保留构建上下文的文件模式（部署机 umask 0077 → 640）并把
+# 属主变为 root——容器进程以非 root uid（--user 1321）运行时会无权读取。
+# 统一放开读 + 目录执行位，镜像权限自包含、不依赖宿主 umask。
+RUN chmod -R a+rX /app
+
 EXPOSE 8100
 # 与裸机 start.sh 同构：单进程 uvicorn 同时托管 API 与 SPA
 # （run_server.py 的 SPA 兜底路由按 /app/frontend/dist 解析，见该文件头部注释）。
