@@ -10,8 +10,8 @@ sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner �
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
   不含 tag_id（模式 B 的 tag_id 由匹配层赋，LLM 不产出）。
 
-场景证据（Task 6）：两模式均解析 prompt 中的场景行（runner
-_render_content_text 组装的 `- {scene_id} [{start_ms}-{end_ms}] {description}`），
+场景证据（Task 6）：两模式均解析 prompt 中的场景行（装配层
+assemble._render_content_text 组装的 `- {scene_id} [{start_ms}-{end_ms}] {description}`），
 每个输出标签按 sha256(evidence|{run_id}|{tag_id 或 tag_name}) 确定性选一条
 场景行并将其描述作为 evidence 摘要——时间区间由 producer 从内容中补齐；
 演示/冒烟模式下证据链完整、evidence_coverage 非零；prompt 无场景行
@@ -28,7 +28,7 @@ import re
 
 from tagplatform.capabilities.llm.client import LLMResponse
 
-# 场景行格式（runner._render_content_text 组装，逐字对齐）：
+# 场景行格式（装配层 assemble._render_content_text 组装，逐字对齐）：
 # `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选
 # 行首词后跟 " |" 而非 " ["，两类行格式天然互斥，互不误配）
 _SCENE_LINE_RE = re.compile(r"^- (\S+) \[(\d+)-(\d+)\] (.+)$", re.MULTILINE)
@@ -82,7 +82,7 @@ def _score_five_point(key: str) -> int:
 def _parse_scenes(text: str) -> list[dict]:
     """解析 prompt 中的全部场景行（无场景行 → []，title-only 兜底的前置）。
 
-    行格式由 runner._render_content_text 组装（逐字对齐），时间戳还原为 int。"""
+    行格式由装配层 assemble._render_content_text 组装（逐字对齐），时间戳还原为 int。"""
     return [{"scene_id": sid, "start_ms": int(start), "end_ms": int(end),
              "description": desc}
             for sid, start, end, desc in _SCENE_LINE_RE.findall(text)]

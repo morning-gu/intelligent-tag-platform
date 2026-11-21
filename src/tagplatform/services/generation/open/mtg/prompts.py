@@ -7,7 +7,7 @@
 - 生成 prompt 含标志串 `## 标签生成任务`；
 - 审核 prompt 含标志串 `## 审核任务`；
 - 场景行统一为 `- {scene_id} [{start_ms}-{end_ms}] {description}`（与
-  `tasks/runner._render_content_text` 同形，Mock 的 `_SCENE_LINE_RE` 直接可解析）；
+  `services/generation/assemble._render_content_text` 同形，Mock 的 `_SCENE_LINE_RE` 直接可解析）；
 - 审核候选行统一为 `- {tag}｜{dimension}｜{reason}`（全角竖线分隔）；
 - 目录块标志串 `## 可以放新标签的目录`：只在有可扩展目录时出现，行格式
   `- {dir_id}｜{全路径}｜{粒度}`，模型的 `dir` 字段按这个 id 回填。

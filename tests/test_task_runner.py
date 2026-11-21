@@ -48,7 +48,6 @@ from tagplatform.tasks import (
     reset_orphan_running,
     run_generation_task,
 )
-from tagplatform.tasks.runner import assemble_spec
 from tagplatform.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
@@ -322,25 +321,6 @@ def test_executor_workers_zero_synchronous(tmp_path):
     engine.dispose()
 
 
-# ---- assemble_spec：spec 组装公共化（执行器与闭环评测共用）----
-
-
-def test_assemble_spec_closed_renders_active_template(session, content_fixture):
-    """closed 模式：assemble_spec 取本地模板常量渲染 content 文本组装 spec。
-
-    四层重构 Task 3 起 prompt 本地化（不读 DB）；Task 4 起第二返回值从
-    producer 协议声明（TagProducer.prompt_version）派生，int 转换保持
-    DB 版本机制时代的 v1 整数口径。
-    """
-    spec, prompt_version = assemble_spec(session, mode="closed", content=content_fixture,
-                                         task_id="t1", asset_id="a1", run_id="r1")
-    assert spec.library is not None and spec.task_id == "t1"
-    assert "摘要" in spec.prompt_text and prompt_version == 1
-
-
-def test_assemble_spec_policy_json_overrides_default(session, content_fixture):
-    """非空 policy_json 覆盖默认 GenerationPolicy（max_tags 默认 30 → 5）。"""
-    spec, prompt_version = assemble_spec(session, mode="closed", content=content_fixture,
-                                         task_id="t1", asset_id="a1", run_id="r1",
-                                         policy_json='{"max_tags": 5}')
-    assert spec.policy.max_tags == 5 and prompt_version == 1
+# spec 组装公共段的两级化测试（load_assembly_context/build_spec）已迁往
+# tests/test_assemble.py（四层重构 Task 5）；本文件的端到端用例经
+# run_generation_task 走 load → build 全链路。

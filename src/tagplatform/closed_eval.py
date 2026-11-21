@@ -21,10 +21,13 @@
 干跑运行器（ClosedEvalService，Task 4）
 =====================================
 
-起跑校验（spec 钉死顺序）→ daemon worker 持线程池逐片生成 → 终态落盘。
-每片走与正式生成**零漂移**的路径：`assemble_spec`（同一组装段，取本地
-closed 模板常量渲染）→ `ClosedTagProducer.produce`（producer 本就不落库——落库
-是正式执行器的职责），所以干跑全程对业务表只读（DB 零写入红线），评测
+起跑校验（spec 钉死顺序）→ 起跑时 `load_assembly_context` 装配**一次**
+（快照语义，四层重构 Task 5：库/策略/生产器/模板常量在起跑时定格，随
+_EvalJob 快照携带）→ daemon worker 持线程池逐片生成 → 终态落盘。
+每片走与正式生成**零漂移**的路径：`build_spec`（同一装配函数对的纯内存
+第二级，起跑快照渲染 content 文本）→ `ClosedTagProducer.produce`（producer
+本就不落库——落库是正式执行器的职责），所以干跑全程对业务表只读（DB
+零写入红线，且干跑循环零 DB 交互——装配只在起跑发生一次），评测
 产物只写 `settings.eval_output_root/<run_id>/` 六个文件：起跑即写
 meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
 每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片）、
@@ -100,11 +103,13 @@ from tagplatform.eval.closed_ranking import (
     evaluate_closed,
     spearman,
 )
-from tagplatform.services.generation import get_producer
-from tagplatform.library import try_load_library
+from tagplatform.services.generation.assemble import (
+    AssemblyContext,
+    build_spec,
+    load_assembly_context,
+)
 from tagplatform.schemas import ContentJSON
 from tagplatform.settings import Settings
-from tagplatform.tasks.runner import assemble_spec
 
 __all__ = [
     "ABORT_CONSECUTIVE",
@@ -414,7 +419,9 @@ class _EvalJob:
     `gt` 与 `tag_universe`（库∩gt，排序）随 job 持有：终态写
     raw_results 时并入 gt 向量；报告组装按 universe 限口径（后续任务）。
     库/模板版本在 start 时定格——run 中途换库/换模板不影响本 run 的
-    口径记录（meta 记的是起跑时快照）。
+    口径记录（meta 记的是起跑时快照）。`context` 是起跑时
+    `load_assembly_context` 的装配快照（Task 5）：干跑循环经它走
+    build_spec（纯内存），run 中途改库行不影响本 run 产出。
     """
 
     run_id: str
@@ -427,6 +434,9 @@ class _EvalJob:
     # 数据集根起跑快照：worker 懒加载 content.json 一律用 job 根——
     # 运行中页面切 override 不影响在跑 run（spec 隔离红线）
     dataset_root: str
+    # 装配快照（Task 5）：库/模板/策略/生产器起跑时定格，干跑循环
+    # 只经它 build_spec，全程零 DB 装配
+    context: AssemblyContext
 
 
 def _now_iso() -> str:
@@ -455,14 +465,16 @@ def _produced_rows(tags: list) -> list[dict]:
 class ClosedEvalService:
     """闭环评测干跑运行器：起跑校验 → 线程池逐片生成 → 终态落盘。
 
-    DB 零写入红线（spec §5/§9）：`_run_movie` 只调 `assemble_spec`（本地
-    模板常量渲染）与 `ClosedTagProducer.produce`（producer 不落库——落库是正
-    式执行器的事），全程对业务表只读；评测唯一的写盘位置是
-    `settings.eval_output_root/<run_id>/`。与正式生成复用同一组装段与
-    producer，评测结果因此可直接对照生产口径。
+    DB 零写入红线（spec §5/§9）：起跑时 `load_assembly_context` 装配一次
+    （Task 5 快照语义），`_run_movie` 只调 `build_spec`（起跑快照纯内存
+    渲染）与 `context.producer.produce`（producer 不落库——落库是正式
+    执行器的事），干跑循环全程零 DB 交互；评测唯一的写盘位置是
+    `settings.eval_output_root/<run_id>/`。与正式生成复用同一装配函数对
+    与 producer，评测结果因此可直接对照生产口径。
 
     线程模型：`start` 起 daemon worker；worker 主线程持
-    ThreadPoolExecutor 按 tt 序滑动提交 `_run_movie`（每片独立会话）并
+    ThreadPoolExecutor 按 tt 序滑动提交 `_run_movie`（每片独立线程，
+    经 job.context 走零 DB 干跑）并
     在完成序上收敛——每片完成即锁内更新注册表 + 追加 progress.jsonl；
     完成即锁内更新注册表 + 追加 progress.jsonl；完成序连续
     `ABORT_CONSECUTIVE` 次失败 → status=aborted（余量 future.cancel，
@@ -475,6 +487,9 @@ class ClosedEvalService:
     """
 
     def __init__(self, session_factory, llm, embedder, settings: Settings) -> None:
+        """session_factory 留自池饿死改造时代：Task 5 装配两级化后干跑循环
+        零 DB（起跑装配走全局引擎，见 load_assembly_context），服务体内
+        不再开会话；参数保留给 API 装配层（Task 11 编排接手时裁决去留）。"""
         self.settings = settings
         self._session_factory = session_factory
         self._llm = llm
@@ -529,9 +544,13 @@ class ClosedEvalService:
             gt = load_gt(root, dataset_id)
         except ValueError as exc:
             raise EvalValidationError(str(exc)) from None
-        library = try_load_library()
-        if library is None:
+        # 装配一次（Task 5 快照语义）：库/策略/生产器/模板常量在起跑时
+        # 定格——干跑循环只走 build_spec（纯内存），run 中途改库行/换模板
+        # 不影响本 run 产出（Review Focus #4 的结构保证）
+        context = load_assembly_context("closed")
+        if context.library is None:
             raise EvalValidationError("标签库未就绪，无法启动闭环评测")
+        library = context.library
         gt_tags = {tag for tags in gt.values() for tag in tags}
         library_ids = {tag.tag_id for tag in library.tags()}
         if not gt_tags & library_ids:
@@ -548,7 +567,9 @@ class ClosedEvalService:
                 gt_sha8 = hashlib.sha256(f.read()).hexdigest()[:8]
         except OSError:
             gt_sha8 = ""
-        prompt_version = self._active_prompt_version()
+        # meta 口径沿用 DB 版本机制时代的整数语义（既有契约 version=1）：
+        # 单一来源仍是 producer 协议声明（字符串留痕口径），消费方转 int
+        prompt_version = int(context.producer.prompt_version)
 
         # Busy 检查 + 注册（同一锁内原子完成：并发 start 只放行一个）
         with self._lock:
@@ -581,7 +602,7 @@ class ClosedEvalService:
         job = _EvalJob(run_id=run_id, movies=list(selected), gt=gt,
                        tag_universe=sorted(library_ids & gt_tags),
                        concurrency=concurrency, started_at=started_at,
-                       meta=meta, dataset_root=root)
+                       meta=meta, dataset_root=root, context=context)
 
         # run 目录骨架：meta 先行落盘 status=running（进程中断后可被历史
         # 扫描识别为 interrupted，不留无名目录）
@@ -818,9 +839,8 @@ class ClosedEvalService:
                     # 按 tt 序滑动补位：停止判定先于提交，余量片不进池
                     while (next_index < len(order)
                            and len(inflight) < job.concurrency):
-                        future = pool.submit(self._run_movie, job.run_id,
-                                             order[next_index],
-                                             job.dataset_root)
+                        future = pool.submit(self._run_movie, job,
+                                             order[next_index])
                         inflight[future] = order[next_index]
                         next_index += 1
                 elif inflight:
@@ -857,18 +877,18 @@ class ClosedEvalService:
             if future.cancel():
                 inflight.pop(future)
 
-    def _run_movie(self, run_id: str, tt: str, dataset_root: str) -> MovieResult:
+    def _run_movie(self, job: _EvalJob, tt: str) -> MovieResult:
         """单片干跑（线程池内执行）：共 1+RETRY_PER_MOVIE 次尝试。
 
-        每次尝试独立会话（异常后不依赖会话状态）：load → assemble_spec
-        （mode="closed"，本地模板常量渲染）→ produce（不写库）→ 产出按
-        (-sf, tag_id) 排序。**会话在 assemble 后立即归还**：produce 含
-        全部 LLM 调用（分钟级）不得持有 DB 连接（池饿死事故 2026-11-21：
-        并发 16 > QueuePool 5+10，会话横跨 produce 把池占死、平台 API 全
-        超时）；closed producer 不消费 session（全读 spec.library，assemble
-        已装好），第二参传 None——协议签名不动，正式执行器照常传真会话。
-        内容从起跑快照根加载（dataset_root）——运行中切 override 不影响
-        本 run。
+        每次尝试：load（数据集快照根）→ build_spec（起跑装配快照渲染，
+        纯内存零 DB）→ produce（不写库）→ 产出按 (-sf, tag_id) 排序。
+        干跑循环全程零 DB 交互：库/模板/策略随 job.context 起跑快照携带
+        （Task 5 快照语义——装配后变更库行，干跑产出不变），池饿死事故
+        （2026-11-21：会话横跨 produce 占死 QueuePool）的"produce 不持
+        会话"纪律由结构保证——循环里根本没有会话可持。produce 第二参传
+        None（producer 本不落库；未来 producer 改用会话会以 AttributeError
+        显式失败，不静默漂移）。内容从起跑快照根加载（job.dataset_root）
+        ——运行中切 override 不影响本 run。
         """
         started = time.perf_counter()
         title = ""
@@ -876,16 +896,12 @@ class ClosedEvalService:
         produced: list[dict] = []
         for _attempt in range(1 + RETRY_PER_MOVIE):
             try:
-                with self._session_factory() as session:
-                    content = load_movie_content(dataset_root, tt)
-                    title = content.asset.title
-                    spec, _prompt_version = assemble_spec(
-                        session, mode="closed", content=content,
-                        task_id=f"eval-{run_id}", asset_id=tt,
-                        run_id=f"{run_id}:{tt}")
-                # produce 传 None（见 docstring）：未来 producer 改用会话
-                # 会以 AttributeError 显式失败，不静默漂移
-                tags = get_producer("closed").produce(
+                content = load_movie_content(job.dataset_root, tt)
+                title = content.asset.title
+                spec = build_spec(job.context, content=content,
+                                  task_id=f"eval-{job.run_id}", asset_id=tt,
+                                  run_id=f"{job.run_id}:{tt}")
+                tags = job.context.producer.produce(
                     spec, None, self._llm, self._embedder)
                 produced = _produced_rows(tags)
                 error = None
@@ -950,19 +966,6 @@ class ClosedEvalService:
     def _progress_path(self, run_id: str) -> str:
         return os.path.join(self.settings.eval_output_root, run_id,
                             "progress.jsonl")
-
-    def _active_prompt_version(self) -> int:
-        """closed 模板口径版本（meta 口径记录）。
-
-        四层重构 Task 3 起模板为本地常量（capabilities/prompts/templates.py，
-        git 即版本），版本标识随常量固定，不再查 DB、不会缺失——与起跑
-        校验段解耦的旧口径（模板缺失走单片失败）随之退役。Task 4 起口径
-        版本由 producer 协议声明（TagProducer.prompt_version，任务表
-        TEXT 列留痕口径的字符串）；meta 沿用 DB 版本机制时代的整数语义
-        （既有 meta 契约 version=1），故此处转 int——单一来源仍是
-        producer 声明，不经 mode 查表。
-        """
-        return int(get_producer("closed").prompt_version)
 
     def _new_run_id(self) -> str:
         """`run-YYYYMMDD-HHMMSS-xxxx`：时间戳人读 + 2 字节随机防同秒撞名。

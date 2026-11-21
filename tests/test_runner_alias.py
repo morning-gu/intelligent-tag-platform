@@ -83,10 +83,14 @@ def _seed_task(session):
 
 
 def test_catalog_hit_records_alias(session, monkeypatch):
-    """别名写进 tag_define.aliases + 变更日志，任务仍是 succeeded。"""
-    import tagplatform.tasks.runner as runner_mod
+    """别名写进 tag_define.aliases + 变更日志，任务仍是 succeeded。
 
-    monkeypatch.setattr(runner_mod, "get_producer", lambda mode: _StubProducer())
+    Task 5 装配两级化后 runner 不再经注册表分发（producer 随装配
+    context 携带），桩 producer 打在装配层的 get_producer 解析处。"""
+    import tagplatform.services.generation.assemble as assemble_mod
+
+    monkeypatch.setattr(assemble_mod, "get_producer",
+                        lambda mode: _StubProducer())
     task = _seed_task(session)
 
     done = run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)

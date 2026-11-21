@@ -35,8 +35,8 @@ from tagplatform.library import (
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
 from tagplatform.capabilities.prompts import get_prompt, render_prompt
+from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.settings import Settings
-from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
 
 def _evi(ec: int, es: int, ef: int,

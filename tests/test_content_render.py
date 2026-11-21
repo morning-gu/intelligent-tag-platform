@@ -12,8 +12,8 @@ from pathlib import Path
 
 from tagplatform.capabilities.llm.mock import _parse_scenes
 from tagplatform.schemas import parse_content
-from tagplatform.tasks.runner import _render_content_text
-from tagplatform.tasks.runner import _MAX_CAST_LINES
+from tagplatform.services.generation.assemble import _render_content_text
+from tagplatform.services.generation.assemble import _MAX_CAST_LINES
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(

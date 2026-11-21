@@ -289,7 +289,8 @@ class _CountingSessionFactory:
 
 
 class _CountingSession:
-    """计数会话：属性透传内层（assemble_spec 内服务级 DB 读取可用）。"""
+    """计数会话：属性透传内层（Task 5 装配两级化后干跑循环不开会话，
+    本探针留作回归守卫——若循环里重新出现会话，LLM 调用期持有即翻红）。"""
 
     def __init__(self, inner, factory):
         self._inner = inner
@@ -460,8 +461,8 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
     LLM 调用线程自身不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
     会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
-    判据逐线程归属（跨线程毫秒级 assemble 重叠是合法并发）；另断言全局
-    开放会话峰值不超过并发上限（合法并发的上界）。"""
+    Task 5 装配两级化后干跑循环零 DB（装配只在起跑发生一次），判据
+    天然成立；探针留作守卫——循环里重新出现会话即翻红。"""
     from tagplatform.capabilities.storage import make_session_factory
 
     factory = _CountingSessionFactory(make_session_factory(engine))
@@ -472,6 +473,35 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     assert service.get(run_id).failed == 0
     assert llm.violations == 0
     assert factory.peak_open <= DEFAULT_CONCURRENCY
+
+
+def test_run_uses_run_start_library_snapshot(eval_setup):
+    """快照语义验收（Review Focus #4）：run 启动装配一次后变更库行，
+    干跑产出不变。
+
+    时序由闸门 LLM 钉死：起跑装配（快照）完成后首片阻塞在 LLM 调用上，
+    期间把库行清空；放行后第二片才装配——若装配退回每片读库（回归），
+    第二片召回空库必以「候选标签为空」失败，本用例翻红；快照语义下
+    两片都用起跑库，产出只含旧库标签。
+    """
+    from tests.library_fixture import library_root, write_library
+
+    llm = _RecordingGateLLM()
+    service = eval_setup(llm=llm)
+    llm.hold()
+    run_id = service.start("emotion", {"mode": "all"})
+    write_library(library_root(), dirs=[], tags=[])  # 起跑装配后清空库行
+    llm.release()
+    state = _await_terminal(service, run_id)
+    _drain_active(service)
+    assert state.status == "succeeded" and state.failed == 0
+    rows = _raw_rows(service, run_id)
+    assert len(rows) == 2 and all(r["ok"] for r in rows)
+    for row in rows:
+        for produced in row["produced"]:
+            assert produced["tag_id"] in {"t1", "t2", "t7", "t9"}  # 旧库标签
+    meta = _read_meta(service, run_id)
+    assert meta["library"]["n_tags"] == 4  # 起跑快照口径，非清空后口径
 
 
 def test_finished_at_on_terminal_state_and_history(svc):
