@@ -11,10 +11,13 @@
 - **代码分发**：服务器应用目录是仓库的 git checkout（remote 走 gh-proxy 镜像），
   部署 = `git fetch + reset --hard` + `docker build`。
 - **运行**：容器名 `tagplatform`，`--restart unless-stopped`，宿主 8100 → 容器 8100。
-- **挂载**（镜像自包含之外的全部运行态）：
-  - `<app>/data` → `/app/data`（SQLite、媒体、评测产物）
-  - `<app>/.env` → `/app/.env`（pydantic-settings 按进程 CWD 解析）
-  - `/cache/g00619218/tools/hf-cache` → `/hf-cache`（e5 模型，`HF_HOME`）
+- **挂载**（镜像自包含之外的全部运行态；分两组指向同一批宿主目录）：
+  - `/app` 布局（相对路径默认值）：`<app>/data` → `/app/data`、`<app>/.env` → `/app/.env`
+  - **宿主同路径布局**（.env 的绝对路径 `TAGPLT_DATABASE_PATH`/`TAGPLT_MEDIA_ROOT`/
+    `TAGPLT_EMBEDDING_MODEL`/`TAGPLT_EVAL_DATASET_ROOT` 零改动生效）：
+    `<app>/data` → `/cache/g00619218/intelligent-tag-platform/data`、
+    `/cache/g00619218/tools/models`（只读）、`/cache/MovieTags`（只读）
+  - `/cache/g00619218/tools/hf-cache` → `/hf-cache`（e5 模型，镜像 `HF_HOME`）
 - **容器进程 uid = mtuser(1321)**：`docker run --user 1321:1321`，与挂载目录属主
   一致，data 可写、镜像层只读。
 - **权限模型**：mtuser 不在 docker 组（用户拍板最小化）。git 操作走 mtuser，
