@@ -1,0 +1,27 @@
+# 构建上下文瘦身：运行时挂载物绝不进镜像/上下文
+# （data/、.env 由 docker run -v 挂载；venv 为宿主回滚路径，与镜像无关）
+.git
+.venv
+data
+.env
+*.log
+*.log.*
+*.pid
+*.gz
+*.bak*
+
+__pycache__
+**/__pycache__
+*.pyc
+
+frontend/node_modules
+frontend/dist
+frontend/coverage
+
+# 运行时不需要的目录
+tests
+docs
+examples
+deploy
+.superpowers
+.claude
