@@ -520,10 +520,11 @@ def _movies_rows():
 
 
 def _write_movies_run(client, *, run_id=_MOVIES_RUN, rows=None,
-                      write_raw=True, write_meta=True, grid=True):
+                      write_raw=True, write_meta=True, grid=True,
+                      thetas=None):
     """手写一个终态 run 目录（磁盘夹具模式同 test_get_run_disk_only_fallback）：
     raw_results.json + meta.json；grid=False 时 meta 不带 thetas/ks 键
-    （老 run 形态）。"""
+    （老 run 形态）；thetas 覆写夹具网格（拆 θ 用例需要 0.8 档）。"""
     out = Path(client.app.state.settings.eval_output_root)
     d = out / run_id
     d.mkdir(parents=True)
@@ -538,6 +539,8 @@ def _write_movies_run(client, *, run_id=_MOVIES_RUN, rows=None,
         if grid:
             meta["thetas"] = [0.2, 0.4, 0.6]
             meta["ks"] = [5, 10, 20]
+        if thetas is not None:
+            meta["thetas"] = thetas
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False),
                                      encoding="utf-8")
     return d
@@ -551,7 +554,8 @@ def test_run_movies_endpoint(client):
     r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
     assert r.status_code == 200
     body = r.json()
-    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert (body["theta_p"], body["theta_r"], body["k_p"],
+            body["k_r"]) == (0.4, 0.4, 10, 20)
     assert [row["tt"] for row in body["rows"]] == ["tt0000002", "tt0000001"]
     fail, hit = body["rows"]
     assert fail["ok"] is False and fail["error"] == "boom"
@@ -577,7 +581,8 @@ def test_run_movie_detail_endpoint(client):
     assert r.status_code == 200
     body = r.json()
     assert body["tt"] == "tt0000001" and body["ok"] is True
-    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert (body["theta_p"], body["theta_r"], body["k_p"],
+            body["k_r"]) == (0.4, 0.4, 10, 20)
     assert [p["tag_id"] for p in body["produced"]] == ["t1", "t2", "t9"]
     assert [p["hit"] for p in body["produced"]] == [True, True, False]
     assert body["produced"][0]["gt_score"] == 0.9
@@ -597,7 +602,8 @@ def test_run_movie_detail_endpoint(client):
     assert d2["ok"] is False and d2["error"] == "boom"
     assert (d2["produced"] == [] and d2["out_of_space"] == []
             and d2["misses"] == [])
-    assert (d2["theta_used"], d2["k_p"], d2["k_r"]) == (0.4, 10, 20)
+    assert (d2["theta_p"], d2["theta_r"], d2["k_p"],
+            d2["k_r"]) == (0.4, 0.4, 10, 20)
     # 未知 tt → 404
     r3 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt9999999")
     assert r3.status_code == 404
@@ -650,12 +656,14 @@ def test_movies_default_grid_when_meta_missing(client):
     r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
     assert r.status_code == 200
     body = r.json()
-    assert (body["theta_used"], body["k_p"], body["k_r"]) == (0.4, 10, 20)
+    assert (body["theta_p"], body["theta_r"], body["k_p"],
+            body["k_r"]) == (0.4, 0.4, 10, 20)
     assert len(body["rows"]) == 2  # 指标照算（rows 有数）
     # meta 存在但缺 thetas/ks 键 → 同回落
     _write_movies_run(client, run_id="run-movies-oldmeta", grid=False)
     body2 = client.get(f"{_BASE}/runs/run-movies-oldmeta/movies").json()
-    assert (body2["theta_used"], body2["k_p"], body2["k_r"]) == (0.4, 10, 20)
+    assert (body2["theta_p"], body2["theta_r"], body2["k_p"],
+            body2["k_r"]) == (0.4, 0.4, 10, 20)
     # meta 只有 ks 无 thetas → 两键独立回落：thetas 走 DEFAULT（0.4），
     # ks 照用（[5] 唯一元素即 P/R 两目标的最近档 → k_p=k_r=5）（终审 Minor）
     out = Path(client.app.state.settings.eval_output_root)
@@ -667,7 +675,7 @@ def test_movies_default_grid_when_meta_missing(client):
         json.dumps({"run_id": "run-movies-ks-only", "ks": [5]},
                    ensure_ascii=False), encoding="utf-8")
     body3 = client.get(f"{_BASE}/runs/run-movies-ks-only/movies").json()
-    assert body3["theta_used"] == 0.4  # thetas 缺 → DEFAULT 档
+    assert body3["theta_p"] == 0.4 and body3["theta_r"] == 0.4  # 缺 → DEFAULT
     assert body3["k_p"] == 5 and body3["k_r"] == 5  # ks=[5] 照用
 
 
@@ -706,3 +714,96 @@ def test_movies_run_dir_guard(client):
     assert r2.status_code == 404 and "不存在" in r2.json()["detail"]
     r3 = client.get(f"{_BASE}/runs/C:%5CWindows%5Ctemp/movies")
     assert r3.status_code == 404 and "不存在" in r3.json()["detail"]
+
+
+# ---------------------------------------------------------------- θ 可调（增补 2026-11-22）
+
+
+def _theta_split_rows():
+    """拆 θ 夹具（run thetas 含 0.8 档；标签用 seeded 库的 t1/t2/t7）：
+    t1=0.3 ∈[0.2,0.4) 只影响 P 门、t2=0.7 ∈[0.4,0.8) 影响 R 门 0.4 vs
+    0.8 的相关集、t7=0.9 ≥0.8 未产出（两门皆漏检）。"""
+    return [
+        _movies_row("tt-split", {"t1": 0.3, "t2": 0.7, "t7": 0.9},
+                    [_movies_prod("t1", 0.90, tag_name="悬疑"),
+                     _movies_prod("t2", 0.80, tag_name="动作")]),
+    ]
+
+
+_THETA_GRID = [0.2, 0.4, 0.6, 0.8]
+
+
+def test_movies_theta_query_validation(client):
+    """θ query 参数：非网格档 → 400 带合法值清单（两端点）；合法拆门 →
+    p 用 θ_p、r/n_relevant 用 θ_r；缺省 → theta_p==theta_r==0.4 回归。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client, rows=_theta_split_rows(), thetas=_THETA_GRID)
+
+    bad_p = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
+                       params={"theta_p": 0.3})
+    assert bad_p.status_code == 400
+    detail = bad_p.json()["detail"]
+    assert "theta_p" in detail and "0.2" in detail and "0.8" in detail
+    bad_r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
+                       params={"theta_r": 0.5})
+    assert bad_r.status_code == 400
+    assert "theta_r" in bad_r.json()["detail"]
+
+    ok = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
+                    params={"theta_p": 0.2, "theta_r": 0.8})
+    assert ok.status_code == 200
+    body = ok.json()
+    assert (body["theta_p"], body["theta_r"]) == (0.2, 0.8)
+    assert body["thetas"] == _THETA_GRID
+    row = body["rows"][0]
+    assert row["p_at_k"] == pytest.approx(0.2)  # θ_p=0.2：t1 入相关 → 2/10
+    assert row["r_at_k"] == pytest.approx(0.0)  # θ_r=0.8：分母只 t7，未产出
+    assert row["n_relevant"] == 1  # 只数 ≥0.8
+
+    default = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").json()
+    assert (default["theta_p"], default["theta_r"]) == (0.4, 0.4)
+    drow = default["rows"][0]
+    assert drow["p_at_k"] == pytest.approx(0.1)  # t1 0.3 < 0.4 不相关
+    assert drow["r_at_k"] == pytest.approx(0.5)  # 相关 {t2,t7}，命中 t2
+    assert drow["n_relevant"] == 2
+
+
+def test_movie_detail_theta_query(client):
+    """明细带 θ：hit/漏检跟 theta_r（0.8 → 双 False、0.4 → t2 翻真）；
+    theta_p 只回显不参与分类。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client, rows=_theta_split_rows(), thetas=_THETA_GRID)
+
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
+                   params={"theta_p": 0.2, "theta_r": 0.8})
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["theta_p"], body["theta_r"]) == (0.2, 0.8)
+    assert [p["hit"] for p in body["produced"]] == [False, False]  # 0.3/0.7 < 0.8
+    assert [(m["tag_id"], m["gt_score"]) for m in body["misses"]] == [("t7", 0.9)]
+
+    mid = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
+                     params={"theta_r": 0.4}).json()
+    assert [p["hit"] for p in mid["produced"]] == [False, True]  # t2 0.7 ≥ 0.4
+    assert [m["tag_id"] for m in mid["misses"]] == ["t7"]
+
+
+def test_movies_theta_non_admin_401(client):
+    """θ 参数不影响门禁：带参访问仍 403（reviewer）/ 401（未登录）。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client, rows=_theta_split_rows(), thetas=_THETA_GRID)
+    assert client.post("/api/v1/users", json={
+        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
+    }).status_code == 200
+    client.post("/api/v1/auth/logout")
+    client.post("/api/v1/auth/login",
+                json={"username": "bob", "password": "pw-bob-1"})
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
+                      params={"theta_p": 0.2}).status_code == 403
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
+                      params={"theta_r": 0.8}).status_code == 403
+    client.post("/api/v1/auth/logout")
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
+                      params={"theta_p": 0.2}).status_code == 401
+    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
+                      params={"theta_r": 0.8}).status_code == 401

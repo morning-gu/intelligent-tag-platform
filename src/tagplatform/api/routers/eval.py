@@ -22,14 +22,16 @@
   指标与闭环网格共用原语可对账）：raw 缺失/截断/非 list 或行级不是带
   tt 键的 dict → 404「无单片明细」（运行中 run 与写盘非原子窗口不
   500），meta thetas/ks 缺失/损坏 → DEFAULT 档照常出数（两键独立回落）；
-  tt 只做 JSON 行内查找、不参与路径拼接。
+  tt 只做 JSON 行内查找、不参与路径拼接；增补 2026-11-22：可选
+  theta_p/theta_r query 拆门（P 用 θ_p、R 与明细 hit/漏检分类用 θ_r，
+  非网格档 → 400 带合法值清单）。
 """
 
 import json
 from pathlib import Path
 from typing import Literal, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -172,19 +174,23 @@ class MovieSummaryRowOut(BaseModel):
 
 
 class MovieSummaryOut(BaseModel):
-    """单片摘要包层（spec 钉死三键包层）：theta_used/k_p/k_r 为服务端
-    确定选取（最接近 0.4 的 θ、P 看 top-10、R 看 top-20，并列取小），
-    前端表头按这三键拼字面量（P@{k_p}/R@{k_r}）。"""
+    """单片摘要包层（增补 2026-11-22 拆 θ）：theta_p/theta_r 为 P 门与
+    R 门各自的实际取值（query 参数或最接近 0.4 的缺省档）；thetas 回传
+    该 run 的网格档（前端选择器的选项源）；k_p/k_r 仍是确定选取
+    （P 看 top-10、R 看 top-20）。前端表头按这些键拼字面量
+    （P@{k_p}(θ{theta_p}) / R@{k_r}(θ{theta_r})）。"""
 
-    theta_used: float
+    theta_p: float
+    theta_r: float
     k_p: int
     k_r: int
+    thetas: list[float]
     rows: list[MovieSummaryRowOut]
 
 
 class ProducedTagOut(BaseModel):
     """计分清单条目（GT 空间内、按 -sf 序）：hit = gt_score 非 None 且
-    ≥ theta_used；tag_name 沿用产出原文（misses 才做库回填）。"""
+    ≥ theta_r；tag_name 沿用产出原文（misses 才做库回填）。"""
 
     tag_id: str
     tag_name: str | None = None
@@ -214,14 +220,16 @@ class MissTagOut(BaseModel):
 
 class MovieDetailOut(BaseModel):
     """单片明细（摘要行展开懒加载）：produced/out_of_space/misses 三表；
-    失败片三表全空、error 原样；theta_used/k_p/k_r 与摘要包层同源。"""
+    失败片三表全空、error 原样；theta_p/theta_r 与摘要包层同源（明细侧
+    hit/misses 分类跟 theta_r，theta_p 只回显）。"""
 
     tt: str
     title: str | None = None
     ok: bool | None = None
     error: str | None = None
     elapsed_ms: int | None = None
-    theta_used: float
+    theta_p: float
+    theta_r: float
     k_p: int
     k_r: int
     produced: list[ProducedTagOut]
@@ -324,6 +332,17 @@ def _movies_read(settings: Settings,
                 and all(isinstance(x, int) for x in meta_ks)):
             ks = meta_ks
     return rows, thetas, ks
+
+
+def _theta_or_400(thetas: Sequence[float], value: float, name: str) -> float:
+    """query 传入的 θ 必须是 run 网格档之一（浮点相等比较；增补
+    2026-11-22）；否则 400 带合法值清单——语义校验集中本层（模式同
+    set_dataset_root 的目录校验段），pydantic 只管 float 形状。"""
+    if not any(value == t for t in thetas):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} 需为该 run 网格档之一：{list(thetas)}")
+    return value
 
 
 # ---------------------------------------------------------------- 端点
@@ -523,14 +542,24 @@ def get_run_file(
 @router.get("/runs/{run_id}/movies", response_model=MovieSummaryOut)
 def get_run_movies(
     run_id: str,
+    theta_p: float | None = Query(
+        None, description="P 门 θ（须为 run 网格档；缺省=最接近 0.4）"),
+    theta_r: float | None = Query(
+        None, description="R 门 θ（同上；n_relevant 与明细 hit/漏检跟此门）"),
     _admin: UserAccount = Depends(require_admin),
     settings: Settings = Depends(get_settings_dep),
 ) -> MovieSummaryOut:
     """run 的逐片摘要（badcase 视图主表）：读盘现算（落盘结构零改动，
-    历史 run 即时可用）——失败置顶、P@K 升序的坏例优先；档位包层三键
-    回传，前端表头按其拼字面量。"""
+    历史 run 即时可用）——失败置顶、P@K 升序的坏例优先；θ 门可拆
+    （增补 2026-11-22：theta_p/theta_r query，非法档 400 带合法清单），
+    档位包层回传、前端表头按其拼字面量。"""
     rows, thetas, ks = _movies_read(settings, run_id)
-    payload = summarize_movies(rows, thetas, ks, set(_library_tag_map()))
+    payload = summarize_movies(
+        rows, thetas, ks, set(_library_tag_map()),
+        theta_p=(_theta_or_400(thetas, theta_p, "theta_p")
+                 if theta_p is not None else None),
+        theta_r=(_theta_or_400(thetas, theta_r, "theta_r")
+                 if theta_r is not None else None))
     return MovieSummaryOut(**payload)
 
 
@@ -538,15 +567,25 @@ def get_run_movies(
 def get_run_movie_detail(
     run_id: str,
     tt: str,
+    theta_p: float | None = Query(
+        None, description="P 门 θ（只回显；明细分类不使用）"),
+    theta_r: float | None = Query(
+        None, description="R 门 θ（hit 标记与 misses 按此门）"),
     _admin: UserAccount = Depends(require_admin),
     settings: Settings = Depends(get_settings_dep),
 ) -> MovieDetailOut:
     """单片明细（摘要行展开懒加载）：计分清单（hit/gt_score）+ 空间外 +
     漏检三表；misses 的 tag_name 从当前标签库回填（库缺该标签 → None）；
-    tt 只做 JSON 行内查找、不参与路径拼接，未知 tt → 404。"""
+    tt 只做 JSON 行内查找、不参与路径拼接，未知 tt → 404；θ 门同摘要
+    端点（非法档 400）。"""
     rows, thetas, ks = _movies_read(settings, run_id)
     tag_map = _library_tag_map()
-    detail = breakdown_movie(rows, tt, thetas, ks, set(tag_map), tag_map)
+    detail = breakdown_movie(
+        rows, tt, thetas, ks, set(tag_map), tag_map,
+        theta_p=(_theta_or_400(thetas, theta_p, "theta_p")
+                 if theta_p is not None else None),
+        theta_r=(_theta_or_400(thetas, theta_r, "theta_r")
+                 if theta_r is not None else None))
     if detail is None:
         raise HTTPException(status_code=404,
                             detail=f"影片不在该 run 明细中：{tt!r}")
