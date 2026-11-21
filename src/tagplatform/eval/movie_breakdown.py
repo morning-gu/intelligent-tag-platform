@@ -5,7 +5,9 @@
 同一样本构造（ranked=计分清单 tuple、relevance=gt∩库、system_scores=产出
 sf），因此单片指标与网格格值可精确对账（test_reconciliation_with_grid 钉
 死）；该 θ 下相关集为空的影片，网格靠 valid_theta 预滤、单片自管 null，
-两侧都不进平均。
+两侧都不进平均。增补（2026-11-22）：P 门与 R 门可各自独立取 θ——p 对账
+(θ_p, K_P) 格、r 对账 (θ_r, K_R) 格；n_relevant/hit/misses 一律跟 θ_r
+（漏检=召回侧语义）；Spearman 与 θ 无关。
 已知取舍：precision/recall 原语对空相关集记 0.0，本模块先判 θ-相关集为空
 → None、非空才调（None≠0）；计分清单与明细顺序防御性按 (-sf, tag_id) 重
 排，不信任输入序。
@@ -78,25 +80,25 @@ def _scoring(row: dict, gt_space: set[str]) -> list[dict]:
 
 
 def _movie_metrics(row: dict, gt_space: set[str], relevance: dict[str, float],
-                   theta: float, k_p: int, k_r: int,
+                   theta_p: float, theta_r: float, k_p: int, k_r: int,
                    ) -> tuple[float | None, float | None, float | None]:
     """单片 (p_at_k, r_at_k, spearman)；算不出的项为 None（None≠0）。
 
     - 失败片或无交集（relevance 空）→ 三项全 None；
-    - θ-相关集为空 → p/r 为 None（原语对空相关集记 0.0，网格靠
-      valid_theta 预滤规避，单片必须先判空再调）、spearman 照算；
-    - spearman 与 assemble_report 同式：sorted(relevance) 上
+    - p 与 r 各用各的门：θ_p-相关集为空 → p=None、θ_r-相关集为空 → r=None
+      （原语对空相关集记 0.0，网格靠 valid_theta 预滤规避，单片必须先判空
+      再调；各 θ 各对齐各 θ 的网格排除规则）；
+    - spearman 与 θ 无关、与 assemble_report 同式：sorted(relevance) 上
       [计分 sf.get(t, 0.0)] × [gt 分]（未产出的交集标签按 0 分补位）。
     """
     if not row.get("ok") or not relevance:
         return (None, None, None)
     scoring = _scoring(row, gt_space)
     ranked = tuple(e["tag_id"] for e in scoring)
-    relevant_theta = {t for t, s in relevance.items() if s >= theta}
-    p = r = None
-    if relevant_theta:
-        p = precision_at_k(ranked, relevance, k_p, relevant_grade=theta)
-        r = recall_at_k(ranked, relevance, k_r, relevant_grade=theta)
+    p = (precision_at_k(ranked, relevance, k_p, relevant_grade=theta_p)
+         if any(s >= theta_p for s in relevance.values()) else None)
+    r = (recall_at_k(ranked, relevance, k_r, relevant_grade=theta_r)
+         if any(s >= theta_r for s in relevance.values()) else None)
     system_scores = {e["tag_id"]: float(e.get("sf", 0.0)) for e in scoring}
     keys = sorted(relevance)
     sp = spearman([system_scores.get(t, 0.0) for t in keys],
@@ -107,22 +109,30 @@ def _movie_metrics(row: dict, gt_space: set[str], relevance: dict[str, float],
 # ---------------------------------------------------------------- 公共入口
 
 def summarize_movies(rows: list[dict], thetas: Sequence[float],
-                     ks: Sequence[int], library_ids: set[str]) -> dict:
+                     ks: Sequence[int], library_ids: set[str], *,
+                     theta_p: float | None = None,
+                     theta_r: float | None = None) -> dict:
     """逐片摘要（badcase 视图主表）：指标 + 计数 + 排序。
 
-    - `theta_used`/`k_p`/`k_r`：pick_theta / pick_k 的确定选取；
-    - 每片一行：指标（float | None，None=算不出）+ n_produced（原始产出
-      条数含空间外）+ n_relevant（gt∩库 ≥θ 计数，失败片也照数）；
-    - 排序：失败置顶 → p_at_k 非空升序 → null 垫底 → 同分按 tt 字典序。
+    - `theta_p`/`theta_r`：P 门与 R 门各自独立（增补 2026-11-22）；缺省
+      None → 各自 `pick_theta`（= 旧单 θ 行为）；`thetas` 回传网格档
+      （选择器选项源）；
+    - 每片一行：指标（float | None，None=算不出；p 用 θ_p、r 用 θ_r）+
+      n_produced（原始产出条数含空间外）+ n_relevant（gt∩库 ≥**θ_r**
+      计数，与漏检/命中分类同门；失败片也照数）；
+    - 排序：失败置顶 → p_at_k 非空升序 → null 垫底 → 同分按 tt 字典序
+      （垫底键只看 p，θ_r 不参与排序）。
     """
-    theta = pick_theta(thetas)
+    theta_p = pick_theta(thetas) if theta_p is None else theta_p
+    theta_r = pick_theta(thetas) if theta_r is None else theta_r
     k_p = pick_k(ks, _TARGET_K_P)
     k_r = pick_k(ks, _TARGET_K_R)
     gt_space = _gt_space(rows)
     out: list[dict] = []
     for row in rows:
         relevance = _relevance(row, library_ids)
-        p, r, sp = _movie_metrics(row, gt_space, relevance, theta, k_p, k_r)
+        p, r, sp = _movie_metrics(row, gt_space, relevance,
+                                  theta_p, theta_r, k_p, k_r)
         out.append({
             "tt": row["tt"],
             "title": row.get("title"),
@@ -133,37 +143,47 @@ def summarize_movies(rows: list[dict], thetas: Sequence[float],
             "r_at_k": r,
             "elapsed_ms": row.get("elapsed_ms"),
             "n_produced": len(row.get("produced") or []),
-            "n_relevant": sum(1 for s in relevance.values() if s >= theta),
+            "n_relevant": sum(1 for s in relevance.values() if s >= theta_r),
         })
     out.sort(key=lambda r: (r["ok"] is True, r["p_at_k"] is None,
                             r["p_at_k"] if r["p_at_k"] is not None else 0.0,
                             r["tt"]))
-    return {"theta_used": theta, "k_p": k_p, "k_r": k_r, "rows": out}
+    return {"theta_p": theta_p, "theta_r": theta_r, "k_p": k_p, "k_r": k_r,
+            "thetas": list(thetas), "rows": out}
 
 
 def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
                     ks: Sequence[int], library_ids: set[str],
-                    library_names: dict[str, str]) -> dict | None:
+                    library_names: dict[str, str], *,
+                    theta_p: float | None = None,
+                    theta_r: float | None = None) -> dict | None:
     """单片明细：计分清单（hit/gt_score）+ 空间外 + misses 三张表。
 
+    - `theta_p`/`theta_r` 同 summarize（缺省 → pick_theta）；明细侧
+      `theta_p` 只回显——**hit 标记与 misses 跟 θ_r**（漏检=召回侧
+      「相关未产出」；GT 原分行内可见，别的门槛肉眼可判）；
     - `produced`：计分条目（GT 空间 = 各行 gt 键并集；防御性 (-sf, tag_id)
       排），每条附 `gt_score`（该片 gt 原分，不在该片 gt → None）与
-      `hit`（gt_score 非 None 且 ≥ theta_used）；
-    - `out_of_space`：produced 中不在 GT 空间的条目（不计分只列名）；
-    - `misses`：相关（gt∩库 ≥θ）未产出标签，按 (-gt_score, tag_id) 排，
+      `hit`（gt_score 非 None 且 ≥ theta_r）；
+    - `out_of_space`：produced 中不在 GT 空间的条目（不计分只列名，
+      与 θ 无关）；
+    - `misses`：相关（gt∩库 ≥θ_r）未产出标签，按 (-gt_score, tag_id) 排，
       tag_name 从 library_names 回填（缺 → None）；
     - 失败片三表全空、error 原样；未知 tt → None。
     """
     row = next((r for r in rows if r.get("tt") == tt), None)
     if row is None:
         return None
+    theta_p = pick_theta(thetas) if theta_p is None else theta_p
+    theta_r = pick_theta(thetas) if theta_r is None else theta_r
     detail = {
         "tt": row["tt"],
         "title": row.get("title"),
         "ok": row.get("ok"),
         "error": row.get("error"),
         "elapsed_ms": row.get("elapsed_ms"),
-        "theta_used": pick_theta(thetas),
+        "theta_p": theta_p,
+        "theta_r": theta_r,
         "k_p": pick_k(ks, _TARGET_K_P),
         "k_r": pick_k(ks, _TARGET_K_R),
         "produced": [],
@@ -174,7 +194,6 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
         return detail  # 失败片：三表全空、error 原样
     gt = row.get("gt") or {}
     gt_space = _gt_space(rows)
-    theta = detail["theta_used"]
     for entry in _scoring(row, gt_space):
         gt_score = gt.get(entry["tag_id"])
         detail["produced"].append({
@@ -184,7 +203,7 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
             "confidence": entry.get("confidence"),
             "evidence_count": entry.get("evidence_count"),
             "gt_score": gt_score,
-            "hit": gt_score is not None and gt_score >= theta,
+            "hit": gt_score is not None and gt_score >= theta_r,
         })
     out_of_space = [{"tag_id": e["tag_id"], "tag_name": e.get("tag_name"),
                      "sf": e.get("sf")}
@@ -196,7 +215,7 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
     misses = sorted(
         ({"tag_id": t, "gt_score": s}
          for t, s in _relevance(row, library_ids).items()
-         if s >= theta and t not in produced_ids),
+         if s >= theta_r and t not in produced_ids),
         key=lambda m: (-m["gt_score"], m["tag_id"]))
     detail["misses"] = [{"tag_id": m["tag_id"],
                          "tag_name": library_names.get(m["tag_id"]),
