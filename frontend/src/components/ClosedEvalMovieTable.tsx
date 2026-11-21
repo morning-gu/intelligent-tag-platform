@@ -14,7 +14,11 @@
 // 未选（null）= 服务端缺省档（请求不带参）；切换即重拉摘要（带参）+ 清空
 // 明细缓存 + 收起展开行（θ_r 变了缓存里的 hit/漏检过期；统一清不区分 p/r）；
 // 换 run 重置回未选。明细取数在 θ 已选时带参（hit/漏检跟 θ_r）。
-import { useEffect, useMemo, useState } from 'react'
+// 代际守卫（终审修复）：genRef 在换 run 与每次切 θ 时自增——旧代际的摘要/
+// 明细响应一律作废不写回（防：θ 切换后在途旧 θ 明细落入已清缓存、连续切 θ
+// 的慢响应覆盖快响应、跨 run 慢响应覆盖新 run）。θ 重拉失败不毁视图：旧表
+// 保留 + 内联警示（refetchError），成功即清除——恢复路径不消失。
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX, Key } from 'react'
 import { Alert, Select, Spin, Table, Typography } from 'antd'
 import type { TableProps } from 'antd'
@@ -127,6 +131,10 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
   // θ 门（null = 未选 → 用服务端缺省档、请求不带参；换 run 重置）
   const [thetaP, setThetaP] = useState<number | null>(null)
   const [thetaR, setThetaR] = useState<number | null>(null)
+  // θ 重拉失败的内联警示（不毁视图，成功即清除）
+  const [refetchError, setRefetchError] = useState<string | null>(null)
+  // 请求代际：换 run / 切 θ 自增——旧代际响应一律作废不写回
+  const genRef = useRef(0)
 
   /** 当前生效门（选择器初值与表头字面量用）：已选取已选，否则取 payload 回传。 */
   const effectiveThetaP = thetaP ?? payload?.theta_p
@@ -138,21 +146,26 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
     return { p: thetaP ?? undefined, r: thetaR ?? undefined }
   }, [thetaP, thetaR])
 
-  // 摘要随 runId 拉取；换 run 清摘要/展开态/θ 选择（明细缓存按 runId 分键，
-  // 无需清）
+  // 摘要随 runId 拉取；换 run 清摘要/展开态/θ 选择/警示（明细缓存按
+  // runId 分键，无需清），并使旧 run 的在途响应全部作废
   useEffect(() => {
+    genRef.current += 1
+    const gen = genRef.current
     let cancelled = false
     setPayload(null)
     setSummaryError(null)
     setExpandedKeys([])
     setThetaP(null)
     setThetaR(null)
+    setRefetchError(null)
     getRunMovies(runId)
       .then((p) => {
-        if (!cancelled) setPayload(p)
+        if (!cancelled && gen === genRef.current) setPayload(p)
       })
       .catch((e: unknown) => {
-        if (!cancelled) setSummaryError(e instanceof Error ? e.message : String(e))
+        if (!cancelled && gen === genRef.current) {
+          setSummaryError(e instanceof Error ? e.message : String(e))
+        }
       })
     return () => {
       cancelled = true
@@ -161,26 +174,38 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
 
   /** θ 选择器切换：重拉摘要（带参）+ 清明细缓存 + 收起展开行——θ_r 变了
    * 缓存里的 hit/漏检过期（θ_p-only 变更明细技术上仍有效，但统一清不区分，
-   * 口径简单）。旧表保持可见（不闪 Spin），新 payload 到达即整体替换。 */
+   * 口径简单）。旧表保持可见（不闪 Spin），新 payload 到达即整体替换；
+   * 失败不毁视图——内联警示、表格照旧。代际自增使在途旧响应（慢摘要/
+   * 旧 θ 明细）一律作废。 */
   function changeTheta(which: 'p' | 'r', value: number): void {
+    genRef.current += 1
+    const gen = genRef.current
     const nextP = which === 'p' ? value : thetaP
     const nextR = which === 'r' ? value : thetaR
     setThetaP(nextP)
     setThetaR(nextR)
     setExpandedKeys([])
     setDetails(new Map())
+    setRefetchError(null)
     getRunMovies(runId, {
       p: nextP ?? undefined,
       r: nextR ?? undefined,
     })
-      .then((p) => setPayload(p))
-      .catch((e: unknown) =>
-        setSummaryError(e instanceof Error ? e.message : String(e)))
+      .then((p) => {
+        if (gen !== genRef.current) return
+        setPayload(p)
+        setRefetchError(null)
+      })
+      .catch((e: unknown) => {
+        if (gen !== genRef.current) return
+        setRefetchError(e instanceof Error ? e.message : String(e))
+      })
   }
 
   /** 展开懒加载：成功片且无缓存条目（pending/detail/error 均算）才发请求；
-   * 失败片不发（展开区只渲染 error 原文）。写回闭包持点击时的 runId 键——
-   * 换 run 后落写旧键，不污染新 run；θ 已选时带参（hit/漏检跟 θ_r）。 */
+   * 失败片不发（展开区只渲染 error 原文）。写回闭包持点击时的 runId 键与
+   * 请求代际——换 run/切 θ 后旧代际落写作废，不污染新视图；θ 已选时带参
+   * （hit/漏检跟 θ_r）。 */
   function handleExpand(expanded: boolean, record: MovieSummaryRow): void {
     setExpandedKeys((keys) =>
       expanded ? [...keys, record.tt] : keys.filter((k) => k !== record.tt),
@@ -189,15 +214,18 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
     const key = detailKey(runId, record.tt)
     if (details.has(key)) return
     setDetails((prev) => new Map(prev).set(key, 'pending'))
+    const gen = genRef.current
     // 未选 θ → 两参调用（走服务端缺省档）；已选 → 带 θ 取数（hit/漏检跟 θ_r）
     const request = thetaArgs === undefined
       ? getRunMovieDetail(runId, record.tt)
       : getRunMovieDetail(runId, record.tt, thetaArgs)
     request
       .then((d) => {
+        if (gen !== genRef.current) return
         setDetails((prev) => new Map(prev).set(key, d))
       })
       .catch((e: unknown) => {
+        if (gen !== genRef.current) return
         setDetails((prev) =>
           new Map(prev).set(key, e instanceof Error ? e : new Error(String(e))),
         )
@@ -294,6 +322,14 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
           expandedRowRender: renderDetail,
         }}
       />
+      {refetchError !== null && (
+        <Alert
+          type="warning"
+          showIcon
+          data-testid="theta-refetch-error"
+          message={`θ 重拉失败，当前显示旧门数据：${refetchError}`}
+        />
+      )}
     </div>
   )
 }

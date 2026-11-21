@@ -401,4 +401,116 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
       'run-B', 'tt0000001',
     ))
   })
+
+  // ---------- 终审修复回归（generation 守卫） ----------
+
+  it('θ_r 切换时在途明细写回作废：不落缓存、重展开带参重新取数（终审 Important 1）', async () => {
+    // 第一次明细（无 θ）用未决 promise 卡住在途；第二次（θ_r=0.8）返回新门明细
+    let resolveOld!: (d: MovieDetail) => void
+    mockedGetRunMovies.mockResolvedValue(SUMMARY_THETA)
+    mockedGetRunMovieDetail.mockImplementation((_rid: string, _tt: string, theta?: { r?: number }) => {
+      if (theta?.r === 0.8) {
+        return Promise.resolve({
+          ...DETAIL,
+          theta_r: 0.8,
+          produced: [{ ...DETAIL.produced[0], tag_name: '新门明细' }],
+        })
+      }
+      return new Promise<MovieDetail>((res) => {
+        resolveOld = res
+      })
+    })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1))
+
+    // 切 θ_r 到 0.8（缓存清空、旧请求仍在途）
+    const rSelect = screen.getByTestId('theta-r-select')
+    fireEvent.mouseDown(rSelect)
+    fireEvent.click(await screen.findByTitle('0.8'))
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+
+    // 旧请求此刻才 resolve：写回必须作废（θ 代际已过）——不得落入缓存
+    await act(async () => {
+      resolveOld(DETAIL)
+    })
+
+    // 重展开：缓存里没有旧 θ 明细 → 第二次带 theta_r=0.8 取数、渲染新门明细
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(2))
+    expect(mockedGetRunMovieDetail).toHaveBeenLastCalledWith(
+      RUN_ID, 'tt0000001', { r: 0.8 },
+    )
+    expect(await screen.findByText('新门明细')).toBeVisible()
+    // 旧 θ 的明细内容（动作）未被串写渲染
+    expect(screen.queryByText('动作')).not.toBeInTheDocument()
+  })
+
+  it('连续切 θ：后到先回不覆盖，最后选择的门生效（终审 Important 2）', async () => {
+    // 行标题作覆盖探针：慢响应（θ=0.2）与快响应（θ=0.6）带不同标题——
+    // 表头 θ 取自 state 探测不到旧响应覆盖，必须看 rows 内容
+    const slowPayload: MovieSummaryPayload = {
+      ...SUMMARY_THETA,
+      theta_p: 0.2,
+      rows: SUMMARY_THETA.rows.map((r) =>
+        r.tt === 'tt0000001' ? { ...r, title: '旧门慢片' } : r),
+    }
+    const fastPayload: MovieSummaryPayload = {
+      ...SUMMARY_THETA,
+      theta_p: 0.6,
+      rows: SUMMARY_THETA.rows.map((r) =>
+        r.tt === 'tt0000001' ? { ...r, title: '新门快片' } : r),
+    }
+    let resolveSlow!: (p: MovieSummaryPayload) => void
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY_THETA) // 初载（无参）
+      .mockReturnValueOnce(new Promise<MovieSummaryPayload>((res) => { // θ_P=0.2（慢）
+        resolveSlow = res
+      }))
+      .mockResolvedValueOnce(fastPayload) // θ_P=0.6（快）
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    const pSelect = screen.getByTestId('theta-p-select')
+    fireEvent.mouseDown(pSelect)
+    fireEvent.click(await screen.findByTitle('0.2')) // 慢请求在途
+    fireEvent.mouseDown(pSelect)
+    fireEvent.click(await screen.findByTitle('0.6')) // 快请求立即落地
+    await waitFor(() => expect(screen.getByText('新门快片')).toBeInTheDocument())
+
+    // 慢请求（旧门数据）此刻才 resolve：作废，不得覆盖新门 rows
+    await act(async () => {
+      resolveSlow(slowPayload)
+    })
+    expect(screen.getByText('新门快片')).toBeInTheDocument()
+    expect(screen.queryByText('旧门慢片')).not.toBeInTheDocument()
+  })
+
+  it('θ 重拉失败不毁视图：表格与选择器仍在、内联警示、再成功即清除（终审 Important 3）', async () => {
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY_THETA)
+      .mockRejectedValueOnce(new Error('θ 重拉失败'))
+      .mockResolvedValueOnce({ ...SUMMARY_THETA, theta_p: 0.6 })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    const pSelect = screen.getByTestId('theta-p-select')
+    fireEvent.mouseDown(pSelect)
+    fireEvent.click(await screen.findByTitle('0.2'))
+
+    // 失败：表格（行仍在）+ 两个选择器仍在 + 内联警示出现（不是整页 Alert 替换）
+    expect(await screen.findByTestId('theta-refetch-error')).toBeInTheDocument()
+    expect(screen.getByText('tt0000001')).toBeInTheDocument()
+    expect(screen.getByTestId('theta-p-select')).toBeInTheDocument()
+    expect(screen.getByTestId('theta-r-select')).toBeInTheDocument()
+
+    // 再切一次到 0.6（不同值才触发 onChange——同值重选 antd 不发事件）：
+    // 成功 → 警示清除、表头更新
+    fireEvent.mouseDown(pSelect)
+    fireEvent.click(screen.getByRole('option', { name: '0.6' }))
+    await waitFor(() => expect(screen.getByText('P@10(θ0.6)')).toBeInTheDocument())
+    await waitFor(() =>
+      expect(screen.queryByTestId('theta-refetch-error')).not.toBeInTheDocument())
+  })
 })
