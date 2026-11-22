@@ -180,7 +180,7 @@ describe('Dashboard 工作台总览', () => {
     expect(await screen.findByText('暂无数据')).toBeInTheDocument()
   })
 
-  it('快捷入口：进入审核跳 /review、创建任务跳 /tasks', async () => {
+  it('快捷入口：点击"进入审核"跳 /review', async () => {
     mockMetricsApis(SUMMARY, CONFIDENCE, COVERAGE)
 
     renderDashboard()
@@ -188,6 +188,15 @@ describe('Dashboard 工作台总览', () => {
     // antd 两字按钮会自动插空隙，用宽容正则断言可访问名
     fireEvent.click(await screen.findByRole('button', { name: /进\s*入\s*审\s*核/ }))
     expect(screen.getByText('审核中心页面桩')).toBeInTheDocument()
+  })
+
+  it('快捷入口：点击"创建任务"跳 /tasks', async () => {
+    mockMetricsApis(SUMMARY, CONFIDENCE, COVERAGE)
+
+    renderDashboard()
+
+    fireEvent.click(await screen.findByRole('button', { name: /创\s*建\s*任\s*务/ }))
+    expect(screen.getByText('生产任务页面桩')).toBeInTheDocument()
   })
 
   it('单端点 reject（置信度分布）渲染错误提示，不白屏', async () => {

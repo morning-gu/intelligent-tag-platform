@@ -55,7 +55,7 @@ function RequireAuth() {
   return <Outlet context={{ user: gate.user } satisfies AuthedOutlet} />
 }
 
-/** admin 门槛：非 admin 直接访问 /users 时重定向回工作台。 */
+/** admin 门槛：非 admin 访问管理路由（/config、/eval-closed）时重定向回工作台。 */
 function AdminRoute() {
   const { user } = useOutletContext<AuthedOutlet>()
   if (user.role !== 'admin') {

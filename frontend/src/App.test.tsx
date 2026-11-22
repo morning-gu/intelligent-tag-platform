@@ -220,6 +220,14 @@ describe('路由装配（Layout → AdminRoute → 页面）', () => {
     expect(screen.queryByRole('menuitem', { name: '导入任务' })).not.toBeInTheDocument()
   })
 
+  it('访问旧书签 /quality：重定向回工作台（总览）', async () => {
+    // 四条旧路由重定向中唯一无用例的一条（其余 /imports、/users、
+    // /model-config 均有集成测试）
+    mockReviewerApis()
+    renderAt('/quality')
+    expect(await screen.findByText('待审核标签')).toBeInTheDocument()
+  })
+
   it('reviewer 直接访问旧书签 /users：重定向链经 AdminRoute 拦回工作台', async () => {
     // 链路：/users → /config?tab=users →（非 admin）AdminRoute → / 工作台
     mockReviewerApis()
