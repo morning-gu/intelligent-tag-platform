@@ -40,6 +40,8 @@ docker images | grep tagplatform   # 确认新 tag 就绪；旧镜像 tag 保留
 
 cancel 为优雅语义：置事件后不再提交新片，在途片跑完、已完成片结果留盘
 （progress.jsonl / raw_results 不丢）。**在途片重跑为已知代价**（spec §4a）。
+cancel 只覆盖在途评测 run：在途资产构建/标签导入任务随停服硬停、切换即
+作废（新容器启动将其孤儿行复位 failed，见 §3 第 9 条），重新上传/重跑即可。
 
 ```bash
 # 登录取会话 cookie（HttpOnly，cookie jar 保存）
@@ -143,6 +145,10 @@ cp -r /backup/switch-<日期>/media/. /opt/tagplatform/data/media/
 #    a. 旧容器（若此前已是容器形态）：docker run 同 §1.6、镜像换旧 tag、
 #       去掉入口 alembic 前缀
 #    b. 旧 systemd 服务（venv 形态，本文基线）：
+#       先退回旧代码再起服务——§1.1 已把 /opt/tagplatform 同步到重构合入
+#       提交（为镜像构建），直接 start 会以新代码对还原到 0016 的备份再执行
+#       0017+0018（重新 drop prompt_template），既非回退且损坏还原库
+git -C /opt/tagplatform checkout <重构合入前的旧提交>
 sudo systemctl start tagplatform   # ExecStartPre 自动重跑迁移（还原库为旧版本，迁移为 no-op）
 curl http://127.0.0.1:8100/health
 ```
@@ -171,9 +177,9 @@ docker stop tagplatform && docker rm tagplatform
 
 ## 3. 行为变化清单（部署知悉项）
 
-来源 = 重构 ledger（progress.md）各任务记录的部署知悉项。白名单内的契约
-变化（tags list 加 total、prompts 只读化、POST/activate 删除）不在此列，
-见 §4.2。
+来源 = 重构 ledger（progress.md）各任务记录的部署知悉项（第 10–11 条为
+终审 review 补录的微变化）。白名单内的契约变化（tags list 加 total、
+prompts 只读化、POST/activate 删除）不在此列，见 §4.2。
 
 1. **组合值挂载行为变化**（Task 8）：`tag_catalog.applicable_scope` 组合值
    （如 `content,scene`）的目录挂载，从"静默降级只挂 content"变为"按证据
@@ -201,6 +207,18 @@ docker stop tagplatform && docker rm tagplatform
    差异列入豁免清单（基线 = 切换前线上实际版本，不含 #32）。
 8. **前端边缘差异**（Task 15，reviewer 确认）：评测弹窗关闭后晚到的
    build_task_id 不再隐形轮询 + toast——旧代码意外行为消除，非缺陷。
+9. **孤儿任务启动复位**（Task 13，本次重构新增语义）：切换只优雅 cancel
+   在途评测 run（§1.2），在途 AssetBuild（running）/TagImport（processing）
+   任务随停服硬停；新容器 lifespan 的 `reset_orphan_tasks` 启动时将孤儿行
+   统一置 failed（构建 error="进程重启中断"；导入无 error 列，改写含恢复
+   指引的 result_summary 文案）。对 AssetBuild 为全新部署可见语义。
+   运维核对：切换前后对比任务状态，出现无对应执行日志可解释的
+   running→failed 翻转属预期复位、非执行失败，对应任务重新发起即可。
+10. **POST /api/v1/users 重名竞态 500→409**：建号撞重名从服务层异常泄漏
+    500 变为映射 409 冲突——错误路径契约变化，仅重名并发竞态可见。
+11. **tags 列表坏 JSON aliases 展示变化**：别名解析统一到
+    services.tags.library.parse_aliases 后，列表视图对坏 JSON 的 aliases
+    行从显示 [] 变为按逗号切分结果——仅脏数据可见的展示面变化。
 
 ---
 
