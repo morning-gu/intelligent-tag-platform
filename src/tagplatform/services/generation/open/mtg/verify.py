@@ -18,42 +18,14 @@ import json
 import logging
 
 from tagplatform.capabilities.llm.usage import accumulate_usage
+from tagplatform.capabilities.prompts.mtg import (
+    VERIFY_INSTRUCTIONS, VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT,
+)
 
 VERIFY_MARKER = "## 相似度复核"
 
 # 单次最多复核多少对：一部片子通常 5-10 对，40 是上限保险
 _MAX_PAIRS = 40
-
-_RETRY_HINT = (
-    "\n\n上一次输出无法解析：只输出一个 JSON 对象，形如 "
-    '{"results":[{"candidate":"候选原文","same":true}]}，'
-    "不要解释、不要 Markdown 代码块。"
-)
-
-# ---- 指令文案（与解析器互为协议）----
-# 提取自 _verify_messages 的函数体字面量，逐字未改。本模块的
-# parse_verify_results 就是这段文案的解析端：候选行 `- 候选｜库标签｜相似度`
-# 的行格式、输出 JSON 形状 {"results":[{"candidate","same"}]}、"每行都要给一条"
-# 两侧必须同改——文案要求什么、解析就认什么，改动只落一侧=静默丢对子。
-VERIFY_INSTRUCTIONS = (
-    "下面每行是一组「候选标签｜已有标签｜相似度」。\n"
-    "判断标准只有一条：如果这两个词都进了标签库，审核的人会不会认为它们是"
-    "重复条目、只该留一条？会 → same=true，否则 false。\n"
-    "答 true 的典型情况（同一含义的详略/近义说法，合并后信息不丢，"
-    "原措辞会作为别名保留）：\n"
-    "- 压抑沉重 / 压抑\n"
-    "- 古典史诗 / 宏大史诗\n"
-    "- 悬疑神秘 / 悬疑\n"
-    "答 false 的三种情况：\n"
-    "1. 意思相反（非线性叙事 / 线性叙事）；\n"
-    "2. 字面像但指不同事物（友情与背叛 / 权力与背叛；超能力觉醒 / 绝境觉醒）；\n"
-    "3. 候选是另一个独立概念，只是共享了词（暴君多疑 / 多疑 视情况，"
-    "共享词但主体不同的判 false）。\n"
-)
-VERIFY_OUTPUT_FORMAT = (
-    '只输出一个 JSON 对象：{"results":[{"candidate":"候选原文","same":true}]}，'
-    "每行都要给一条，不要解释、不要 Markdown 代码块。"
-)
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +41,7 @@ def build_verify_template() -> dict:
     return {
         "messages": _verify_messages(_pair_line(
             "{{候选标签}}", "{{库内标签}}", "{{余弦相似度，两位小数}}")),
-        "retry_suffix": _RETRY_HINT,
+        "retry_suffix": VERIFY_RETRY_HINT,
     }
 
 
@@ -123,7 +95,7 @@ def verify_pairs(client, pairs: list[tuple[str, str, float]], *,
     messages = build_verify_messages(pairs)
     for attempt in range(retries + 1):
         request = messages if attempt == 0 else [
-            {"role": "user", "content": messages[0]["content"] + _RETRY_HINT}]
+            {"role": "user", "content": messages[0]["content"] + VERIFY_RETRY_HINT}]
         try:
             response = client.complete(request,
                                        f"{run_id}:verify{'' if attempt == 0 else attempt}")

@@ -17,6 +17,7 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 from __future__ import annotations
 
 from tagplatform.capabilities.llm.usage import accumulate_usage
+from tagplatform.capabilities.prompts.mtg import JUDGE_RETRY_HINT
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import MTGParseError, parse_judge_items
 from tagplatform.services.generation.open.mtg.prompts import (
@@ -24,19 +25,12 @@ from tagplatform.services.generation.open.mtg.prompts import (
 )
 from tagplatform.schemas import ContentJSON
 
-_RETRY_HINT = (
-    "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
-    '每个元素形如 {"tag":"标签","verdict":"supported","importance":"core",'
-    '"confidence":0.9,"scenes":["scene_id"],"reason":"依据"}。'
-    "不要用对象包装、不要任何解释文字或 Markdown 代码块。"
-)
-
 
 def build_judge_template() -> dict:
     line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
     return {
         "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line),
-        "retry_suffix": _RETRY_HINT,
+        "retry_suffix": JUDGE_RETRY_HINT,
     }
 
 
@@ -84,7 +78,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
     for attempt in range(retries + 1):
         request = messages if attempt == 0 else [
             {"role": "user",
-             "content": messages[0]["content"] + _RETRY_HINT}]
+             "content": messages[0]["content"] + JUDGE_RETRY_HINT}]
         response = client.complete(request, f"{run_id}:judge{'' if attempt == 0 else attempt}")
         if usage is not None:
             accumulate_usage(usage, response.usage)

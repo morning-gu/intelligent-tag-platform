@@ -23,6 +23,12 @@ from pathlib import Path
 
 from tagplatform.schemas import ContentJSON
 from tagplatform.schemas.content import Character, Scene
+from tagplatform.capabilities.prompts.mtg import (
+    DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
+    FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
+    JUDGE_CRITERIA, JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT,
+    SCENE_GOAL_TEXT,
+)
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
 DIMENSIONS: dict[str, str] = {
@@ -51,39 +57,8 @@ def _scope_label(scope: str | None) -> str:
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
 
-# ---- judge 指令文案（与解析器互为协议）----
-# 提取自 render_judge_messages 的函数体字面量，逐字未改。judge 输出的解析端
-# 是 parse.parse_judge_items（verdict/importance 取值集、confidence 夹取、
-# quote/reason 截断都在那里），重试提示 judge._RETRY_HINT 是同一输出协议的
-# 第三次出现——改字段名、取值集或输出 JSON 形状时三处必须同改，改动只落
-# 提示词一侧=靠解析容错兜住的静默漂移（审查 nit #11 的病灶）。
-JUDGE_ROLE_BRIEF = (
-    "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
-    "请逐个判定候选标签是否被内容真实支持。\n\n"
-)
-JUDGE_CRITERIA = (
-    "## 判定标准\n"
-    "- supported：内容中有明确依据（如场景描述、台词、氛围或人物情绪）；\n"
-    "- insufficient：内容不足以判断（不要臆测）；\n"
-    "- contradicted：内容明显与标签矛盾；\n"
-    "- importance：film 按全片展示价值评 core / secondary / incidental。"
-    "scene 按本场检索价值评 core（精确且有区分度）/ secondary（相关但较泛）/ "
-    "incidental（难以帮助定位片段），无需衡量在全片中的重要性。\n"
-    "- confidence：0-1，你对判定结果的把握；\n"
-    "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
-    "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
-    "台词、氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
-    "理由**；找不到能摘的原文就判 insufficient。\n"
-    "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
-    "按候选标明的作用域审核。film 判 supported 时，scenes 必须列出至少两个共同支撑它的真实场景；"
-    "只有一处依据时判 insufficient。scene 只在候选标明的依据场景内核验并引用原文。\n"
-    "只有 quote 能在内容里逐字找到的判定才算数，没有原文依据一律 insufficient。\n"
-    "宁可判 insufficient，也不要放过没有依据的标签。\n\n"
-    "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
-    '{"verdicts":[{"tag":"候选标签原文","verdict":"supported|insufficient|contradicted",'
-    '"importance":"core|secondary|incidental","confidence":0.0,'
-    '"scenes":["场景 id"],"quote":"原文逐字摘录","reason":"30 字以内"}]}'
-)
+# judge 指令文案（JUDGE_ROLE_BRIEF / JUDGE_CRITERIA）自 2026-11-22 文案集中
+# 起移驻 tagplatform.capabilities.prompts.mtg（本模块 import 消费）。
 
 # prompt 内明细上限（控制 token；资产本身已按场景裁剪过台词）
 _MAX_CAST = 8
@@ -203,37 +178,15 @@ def render_scene(scene: Scene, active: frozenset[str]) -> str:
 
 
 def _generation_instructions(scope: str, max_tags: int | str, with_dir: bool = False) -> str:
-    dir_rule = (
-        "- dir：从「可以放新标签的目录」中选择语义和适用粒度匹配的一项，填写其目录 id；"
-        "只输出有合适目录的标签。\n" if with_dir else "")
+    # goal 文案与"如何填写"块自文案集中起为中央常量（capabilities.prompts.mtg）
+    dir_rule = DIR_FIELD_RULE_TEXT if with_dir else ""
     dir_field = '"dir":"目录 id",' if with_dir else ""
-    if scope == "scene":
-        goal = (
-            "第一轮：为场景搜索提炼标签，scope 固定为 scene。"
-            "想象用户记得这个片段的一个细节，或者想找同类片段时，会搜索什么。"
-            "选择本场明确出现且有区分度的细节，用自然、可直接搜索的词组命名，"
-            "比如「无声对峙」「拆除定时炸弹」。局部细节本身就可以有检索价值。"
-            "以本场的描述、台词或画面为证据。scenes 只填写这一场的 ID。"
-            "如有目录清单，选择能归入单场景目录的标签。"
-        )
-    else:
-        goal = (
-            "第二轮：结合影片材料和逐场候选，为观众提炼可独立展示的全片标签，scope 固定为 film。"
-            "从反复出现的意象或情绪、人物变化、前后呼应和段落对照中找全片特征。"
-            "逐场候选是检索线索，证据来自影片材料。允许发现候选里没有的全片特征。"
-            "避免照抄局部标签、机械拼接场景标签或仅凭重复次数决定主题。"
-            "每条标签至少引用两个不同场景，在 reason 中说清它们的共性或联系，"
-            "以及这些细节为何足以概括全片。"
-        )
+    goal = SCENE_GOAL_TEXT if scope == "scene" else FILM_GOAL_TEXT
     return (
         f"## 要求\n{goal}\n"
         f"最多 {max_tags} 条，按对当前用途的价值和证据强度降序排列。"
         "一个概念只保留一个说法。证据不足可以少给或返回空 tags。\n"
-        "\n## 如何填写\n"
-        "- tag：用简洁自然的中文词组命名，通常 2-8 字。\n"
-        "- desc：用 10-32 字解释标签本身，写成可跨影片复用的词典式释义。\n"
-        "- scenes：填写实际提供、且用于支撑标签的场景 ID。\n"
-        "- reason：用一到两句完整的话指出可核对的细节，并说明这些细节如何支持标签。\n"
+        f"{HOW_TO_FILL_TEXT}"
         f"{dir_rule}\n## 输出格式\n"
         "直接返回一个 JSON 对象，结构如下：\n"
         '{"tags":[{"tag":"2-8 字中文标签",' + dir_field +
@@ -253,15 +206,8 @@ def _dir_hint_block(dirs: list[dict]) -> str:
     for entry in dirs:
         label = _scope_label(entry.get("scope"))
         lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
-    return (
-        "## 可以放新标签的目录\n"
-        "每个标签都要落到下面某个目录里，用**目录 id** 填 `dir` 字段。"
-        "只能从这张表里选，不要自造 id（竖线后是目录全路径与挂载粒度）：\n"
-        + "\n".join(lines) + "\n"
-        "按标签本身的含义挑目录，不要看哪个目录空着就往哪塞；"
-        "一条标签实在没有合适的目录，就**不要输出它**——宁可少一条，"
-        "也不要放进不合适的目录。"
-    )
+    # 头尾说明文案为中央常量（capabilities.prompts.mtg），listing 行就地渲染
+    return DIR_HINT_HEAD_TEXT + "\n".join(lines) + "\n" + DIR_HINT_TAIL_TEXT
 
 
 def build_scene_generation_messages(scene: Scene, frames: tuple[Path, ...], *,
@@ -329,8 +275,7 @@ def _generation_messages(body: str, frame_parts: list[dict],
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
-                 "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
-                 "## 内容\n" + body),
+                 f"{GENERATION_ROLE_TEXT}" + body),
     }, *frame_parts]
     if library_hint:
         parts.append({"type": "text", "text": _library_hint_block(library_hint)})
@@ -371,12 +316,7 @@ def _library_hint_block(names: list[str]) -> str:
     "悬疑解谜"这类更细的候选，只是不该原样复述。
     """
     listing = "\n".join(f"- {name}" for name in names)
-    return (
-        "## 库里已有的标签\n"
-        "以下是已收录的表述，供你对照。请输出尚未收录的表述，优先补充清单未覆盖的特征，"
-        "或用片中证据提炼出比现有词更精确的标签：\n"
-        f"{listing}"
-    )
+    return LIBRARY_HINT_HEAD_TEXT + f"{listing}"
 
 
 def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
