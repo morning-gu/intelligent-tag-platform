@@ -65,7 +65,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：七项菜单（配置管理已合一，含仅 admin 可见两项）', async () => {
+  it('admin 登录：七项菜单按序（终态对齐七模块命名）', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -73,30 +73,36 @@ describe('路由门禁（requireAuth）', () => {
     // 等布局渲染完成（任一菜单项出现）
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(7)
-    expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '标签管理' })).toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '导入任务' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '质量评估' })).not.toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '闭环评测' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '配置管理' })).toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '用户管理' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '模型配置' })).not.toBeInTheDocument()
+    // 菜单顺序即模块顺序：工作台 → 标签管理 → 内容管理 → 内容打标 →
+    // 审核中心 → 闭环评测 → 配置管理
+    expect(menuItems.map((el) => el.textContent)).toEqual([
+      '工作台',
+      '标签管理',
+      '内容管理',
+      '内容打标',
+      '审核中心',
+      '闭环评测',
+      '配置管理',
+    ])
     // 顶部显示用户名
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
 
-  it('普通用户：菜单仅五项，不显示用户管理与模型配置', async () => {
+  it('普通用户：菜单为终态前五项，不显示 admin 专属两项', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u2', username: 'alice', role: 'reviewer' })
 
     renderAt('/')
 
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
-    expect(screen.getAllByRole('menuitem')).toHaveLength(5)
-    expect(screen.queryByRole('menuitem', { name: '用户管理' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '模型配置' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('menuitem').map((el) => el.textContent)).toEqual([
+      '工作台',
+      '标签管理',
+      '内容管理',
+      '内容打标',
+      '审核中心',
+    ])
+    expect(screen.queryByRole('menuitem', { name: '闭环评测' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '配置管理' })).not.toBeInTheDocument()
   })
 })
 

@@ -15,13 +15,14 @@ export interface AuthedOutlet {
 /** 菜单项数组类型（去掉 MenuProps['items'] 的可选外层，便于展开复用）。 */
 type MenuItems = NonNullable<MenuProps['items']>
 
-/** 静态菜单项（工作台至标签库全员可见）；用户管理按 role 追加。 */
+/** 静态菜单项（全员可见，顺序即模块顺序：标签管理→内容管理→内容打标→
+ * 审核中心；命名对齐七模块方案）。 */
 const BASE_MENU_ITEMS: MenuItems = [
   { key: '/', label: '工作台' },
-  { key: '/review', label: '审核中心' },
-  { key: '/assets', label: '内容资产' },
-  { key: '/tasks', label: '生产任务' },
   { key: '/tags', label: '标签管理' },
+  { key: '/assets', label: '内容管理' },
+  { key: '/tasks', label: '内容打标' },
+  { key: '/review', label: '审核中心' },
 ]
 
 /** admin 专属菜单项（闭环评测 + 配置管理），按 role 追加在全员项之后。 */
