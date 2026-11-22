@@ -35,9 +35,9 @@ from tagplatform.settings import Settings
 _MOVIE_ID = re.compile(r"tt[0-9]+")
 
 
-def dataset_movies(root: str) -> list[str]:
+def dataset_movies(root: Path) -> list[str]:
     """发现具备内容的影片。开放生成的标签词表不依赖固定 ID 的 GT。"""
-    data_dir = Path(root) / "data"
+    data_dir = root / "data"
     if not data_dir.is_dir():
         return []
     return sorted(
@@ -46,11 +46,32 @@ def dataset_movies(root: str) -> list[str]:
     )
 
 
-def dataset_movie_entries(root: str) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class OpenDataset:
+    root: Path
+    movies: list[str]
+
+
+def scan_open_datasets(root: str) -> dict[str, OpenDataset]:
+    """接收单个数据集目录，或包含多个数据集的上一级目录。"""
+    path = Path(root).resolve()
+    movies = dataset_movies(path)
+    if movies:
+        return {path.name: OpenDataset(path, movies)}
+    if not path.is_dir():
+        return {}
+    return {
+        child.name: OpenDataset(child, movies)
+        for child in sorted(path.iterdir())
+        if (movies := dataset_movies(child))
+    }
+
+
+def dataset_movie_entries(dataset: OpenDataset) -> list[dict[str, str]]:
     entries = []
-    for tt in dataset_movies(root):
+    for tt in dataset.movies:
         try:
-            raw = read_movie_data(Path(root) / "data" / tt)
+            raw = read_movie_data(dataset.root / "data" / tt)
             title = str(raw["asset"].get("title") or tt)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             title = tt
@@ -84,6 +105,7 @@ class _OpenMovieResult(MovieResult):
     status: str
     note: str | None = None
     frame_count: int = 0
+    scene_count: int = 0
 
 
 class OpenEvalService(EvalRunService[_OpenJob, _OpenMovieResult]):
@@ -97,12 +119,12 @@ class OpenEvalService(EvalRunService[_OpenJob, _OpenMovieResult]):
 
     def start(self, dataset_id: str, movies: dict, quality_model: str = DEFAULT_MODEL,
               concurrency: int = DEFAULT_CONCURRENCY, *, wait: bool = False) -> str:
-        root = Path(self.effective_root).resolve()
-        usable = dataset_movies(str(root))
-        if dataset_id != root.name or not usable:
+        dataset = scan_open_datasets(self.effective_root).get(dataset_id)
+        if dataset is None:
             raise EvalValidationError("开放评估数据集不存在或没有可用影片")
+        root = dataset.root
         try:
-            selected = select_movies(usable, movies.get("mode"), movies.get("ids"))
+            selected = select_movies(dataset.movies, movies.get("mode"), movies.get("ids"))
         except ValueError as exc:
             raise EvalValidationError(str(exc)) from None
         if not selected:
@@ -142,6 +164,7 @@ class OpenEvalService(EvalRunService[_OpenJob, _OpenMovieResult]):
         started = time.perf_counter()
         title = tt
         frame_count = 0
+        scene_count = 0
 
         def result(status: str, produced: list[dict], error: str | None = None,
                    note: str | None = None) -> _OpenMovieResult:
@@ -149,7 +172,7 @@ class OpenEvalService(EvalRunService[_OpenJob, _OpenMovieResult]):
                 tt=tt, title=title, ok=status not in ("failed", "generation_failed"),
                 error=error, produced=produced,
                 elapsed_ms=int((time.perf_counter() - started) * 1000),
-                status=status, note=note, frame_count=frame_count,
+                status=status, note=note, frame_count=frame_count, scene_count=scene_count,
             )
 
         settings = job.generation_settings
@@ -162,6 +185,7 @@ class OpenEvalService(EvalRunService[_OpenJob, _OpenMovieResult]):
             }
             content = parse_movie_content(raw)
             title = content.asset.title or tt
+            scene_count = len(content.content.scenes)
             frames = (plan_dataset_frames(content, movie_dir, frame_lists,
                                           settings.mtg_frames_per_scene, settings.mtg_max_frames)
                       if "video" in settings.mtg_modality_set else {})

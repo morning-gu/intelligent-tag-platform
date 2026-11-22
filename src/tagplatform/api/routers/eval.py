@@ -16,7 +16,7 @@ from tagplatform.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.library import try_load_library
 from tagplatform.eval.tag_quality import DEFAULT_MODEL
 from tagplatform.eval_runs import DEFAULT_CONCURRENCY, EvalValidationError, RunActiveError, RunBusyError
-from tagplatform.open_eval import OpenEvalService, dataset_movie_entries, dataset_movies
+from tagplatform.open_eval import OpenDataset, OpenEvalService, dataset_movie_entries, scan_open_datasets
 
 router = APIRouter(prefix="/api/v1/eval/{mode}")
 
@@ -159,9 +159,11 @@ def _dataset_or_404(root: str, dataset_id: str):
     return info
 
 
-def _require_open_dataset(root: str, dataset_id: str) -> None:
-    if dataset_id != Path(root).resolve().name or not dataset_movies(root):
+def _require_open_dataset(root: str, dataset_id: str) -> OpenDataset:
+    dataset = scan_open_datasets(root).get(dataset_id)
+    if dataset is None:
         raise HTTPException(status_code=404, detail=f"开放评估数据集不可用：{dataset_id!r}")
+    return dataset
 
 
 def _run_state_out(state) -> RunStateOut:
@@ -202,8 +204,11 @@ def set_dataset_root(
             status_code=400,
             detail=f"数据集根目录不存在或不是目录：{root}")
     if isinstance(service, OpenEvalService):
-        if not dataset_movies(root):
-            raise HTTPException(status_code=400, detail=f"目录 {root} 下未找到 data/<tt>/content.json")
+        if not scan_open_datasets(root):
+            raise HTTPException(
+                status_code=400,
+                detail=f"目录 {root} 及其直接子目录下未找到 data/<tt>/content.json",
+            )
     elif not scan_datasets(root, set()):
         raise HTTPException(
             status_code=400,
@@ -220,9 +225,10 @@ def list_datasets(
     """可评数据集列表（畸形 gt 已在扫描层跳过；overlap 对当前标签库）。"""
     root = service.effective_root
     if isinstance(service, OpenEvalService):
-        movies = dataset_movies(root)
-        return [DatasetInfoOut(id=Path(root).resolve().name, n_movies=len(movies),
-                               usable_movies=len(movies))] if movies else []
+        return [
+            DatasetInfoOut(id=dataset_id, n_movies=len(dataset.movies), usable_movies=len(dataset.movies))
+            for dataset_id, dataset in scan_open_datasets(root).items()
+        ]
     infos = scan_datasets(root, _library_tag_ids())
     return [DatasetInfoOut(id=i.id, gt_path=i.gt_path, n_movies=i.n_movies,
                            n_tags=i.n_tags, library_overlap=i.library_overlap,
@@ -239,8 +245,8 @@ def list_dataset_movies(
     """数据集的 usable 影片清单（选片列表用）；未知 dataset → 404。"""
     root = service.effective_root
     if isinstance(service, OpenEvalService):
-        _require_open_dataset(root, dataset_id)
-        return [MovieRefOut(**entry) for entry in dataset_movie_entries(root)]
+        dataset = _require_open_dataset(root, dataset_id)
+        return [MovieRefOut(**entry) for entry in dataset_movie_entries(dataset)]
     _dataset_or_404(root, dataset_id)
     try:
         entries = movie_entries(root, dataset_id)

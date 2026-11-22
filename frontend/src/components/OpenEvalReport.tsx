@@ -142,7 +142,10 @@ export default function OpenEvalReportView({ report, runId }: { report: OpenEval
                 <Typography.Text strong>{film.title}</Typography.Text>
                 <Typography.Text type="secondary">{film.tt}</Typography.Text>
                 <Tag>{filmStatuses[film.status]}</Tag>
-                <Typography.Text type="secondary">{film.produced.length} 条标签 · {film.frame_count} 张帧</Typography.Text>
+                <Typography.Text type="secondary">
+                  {film.produced.length} 条标签 · {film.frame_count} 张帧
+                  {film.scene_count !== undefined && ` · ${film.scene_count} 个场景`}
+                </Typography.Text>
               </Space>
             ),
             children: (

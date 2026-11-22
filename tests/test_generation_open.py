@@ -522,3 +522,19 @@ def test_plan_scene_frames_missing_annotation_is_empty(tmp_path, content_fixture
     root = tmp_path / "empty"
     root.mkdir()
     assert keyframes_mod.plan_scene_frames(content_fixture, str(root)) == {}
+
+
+def test_plan_dataset_frames_spreads_limited_budget_across_scenes(tmp_path, content_fixture):
+    content = _scene_content(content_fixture, "tt0000001", 10)
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    frame_lists = {}
+    for scene in content.content.scenes:
+        frame = frames_dir / f"{scene.scene_id}.jpg"
+        frame.write_bytes(b"jpg")
+        frame_lists[scene.scene_id] = [f"frames/{frame.name}"]
+
+    plan = keyframes_mod.plan_dataset_frames(content, tmp_path, frame_lists, per_scene=2, max_frames=4)
+
+    assert list(plan) == [content.content.scenes[index].scene_id for index in (1, 3, 6, 8)]
+    assert sum(map(len, plan.values())) == 4

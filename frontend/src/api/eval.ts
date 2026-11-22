@@ -153,6 +153,7 @@ export interface OpenEvalReport {
     error: string | null
     note: string | null
     frame_count: number
+    scene_count?: number
     metrics: QualityMetrics | null
     produced: OpenEvalLabel[]
   }[]

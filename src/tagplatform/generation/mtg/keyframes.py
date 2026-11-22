@@ -162,7 +162,7 @@ def plan_dataset_frames(
     content: ContentJSON, movie_dir: Path, frame_lists: dict[str, list[str]],
     per_scene: int, max_frames: int,
 ) -> dict[str, tuple[Path, ...]]:
-    """从故事段自带的时间顺序帧列表均匀取样，使用与生产相同的全片预算。"""
+    """从数据集场景的时间顺序帧列表均匀取样，帧预算不足时覆盖全片。"""
     if per_scene <= 0 or max_frames <= 0:
         return {}
     frames_dir = movie_dir.resolve() / "frames"
@@ -178,8 +178,11 @@ def plan_dataset_frames(
         count = min(per_scene, len(available))
         sampled = tuple(available[(2 * i + 1) * len(available) // (2 * count)]
                         for i in range(count))
-        plans.append(SceneFrames(scene.scene_id, scene.time_range.start_ms,
-                                 scene.time_range.end_ms, sampled))
+        if sampled:
+            plans.append(SceneFrames(scene.scene_id, scene.time_range.start_ms,
+                                     scene.time_range.end_ms, sampled))
+    if len(plans) > max_frames:
+        plans = [plans[(2 * i + 1) * len(plans) // (2 * max_frames)] for i in range(max_frames)]
     return {plan.scene_id: plan.frames for plan in _cap_frames(plans, max_frames) if plan.frames}
 
 

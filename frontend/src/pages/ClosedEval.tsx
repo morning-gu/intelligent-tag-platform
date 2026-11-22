@@ -212,7 +212,10 @@ export default function EvalPage({ mode = 'closed' }: { mode?: EvalMode }) {
   const updateDatasets = useCallback((rows: DatasetInfo[]) => {
     setDatasets(rows)
     setDatasetsError(null)
-    if (isOpen) createForm.setFieldValue('dataset', rows[0]?.id)
+    const current = createForm.getFieldValue('dataset')
+    if (isOpen && !rows.some((row) => row.id === current)) {
+      createForm.setFieldValue('dataset', rows.length === 1 ? rows[0].id : undefined)
+    }
   }, [createForm, isOpen])
 
   const stopPolling = useCallback(() => {
@@ -299,7 +302,7 @@ export default function EvalPage({ mode = 'closed' }: { mode?: EvalMode }) {
       message.success('数据集根已应用')
       setEffectiveRoot(info.root)
       createForm.setFieldValue('ids', undefined)
-      setMovies([])
+      if (info.root !== effectiveRoot) setMovies([])
       localStorage.setItem(rootStorageKey, value)
       try {
         const rows = await api.listDatasets()
@@ -470,10 +473,13 @@ export default function EvalPage({ mode = 'closed' }: { mode?: EvalMode }) {
     }
   }
 
-  const datasetOptions = datasets.map((d) => ({
-    value: d.id,
-    label: isOpen ? `${d.id}（${d.usable_movies} 部影片）` : `${d.id}（交集 ${d.library_overlap}）`,
-  }))
+  const datasetOptions = datasets.map((d) => {
+    const name = isOpen && d.id === 'MovieTags' ? 'MovieTags V1' : d.id
+    return {
+      value: d.id,
+      label: isOpen ? `${name}（${d.usable_movies} 部影片）` : `${name}（交集 ${d.library_overlap}）`,
+    }
+  })
 
   /** 操作列（组件内构造：需要 handleDelete 闭包）：仅终态行可删，运行行
    * 禁用（后端 409 是最终裁决，前端先挡更省一轮）。外层 span 拦截点击
@@ -522,7 +528,9 @@ export default function EvalPage({ mode = 'closed' }: { mode?: EvalMode }) {
             aria-label="数据集根路径"
             value={rootInput}
             onChange={(e) => setRootInput(e.target.value)}
-            placeholder={`服务器上的数据集根目录，如 /cache/${isOpen ? 'MovieTagsV2' : 'MovieTags'}`}
+            placeholder={isOpen
+              ? 'MovieTags 或 MovieTagsV2 所在目录，也可填两者的共同上级目录'
+              : '服务器上的数据集根目录，如 /cache/MovieTags'}
             style={{ flex: 1 }}
           />
           <Button

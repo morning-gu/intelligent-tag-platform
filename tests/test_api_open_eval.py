@@ -1,4 +1,5 @@
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -30,12 +31,12 @@ def dataset(tmp_path):
     return root
 
 
-def _start(client, dataset):
-    response = client.post(f"{BASE}/dataset-root", json={"root": str(dataset)})
+def _start(client, dataset, *, root=None, title="样本影片"):
+    response = client.post(f"{BASE}/dataset-root", json={"root": str(root or dataset)})
     assert response.status_code == 200
-    assert client.get(f"{BASE}/datasets").json()[0]["id"] == dataset.name
+    assert dataset.name in {row["id"] for row in client.get(f"{BASE}/datasets").json()}
     assert client.get(f"{BASE}/datasets/{dataset.name}/movies").json() == [
-        {"tt": TT, "title": "样本影片"},
+        {"tt": TT, "title": title},
     ]
     response = client.post(f"{BASE}/runs", json={
         "dataset": dataset.name, "movies": {"mode": "custom", "ids": [TT]},
@@ -49,6 +50,36 @@ def _start(client, dataset):
             return run_id, state
         time.sleep(0.01)
     pytest.fail(f"{run_id} 未完成")
+
+
+def test_open_eval_selects_v1_and_v2_from_same_parent(client, dataset):
+    v1 = dataset.with_name("MovieTags")
+    shutil.copytree(dataset, v1)
+    source = v1 / "data" / TT / "content.json"
+    movie = json.loads(source.read_text(encoding="utf-8"))
+    movie["asset"]["title"] = "V1 影片"
+    movie["content"]["scenes"].append({
+        "scene_id": "scene_002", "start_ms": 60000, "end_ms": 66000,
+        "dialogues": [{"dialogue_id": "d1", "speaker_id": None, "text": "真的是你。"}],
+    })
+    source.write_text(json.dumps(movie), encoding="utf-8")
+
+    run_id, state = _start(client, v1, root=dataset.parent, title="V1 影片")
+    assert state["status"] == "succeeded" and state["failed"] == 0
+    assert [row["id"] for row in client.get(f"{BASE}/datasets").json()] == [
+        "MovieTags", "MovieTagsV2",
+    ]
+    assert client.get(f"{BASE}/datasets/Missing/movies").status_code == 404
+    report = client.get(f"{BASE}/runs/{run_id}/report").json()
+    assert report["meta"]["dataset"] == {"id": v1.name, "root": str(v1)}
+    assert report["films"][0]["scene_count"] == 2
+    assert report["films"][0]["frame_count"] == 1
+
+    v2_run, state = _start(client, dataset, root=dataset.parent)
+    assert state["status"] == "succeeded" and state["failed"] == 0
+    report = client.get(f"{BASE}/runs/{v2_run}/report").json()
+    assert report["meta"]["dataset"] == {"id": dataset.name, "root": str(dataset)}
+    assert report["films"][0]["scene_count"] == 1
 
 
 @pytest.mark.empty_library
