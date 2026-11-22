@@ -242,6 +242,10 @@ class ClosedEvalService:
         self._runs: dict[str, RunState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_run_id: str | None = None
+        # 跨服务互斥探针（open-eval Task 4）：对端评测服务的活跃 run 无锁
+        # 读（OpenEvalService.active_run_id_lockless）——app 装配层互挂
+        # （Task 6）。默认 None = 零行为变化（单服务部署零探测）
+        self.busy_probe = None
         # 数据集根页面级 override（POST /eval/closed/dataset-root 写入）：
         # 进程内生效，重启回落 settings 默认；起跑时经 effective_root 快照
         self.dataset_root_override: str | None = None
@@ -264,8 +268,9 @@ class ClosedEvalService:
 
         校验序（spec 钉死）：数据集存在 → 影片集（select_movies，custom
         越权/未知模式在此报错）→ gt 可读 → 库就绪 → 库∩gt 非空 →
-        Busy。校验失败抛 `EvalValidationError`（不占 busy 位）；已有
-        run 在跑抛 `RunBusyError`。`wait=True` 供测试同步等完（join
+        Busy（自有活跃 + 对端评测服务 probe）。校验失败抛
+        `EvalValidationError`（不占 busy 位）；已有 run 在跑抛
+        `RunBusyError`。`wait=True` 供测试同步等完（join
         worker 线程后返回）。
         """
         root = self.effective_root
@@ -315,10 +320,21 @@ class ClosedEvalService:
         # 单一来源仍是 producer 协议声明（字符串留痕口径），消费方转 int
         prompt_version = int(context.producer.prompt_version)
 
-        # Busy 检查 + 注册（同一锁内原子完成：并发 start 只放行一个）
+        # Busy 检查 + 注册（同一锁内原子完成：并发 start 只放行一个）。
+        # 跨服务互斥（open-eval Task 4）：自有活跃检查之后探测对端评测
+        # 服务。probe 是对端的无锁读（active_run_id_lockless）——本锁内
+        # 若再取对端锁，两服务互挂探针时即经典锁序倒置死锁（A 持 A 锁探
+        # B、B 持 B 锁探 A 互相等）；无锁读单个 Python 属性是原子的，
+        # 死锁不可能。良性竞态窗口：对端可能恰在本探测通过与对端自身注册
+        # 之间放行（双方都探测到对方空闲），窗口为各自锁内注册前几条语句
+        # 的微秒级，且互斥语义是友好拒绝而非硬事务边界——接受（与
+        # OpenEvalService 模块 docstring「跨服务互斥」同款说明）。
         with self._lock:
             if self._active_run_id is not None:
                 raise RunBusyError(f"已有评测 run 进行中：{self._active_run_id}")
+            peer = self.busy_probe() if self.busy_probe else None
+            if peer is not None:
+                raise RunBusyError(f"另一评测进行中：{peer}")
             run_id = self._new_run_id()
             started_at = _now_iso()
             self._runs[run_id] = RunState(
@@ -431,6 +447,17 @@ class ClosedEvalService:
         """当前进行中的 run_id（无 → None）。"""
         with self._lock:
             return self._active_run_id
+
+    def active_run_id_lockless(self) -> str | None:
+        """当前活跃 run_id 的无锁读——专供对端评测服务的 busy_probe（Task 4）。
+
+        死锁规避：busy 探测发生在对端 start 持有其自身锁的窗口内，这里
+        再取本服务锁即锁序倒置（A 持 A 锁探 B、B 持 B 锁探 A 互相等）；
+        读单个 Python 属性是原子的，无锁读安全。良性竞态窗口（探测通过
+        与注册之间对端可能放行）见 busy_probe 注释与 OpenEvalService 模块
+        docstring「跨服务互斥」。
+        """
+        return self._active_run_id
 
     def history(self) -> list[dict]:
         """历史扫描：`eval_output_root/*/meta.json` → 摘要行（started_at 降序）。
