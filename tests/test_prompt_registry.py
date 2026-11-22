@@ -1,7 +1,8 @@
-"""GET /api/v1/prompts/registry 契约 + assets/quality 搬运 wiring。"""
+"""GET /api/v1/prompts/registry 契约 + assets/quality/open_review 搬运 wiring。"""
 from tagplatform.capabilities.prompts import mtg as mtg_prompts
 from tagplatform.capabilities.prompts import (
     assets as assets_prompts,
+    open_review as open_review_prompts,
     quality as quality_prompts,
     registry as registry_mod,
     templates as templates_prompts,
@@ -35,6 +36,7 @@ def test_registry_covers_all_central_constants():
         "mtg": _public_str_constants(mtg_prompts),
         "assets": _public_str_constants(assets_prompts),
         "quality": _public_str_constants(quality_prompts),
+        "open_review": _public_str_constants(open_review_prompts),
     }
     actual = {g["module"]: {i["name"] for i in g["items"]}
               for g in registry_mod.list_prompt_registry()}
@@ -50,7 +52,8 @@ def test_registry_endpoint_contract(client):
     resp = client.get("/api/v1/prompts/registry")
     assert resp.status_code == 200
     groups = resp.json()
-    assert {g["module"] for g in groups} == {"closed", "mtg", "assets", "quality"}
+    assert {g["module"] for g in groups} == {
+        "closed", "mtg", "assets", "quality", "open_review"}
     for group in groups:
         assert group["title"]
         assert group["items"]
@@ -73,6 +76,16 @@ def test_registry_mtg_items_match_constants(client):
     by_name = {i["name"]: i["text"] for i in groups["mtg"]["items"]}
     assert by_name["JUDGE_CRITERIA"] == mtg_prompts.JUDGE_CRITERIA  # 单一来源钉死
     assert by_name["SCENE_GOAL_TEXT"] == mtg_prompts.SCENE_GOAL_TEXT
+
+
+def test_registry_open_review_content(client):
+    groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
+    items = {i["name"]: i["text"] for i in groups["open_review"]["items"]}
+    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v1"
+    assert "## 标签评审（二值）" in items["REVIEW_PROMPT"]
+    assert "10–25 字" in items["REVIEW_PROMPT"]      # 摘录长度要求（en-dash）
+    assert "reviews" in items["REVIEW_OUTPUT_FORMAT"]
+    assert "reviews" in items["REVIEW_RETRY_HINT"]
 
 
 def test_registry_does_not_break_prompt_contract_locks(client):

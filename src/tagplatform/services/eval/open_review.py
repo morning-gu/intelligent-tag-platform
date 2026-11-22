@@ -1,0 +1,333 @@
+"""开放评测的二值评审层：调用 / 解析 / 摘录核验 / 超长切分（spec §6）。
+
+open-eval 运行器（Task 4）在 produce 之后对每片全部产出标签（新词 +
+库内命中）做一次二值评审。语义边界：
+
+- 一片一批（全部标签一次请求，超长才切分——镜像 tag_quality 的二分
+  行为，输入超长与输出截断两种触发都切）；
+- 解析纪律（Review Focus 1；147.3 端点家族畸形前科四起）：剥首尾整圈
+  ``` 围栏、reviews 单对象（按 id 索引的 dict）容忍、裸列表容忍、
+  pass/is_pass 别名键兼容、id 容忍 "t3" / 3 / "3"；漏判 id 的行
+  pass=None（不判 pass 也不判 fail，排除出分母、计 review_missing），
+  全部行漏判 → ReviewRequestError（评审失败 ≠ 评审 0 分）；
+- 摘录必核（Review Focus 4）：pass 且 quote 经 _quote_ok 核不中渲染
+  文本 → 改判 fail、reason 追加「摘录未命中原文」——与生产 judge 的
+  「引用不过改判 insufficient」同款纪律，防评审员空口通过；
+- 格式重试一次（附格式要求重发，镜像 judge/verify 的重试后缀），仍
+  失败 → ReviewRequestError；请求失败（传输异常 / ok=False 信封）同样
+  → ReviewRequestError。评审失败由上层记 review_failed（produce 产出
+  完整保留，不判 0），本层不写盘、不碰 DB。
+
+评审客户端与主客户端同构（make_review_client 通道）：评审三键
+（open_eval_review_model / _base_url_env / _api_key_env）全空或
+mock / 零网络替身时回落传入主客户端（同模评审）；否则按三键另建真实
+客户端，env 名逐键回落主 LLM 设置。
+"""
+from __future__ import annotations
+
+import json
+import logging
+
+from tagplatform.capabilities.prompts.open_review import (
+    REVIEW_OUTPUT_FORMAT, REVIEW_PROMPT, REVIEW_PROMPT_VERSION,
+    REVIEW_RETRY_HINT,
+)
+from tagplatform.schemas import ContentJSON
+from tagplatform.services.generation.open.mtg.pipeline import _quote_ok
+from tagplatform.services.generation.open.mtg.prompts import render_content
+from tagplatform.settings import Settings
+
+logger = logging.getLogger(__name__)
+
+# REVIEW_PROMPT_VERSION 从 capabilities/prompts.open_review 同驻 re-export：
+# canonical 在 prompt 常量模块（文案与版本同驻），这里转出口给运行器记账
+# （meta.review.prompt_version），import 路径与 make_review_client 对齐。
+__all__ = [
+    "REVIEW_PROMPT_VERSION",
+    "ReviewRequestError",
+    "make_review_client",
+    "review_calibre",
+    "review_movie_tags",
+]
+
+
+class ReviewRequestError(RuntimeError):
+    """评审调用失败（请求失败 / 格式两连败 / 全部漏判）。
+
+    上层（运行器）按「该片评审失败」处理：produce 产出完整保留、该片
+    全部标签不计入通过率/标定（None≠0 纪律），绝不判 0。
+    """
+
+
+def make_review_client(settings: Settings, llm):
+    """评审客户端工厂：未配独立评审端点或替身场景直接复用主客户端。
+
+    - settings.use_mock_llm 或主客户端声明 zero_network 能力位（零网络
+      替身）→ 返回 llm（能力探测而非类型判断，与 mtg 管线的
+      _make_stage_client 同款——管线因此不 import 测试替身的类型）；
+    - 评审三键全空（未配置独立评审端点）→ 返回 llm（同模评审，spec §6）；
+    - 否则按评审模型 + env 名逐键回落另建真实客户端（model 必填，两个
+      env 名空时用主 LLM 的 base_url/api_key 环境变量名）。温度恒 0
+      （评审是判定不是创作），限速沿用主 LLM 设置。
+    """
+    if settings.use_mock_llm or getattr(llm, "zero_network", False):
+        return llm
+    if not settings.open_eval_review_model:
+        return llm
+    from tagplatform.capabilities.llm import OpenAIClient
+    return OpenAIClient(
+        model=settings.open_eval_review_model,
+        base_url_env=settings.open_eval_review_base_url_env or settings.llm_base_url_env,
+        api_key_env=settings.open_eval_review_api_key_env or settings.llm_api_key_env,
+        temperature=0.0,
+        request_interval=settings.llm_request_interval,
+    )
+
+
+def review_calibre(settings: Settings, llm) -> dict:
+    """评审口径（meta 直用）：评审模型名 + 是否与生成同模。
+
+    三键全空 = 回落主 LLM（同模评审），模型名取 settings.llm_model——
+    刻意不读 llm.model：mock 替身的 model 属性是替身名（如 mock-1），
+    写进 meta 会让同模警示误报。llm 参数仅为与 make_review_client 的
+    调用形状对齐。
+    """
+    model = settings.open_eval_review_model or settings.llm_model
+    return {"model": model, "same_model": model == settings.llm_model}
+
+
+def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
+                      run_id: str, modalities=("script", "dialogue")) -> list[dict]:
+    """对一片的全部产出标签做二值评审，同序回填 pass / reason / quote。
+
+    入参行 {"id","name","desc","level","scenes":[scene_id,...]}；返回同序
+    行追加 {"pass": bool | None, "reason": str, "quote": str | None}。送进
+    模型的 id 一律按批次位置重编为 "t0".."tN"（防名称撞车——模型按 id
+    回填，不按名称匹配），结果按位置映射回原行：入参行的 id 与其余字段
+    原样保留；即便行里带了生成侧 reason 等多余字段也不会进提示（防同模
+    锚定——清单只投影评审需要的五个字段）。
+
+    抛 ReviewRequestError 的三种情况：请求失败（含传输异常）、同一批两
+    次解析失败、全部行漏判。部分漏判不抛——漏判行 pass=None 占位，由
+    指标层排除出分母（None≠0 纪律）。
+    """
+    if not tag_rows:
+        return []
+    haystack = render_content(content, modalities=modalities)
+    results: dict[int, dict] = {}
+    errors: list[str] = []
+
+    def batch(rows_slice: list[dict], offset: int) -> None:
+        if errors:  # 已有硬失败（端点死亡/协议失败）：后续批次不再烧 token
+            return
+        messages = _build_messages(haystack, rows_slice)
+        try:
+            response = client.complete(messages, run_id)
+        except Exception as exc:  # noqa: BLE001 —— 端点任何异常统一按调用失败记
+            errors.append(f"评审调用失败：{exc}")
+            return
+        text, ok, transport_error = _unwrap(response)
+        truncated = _truncated(response)
+        if (truncated or (not ok and _input_limit(transport_error.lower()))) \
+                and len(rows_slice) > 1:
+            middle = len(rows_slice) // 2
+            logger.info("评审请求超长，二分重试 run_id=%s batch_sizes=%d,%d",
+                        run_id, middle, len(rows_slice) - middle)
+            batch(rows_slice[:middle], offset)
+            batch(rows_slice[middle:], offset + middle)
+            return
+        if not ok:
+            errors.append(f"评审调用失败：{transport_error}")
+            return
+        if truncated:
+            errors.append("评审输出超出长度限制")
+            return
+        verdicts = _parse_with_retry(client, messages, text, len(rows_slice),
+                                     run_id, errors)
+        if errors or verdicts is None:
+            return
+        for index, verdict in verdicts.items():
+            results[offset + index] = verdict  # 批内 id 重编 → 全局位置回填
+
+    batch(tag_rows, 0)
+    if errors:
+        raise ReviewRequestError("；".join(dict.fromkeys(errors)))
+    if not results:
+        raise ReviewRequestError("评审响应未包含任何有效判决（全部漏判）")
+    # 摘录必核：pass 且摘录核不中 → 改判 fail（空口通过在这里拦下）
+    for verdict in results.values():
+        if verdict["pass"] and not _quote_ok(verdict["quote"], haystack):
+            verdict["pass"] = False
+            verdict["reason"] = (f"{verdict['reason']}；摘录未命中原文"
+                                 if verdict["reason"] else "摘录未命中原文")
+    # 同序回填：漏判行占位 None（排除出分母，计 review_missing 由上层做）
+    for index, row in enumerate(tag_rows):
+        verdict = results.get(index)
+        if verdict is None:
+            verdict = {"pass": None, "reason": "评审未返回该条判定", "quote": None}
+        row.update(verdict)
+    return tag_rows
+
+
+def _build_messages(haystack: str, rows: list[dict]) -> list[dict]:
+    """评审消息：system = REVIEW_PROMPT（spec §6 逐字），user = 材料 + 清单。
+
+    清单按批次位置重编 id（"t0".."tN"）并只投影五个评审字段——防名称
+    撞车与生成侧 reason 锚定。输出 JSON 形状说明附在清单之后（REVIEW_
+    PROMPT 原文不含形状；形状属协议细节，随消息装配给出）。
+    """
+    listing = [{
+        "id": f"t{position}",
+        "name": row.get("name"),
+        "desc": row.get("desc"),
+        "level": row.get("level"),
+        "scenes": list(row.get("scenes") or []),
+    } for position, row in enumerate(rows)]
+    user_content = (
+        haystack
+        + "\n\n## 待评审标签\n"
+        + json.dumps(listing, ensure_ascii=False)
+        + "\n"
+        + REVIEW_OUTPUT_FORMAT
+    )
+    return [
+        {"role": "system", "content": REVIEW_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _parse_with_retry(client, messages: list[dict], text: str, total: int,
+                      run_id: str, errors: list[str]) -> dict[int, dict] | None:
+    """解析评审响应；格式重试一次（附格式要求重发），两连败记入 errors。
+
+    返回 {批次内行序号: 判决}（可能为空 = 本批全漏判，由影片级统一裁决
+    是否全漏）；硬失败返回 None（errors 已带上原因）。
+    """
+    last_error: Exception | None = None
+    for attempt in range(2):
+        if attempt:
+            try:
+                response = client.complete(
+                    [messages[0],
+                     {"role": "user",
+                      "content": messages[1]["content"] + REVIEW_RETRY_HINT}],
+                    run_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"评审调用失败：{exc}")
+                return None
+            retry_text, ok, transport_error = _unwrap(response)
+            if not ok:
+                errors.append(f"评审调用失败：{transport_error}")
+                return None
+            text = retry_text
+        try:
+            return _parse_reviews(text, total)
+        except ValueError as exc:
+            last_error = exc
+    errors.append(f"评审响应无法解析：{last_error}")
+    return None
+
+
+def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
+    """响应文本 → {批次内行序号: {"pass","reason","quote"}}。
+
+    畸形家族容错（Review Focus 1）：首尾整圈 ``` 围栏剥除（tag_quality
+    同款）、直读失败按首尾大括号抠对象（verify._loads 同款——模型爱在
+    JSON 前后垫说明文字）、reviews 为按 id 索引的单对象时展平、裸列表
+    容忍、pass/is_pass 别名键兼容。缺 pass / 非布尔 pass / id 出界 /
+    重复 id（镜像 tag_quality：重复即不可靠）的条目按漏判处理——不进
+    结果，不抛错。
+    """
+    text = raw.strip()
+    first, separator, rest = text.partition("\n")
+    if separator and first.strip().lower() in ("```json", "```") \
+            and rest.rstrip().endswith("```"):
+        text = rest.rstrip()[:-3].strip()
+    data = _loads_with_prose_fallback(text)
+    if isinstance(data, dict) and isinstance(data.get("reviews"), dict):
+        items = [{"id": key, **value} for key, value in data["reviews"].items()
+                 if isinstance(value, dict)]
+    elif isinstance(data, dict) and isinstance(data.get("reviews"), list):
+        items = [item for item in data["reviews"] if isinstance(item, dict)]
+    elif isinstance(data, list):
+        items = [item for item in data if isinstance(item, dict)]
+    else:
+        raise ValueError("评审响应缺少 reviews 列表")
+    results: dict[int, dict] = {}
+    for item in items:
+        index = _row_index(item.get("id"), total)
+        if index is None:
+            continue
+        if index in results:
+            results.pop(index)
+            continue
+        verdict = item["pass"] if "pass" in item else item.get("is_pass")
+        if not isinstance(verdict, bool):
+            continue
+        reason = item.get("reason")
+        quote = item.get("quote")
+        results[index] = {
+            "pass": verdict,
+            "reason": reason.strip() if isinstance(reason, str) else "",
+            "quote": quote if isinstance(quote, str) else None,
+        }
+    return results
+
+
+def _loads_with_prose_fallback(text: str):
+    """json.loads 直读失败时按首尾大括号抠对象（verify._loads 同款容错）。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("评审响应中没有 JSON 对象")
+    return json.loads(text[start:end + 1])
+
+
+def _row_index(value, total: int) -> int | None:
+    """响应 id → 批次内行序号：容忍 "t3" / 3 / "3"；出界或不可解析 → None。"""
+    text = str(value).strip().lower()
+    if text.startswith("t"):
+        text = text[1:]
+    if not text.isdigit():
+        return None
+    index = int(text)
+    return index if index < total else None
+
+
+def _unwrap(response) -> tuple[str, bool, str]:
+    """评审客户端响应归一：真客户端 / mock 回 LLMResponse，简化替身回文本。
+
+    返回 (text, ok, error)：纯文本替身按成功处理（测试替身契约的最小
+    形状 .complete(messages, run_id) -> str）；LLMResponse 失败时给
+    raw.error 错误串。
+    """
+    if isinstance(response, str):
+        return response, True, ""
+    ok = bool(getattr(response, "ok", True))
+    if not ok:
+        raw = getattr(response, "raw", None) or {}
+        return "", False, str(raw.get("error") or "模型未返回成功响应")
+    return getattr(response, "content", None) or "", True, ""
+
+
+def _truncated(response) -> bool:
+    """finish_reason == "length" 判定；输出截断同样走切分（镜像 tag_quality）。
+
+    纯文本替身没有 raw 信封，恒 False。
+    """
+    raw = getattr(response, "raw", None) or {}
+    choices = raw.get("choices") or [{}]
+    return choices[0].get("finish_reason") == "length"
+
+
+def _input_limit(error: str) -> bool:
+    """输入超长判别式（照抄 tag_quality 的判别式，本地实现——不跨模块
+    import 私有函数）。"""
+    return any(term in error for term in (
+        "context_length_exceeded", "maximum context length", "context window",
+        "input is too long", "input length", "payload too large", "request too large",
+        "too many images", "413 request", "上下文长度", "输入过长",
+    ))
