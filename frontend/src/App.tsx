@@ -18,8 +18,7 @@ import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
 import ModelConfig from './pages/config/ModelConfig'
 import ReviewCenter from './pages/review/ReviewCenter'
-import TagCatalog from './pages/tag-management/TagCatalog'
-import TagImports from './pages/tag-management/TagImports'
+import TagManagement from './pages/tag-management/TagManagement'
 import Users from './pages/config/Users'
 
 type GateState =
@@ -76,8 +75,10 @@ export default function App() {
           <Route path="assets" element={<AssetList />} />
           <Route path="assets/:assetId" element={<AssetDetail />} />
           <Route path="tasks" element={<GenerationTasks />} />
-          <Route path="imports" element={<TagImports />} />
-          <Route path="tags" element={<TagCatalog />} />
+          {/* 标签管理合一（Task 2）：标签库+导入批次收编为 /tags 双 tab，
+              旧 /imports 独立路由重定向保书签 */}
+          <Route path="tags" element={<TagManagement />} />
+          <Route path="imports" element={<Navigate to="/tags?tab=imports" replace />} />
           {/* 旧 /quality 入口已并入工作台总览，重定向保书签 */}
           <Route path="quality" element={<Navigate to="/" replace />} />
           <Route element={<AdminRoute />}>
