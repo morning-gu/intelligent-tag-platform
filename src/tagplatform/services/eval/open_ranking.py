@@ -230,6 +230,11 @@ def evaluate_open(samples: list[OpenSample],
 
         whole_hit_none = s.hit_pass is None
         whole_new_none = s.new_pass is None
+        # 会计分块：空产出 + 评审缺席 = produce 失败片（调用方若传入）——
+        # 该片评审是「跳过」而非「失败」，不进 n_review_failed
+        if not s.hit_ids and whole_hit_none and whole_new_none:
+            report.n_failed += 1
+            continue
         review_failed = whole_hit_none or whole_new_none
         if review_failed:
             report.n_review_failed += 1
@@ -244,10 +249,6 @@ def evaluate_open(samples: list[OpenSample],
         if not whole_new_none:
             review_missing += sum(1 for v in s.new_pass if v is None)  # type: ignore[union-attr]
 
-        # 会计分块：空产出 + 评审缺席 = produce 失败片（调用方若传入）
-        if not s.hit_ids and whole_hit_none and whole_new_none:
-            report.n_failed += 1
-            continue
         if not hit_in:
             report.n_invalid += 1
             invalid_labels.append(s.label)
@@ -256,7 +257,6 @@ def evaluate_open(samples: list[OpenSample],
 
         # θ 族原料（θ 无关部分）：gt 增益、nDCG、先验序、标定条目
         film: dict = {
-            "label": s.label,
             "hit_in": hit_in,
             "intersection": s.intersection,
             "review_ok": not review_failed,
@@ -273,8 +273,8 @@ def evaluate_open(samples: list[OpenSample],
             # 标定条目：仅交集内命中、漏判条目排除——(判定, gt) 对，θ 上复用
             film["calib_entries"] = [
                 (verdict, gain)
-                for (_, tag), gain in zip(hit_in_indexed, gains)
-                if (verdict := _verdict(s.hit_pass, _)) is not None
+                for (idx, tag), gain in zip(hit_in_indexed, gains)
+                if (verdict := _verdict(s.hit_pass, idx)) is not None
             ]
             valid.append(film)
 
@@ -343,7 +343,7 @@ def evaluate_open(samples: list[OpenSample],
             n_hit = len(film["hit_in"])
             # 准确率@θ = |hit_in 中 gt≥θ| / |hit_in|（合法 0 照进）
             accuracies.append(sum(1 for g in gains if g >= theta) / n_hit)
-            # 交集内相关总数：随机基线分母里的 r、覆盖率分母共用
+            # 交集内相关总数：随机基线的 r（分子）、覆盖率分母共用
             n_relevant = sum(1 for v in intersection.values() if v >= theta)
             # 随机基线 r/n（n = 交集标签数；r=0 是解析解的合法 0）
             randoms.append(n_relevant / len(intersection))
