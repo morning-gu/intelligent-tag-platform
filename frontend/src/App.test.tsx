@@ -1,7 +1,9 @@
 // 路由门禁与菜单测试：App 以 MemoryRouter 驱动（BrowserRouter 由 main.tsx 提供）。
 // api/client 整体 mock——门禁只关心 getMe 结果：拒绝 → 登录页；成功 → 布局与菜单
-// （十项菜单齐全，其中"用户管理"/"模型配置"/"闭环评测"仅 admin 角色可见）。登录态
-// 下工作台会挂载并请求指标接口，apiFetch 桩默认为永不落定的 Promise，页面停留在加载态。
+// （七项菜单，其中"闭环评测"/"配置管理"仅 admin 角色可见；"质量评估"已并入
+// 工作台总览、"标签库/导入任务"合一为标签管理、"用户/模型配置"合一为配置管理）。
+// 登录态下工作台会挂载并请求三个指标端点，apiFetch 桩默认为永不落定的
+// Promise，页面停留在加载态。
 //
 // 路由装配集成用例（2026-11-02 白屏回归增补）：整棵 <App /> 在真实路由嵌套下
 // 渲染。各页面单测孤立渲染组件，门禁用例只看菜单项——RequireAuth → Layout →
@@ -63,7 +65,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：十项菜单齐全（含仅 admin 可见的用户管理/模型配置/闭环评测）', async () => {
+  it('admin 登录：七项菜单按序（终态对齐七模块命名）', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -71,29 +73,36 @@ describe('路由门禁（requireAuth）', () => {
     // 等布局渲染完成（任一菜单项出现）
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(10)
-    expect(screen.getByRole('menuitem', { name: '工作台' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '内容资产' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '生产任务' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '导入任务' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '标签库' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '质量评估' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '用户管理' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '模型配置' })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: '闭环评测' })).toBeInTheDocument()
+    // 菜单顺序即模块顺序：工作台 → 标签管理 → 内容管理 → 内容打标 →
+    // 审核中心 → 闭环评测 → 配置管理
+    expect(menuItems.map((el) => el.textContent)).toEqual([
+      '工作台',
+      '标签管理',
+      '内容管理',
+      '内容打标',
+      '审核中心',
+      '闭环评测',
+      '配置管理',
+    ])
     // 顶部显示用户名
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
 
-  it('普通用户：菜单仅七项，不显示用户管理与模型配置', async () => {
+  it('普通用户：菜单为终态前五项，不显示 admin 专属两项', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u2', username: 'alice', role: 'reviewer' })
 
     renderAt('/')
 
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
-    expect(screen.getAllByRole('menuitem')).toHaveLength(7)
-    expect(screen.queryByRole('menuitem', { name: '用户管理' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: '模型配置' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('menuitem').map((el) => el.textContent)).toEqual([
+      '工作台',
+      '标签管理',
+      '内容管理',
+      '内容打标',
+      '审核中心',
+    ])
+    expect(screen.queryByRole('menuitem', { name: '闭环评测' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '配置管理' })).not.toBeInTheDocument()
   })
 })
 
@@ -132,6 +141,8 @@ function mockAdminApis() {
     // 闭环评测页挂载双拉（暂无数据集/历史的空态足够证明装配）
     if (path === '/api/v1/eval/closed/datasets') return []
     if (path === '/api/v1/eval/closed/runs') return []
+    // 标签管理导入 tab 挂载拉取导入批次
+    if (path === '/api/v1/import/tasks') return []
     throw new Error(`未预期的请求：${path}`)
   })
 }
@@ -158,25 +169,30 @@ function mockReviewerApis() {
       }
     }
     if (path === '/api/v1/metrics/confidence-distribution') return []
-    if (path === '/api/v1/metrics/tag-type-coverage') return []
+    if (path === '/api/v1/metrics/dir-coverage') return []
     throw new Error(`未预期的请求：${path}`)
   })
 }
 
 describe('路由装配（Layout → AdminRoute → 页面）', () => {
-  it('admin 访问 /users：整树渲染出用户管理页', async () => {
+  it('admin 访问 /config：整树渲染出用户管理页（默认 tab）', async () => {
     // 回归位：AdminRoute 解构 useOutletContext 曾抛 TypeError 白屏——
-    // 能等到页面内容即证明 RequireAuth→Layout→AdminRoute→Users 全链路通了
+    // 能等到页面内容即证明 RequireAuth→Layout→AdminRoute→Config→Users 全链路通了
     mockAdminApis()
-    renderAt('/users')
+    renderAt('/config')
     expect(await screen.findByText('创建用户')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '用户' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('admin 访问 /model-config：渲染出 Prompt 模板（只读）与运行配置', async () => {
+  it('admin 访问旧书签 /model-config：重定向到配置管理并激活"模型与 Prompt" tab', async () => {
     mockAdminApis()
     renderAt('/model-config')
     expect(await screen.findByText('Prompt 模板')).toBeInTheDocument()
     expect(screen.getByText('当前运行配置')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '模型与 Prompt' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
   })
 
   it('admin 访问 /eval-closed：渲染出闭环评测页（新建表单与历史骨架）', async () => {
@@ -190,7 +206,30 @@ describe('路由装配（Layout → AdminRoute → 页面）', () => {
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/runs')
   })
 
-  it('reviewer 直接访问 /users：AdminRoute 重定向回工作台', async () => {
+  it('admin 访问旧书签 /imports：重定向到标签管理并激活导入批次 tab', async () => {
+    // 回归位：旧独立路由删除后书签直达必须落在合并页的正确 tab
+    mockAdminApis()
+    renderAt('/imports')
+    expect(await screen.findByRole('tab', { name: '导入批次' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    // 导入页本体渲染（任务历史卡）
+    expect(await screen.findByText('任务历史')).toBeInTheDocument()
+    // 旧独立菜单项不再存在
+    expect(screen.queryByRole('menuitem', { name: '导入任务' })).not.toBeInTheDocument()
+  })
+
+  it('访问旧书签 /quality：重定向回工作台（总览）', async () => {
+    // 四条旧路由重定向中唯一无用例的一条（其余 /imports、/users、
+    // /model-config 均有集成测试）
+    mockReviewerApis()
+    renderAt('/quality')
+    expect(await screen.findByText('待审核标签')).toBeInTheDocument()
+  })
+
+  it('reviewer 直接访问旧书签 /users：重定向链经 AdminRoute 拦回工作台', async () => {
+    // 链路：/users → /config?tab=users →（非 admin）AdminRoute → / 工作台
     mockReviewerApis()
     renderAt('/users')
     expect(await screen.findByText('待审核标签')).toBeInTheDocument()

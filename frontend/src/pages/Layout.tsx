@@ -1,5 +1,6 @@
-// 主布局：左侧导航（十项菜单，"用户管理"/"模型配置"/"闭环评测"仅 admin
-// 角色可见）+ 顶部用户名与登出。
+// 主布局：左侧导航（七项菜单，"闭环评测"/"配置管理"仅 admin 角色可见；
+// "质量评估"已并入工作台、"标签库/导入任务"合一为标签管理、"用户/模型
+// 配置"合一为配置管理）+ 顶部用户名与登出。
 // 登录用户经路由门禁（RequireAuth）的 Outlet context 注入，本组件只读不请求。
 import { Button, Layout as AntLayout, Menu, Space } from 'antd'
 import type { MenuProps } from 'antd'
@@ -14,22 +15,20 @@ export interface AuthedOutlet {
 /** 菜单项数组类型（去掉 MenuProps['items'] 的可选外层，便于展开复用）。 */
 type MenuItems = NonNullable<MenuProps['items']>
 
-/** 静态菜单项（工作台至质量评估全员可见）；用户管理按 role 追加。 */
+/** 静态菜单项（全员可见，顺序即模块顺序：标签管理→内容管理→内容打标→
+ * 审核中心；命名对齐七模块方案）。 */
 const BASE_MENU_ITEMS: MenuItems = [
   { key: '/', label: '工作台' },
+  { key: '/tags', label: '标签管理' },
+  { key: '/assets', label: '内容管理' },
+  { key: '/tasks', label: '内容打标' },
   { key: '/review', label: '审核中心' },
-  { key: '/assets', label: '内容资产' },
-  { key: '/tasks', label: '生产任务' },
-  { key: '/imports', label: '导入任务' },
-  { key: '/tags', label: '标签库' },
-  { key: '/quality', label: '质量评估' },
 ]
 
-/** admin 专属菜单项（用户管理 + 模型配置 + 闭环评测），按 role 追加在全员项之后。 */
+/** admin 专属菜单项（闭环评测 + 配置管理），按 role 追加在全员项之后。 */
 const ADMIN_MENU_ITEMS: MenuItems = [
-  { key: '/users', label: '用户管理' },
-  { key: '/model-config', label: '模型配置' },
   { key: '/eval-closed', label: '闭环评测' },
+  { key: '/config', label: '配置管理' },
 ]
 
 const { Sider, Header, Content } = AntLayout
