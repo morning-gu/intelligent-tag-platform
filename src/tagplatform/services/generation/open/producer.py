@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.services.generation.base import GenerationSpec, ProducedTag, register_producer
 from tagplatform.services.generation.open.mtg.pipeline import MTG_VERSION, run_open_generation
+from tagplatform.settings import Settings
 
 
 class OpenTagProducer:
@@ -34,9 +35,11 @@ class OpenTagProducer:
     prompt_version = MTG_VERSION
 
     def produce(self, spec: GenerationSpec, session: Session, llm,
-                embedder, judge_client=None) -> list[ProducedTag]:
+                embedder, judge_client=None,
+                settings: Settings | None = None) -> list[ProducedTag]:
+        # settings：run 级副本（开放评测用），None 时由流水线回落 get_settings()。
         return run_open_generation(spec, session, llm, embedder,
-                                   judge_client=judge_client)
+                                   judge_client=judge_client, settings=settings)
 
 
 register_producer(OpenTagProducer())
