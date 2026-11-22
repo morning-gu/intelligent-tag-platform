@@ -10,9 +10,11 @@ open-eval 运行器（Task 4）在 produce 之后对每片全部产出标签（�
   pass/is_pass 别名键兼容、id 容忍 "t3" / 3 / "3"；漏判 id 的行
   pass=None（不判 pass 也不判 fail，排除出分母、计 review_missing），
   全部行漏判 → ReviewRequestError（评审失败 ≠ 评审 0 分）；
-- 摘录必核（Review Focus 4）：pass 且 quote 经 _quote_ok 核不中渲染
-  文本 → 改判 fail、reason 追加「摘录未命中原文」——与生产 judge 的
-  「引用不过改判 insufficient」同款纪律，防评审员空口通过；
+- 摘录必核（Review Focus 4）：pass 且 quote 经 _quote_ok 核不中**归一
+  化**渲染文本（对齐生产 judge 的 _require_quotes 判法——quote 8 字窗
+  跨标点/换行时 raw 核验会误杀真 pass）→ 改判 fail、reason 追加
+  「摘录未命中原文」——与生产 judge 的「引用不过改判 insufficient」
+  同款纪律，防评审员空口通过；
 - 格式重试一次（附格式要求重发，镜像 judge/verify 的重试后缀），仍
   失败 → ReviewRequestError；请求失败（传输异常 / ok=False 信封）同样
   → ReviewRequestError。评审失败由上层记 review_failed（produce 产出
@@ -33,7 +35,9 @@ from tagplatform.capabilities.prompts.open_review import (
     REVIEW_RETRY_HINT,
 )
 from tagplatform.schemas import ContentJSON
-from tagplatform.services.generation.open.mtg.pipeline import _quote_ok
+from tagplatform.services.generation.open.mtg.pipeline import (
+    _normalize_quote, _quote_ok,
+)
 from tagplatform.services.generation.open.mtg.prompts import render_content
 from tagplatform.settings import Settings
 
@@ -162,9 +166,13 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         raise ReviewRequestError("；".join(dict.fromkeys(errors)))
     if not results:
         raise ReviewRequestError("评审响应未包含任何有效判决（全部漏判）")
-    # 摘录必核：pass 且摘录核不中 → 改判 fail（空口通过在这里拦下）
+    # 摘录必核：pass 且摘录核不中 → 改判 fail（空口通过在这里拦下）。
+    # 核验 haystack 归一化——对齐生产 judge 的判法（_require_quotes 对
+    # render_content 结果先 _normalize_quote 再核）：quote 的 8 字窗跨过
+    # 标点/换行时，raw 文本中间隔着标点会误杀真 pass。
+    quote_haystack = _normalize_quote(haystack)
     for verdict in results.values():
-        if verdict["pass"] and not _quote_ok(verdict["quote"], haystack):
+        if verdict["pass"] and not _quote_ok(verdict["quote"], quote_haystack):
             verdict["pass"] = False
             verdict["reason"] = (f"{verdict['reason']}；摘录未命中原文"
                                  if verdict["reason"] else "摘录未命中原文")
@@ -226,6 +234,9 @@ def _parse_with_retry(client, messages: list[dict], text: str, total: int,
             retry_text, ok, transport_error = _unwrap(response)
             if not ok:
                 errors.append(f"评审调用失败：{transport_error}")
+                return None
+            if _truncated(response):
+                errors.append("评审输出超出长度限制")
                 return None
             text = retry_text
         try:
@@ -324,8 +335,12 @@ def _unwrap(response) -> tuple[str, bool, str]:
 def _truncated(response) -> bool:
     """finish_reason == "length" 判定；输出截断同样走切分（镜像 tag_quality）。
 
+    ok=False 信封不判截断（失败请求的 raw 里即便带着 length 也要走
+    「评审调用失败」口径，tag_quality 同款 `response.ok and ...` 门）。
     纯文本替身没有 raw 信封，恒 False。
     """
+    if not getattr(response, "ok", True):
+        return False
     raw = getattr(response, "raw", None) or {}
     choices = raw.get("choices") or [{}]
     return choices[0].get("finish_reason") == "length"

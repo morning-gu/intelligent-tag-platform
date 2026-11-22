@@ -302,6 +302,18 @@ def test_review_quote_miss_with_empty_reason():
     assert result[0]["reason"] == "摘录未命中原文"  # 空理由不出现开头分号
 
 
+def test_review_quote_spanning_punctuation_stays_pass():
+    """摘录跨标点边界仍 pass：核验对齐生产 judge（_require_quotes 对渲染
+    文本先 _normalize_quote 再核）——quote 的 8 字窗跨过「，」时 raw 核验
+    会误杀真 pass，把通过率压低、标定 FN 抬高。"""
+    text = _reviews(_pass("t0", quote="小镇街道晨跑，电台广播"))
+    client = StubClient(text)
+    result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert result[0]["pass"] is True  # 归一化后「小镇街道晨跑电台广播」命中
+    assert result[0]["reason"] == "台词有据"
+    assert result[0]["quote"] == "小镇街道晨跑，电台广播"
+
+
 # ---- 调用失败 / 格式重试 / 超长切分 ----
 
 
@@ -321,6 +333,20 @@ def test_review_failed_envelope_raises():
     assert "评审端点 502" in str(exc_info.value)
 
 
+def test_review_failed_envelope_not_mistaken_as_truncated():
+    """ok=False 信封即便 raw 带着 finish_reason=length 也不判截断——失败
+    请求走「评审调用失败」口径（tag_quality 的 ok 门镜像），不进切分。"""
+    client = StubClient(LLMResponse(
+        "", {}, {"error": "评审端点 502",
+                 "choices": [{"message": {"content": ""}, "finish_reason": "length"}]},
+        False))
+    with pytest.raises(ReviewRequestError) as exc_info:
+        review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert "评审端点 502" in str(exc_info.value)
+    assert "超出长度限制" not in str(exc_info.value)
+    assert len(client.calls) == 1  # 失败信封不触发二分
+
+
 def test_review_format_retry_once():
     """首回不合法 → 附格式要求重发一次；重试成功后照常评审。"""
     client = StubClient("抱歉，我无法以 JSON 输出，以下是逐条评审：t0 通过。",
@@ -338,6 +364,22 @@ def test_review_two_parse_failures_raise():
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert "无法解析" in str(exc_info.value)
     assert len(client.calls) == 2  # 格式重试恰好一次
+
+
+def test_review_truncated_retry_reports_length_error():
+    """重试响应截断 → 记「输出超出长度限制」而非误报「无法解析」（重试
+    响应同样过 _truncated 检查，失败原因如实）。"""
+    client = StubClient(
+        "抱歉，我无法以 JSON 输出。",
+        LLMResponse("", {},
+                    {"choices": [{"message": {"content": ""},
+                                  "finish_reason": "length"}]},
+                    ok=True))
+    with pytest.raises(ReviewRequestError) as exc_info:
+        review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert "超出长度限制" in str(exc_info.value)
+    assert "无法解析" not in str(exc_info.value)
+    assert len(client.calls) == 2
 
 
 def test_review_splits_on_input_limit():
