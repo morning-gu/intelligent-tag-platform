@@ -8,12 +8,11 @@
 不落库），干跑全程对业务表零写入；评测产物只写
 `settings.open_eval_output_root/<run_id>/`：起跑即写 meta.json 骨架
 （status=running——进程中断可被历史扫描标 interrupted）、每片完成锁内
-追加 progress.jsonl、终态由 worker 主线程写 meta + raw_results。
-**audit/<tt>.json 由 mtg 管线自己落盘**：run 级 settings 副本把
-mtg_report_dir 重定向进 run 目录、task_id=影片 id，审计随 run 归档
-（Task 5 报告组装的 judge 段按此读）。报告三件套（report.json /
-report.md / metrics.csv）由 Task 5 接线进 _write_artifacts——本任务
-只写 meta + raw 的中间态。
+追加 progress.jsonl、终态由 worker 主线程写 meta + raw + 报告三件套
+（assemble_open_report → write_open_report，report.json / report.md /
+metrics.csv）。**audit/<tt>.json 由 mtg 管线自己落盘**：run 级 settings
+副本把 mtg_report_dir 重定向进 run 目录、task_id=影片 id，审计随 run
+归档（报告组装的 judge 段按 run_dir/audit 读）。
 
 run 语义契约（本模块的三个核心语义，改动前先读）
 ================================================
@@ -49,11 +48,12 @@ docstring 的说明）。
 通过率/新词占比）不需要 gt，零交集只让集合准确率/标定无 gt 可评——
 meta 落 warning、报告侧按 None≠0 报 None，绝不产出假 0。
 
-历史扫描（Task 5 接线摘要）：`history()` 扫
+历史扫描：`history()` 扫
 `open_eval_output_root/*/meta.json` 出历史行：meta.status=running 且
 不在进程内注册表 → interrupted（进程死亡在磁盘上可辨认）；五摘要键
-（accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）本任务
-恒 None，Task 5 的 `_read_open_summary` 接线后有值。
+（accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）由
+open_report._read_open_summary 读该 run 的 report.json（缺失全 None，
+宁缺勿假）。
 
 分层红线：本模块不 import fastapi（设计文档 §9.4），不 import/call
 persist_tags（评测只读）；评测产物只写 `settings.open_eval_output_root`。
@@ -85,6 +85,11 @@ from tagplatform.services.eval.dataset import (
     select_movies,
 )
 from tagplatform.services.eval.open_ranking import DEFAULT_THETAS
+from tagplatform.services.eval.open_report import (
+    _read_open_summary,
+    assemble_open_report,
+    write_open_report,
+)
 from tagplatform.services.eval.open_review import (
     make_review_client,
     review_calibre,
@@ -245,9 +250,9 @@ class OpenEvalService:
     双熔断（见模块 docstring）→ status=aborted（余量 future.cancel，
     在途片跑完）；`cancel` 置事件后不再提交（在途片照常跑完，已完成
     结果保留，status=cancelled）。终态（succeeded/cancelled/aborted，
-    failed 为 worker 意外兜底）由 worker 主线程写 meta.json 与
-    raw_results.json（报告三件套 Task 5 接线）；`history()` 扫磁盘出
-    历史行（interrupted 推断见其 docstring）。注册表更新、cancel、
+    failed 为 worker 意外兜底）由 worker 主线程写 meta.json、
+    raw_results.json 与报告三件套（open_report 组装）；`history()` 扫
+    磁盘出历史行（interrupted 推断见其 docstring）。注册表更新、cancel、
     progress 追加都在 `threading.Lock` 内。
     """
 
@@ -542,9 +547,9 @@ class OpenEvalService:
         磁盘是持久层、注册表是进程内存：meta.status=running 且不在注册表 →
         进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
         读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过。五摘要键
-        （accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）
-        本任务恒 None——Task 5 接线 `open_report._read_open_summary` 后
-        有值（历史摘要不因缺报告报错，宁缺勿假）。
+        （accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）由
+        `_read_open_summary` 读该 run 的 report.json（取格规则见其
+        docstring）；报告缺失/截断 → 五键 None（宁缺勿假）。
         """
         root = Path(self.settings.open_eval_output_root)
         try:
@@ -568,6 +573,7 @@ class OpenEvalService:
                     # 在注册表 → 用注册表现值（终态落盘前的窄窗口）；
                     # 不在 → 进程死亡残留，标 interrupted
                     status = state.status if state is not None else "interrupted"
+            summary = _read_open_summary(root / name)
             rows.append({
                 "run_id": run_id,
                 "dataset_id": (meta.get("dataset") or {}).get("id"),
@@ -579,12 +585,12 @@ class OpenEvalService:
                 "finished_at": meta.get("finished_at"),
                 "error": meta.get("error"),
                 # 历史摘要五键（accuracy40/new_pass/hit_pass/agreement40/
-                # new_ratio）：Task 5 接线 _read_open_summary，本任务恒 None
-                "accuracy40": None,
-                "new_pass": None,
-                "hit_pass": None,
-                "agreement40": None,
-                "new_ratio": None,
+                # new_ratio）：_read_open_summary 读 report.json，缺失全 None
+                "accuracy40": summary["accuracy40"],
+                "new_pass": summary["new_pass"],
+                "hit_pass": summary["hit_pass"],
+                "agreement40": summary["agreement40"],
+                "new_ratio": summary["new_ratio"],
             })
         rows.sort(key=lambda row: row.get("started_at") or "", reverse=True)
         return rows
@@ -804,13 +810,17 @@ class OpenEvalService:
 
     def _write_artifacts(self, job: _OpenJob, results: list[OpenMovieResult],
                          status: str, error: str | None) -> None:
-        """终态写盘（worker 主线程）：meta.json → raw_results.json。
+        """终态写盘（worker 主线程）：meta.json → raw_results.json → 报告三件套。
 
-        **Task 5 接线点**：报告三件套（assemble_open_report →
-        write_open_report）在本方法末尾追加；本任务只写 meta + raw 的
-        中间态。audit/ 已由 mtg 管线经 run 级 settings 副本落进本目录。
-        raw 行结构（Task 5 组装 open_report 的输入形状）：gt 向量并入
-        （无内容片的满表向量也在——报告侧按交集口径自行取用）。
+        写序非原子（meta 先行、报告最后）：读侧（history）对缺失/截断的
+        report.json 按「该 run 无报告」容错。报告口径用 job 携带的
+        gt/library_ids（起跑时定格，run 中途换库不影响本 run）与终态
+        meta（banner 需要 status/done/total）；audit/ 已由 mtg 管线经
+        run 级 settings 副本落进本目录，judge 段按 run_dir/audit 读。
+        组装/落盘异常向上抛（worker 兜底记日志）——meta/raw 已先行落盘，
+        报告缺失按「无报告」容错，不滞留 running。raw 行结构（组装
+        open_report 的输入形状）：gt 向量并入（无内容片的满表向量也在
+        ——报告侧按交集口径自行取用）。
         """
         run_dir = Path(self.settings.open_eval_output_root) / job.run_id
         meta = dict(job.meta)
@@ -831,6 +841,14 @@ class OpenEvalService:
                 for r in results]
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)
+        # 报告三件套（report.json / report.md / metrics.csv）：
+        # assemble_open_report → write_open_report（镜像闭环 _write_artifacts
+        # 的写序）；judge 段读 run 目录的 audit/<tt>.json
+        report = assemble_open_report(
+            results, job.gt, job.library_ids,
+            meta.get("thetas") or DEFAULT_THETAS, meta,
+            audit_dir=run_dir / "audit")
+        write_open_report(run_dir, report)
 
     def _progress_path(self, run_id: str) -> str:
         return os.path.join(self.settings.open_eval_output_root, run_id,

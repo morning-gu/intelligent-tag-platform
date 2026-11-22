@@ -10,9 +10,10 @@ _ReviewFailStub）替换 `svc._review_client`——make_review_client 的
 
 钉死口径：
 
-1. 跑完写盘四件（meta.json / progress.jsonl / raw_results.json /
-   audit/<tt>.json）——报告三件套由 Task 5 接线，本任务 _write_artifacts
-   只写 meta + raw；
+1. 跑完写盘六件 + audit/（meta.json / progress.jsonl / raw_results.json /
+   report.json / report.md / metrics.csv / audit/<tt>.json）——Task 5
+   接线后 _write_artifacts 末尾组装报告三件套（组装口径归
+   test_eval_open_report.py）；
 2. FakeOpenProducer 收到 run 级 settings 副本（modalities / audit 目录
    生效）与 session=None（producer 不持会话，池饿死纪律）；
 3. 评审失败契约（spec §6）：产出完整保留、行 review=None、review_error
@@ -29,7 +30,8 @@ _ReviewFailStub）替换 `svc._review_client`——make_review_client 的
 8. delete 路径守卫（`.`/嵌套段/越界按不存在，绝不 rmtree 输出根）；
 9. review calibre（model / same_model / prompt_version）进 meta；
 10. history 五摘要键（accuracy40 / new_pass / hit_pass / agreement40 /
-    new_ratio）本任务恒 None——Task 5 接线 _read_open_summary 后有值。
+    new_ratio）由 open_report._read_open_summary 读 report.json（Task 5
+    接线）；取格规则的专测在 test_eval_open_report.py。
 """
 
 from __future__ import annotations
@@ -444,8 +446,9 @@ def test_modalities_validation(open_setup):  # Review Focus 5
 
 # ---------------------------------------------------------------- 干跑主流程
 
-def test_run_completes_writes_four_artifacts(open_setup):
-    """跑完写盘四件：meta / progress / raw / audit/<tt>.json；报告三件套不落盘。"""
+def test_run_completes_writes_all_artifacts(open_setup):
+    """跑完写盘六件 + audit/：meta / progress / raw / report.json /
+    report.md / metrics.csv / audit/<tt>.json（Task 5 接线报告三件套）。"""
     svc, fake = open_setup()
     stub = _ReviewOkStub()
     svc._review_client = stub
@@ -457,8 +460,21 @@ def test_run_completes_writes_four_artifacts(open_setup):
     assert (d / "raw_results.json").exists()
     assert (d / "audit" / "tt0000001.json").exists()
     assert (d / "audit" / "tt0000002.json").exists()
-    # Task 5 接线前的中间态：报告三件套不存在
-    assert not (d / "report.json").exists()
+    # Task 5 接线：报告三件套落盘
+    assert (d / "report.json").exists()
+    assert (d / "report.md").exists()
+    assert (d / "metrics.csv").exists()
+    report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+    assert report["sample_accounting"] == {
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 0, "invalid": 0}
+    # 全量成功、无失败核算超 10%，但夹具未配独立评审端点 → 仅同模警示
+    assert report["banner"] == ["评审与生成同模型，通过率绝对值系统性偏高，"
+                                "趋势对比可用、绝对值需打折解读"]
+    # 替身审计（{"task_id","stub":True}）无 merged/accepted → judge 空聚合
+    assert report["judge"]["self_filter"] is None
+    assert report["judge"]["verdicts"] == {"supported": 0, "insufficient": 0,
+                                           "contradicted": 0}
+    assert report["calibre"]["review_same_model"] is True
 
     rows = _raw_rows(svc, run_id)
     assert len(rows) == 2 and all(r["ok"] for r in rows)
@@ -552,6 +568,15 @@ def test_review_failure_preserves_output(open_setup):
     assert all(e["review"] == "failed" and e["ok"] for e in entries)
     # 评审每片一次（产出行 3 条 < 切分阈值，单片单批）
     assert sorted(stub.calls) == [f"{run_id}:tt0000001", f"{run_id}:tt0000002"]
+    # Task 5 接线：报告侧按评审失败契约核算（两类片分开，不进 produce 失败）
+    report = json.loads((_run_dir(svc, run_id) / "report.json")
+                        .read_text(encoding="utf-8"))
+    assert report["sample_accounting"] == {
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 2, "invalid": 0}
+    assert [m["tt"] for m in report["review_failed_movies"]] == [
+        "tt0000001", "tt0000002"]
+    assert all(m["hit_pass"] is None and m["new_pass"] is None
+               for m in report["movies"])
 
 
 # ---------------------------------------------------------------- 双熔断
@@ -673,6 +698,16 @@ def test_zero_intersection_library_proceeds_with_warning(open_setup):
     assert state.status == "succeeded"  # 不拒绝（闭环同场景显式报错）
     meta = _read_meta(svc, run_id)
     assert "零交集" in (meta.get("warning") or "")
+    # Task 5 接线：报告照常组装——命中行按「库∩gt 交集」成员判定
+    # （替身产出 t1 越库也算交集外），全部片 invalid 而非误进准确率族，
+    # evaluate_open 的随机基线 r/n 不在空交集上除零
+    report = json.loads((_run_dir(svc, run_id) / "report.json")
+                        .read_text(encoding="utf-8"))
+    assert report["sample_accounting"] == {
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 0, "invalid": 2}
+    assert report["no_gt"] == 3  # t1/tX/t9 全在交集外
+    assert all(row["accuracy"] is None for row in report["theta_rows"])
+    assert report["pass_rates"]["hit_macro"] == pytest.approx(1.0)
 
 
 def test_review_calibre_in_meta(open_setup):
@@ -741,9 +776,9 @@ def test_cancel_keeps_completed_results(open_setup, root6):
 
 # ---------------------------------------------------------------- 历史扫描
 
-def test_history_summary_keys_constant_none(open_setup):
-    """history 五摘要键本任务恒 None（Task 5 接线 _read_open_summary 后有值）；
-    磁盘 running 残留不在注册表 → interrupted。"""
+def test_history_summary_from_report(open_setup):
+    """history 五摘要键由 _read_open_summary 读 report.json（Task 5 接线）；
+    磁盘 running 残留不在注册表 → interrupted、无报告 → 五键 None。"""
     svc, _ = open_setup()
     svc._review_client = _ReviewOkStub()
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
@@ -763,9 +798,15 @@ def test_history_summary_keys_constant_none(open_setup):
     assert mine["status"] == "succeeded"
     assert mine["finished_at"] is not None
     assert mine["dataset_id"] == "emotion"
-    five = ("accuracy40", "new_pass", "hit_pass", "agreement40", "new_ratio")
-    assert all(mine[k] is None for k in five)
+    # 夹具全 pass：θ=0.4 行 accuracy/agreement 均 1.0、通过率均 1.0、
+    # 新词占比 (1/3 + 1/2)/2 = 5/12（手算见 test_eval_open_report.py）
+    assert mine["accuracy40"] == pytest.approx(1.0)
+    assert mine["agreement40"] == pytest.approx(1.0)
+    assert mine["new_pass"] == pytest.approx(1.0)
+    assert mine["hit_pass"] == pytest.approx(1.0)
+    assert mine["new_ratio"] == pytest.approx(5 / 12)
     assert by_id["run-ghost"]["status"] == "interrupted"
+    five = ("accuracy40", "new_pass", "hit_pass", "agreement40", "new_ratio")
     assert all(by_id["run-ghost"][k] is None for k in five)
     # started_at 降序
     started = [r["started_at"] or "" for r in rows]
