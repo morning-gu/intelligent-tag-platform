@@ -45,7 +45,7 @@ function DimensionSummary({ dimension, maxScore }: { dimension: QualityDimension
   )
 }
 
-export function QualityMetricsDetail({ metrics }: { metrics: QualityMetrics }) {
+function QualityMetricsDetail({ metrics }: { metrics: QualityMetrics }) {
   const maxScore = metrics.max_score === undefined ? 2 : metrics.max_score
   const scoreItems = maxScore === null ? [{
     key: 'scale', label: '评分量表', children: '本批次使用了不同量表，分数统计见各影片。',

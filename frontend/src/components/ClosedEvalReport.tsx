@@ -9,7 +9,7 @@
 // 汇总/基线的取格规则：同 K 的「有值」格中 θ 最接近 0.4（并列取小 θ）——
 // θ=0.4 格无有效影片（指标 null）时回退最近有值格，宁出近似不空屏；k 整档
 // 缺格才是「暂无」。随机基线只出 P/R（GridRow 契约无 ndcg_random）。
-import { Alert, Collapse, Statistic, Table, Typography } from 'antd'
+import { Alert, Collapse, Table, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import {
   fileUrl,
@@ -18,7 +18,7 @@ import {
   type GridRow,
 } from '../api/eval'
 import BarChart from './BarChart'
-import type { BarItem } from './BarChart'
+import EvalReportSummary, { coverageBars } from './EvalReportSummary'
 
 const NA = '暂无'
 
@@ -28,15 +28,6 @@ const K_R = 20
 
 /** 产物下载三条（后端 files 端点白名单的子集）。 */
 const DOWNLOADS: EvalFileName[] = ['report.md', 'metrics.csv', 'raw_results.json']
-
-/** 覆盖率分桶（末桶右闭、其余右开）：label 即桶名，直接做 BarChart 行标签。 */
-const COVERAGE_BUCKETS = [
-  { label: '[0,0.2)', lo: 0, hi: 0.2 },
-  { label: '[0.2,0.4)', lo: 0.2, hi: 0.4 },
-  { label: '[0.4,0.6)', lo: 0.4, hi: 0.6 },
-  { label: '[0.6,0.8)', lo: 0.6, hi: 0.8 },
-  { label: '[0.8,1.0]', lo: 0.8, hi: 1 },
-]
 
 /** null → 「暂无」（None≠0）；数值原样字符串化（与历史表同口径）。 */
 function na(v: number | null): string {
@@ -65,18 +56,6 @@ function pickField(
 function ciText(v: number | null, ci: [number, number] | null): string {
   if (v === null) return NA
   return ci === null ? String(v) : `${v} ± [${ci[0]}, ${ci[1]}]`
-}
-
-/** 覆盖率值 → 5 桶计数（末桶右闭）。 */
-function coverageBars(values: number[]): BarItem[] {
-  return COVERAGE_BUCKETS.map((bucket, i) => {
-    const last = i === COVERAGE_BUCKETS.length - 1
-    return {
-      label: bucket.label,
-      value: values.filter((v) => v >= bucket.lo && (last ? v <= bucket.hi : v < bucket.hi))
-        .length,
-    }
-  })
 }
 
 /** θ×K 网格列（null 一律「暂无」）。 */
@@ -161,13 +140,7 @@ export default function ClosedEvalReport({
       {report.banner !== null && <Alert type="warning" showIcon message={report.banner} />}
       {report.warning !== null && <Alert type="warning" showIcon message={report.warning} />}
 
-      <div data-testid="summary-row" style={{ display: 'flex', gap: 48, flexWrap: 'wrap' }}>
-        {summary.map((s) => (
-          <div key={s.key} data-testid={`summary-${s.key}`}>
-            <Statistic title={s.title} value={s.value === null ? NA : s.value} />
-          </div>
-        ))}
-      </div>
+      <EvalReportSummary items={summary} />
 
       <div data-testid="grid-section">
         <Typography.Title level={5}>θ×K 网格</Typography.Title>
