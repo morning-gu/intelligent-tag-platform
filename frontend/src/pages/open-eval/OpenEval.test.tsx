@@ -10,8 +10,9 @@
 // 停表收卡片+起跑恢复；failed 是 worker 收敛异常兜底终态，closed 第 11 轮
 // 教训——TERMINAL_STATUSES 必含）、取消按钮调 cancelOpenRun、删除
 // Popconfirm（span 拦冒泡——antd v6 Trigger 教训，删除点击不得连带触发行
-// 点击重开报告）、行点击取报告（404 毫秒级窗口优雅提示不崩页面/渲染 Task 8
-// 前的原始 JSON 占位）、数据集根挂载展示与应用、数据集加载失败提示。
+// 点击重开报告）、行点击取报告（404 毫秒级窗口优雅提示不崩页面/渲染
+// Task 8 报告视图——note 原文 + banner 警示 + openFileUrl 下载链接）、
+// 数据集根挂载展示与应用、数据集加载失败提示。
 // 轮询用例以 vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
 // 只伪造 interval（setTimeout/Date/rAF 保持真实——antd 渲染与 RTL waitFor
 // 不受影响），用 advanceTimersByTimeAsync 推进 tick 并以 act 包裹刷新。
@@ -653,7 +654,7 @@ describe('OpenEval 开放评测页', () => {
     expect(mockedListOpenRuns).toHaveBeenCalledTimes(1)
   })
 
-  it('行点击取报告：渲染原始 JSON 占位（Task 8 报告视图替换前的挂载点）', async () => {
+  it('行点击取报告：Task 8 报告视图渲染（note 原文 + banner 警示 + 下载五链接）', async () => {
     mockIdleApis()
     mockedGetOpenReport.mockResolvedValue(REPORT)
     render(<OpenEval />)
@@ -664,10 +665,18 @@ describe('OpenEval 开放评测页', () => {
     )
 
     expect(await screen.findByText(/评测报告：run-20261120-100000-ab12/)).toBeInTheDocument()
-    // 占位渲染 report 原始 JSON（银标准 note 原文可见）
+    // 报告视图由 OpenEvalReport 组件接管：银标准 note 原文恒渲染 + banner 警示
     expect(
-      await screen.findByText(/"note": "genome relevance 是模型输出非人工标注"/),
+      await screen.findByText('genome relevance 是模型输出非人工标注'),
     ).toBeInTheDocument()
+    expect(
+      screen.getByText('部分运行：cancelled/aborted/failed 或 done<total 的 run 不可与全量横比'),
+    ).toBeInTheDocument()
+    // 下载链接走 openFileUrl 纯路径拼接（字面量期望防恒真）
+    expect(screen.getByRole('link', { name: 'metrics.csv' })).toHaveAttribute(
+      'href',
+      '/api/v1/eval/open/runs/run-20261120-100000-ab12/files/metrics.csv',
+    )
     expect(mockedGetOpenReport).toHaveBeenCalledWith('run-20261120-100000-ab12')
   })
 

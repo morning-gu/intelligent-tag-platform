@@ -9,7 +9,8 @@
 // cancelled 终态由轮询推进发现，受理后不清轮询）；③ 历史表——五指标列
 // （准确率@θ0.4/新词通过率/命中通过率/标定一致率@θ0.4/新词占比）多轮趋势
 // 一眼可见，null 一律「暂无」（None≠0 纪律）；④ 报告卡片——行点击取
-// report.json，Task 8 的 OpenEvalReport 组件接管前以原始 JSON 占位。
+// report.json，OpenEvalReport 组件渲染报告视图（open-eval Task 8，镜像
+// ClosedEval.tsx 的 ClosedEvalReportView 接线，下载走 openFileUrl 五件套）。
 //
 // 单活跃 run 是后端硬约束且**跨服务互斥**（open 与 closed 任意一边活跃，
 // POST 二发 → 409）：前端在三个入口同步挡——挂载从 open 历史发现 running
@@ -49,6 +50,7 @@ import { ApiError } from '../../api/client'
 import { listRuns } from '../../api/eval'
 import type { DatasetInfo, MovieRef, MovieSelection, RunStatus } from '../../api/eval'
 import { formatTime } from '../../api/time'
+import OpenEvalReportView from '../../components/OpenEvalReport'
 import {
   cancelOpenRun,
   deleteOpenRun,
@@ -762,13 +764,8 @@ export default function OpenEval() {
 
       {report !== null && (
         <Card title={`评测报告：${report.runId}`}>
-          {/* Task 8: 报告视图挂载点 —— 以 <OpenEvalReportView report={report.data}
-              runId={report.runId} /> 替换下方占位（镜像 ClosedEval.tsx 的
-              ClosedEvalReportView 接线；组件落 components/OpenEvalReport.tsx）。
-              下载链接用 openFileUrl(runId, name)（api/evalOpen.ts 五件套）。 */}
-          <pre style={{ maxHeight: 480, overflow: 'auto', fontSize: 12 }}>
-            {JSON.stringify(report.data, null, 2)}
-          </pre>
+          {/* Task 8: 报告视图（components/OpenEvalReport.tsx）接管占位 */}
+          <OpenEvalReportView report={report.data} runId={report.runId} />
         </Card>
       )}
     </div>
