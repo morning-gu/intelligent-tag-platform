@@ -2,10 +2,10 @@
 // Router 由 main.tsx 提供（BrowserRouter）——App 只含 Routes，测试以
 // MemoryRouter 注入。业务页面：工作台（总览，吸收质量评估）/审核中心/内容资产
 // （列表+详情）/生产任务/标签管理（标签库+导入批次双 tab）/闭环评测（admin）/
-// 配置管理（用户+模型与 Prompt 双 tab，admin）。旧独立入口 /quality、/imports、
-// /users、/model-config 均以 Navigate 重定向保书签。
+// 开放评测（admin）/配置管理（用户+模型与 Prompt 双 tab，admin）。旧独立入口
+// /quality、/imports、/users、/model-config 均以 Navigate 重定向保书签。
 // 页面按模块归位（Task 14）：tag-management/content-management/generation/
-// review/closed-eval/config 七目录（open-eval 占位）；Dashboard/Layout/Login
+// review/closed-eval/open-eval/config 八目录；Dashboard/Layout/Login
 // 为跨模块外壳页，留在 pages 根。
 import { useEffect, useState } from 'react'
 import { Navigate, Outlet, Route, Routes, useOutletContext } from 'react-router-dom'
@@ -18,6 +18,7 @@ import Dashboard from './pages/Dashboard'
 import GenerationTasks from './pages/generation/GenerationTasks'
 import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
+import OpenEval from './pages/open-eval/OpenEval'
 import ReviewCenter from './pages/review/ReviewCenter'
 import TagManagement from './pages/tag-management/TagManagement'
 
@@ -89,6 +90,7 @@ export default function App() {
           <Route element={<AdminRoute />}>
             <Route path="config" element={<ConfigManagement />} />
             <Route path="eval-closed" element={<ClosedEval />} />
+            <Route path="eval-open" element={<OpenEval />} />
           </Route>
         </Route>
       </Route>

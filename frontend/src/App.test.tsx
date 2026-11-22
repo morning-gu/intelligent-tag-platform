@@ -1,9 +1,9 @@
 // 路由门禁与菜单测试：App 以 MemoryRouter 驱动（BrowserRouter 由 main.tsx 提供）。
 // api/client 整体 mock——门禁只关心 getMe 结果：拒绝 → 登录页；成功 → 布局与菜单
-// （七项菜单，其中"闭环评测"/"配置管理"仅 admin 角色可见；"质量评估"已并入
-// 工作台总览、"标签库/导入任务"合一为标签管理、"用户/模型配置"合一为配置管理）。
-// 登录态下工作台会挂载并请求三个指标端点，apiFetch 桩默认为永不落定的
-// Promise，页面停留在加载态。
+// （八项菜单，其中"闭环评测"/"开放评测"/"配置管理"仅 admin 角色可见；"质量评估"
+// 已并入工作台总览、"标签库/导入任务"合一为标签管理、"用户/模型配置"合一为
+// 配置管理）。登录态下工作台会挂载并请求三个指标端点，apiFetch 桩默认为永不
+// 落定的 Promise，页面停留在加载态。
 //
 // 路由装配集成用例（2026-11-02 白屏回归增补）：整棵 <App /> 在真实路由嵌套下
 // 渲染。各页面单测孤立渲染组件，门禁用例只看菜单项——RequireAuth → Layout →
@@ -65,7 +65,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(screen.getByRole('button', { name: /登\s*录/ })).toBeInTheDocument()
   })
 
-  it('admin 登录：七项菜单按序（终态对齐七模块命名）', async () => {
+  it('admin 登录：八项菜单按序（终态对齐八模块命名）', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u1', username: 'admin', role: 'admin' })
 
     renderAt('/')
@@ -74,7 +74,7 @@ describe('路由门禁（requireAuth）', () => {
     expect(await screen.findByRole('menuitem', { name: '审核中心' })).toBeInTheDocument()
     const menuItems = screen.getAllByRole('menuitem')
     // 菜单顺序即模块顺序：工作台 → 标签管理 → 内容管理 → 内容打标 →
-    // 审核中心 → 闭环评测 → 配置管理
+    // 审核中心 → 闭环评测 → 开放评测 → 配置管理
     expect(menuItems.map((el) => el.textContent)).toEqual([
       '工作台',
       '标签管理',
@@ -82,13 +82,14 @@ describe('路由门禁（requireAuth）', () => {
       '内容打标',
       '审核中心',
       '闭环评测',
+      '开放评测',
       '配置管理',
     ])
     // 顶部显示用户名
     expect(screen.getByText('admin')).toBeInTheDocument()
   })
 
-  it('普通用户：菜单为终态前五项，不显示 admin 专属两项', async () => {
+  it('普通用户：菜单为终态前五项，不显示 admin 专属三项', async () => {
     mockedGetMe.mockResolvedValue({ user_id: 'u2', username: 'alice', role: 'reviewer' })
 
     renderAt('/')
@@ -102,6 +103,7 @@ describe('路由门禁（requireAuth）', () => {
       '审核中心',
     ])
     expect(screen.queryByRole('menuitem', { name: '闭环评测' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '开放评测' })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: '配置管理' })).not.toBeInTheDocument()
   })
 })
@@ -141,6 +143,12 @@ function mockAdminApis() {
     // 闭环评测页挂载双拉（暂无数据集/历史的空态足够证明装配）
     if (path === '/api/v1/eval/closed/datasets') return []
     if (path === '/api/v1/eval/closed/runs') return []
+    // 开放评测页挂载：open 数据集/历史 + closed 活跃探测（跨服务互斥）
+    if (path === '/api/v1/eval/open/datasets') return []
+    if (path === '/api/v1/eval/open/runs') return []
+    if (path === '/api/v1/eval/open/dataset-root') {
+      return { root: '/cache/MovieTags', is_default: true }
+    }
     // 标签管理导入 tab 挂载拉取导入批次
     if (path === '/api/v1/import/tasks') return []
     throw new Error(`未预期的请求：${path}`)
@@ -203,6 +211,18 @@ describe('路由装配（Layout → AdminRoute → 页面）', () => {
     expect(screen.getByText('评测历史')).toBeInTheDocument()
     // 挂载双拉了数据集与历史端点
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/datasets')
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/runs')
+  })
+
+  it('admin 访问 /eval-open：渲染出开放评测页（新建表单与历史骨架）', async () => {
+    // 装配冒烟：新页签经 RequireAuth→Layout→AdminRoute→OpenEval 全链路渲染
+    mockAdminApis()
+    renderAt('/eval-open')
+    expect(await screen.findByText('新建评测')).toBeInTheDocument()
+    expect(screen.getByText('评测历史')).toBeInTheDocument()
+    // 挂载拉取 open 数据集/历史端点 + closed 活跃探测（跨服务互斥）
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/open/datasets')
+    expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/open/runs')
     expect(mockedApiFetch).toHaveBeenCalledWith('/api/v1/eval/closed/runs')
   })
 
