@@ -24,3 +24,24 @@ export function fetchPrompts(mode?: string): Promise<PromptContractItem[]> {
   const query = mode === undefined ? '' : `?mode=${encodeURIComponent(mode)}`
   return apiFetch<PromptContractItem[]>(`/api/v1/prompts${query}`)
 }
+
+/** 流水线文案清单条目（与后端 RegistryItemOut 一致）：常量名 + 文案本体。 */
+export interface PromptRegistryItem {
+  name: string
+  text: string
+}
+
+/** 流水线文案清单组（与后端 RegistryGroupOut 一致）：按流水线分组
+ * （closed/mtg/assets/quality），文案与 capabilities/prompts 各模块常量
+ * 单一来源逐字一致。 */
+export interface PromptRegistryGroup {
+  module: string
+  title: string
+  items: PromptRegistryItem[]
+}
+
+/** 全量 Prompt 文案只读清单（2026-11-22 文案集中新增）：一处看全部
+ * 文案——GET /api/v1/prompts/registry 四组分组返回。 */
+export function fetchPromptRegistry(): Promise<PromptRegistryGroup[]> {
+  return apiFetch<PromptRegistryGroup[]>('/api/v1/prompts/registry')
+}

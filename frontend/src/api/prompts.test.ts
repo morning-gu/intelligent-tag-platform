@@ -5,7 +5,12 @@
 // 函数，用例钉死后端行为防误用复活）。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, apiFetch } from './client'
-import { fetchPrompts, type PromptContractItem } from './prompts'
+import {
+  fetchPromptRegistry,
+  fetchPrompts,
+  type PromptContractItem,
+  type PromptRegistryGroup,
+} from './prompts'
 
 function stubFetch(handler: (url: string, init?: RequestInit) => Promise<Response>) {
   const fetchMock = vi.fn(handler)
@@ -81,6 +86,25 @@ describe('fetchPrompts 只读清单契约', () => {
       'required_placeholders',
       'template_text',
     ])
+  })
+})
+
+describe('fetchPromptRegistry 流水线文案清单', () => {
+  it('GET /api/v1/prompts/registry 返回分组清单', async () => {
+    const groups: PromptRegistryGroup[] = [
+      {
+        module: 'quality',
+        title: '标签质量评估',
+        items: [{ name: 'PROMPT_VERSION', text: 'tag-quality-v4' }],
+      },
+    ]
+    const fetchMock = stubFetch(async () => jsonResponse(200, groups))
+
+    const rows = await fetchPromptRegistry()
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/prompts/registry')
+    expect(rows).toEqual(groups)
+    expect(rows[0]?.items[0]?.text).toBe('tag-quality-v4')
   })
 })
 
