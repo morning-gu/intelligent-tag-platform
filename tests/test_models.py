@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,
@@ -30,7 +30,8 @@ from tagplatform.db.models import (
     TagDefine,
 )
 
-# 迁移测试断言用：核心表名（v2 标签库两表 + 四张本地表 + 资产挂载/日志/账号）
+# 迁移测试断言用：核心表名（v2 标签库两表 + 四张本地表 + 资产挂载/日志/账号；
+# prompt_template 已由 0018 drop——prompt 本地化，四层重构 Task 3）
 EXPECTED_TABLES = {
     "media_asset",
     "asset_build_task",
@@ -41,7 +42,6 @@ EXPECTED_TABLES = {
     "asset_tag",
     "tag_import_task",
     "tag_change_log",
-    "prompt_template",
     "user_account",
 }
 

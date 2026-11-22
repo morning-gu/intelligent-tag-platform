@@ -35,14 +35,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
-from tagplatform.auth import bootstrap_admin
-from tagplatform.closed_eval import ClosedEvalService
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import Embedder, build_embedder
-from tagplatform.llm import make_llm_client
+from tagplatform.services.auth import bootstrap_admin
+from tagplatform.services.eval.service import ClosedEvalService
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.embed import Embedder, build_embedder
+from tagplatform.capabilities.llm import make_llm_client
 from tagplatform.settings import Settings, get_settings
-from tagplatform.tag_import import TagImportExecutor
-from tagplatform.tasks import TaskExecutor, reset_orphan_running
+from tagplatform.tasks import TaskExecutor, reset_orphan_running, reset_orphan_tasks
+from tagplatform.tasks.tag_import import TagImportExecutor
 from tagplatform.tasks.tag_quality import QualityExecutor
 
 
@@ -134,8 +134,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     - LLM 客户端按 use_mock_llm 构建单例（mock 零网络，测试与冒烟）。
     lifespan：启动时先做首管理员引导（空表创建 admin，密码取
     TAGPLT_ADMIN_PASSWORD，默认 admin123），随后按 generation_workers 构建
-    TaskExecutor（0 = 同步执行）并孤儿清理（running 任务复位 failed）；关停
-    时关线程池等待在途任务结束。
+    TaskExecutor（0 = 同步执行）并孤儿清理（生成任务 running、资产构建
+    running 与标签导入 processing 一并复位 failed）；关停时关线程池等待
+    在途任务结束。
     """
     if settings is None:
         settings = get_settings()
@@ -164,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             with app.state.session_factory() as session:
                 reset_orphan_running(session)
-            app.state.tag_import_executor.reset_interrupted()
+            reset_orphan_tasks(app.state.engine)
             app.state.quality_executor.resume_pending()
             yield
         finally:
@@ -179,15 +180,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 标签库直接读 tag_catalog / tag_define：把 app 引擎绑成"当前数据源"，
     # 生成线程池里的工作线程也因此取到同一个库视图（见 library.bind_engine）
     # （局部导入避免与 routers.library 重名）
-    from tagplatform import library as library_module
+    from tagplatform.services.tags import library as library_module
 
     library_module.bind_engine(app.state.engine)
     app.state.embedder = build_embedder(settings)
     app.state.llm = make_llm_client(settings)
     # 闭环评测服务（Task 6）：app 级单例——评测对业务表只读（DB 零写入
-    # 红线），产物只写 settings.eval_output_root
+    # 红线），产物只写 settings.eval_output_root；session_factory 参数已随
+    # Task 11 裁定删除（服务体内零 DB，干跑装配走全局引擎）
     app.state.closed_eval = ClosedEvalService(
-        app.state.session_factory, app.state.llm, app.state.embedder, settings)
+        app.state.llm, app.state.embedder, settings)
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）

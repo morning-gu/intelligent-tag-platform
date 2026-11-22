@@ -1,7 +1,7 @@
 """回归：命中库内标签（`origin="catalog"` + `alias_name`）时登记别名。
 
 事故现场（2026-11-10，8101 真机）：合并 main 后 `record_alias` 从
-`tagplatform.library` 搬进 `tagplatform.ingest`，第一个参数由「标签库对象」
+`tagplatform.services.tags.library` 搬进 `tagplatform.ingest`，第一个参数由「标签库对象」
 变成「ORM Session」（别名从 JSON 库落进 `tag_define.aliases` 表），
 而 `tasks/runner.py` 仍按老签名传 `library`，于是 open 生成一旦出现
 「相似并入」的候选就
@@ -10,6 +10,7 @@
 
 任务直接 failed（`gen_99d1dd463f89`）。这条用例把整条 runner 链路
 （stub producer → persist_tags → record_alias → commit）跑一遍，钉住签名。
+（模块现住 `tagplatform.services.content.ingest`——四层重构 Task 9 归位。）
 """
 
 import json
@@ -18,15 +19,15 @@ from datetime import datetime, timezone
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagChangeLog,
     TagDefine,
     TagGenerationTask,
 )
-from tagplatform.generation import ProducedTag
-from tagplatform.tasks import run_generation_task
+from tagplatform.services.generation import ProducedTag
+from tagplatform.services.generation.execute import run_generation_task
 
 _CONTENT = {
     "schema_version": "1.0",
@@ -83,10 +84,14 @@ def _seed_task(session):
 
 
 def test_catalog_hit_records_alias(session, monkeypatch):
-    """别名写进 tag_define.aliases + 变更日志，任务仍是 succeeded。"""
-    import tagplatform.tasks.runner as runner_mod
+    """别名写进 tag_define.aliases + 变更日志，任务仍是 succeeded。
 
-    monkeypatch.setattr(runner_mod, "get_producer", lambda mode: _StubProducer())
+    Task 5 装配两级化后 runner 不再经注册表分发（producer 随装配
+    context 携带），桩 producer 打在装配层的 get_producer 解析处。"""
+    import tagplatform.services.generation.assemble as assemble_mod
+
+    monkeypatch.setattr(assemble_mod, "get_producer",
+                        lambda mode: _StubProducer())
     task = _seed_task(session)
 
     done = run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
@@ -116,7 +121,7 @@ def test_record_alias_signature_is_session_first():
     """record_alias 的第一个位置参数必须是 Session（防止签名再次漂移）。"""
     import inspect
 
-    from tagplatform.ingest import record_alias
+    from tagplatform.services.content.ingest import record_alias
 
     params = list(inspect.signature(record_alias).parameters.values())
     assert params[0].name == "session"

@@ -1,81 +1,35 @@
-"""`/api/v1/media/*` 上传与「上传即生成资产」路由。
+"""`/api/v1/media/*` 上传与「上传即生成资产」薄路由。
 
 上传语义（2026-11 起）：登记资产（存文件 + media_asset 行），并用**文件名**
 去数据集里匹配影片——命中就建一条后台生成任务，逐场景跑多模态模型，把
-生成结果以同一条资产的 asset_id 导入平台；没命中就是普通占位资产。
+生成结果以同一条资产的 asset_id 导入平台；没命中就是普通占位资产。前端
+只需"选一个 mp4"：文件名带片名（`The.Godfather.1972.1080p.mkv`）或
+IMDb id（`tt0068646.mp4`，最准）。
 
-这样前端只需"选一个 mp4"，不需要填片名：文件名带片名即可
-（`The.Godfather.1972.1080p.mkv`），带 IMDb id（`tt0068646.mp4`）最准。
+接入层只做协议转换：multipart 表单提取、Content-Length 头早拒（413，
+纯协议守卫，先于任何落盘/入库）→ 调编排 → 返回。预检匹配、上传落盘
+登记、构建任务查询与进度页全部在 tagplatform.orchestration.media（用例
+清单见该模块 docstring）；错误映射（422 后缀白名单 / 413 超上限 / 409
+冲突护栏）随逻辑在编排层原样保留。
 
-权限说明（设计如此，报告注明）：登录即可上传，未设 admin 门槛——与其他业务
-router 一致经 create_app include 时统一挂 protected_deps。
-
-薄路由层：后缀白名单 / 大小上限 / uuid 存盘 / 资产行登记在核心层
-tagplatform.media；匹配与生成编排在 tagplatform.asset_build；本 router 只做
-multipart 提取与错误映射：
-- 后缀非白名单（UnsupportedVideoFormat）→ 422 {"detail": "不支持的视频格式"}；
-- 超上限（UploadTooLarge）→ 413，两条拦截路径（Content-Length 头早拒 +
-  核心层流式累计兜底）。
+权限说明（设计如此，报告注明）：登录即可上传，未设 admin 门槛——与其他
+业务 router 一致经 create_app include 时统一挂 protected_deps。
 """
-
-import json
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from tagplatform import asset_build, media
 from tagplatform.api import get_session, get_settings_dep
-from tagplatform.api.schemas import UtcDatetime
-from tagplatform.db.models import AssetBuildTask, MediaAsset
+from tagplatform.orchestration import media as media_orch
+from tagplatform.orchestration.media import (
+    BuildTaskOut,
+    MediaMatchResponse,
+    MediaUploadResponse,
+)
 from tagplatform.settings import Settings
 
 router = APIRouter(prefix="/api/v1")
-
-
-class MediaUploadResponse(BaseModel):
-    """上传响应：资产标识 + 标题 + 落盘路径 + 数据集匹配与任务信息。"""
-
-    asset_id: str
-    title: str
-    video_uri: str
-    # 文件名命中数据集时非空，前端据此轮询 build_status
-    movie_id: str | None = None
-    matched_title: str | None = None
-    match_how: str | None = None
-    build_task_id: str | None = None
-
-
-class MediaMatchResponse(BaseModel):
-    """选完文件后的预检结果：命中哪部片、这部片是否已有资产和内容。"""
-
-    matched: bool
-    movie_id: str | None = None
-    matched_title: str | None = None
-    match_how: str | None = None
-    asset_id: str | None = None
-    # 已有内容（content_json 非空）→ 前端问用户"是否重新生成"
-    has_content: bool = False
-    content_source: str | None = None
-    scene_count: int = 0
-    built_at: UtcDatetime | None = None
-    # 能否直接重新生成：只有经数据集索引命中（拿到 movie_id）才行；
-    # 按资产标题兜底命中（match_how="asset_title"，中文名/改名/数据集不可读）
-    # 只能提醒"已有同名资产"，重建得先把文件名改成含 IMDb id 或英文片名。
-    can_rebuild: bool = True
-
-
-class BuildTaskOut(BaseModel):
-    """生成任务进度：前端轮询「正在分析第 done/total 个场景」。"""
-
-    task_id: str
-    asset_id: str
-    movie_id: str
-    status: str
-    total_scenes: int
-    done_scenes: int
-    error: str | None = None
 
 
 def enforce_upload_size_limit(request: Request) -> None:
@@ -87,7 +41,7 @@ def enforce_upload_size_limit(request: Request) -> None:
     media.MAX_UPLOAD_BYTES 调用期读取（测试可 monkeypatch 收紧）。
     """
     header = request.headers.get("content-length")
-    if header is not None and header.isdigit() and int(header) > media.MAX_UPLOAD_BYTES:
+    if header is not None and header.isdigit() and int(header) > media_orch.media.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="文件大小超出上传上限")
 
 
@@ -97,60 +51,8 @@ def match_media(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> MediaMatchResponse:
-    """按文件名预检：命中哪部片、这部片是否已有资产（有没有内容）。
-
-    只读接口——不落盘、不建任务，供前端在**选完文件、点上传之前**问用户
-    "该视频已有对应资产，是否重新生成"。判定只认 `media_asset`：资产行
-    存在且 `content_json` 非空，才算已有内容。
-
-    两级匹配：先查数据集索引（能拿到 movie_id，可直接重建）；索引没命中
-    时按**资产标题**兜底（`match_how="asset_title"`，`can_rebuild=false`
-    ——只能提醒，重建需要文件名带 IMDb id 或英文片名）。没有这层兜底，
-    中文名/改过名的文件重复上传时会静默通过。
-    """
-    matched = asset_build.match_filename(filename, settings.dataset_root)
-    if matched is None:
-        asset = asset_build.match_asset_title(session, filename)
-        if asset is None:
-            return MediaMatchResponse(matched=False)
-        return MediaMatchResponse(
-            matched=True,
-            matched_title=asset.title,
-            match_how="asset_title",
-            asset_id=asset.asset_id,
-            has_content=bool(asset.content_json),
-            content_source=asset.source,
-            scene_count=_scene_count(asset),
-            built_at=asset.updated_at,
-            can_rebuild=False,
-        )
-
-    asset = asset_build.asset_for_movie(session, matched.movie.movie_id)
-    if asset is None:
-        # 数据集命中但还没建过任务（例如内容是从 JSON 导入的）
-        asset = asset_build.match_asset_title(session, filename)
-    return MediaMatchResponse(
-        matched=True,
-        movie_id=matched.movie.movie_id,
-        matched_title=matched.movie.title,
-        match_how=matched.how,
-        asset_id=asset.asset_id if asset is not None else None,
-        has_content=bool(asset is not None and asset.content_json),
-        content_source=asset.source if asset is not None else None,
-        scene_count=_scene_count(asset),
-        built_at=asset.updated_at if asset is not None else None,
-    )
-
-
-def _scene_count(asset: MediaAsset | None) -> int:
-    """资产内容里的场景数（内容损坏/为空时按 0 算）。"""
-    if asset is None or not asset.content_json:
-        return 0
-    try:
-        payload = json.loads(asset.content_json)
-        return len((payload.get("content") or {}).get("scenes") or [])
-    except (ValueError, AttributeError):
-        return 0
+    """按文件名预检：命中哪部片、这部片是否已有资产（有没有内容）。"""
+    return media_orch.match_media(session, settings, filename)
 
 
 @router.post("/media/upload", response_model=MediaUploadResponse)
@@ -171,157 +73,29 @@ def upload_media(
 
     同步 def：磁盘落盘与登记为阻塞操作，走线程池不占事件循环。进入本
     函数时 multipart 已由 FastAPI 收完解析（磁盘 spool，内存不上爆），
-    先按 Content-Length 头早拒，再交核心层流式落盘与登记。
-
-    同一部片重复上传**不产生新资产**：按 movie_id 找到已有资产，只把视频
-    地址换掉，内容由后台任务整块覆盖。是否重新生成由前端预检时问用户，
-    这里不再有 force 开关。
-
-    infer=False：只落数据集事实（场景描述/字幕/时间），氛围、事件、说话人
-    留空，一次模型调用都不发；口径随之变为 asset_builder:v5-facts。
-    该项**不落任务行**，只作为本次执行参数透传给后台线程；不传则用全局
-    `settings.asset_infer`（与 main 的全局开关语义一致），表结构也不差一列。
+    先按 Content-Length 头早拒，再交编排层（匹配护栏 → 落盘登记 → 建任务）。
     """
     enforce_upload_size_limit(request)
-    filename = file.filename or ""
-    asset_id = (asset_id or "").strip() or None
-
-    # 客户端显式指定 asset_id 时只允许"预留主键"：已绑定视频的资产不能被
-    # 覆盖，否则任何登录用户都能把别人的视频换掉。
-    if asset_id is not None:
-        existing = session.get(MediaAsset, asset_id)
-        if existing is not None and existing.video_uri:
-            raise HTTPException(
-                status_code=409,
-                detail="资产已绑定视频，不能通过上传覆盖") from None
-
-    # 先匹配：命中数据集时复用这部片已有的资产（asset_id 不变、内容覆盖），
-    # 没命中就是一条全新的占位资产
-    matched = asset_build.match_filename(filename, settings.dataset_root)
-    if matched is not None and asset_id is None:
-        current = asset_build.asset_for_movie(session, matched.movie.movie_id)
-        if current is not None:
-            asset_id = current.asset_id
-
-    # 兜底护栏：数据集没命中、但库里已有同名资产 → 拒绝静默重复入库。
-    # 这条只会挡"同一部片、文件名认不出"的情况（中文名/改名）；换个带
-    # IMDb id 或英文片名的文件名上传即可。前端预检也会提示，这里是不
-    # 依赖前端状态的第二道闸。
-    if matched is None and asset_id is None:
-        duplicate = asset_build.match_asset_title(session, filename)
-        if duplicate is not None and duplicate.content_json:
-            raise HTTPException(
-                status_code=409,
-                detail=(f"已有同名资产《{duplicate.title}》，不能重复上传；"
-                        "要重新生成请把文件名改成含 IMDb id（如 tt0068646）"
-                        "或英文片名再传")) from None
-
-    try:
-        stored = media.save_upload(
-            file.file, filename, session, settings.media_root,
-            asset_id=asset_id,
-            title=matched.movie.title if matched is not None else None)
-    except media.UnsupportedVideoFormat:
-        raise HTTPException(
-            status_code=422, detail="不支持的视频格式") from None
-    except media.UploadTooLarge:
-        raise HTTPException(
-            status_code=413, detail="文件大小超出上传上限") from None
-
-    task = None
-    if matched is not None and auto_build:
-        task = asset_build.create_task(session, stored.asset_id,
-                                       matched.movie.movie_id)
-        asset_build.submit(task.task_id, settings, infer=infer)
-
-    return MediaUploadResponse(
-        asset_id=stored.asset_id,
-        title=stored.title,
-        video_uri=stored.video_uri,
-        movie_id=matched.movie.movie_id if matched else None,
-        matched_title=matched.movie.title if matched else None,
-        match_how=matched.how if matched else None,
-        build_task_id=task.task_id if task else None,
-    )
+    return media_orch.upload_media(
+        session, settings, file.file, file.filename or "",
+        (asset_id or "").strip() or None, auto_build, infer)
 
 
 @router.get("/media/build-tasks/{task_id}", response_model=BuildTaskOut)
 def get_build_task(task_id: str, session: Session = Depends(get_session)) -> BuildTaskOut:
     """查询生成任务进度；未知 task_id → 404。"""
-    task = session.get(AssetBuildTask, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    return _task_out(task)
+    return media_orch.get_build_task(session, task_id)
 
 
 @router.get("/media/build-tasks", response_model=list[BuildTaskOut])
 def list_build_tasks(asset_id: str | None = None,
                      session: Session = Depends(get_session)) -> list[BuildTaskOut]:
     """任务列表：按 asset_id 过滤，创建时间降序。"""
-    query = session.query(AssetBuildTask)
-    if asset_id:
-        query = query.filter(AssetBuildTask.asset_id == asset_id)
-    rows = query.order_by(AssetBuildTask.created_at.desc()).all()
-    return [_task_out(row) for row in rows]
-
-
-_PROGRESS_PAGE = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><title>生成进度</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;margin:40px auto;
-max-width:640px;padding:0 20px;color:#1f2328}
-h1{font-size:18px;margin:0 0 4px}
-.bar{height:10px;background:#eaeef2;border-radius:6px;overflow:hidden;margin:18px 0 8px}
-.fill{height:100%;width:0;background:#2f81f7;transition:width .4s}
-.meta{color:#59636e;font-size:13px}
-.ok{color:#1a7f37}.bad{color:#cf222e}
-code{background:#f6f8fa;padding:1px 5px;border-radius:4px;font-size:13px}
-</style></head><body>
-<h1>资产生成进度</h1>
-<div class="meta">任务 <code>__TASK__</code></div>
-<div class="bar"><div class="fill" id="fill"></div></div>
-<div id="line" class="meta">读取中…</div>
-<div id="extra" class="meta" style="margin-top:14px"></div>
-<script>
-const TASK = "__TASK__";
-async function tick(){
-  try{
-    const r = await fetch("/api/v1/media/build-tasks/" + TASK, {credentials:"include"});
-    if(!r.ok){ document.getElementById("line").textContent = "查询失败 HTTP " + r.status; return; }
-    const t = await r.json();
-    const pct = t.total_scenes ? Math.round(100*t.done_scenes/t.total_scenes) : 0;
-    document.getElementById("fill").style.width = pct + "%";
-    const label = {queued:"排队中",running:"生成中",succeeded:"已完成",failed:"失败"}[t.status] || t.status;
-    const line = document.getElementById("line");
-    line.textContent = label + "  " + t.done_scenes + "/" + (t.total_scenes || "?") + " 场景  (" + pct + "%)";
-    line.className = "meta " + (t.status==="succeeded"?"ok":t.status==="failed"?"bad":"");
-    const extra = document.getElementById("extra");
-    if(t.status === "succeeded"){
-      extra.innerHTML = "资产 <code>" + t.asset_id + "</code> 已可查看（素材页刷新即可）。";
-    } else if(t.status === "failed"){
-      extra.textContent = "错误：" + (t.error || "未知");
-    }
-    if(t.status === "succeeded" || t.status === "failed") return;
-  }catch(e){ document.getElementById("line").textContent = "网络错误：" + e; }
-  setTimeout(tick, 2000);
-}
-tick();
-</script></body></html>"""
+    return media_orch.list_build_tasks(session, asset_id)
 
 
 @router.get("/media/build-tasks/{task_id}/view", response_class=HTMLResponse,
             include_in_schema=False)
 def build_task_view(task_id: str, session: Session = Depends(get_session)) -> HTMLResponse:
-    """进度页（不依赖前端构建）：浏览器打开即自动轮询，替代 dist 里缺失的进度条。"""
-    if session.get(AssetBuildTask, task_id) is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    return HTMLResponse(_PROGRESS_PAGE.replace("__TASK__", task_id))
-
-
-def _task_out(task: AssetBuildTask) -> BuildTaskOut:
-    return BuildTaskOut(
-        task_id=task.task_id, asset_id=task.asset_id, movie_id=task.movie_id,
-        status=task.status, total_scenes=task.total_scenes,
-        done_scenes=task.done_scenes, error=task.error,
-    )
+    """进度页（不依赖前端构建）：浏览器打开即自动轮询。"""
+    return media_orch.build_task_view(session, task_id)

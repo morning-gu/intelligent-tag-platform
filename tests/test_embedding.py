@@ -11,7 +11,7 @@ import types
 import numpy as np
 import pytest
 
-from tagplatform.embed import (
+from tagplatform.capabilities.embed import (
     LocalEmbedder,
     MockEmbedder,
     RemoteEmbedder,
@@ -101,7 +101,7 @@ def test_local_plain_models_get_no_prefix(monkeypatch):
 
     import numpy as np
 
-    from tagplatform.embed.embedding import LocalEmbedder
+    from tagplatform.capabilities.embed.embedding import LocalEmbedder
 
     encoded: list[list[str]] = []
 

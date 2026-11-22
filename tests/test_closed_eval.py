@@ -34,28 +34,32 @@ import pytest
 from sqlalchemy import text
 
 from conftest import MOCK_EMBEDDER, MOCK_LLM
-from tagplatform.closed_eval import (
+from tagplatform.services.eval.dataset import (
+    PRESET_SEED,
+    PRESET_SIZE,
+    load_gt,
+    load_movie_content,
+    movie_entries,
+    scan_datasets,
+    select_movies,
+)
+from tagplatform.services.eval.report import (
+    assemble_report,
+    render_report_md,
+    write_report,
+)
+from tagplatform.services.eval.service import (
     ABORT_CONSECUTIVE,
     DEFAULT_CONCURRENCY,
     RETRY_PER_MOVIE,
     ClosedEvalService,
     EvalValidationError,
     MovieResult,
-    PRESET_SEED,
-    PRESET_SIZE,
     RunActiveError,
     RunBusyError,
-    assemble_report,
-    load_gt,
-    load_movie_content,
-    movie_entries,
-    render_report_md,
-    scan_datasets,
-    select_movies,
-    write_report,
 )
-from tagplatform.eval.closed_ranking import ClosedSample, evaluate_closed
-from tagplatform.llm import MockLLMClient
+from tagplatform.services.eval.closed_ranking import ClosedSample, evaluate_closed
+from tagplatform.capabilities.llm import MockLLMClient
 
 
 # ---------------------------------------------------------------- 夹具
@@ -289,7 +293,8 @@ class _CountingSessionFactory:
 
 
 class _CountingSession:
-    """计数会话：属性透传内层（assemble_spec 的 get_active_prompt 可用）。"""
+    """计数会话：属性透传内层（Task 5 装配两级化后干跑循环不开会话，
+    本探针留作回归守卫——若循环里重新出现会话，LLM 调用期持有即翻红）。"""
 
     def __init__(self, inner, factory):
         self._inner = inner
@@ -324,9 +329,10 @@ class _SessionProbeLLM(MockLLMClient):
 
 @pytest.fixture
 def engine(tmp_path):
-    """评测服务用文件 DB（建表即播种 closed v1 激活模板——after_create 钩子）。"""
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    """评测服务用文件 DB（四层重构 Task 3 起 prompt 本地化：create_all
+    不再播种 prompt_template——after_create 钩子随本地化退役）。"""
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
 
     eng = create_engine_for(str(tmp_path / "closed-eval.db"))
     Base.metadata.create_all(eng)
@@ -349,7 +355,7 @@ def eval_setup(tmp_path, root, engine):
     用例经 dataset_root 换数据集根。teardown 统一等 worker 收尾再解绑库
     引擎——不让 daemon 线程碰已 dispose 的引擎（输出保整洁）。
     """
-    from tagplatform.db import make_session_factory
+    from tagplatform.capabilities.storage import make_session_factory
     from tagplatform.settings import Settings
     from tests.library_fixture import (
         bind_engine,
@@ -362,10 +368,11 @@ def eval_setup(tmp_path, root, engine):
     write_library(library_root(), dirs=_EVAL_DIRS, tags=_EVAL_TAGS)
     made: list[ClosedEvalService] = []
 
-    def _make(llm=MOCK_LLM, dataset_root=None,
-              session_factory=None) -> ClosedEvalService:
+    def _make(llm=MOCK_LLM, dataset_root=None) -> ClosedEvalService:
+        # session_factory 参数已随 Task 11 裁定从 ClosedEvalService 删除
+        # （服务体内零 DB，该参数零消费者）
         service = ClosedEvalService(
-            session_factory or make_session_factory(engine), llm, MOCK_EMBEDDER,
+            llm, MOCK_EMBEDDER,
             Settings(eval_dataset_root=dataset_root or root,
                      eval_output_root=str(tmp_path / "eval-out")))
         made.append(service)
@@ -459,18 +466,49 @@ def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
     """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
     LLM 调用线程自身不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
     会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
-    判据逐线程归属（跨线程毫秒级 assemble 重叠是合法并发）；另断言全局
-    开放会话峰值不超过并发上限（合法并发的上界）。"""
-    from tagplatform.db import make_session_factory
+    Task 5 装配两级化后干跑循环零 DB（装配只在起跑发生一次），判据
+    天然成立；探针留作守卫——循环里重新出现会话即翻红。"""
+    from tagplatform.capabilities.storage import make_session_factory
 
     factory = _CountingSessionFactory(make_session_factory(engine))
     llm = _SessionProbeLLM(factory)
-    service = eval_setup(llm=llm, session_factory=factory)
+    # 探针经 LLM 包装生效；service 的 session_factory 参数已随 Task 11
+    # 裁定删除（服务体内零 DB，该参数零消费者）
+    service = eval_setup(llm=llm)
     run_id = service.start("emotion", {"mode": "all"}, wait=True)
     assert service.get(run_id).status == "succeeded"
     assert service.get(run_id).failed == 0
     assert llm.violations == 0
     assert factory.peak_open <= DEFAULT_CONCURRENCY
+
+
+def test_run_uses_run_start_library_snapshot(eval_setup):
+    """快照语义验收（Review Focus #4）：run 启动装配一次后变更库行，
+    干跑产出不变。
+
+    时序由闸门 LLM 钉死：起跑装配（快照）完成后首片阻塞在 LLM 调用上，
+    期间把库行清空；放行后第二片才装配——若装配退回每片读库（回归），
+    第二片召回空库必以「候选标签为空」失败，本用例翻红；快照语义下
+    两片都用起跑库，产出只含旧库标签。
+    """
+    from tests.library_fixture import library_root, write_library
+
+    llm = _RecordingGateLLM()
+    service = eval_setup(llm=llm)
+    llm.hold()
+    run_id = service.start("emotion", {"mode": "all"})
+    write_library(library_root(), dirs=[], tags=[])  # 起跑装配后清空库行
+    llm.release()
+    state = _await_terminal(service, run_id)
+    _drain_active(service)
+    assert state.status == "succeeded" and state.failed == 0
+    rows = _raw_rows(service, run_id)
+    assert len(rows) == 2 and all(r["ok"] for r in rows)
+    for row in rows:
+        for produced in row["produced"]:
+            assert produced["tag_id"] in {"t1", "t2", "t7", "t9"}  # 旧库标签
+    meta = _read_meta(service, run_id)
+    assert meta["library"]["n_tags"] == 4  # 起跑快照口径，非清空后口径
 
 
 def test_finished_at_on_terminal_state_and_history(svc):

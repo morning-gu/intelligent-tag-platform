@@ -1,12 +1,12 @@
-"""过滤责任链测试：注册表顺序、占位环节透传、自定义环节丢弃与
-runner 集成（第 7 步）。
+"""过滤责任链测试：注册表顺序、占位环节透传、自定义环节丢弃与执行
+序列集成（execute.py 第 6.5 步）。
 
 覆盖契约：
 - 默认链初始态 list_filters() == ["quality", "fence"]（顺序即执行序，
   质量评估在前、信息围栏在后）；
 - name 重复注册抛 ValueError；空链原样透传（run_filter_chain 不改动）；
 - 两占位环节原样透传：条数不变、dropped 恒 0、note 标明未评估/未围栏；
-- 自定义环节丢弃后 runner 只落通过行，任务仍 succeeded（"过滤掉不算
+- 自定义环节丢弃后执行序列只落通过行，任务仍 succeeded（"过滤掉不算
   失败"）；环节抛错 → 任务 failed + 零半截写入（任务级事务）。
 """
 
@@ -18,27 +18,27 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagCatalog,
     TagDefine,
     TagGenerationTask,
 )
-from tagplatform.filtering import (
+from tagplatform.services.generation import ProducedTag
+from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.services.generation.filtering import (
     FilterContext,
     FilterOutcome,
     list_filters,
     register_filter,
     run_filter_chain,
 )
-from tagplatform.filtering.base import _CHAIN
-from tagplatform.filtering.fence import InfoFenceFilter
-from tagplatform.filtering.quality import QualityFilter
-from tagplatform.generation import ProducedTag
+from tagplatform.services.generation.filtering.base import _CHAIN
+from tagplatform.services.generation.filtering.fence import InfoFenceFilter
+from tagplatform.services.generation.filtering.quality import QualityFilter
 from tagplatform.schemas import ContentJSON, parse_content
-from tagplatform.tasks import run_generation_task
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(
@@ -169,7 +169,8 @@ def test_exception_propagates(restore_chain):
 
 def test_chain_logs_start_stage_and_end(caplog):
     tags = [_tag("甲"), _tag("乙", tag_id="tag_y")]
-    with caplog.at_level("INFO", logger="tagplatform.filtering"):
+    with caplog.at_level("INFO",
+                         logger="tagplatform.services.generation.filtering"):
         run_filter_chain(tags, _ctx(), None)
     messages = [record.getMessage() for record in caplog.records]
     assert any("过滤责任链开始" in m and "task_f" in m for m in messages)
@@ -184,7 +185,8 @@ def test_chain_logs_start_stage_and_end(caplog):
 def test_stage_logs_input_tag_names(caplog):
     """两个占位环节各自打出收到的候选名，便于排查丢在哪一步。"""
     tags = [_tag("甲"), _tag("乙", tag_id="tag_y")]
-    with caplog.at_level("INFO", logger="tagplatform.filtering"):
+    with caplog.at_level("INFO",
+                         logger="tagplatform.services.generation.filtering"):
         run_filter_chain(tags, _ctx(), None)
     messages = [record.getMessage() for record in caplog.records]
     assert any("质量评估" in m and "收到 2 条候选" in m and "甲" in m
@@ -195,14 +197,15 @@ def test_stage_logs_input_tag_names(caplog):
 def test_dropped_detail_logged(restore_chain, caplog):
     """有丢弃时打出被丢标签名（明细只进日志，不入库）。"""
     register_filter(_DropNamed())
-    with caplog.at_level("INFO", logger="tagplatform.filtering"):
+    with caplog.at_level("INFO",
+                         logger="tagplatform.services.generation.filtering"):
         run_filter_chain([_tag("甲"), _tag("乙", tag_id="tag_y")], _ctx(), None)
     messages = [record.getMessage() for record in caplog.records]
     assert any("test_drop_named 丢弃明细" in m and "甲" in m
                for m in messages)
 
 
-# ---- runner 集成（第 7 步） ----
+# ---- 执行序列集成（execute.run_generation_task 第 6.5 步） ----
 
 
 def _seed_asset(session: Session, content_json: str | None = _CONTENT_JSON) -> None:

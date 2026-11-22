@@ -24,7 +24,7 @@
 模型永远同一个分数），因此可直接当回归基线——改提示词、改目录描述、换
 嵌入模型，分数掉下去就是真掉下去了。
 
-指标解读（实现见 `tagplatform/eval/ranking.py`）
+指标解读（实现见 `tagplatform/services/eval/ranking.py`）
 =================================================
 
 - **NDCG@3/@5**：主指标。分级相关度——预测到精确目录得 2 分，到同父
@@ -60,7 +60,7 @@
 
 安全设计：本脚本**只读**，不写库、不改标签库、不落任何状态。
 
-分层红线：脚本可用平台模块，但指标全在 `tagplatform/eval`（纯标准库）。
+分层红线：脚本可用平台模块，但指标全在 `tagplatform/services/eval`（纯标准库）。
 """
 
 from __future__ import annotations
@@ -72,9 +72,9 @@ from pathlib import Path
 
 import numpy as np
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.embed import build_embedder
-from tagplatform.eval import (
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.embed import build_embedder
+from tagplatform.services.eval import (
     GRADE_EXACT,
     GRADE_NONE,
     GRADE_SIBLING,
@@ -85,12 +85,12 @@ from tagplatform.eval import (
     lift,
     random_baseline,
 )
-from tagplatform.library import (
+from tagplatform.services.tags.library import (
     _DIR_SAMPLE_TAGS,
     TagLibrary,
-    _is_placeholder,
     dir_text,
     is_deprecated,
+    is_placeholder,
     library_from_session,
 )
 from tagplatform.settings import get_settings
@@ -105,7 +105,7 @@ def _dir_tag_lists(library: TagLibrary) -> dict[str, list[tuple[str, str]]]:
     """每个目录下的（tag_id, tag_name），按库内顺序，已过滤废弃与占位。"""
     buckets: dict[str, list[tuple[str, str]]] = {}
     for tag in library.tags():
-        if is_deprecated(tag.status) or _is_placeholder(tag.tag_name):
+        if is_deprecated(tag.status) or is_placeholder(tag.tag_name):
             continue
         buckets.setdefault(tag.dir_id, []).append((tag.tag_id, tag.tag_name))
     return buckets
@@ -178,7 +178,7 @@ def library_samples(library: TagLibrary, embedder, dir_ids: list[str] | None,
         return [], ["标签库里没有可扩展目录（dir_dynamic），无法评测"]
 
     tags = [t for t in library.tags_in_dirs(dir_ids)
-            if not is_deprecated(t.status) and not _is_placeholder(t.tag_name)]
+            if not is_deprecated(t.status) and not is_placeholder(t.tag_name)]
     if limit:
         tags = tags[:limit]
     if not tags:

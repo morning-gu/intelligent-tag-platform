@@ -1,0 +1,42 @@
+"""只读运行配置编排（GET /api/v1/config）——orchestration/config 域。
+
+用例清单：`get_config`——Settings 只读视图，供运营侧核对部署参数（阶段 4
+Task 2）。无 services/config（2026-11-21 精简审计砍除：prompt 移能力层后
+仅剩"读冻结的 Settings 返回视图"，无状态/无事务/无写，不构成服务），
+编排直读 Settings 拼装。
+
+response_model 字段白名单保证机密不外泄——session_secret / admin_password
+等敏感项不在 ConfigOut 中，即便未来 Settings 增列也不会自动进入响应。
+只读语义：不提供任何写配置端点（改配置走环境变量 + 重启，见 README）。
+"""
+
+from pydantic import BaseModel
+
+from tagplatform.settings import Settings
+
+
+class ConfigOut(BaseModel):
+    """运行配置只读视图：机密字段（session_secret / admin_password）绝不入列。"""
+
+    llm_model: str
+    llm_temperature: float
+    recall_top_k_per_type: int
+    open_match_threshold: float
+    generation_workers: int
+    use_mock_llm: bool
+    use_mock_embedder: bool
+    database_path: str
+
+
+def get_config(settings: Settings) -> ConfigOut:
+    """只读运行配置：字段与设计契约一一对应，不含任何机密。"""
+    return ConfigOut(
+        llm_model=settings.llm_model,
+        llm_temperature=settings.llm_temperature,
+        recall_top_k_per_type=settings.recall_top_k_per_type,
+        open_match_threshold=settings.open_match_threshold,
+        generation_workers=settings.generation_workers,
+        use_mock_llm=settings.use_mock_llm,
+        use_mock_embedder=settings.use_mock_embedder,
+        database_path=settings.database_path,
+    )

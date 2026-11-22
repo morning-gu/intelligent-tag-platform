@@ -10,14 +10,14 @@ import json
 import pytest
 from conftest import MOCK_EMBEDDER
 
-from tagplatform.generation import GenerationPolicy, GenerationSpec
-from tagplatform.generation.mtg import pipeline as mtg_pipeline
-from tagplatform.generation.mtg.merge import merge_candidates
-from tagplatform.generation.mtg.parse import parse_generation_items
-from tagplatform.generation.mtg.prompts import build_generation_messages
-from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.llm.client import LLMResponse
-from tagplatform.library import try_load_library
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.merge import merge_candidates
+from tagplatform.services.generation.open.mtg.parse import parse_generation_items
+from tagplatform.services.generation.open.mtg.prompts import build_generation_messages
+from tagplatform.services.generation.open.producer import OpenTagProducer
+from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.schemas import parse_content
 from tagplatform.settings import Settings
 
@@ -91,7 +91,7 @@ def test_dir_hint_lists_only_expandable_dirs_with_full_path(content_fixture):
 def test_dir_hint_includes_asset_dirs(content_fixture):
     """dir_asset 同 dir_dynamic 进提示清单。"""
     from tests.library_fixture import add_dirs
-    from tagplatform.library import DIR_ASSET
+    from tagplatform.services.tags.library import DIR_ASSET
 
     add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
                "dir_type": DIR_ASSET, "applicable_scope": "content",
@@ -225,7 +225,7 @@ def test_model_chosen_asset_dir_is_used(session, content_fixture,
                                         dir_settings, tmp_path):
     """dir_asset 目录可扩充：模型选它 → 采纳，同 dir_dynamic。"""
     from tests.library_fixture import add_dirs
-    from tagplatform.library import DIR_ASSET
+    from tagplatform.services.tags.library import DIR_ASSET
 
     add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
                "dir_type": DIR_ASSET, "applicable_scope": "content",

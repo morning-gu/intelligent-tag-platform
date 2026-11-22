@@ -30,8 +30,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import TagCatalog, TagDefine
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
+from tagplatform.capabilities.vectors import encode_vector
 
 
 @dataclass
@@ -72,8 +72,8 @@ def reembed_all(session: Session, embedder) -> ReembedSummary:
 
 def main() -> None:
     """CLI 入口：按运行环境配置（.env / TAGPLT_*）连接库并执行重建。"""
-    from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.embed import build_embedder
+    from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+    from tagplatform.capabilities.embed import build_embedder
     from tagplatform.settings import get_settings
 
     settings = get_settings()

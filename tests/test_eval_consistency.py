@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from tagplatform.eval import (
+from tagplatform.services.eval import (
     consistent_share,
     consistency_std,
     icc_2_1,

@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from tagplatform.adapters.vision import to_content_json
-from tagplatform.assets import (
+from tagplatform.capabilities.adapters.vision import to_content_json
+from tagplatform.services.content.assets import (
     ASSET_BUILDER_VERSION,
     AssetBuilder,
     CastIndex,
@@ -36,8 +36,8 @@ from tagplatform.assets import (
     plan_scenes,
     source_tag,
 )
-from tagplatform.assets.subtitles import SubtitleLine
-from tagplatform.llm import LLMResponse
+from tagplatform.services.content.assets.subtitles import SubtitleLine
+from tagplatform.capabilities.llm import LLMResponse
 from tagplatform.schemas.upstream import parse_upstream
 
 LONG_SUMMARY = ("这是整片的中文剧情描述，交代了主要人物、核心冲突与结局走向，"
@@ -148,7 +148,7 @@ def test_parse_srt_skips_bad_blocks():
 
 
 def test_clean_text_strips_sdh_marks():
-    from tagplatform.assets.subtitles import clean_text
+    from tagplatform.services.content.assets.subtitles import clean_text
     assert clean_text("[door slams]") == "[door slams]"      # 纯音效行保留
     assert clean_text("Oh, God. - [Thud]") == "Oh, God."
     assert clean_text("- Yes. - No.") == "Yes. No."

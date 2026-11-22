@@ -16,8 +16,8 @@ import sqlite3
 
 import pytest
 
-from tagplatform.db import create_engine_for
-from tagplatform.db.models import Base
+from tagplatform.capabilities.storage import create_engine_for
+from tagplatform.capabilities.storage.models import Base
 
 
 @pytest.fixture()

@@ -5,7 +5,7 @@
 // 未知资产/未完成内容识别 → 404（ApiError.status）。v2 语义：content_json
 // 直写影片级 media_asset 行，context 概念退役——contexts 数组与 contexts
 // 端点随之移除。
-import { apiFetch } from './client'
+import { apiFetch, buildSearchParams } from './client'
 import type { TagOrigin } from './review'
 
 /** 资产列表项（与后端 AssetOut 一致，均非大字段）。 */
@@ -106,13 +106,7 @@ export interface AssetListQuery {
 
 /** 资产列表：asset_type 精确过滤、q 对 title 子串匹配，按 asset_id 排序。 */
 export function fetchAssets(query: AssetListQuery = {}): Promise<AssetSummary[]> {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== '') {
-      params.set(key, value)
-    }
-  }
-  const search = params.toString()
+  const search = buildSearchParams(query).toString()
   return apiFetch<AssetSummary[]>(`/api/v1/assets${search ? `?${search}` : ''}`)
 }
 

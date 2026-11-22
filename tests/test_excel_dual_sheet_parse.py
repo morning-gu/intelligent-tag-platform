@@ -25,7 +25,7 @@ import io
 
 import openpyxl
 
-from tagplatform.governance.excel import (
+from tagplatform.services.tags.governance.excel import (
     DUAL_DIR_COLUMNS,
     DUAL_DIR_SHEET,
     DUAL_TAG_COLUMNS,

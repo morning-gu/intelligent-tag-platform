@@ -21,22 +21,22 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.generation import Evidence, GenerationPolicy, GenerationSpec
-from tagplatform.generation import closed as closed_module
-from tagplatform.generation.closed import ClosedTagProducer
-from tagplatform.generation.recall import embed_content_texts, recall_candidates
-from tagplatform.library import (
+from tagplatform.services.generation import Evidence, GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.closed import producer as closed_module
+from tagplatform.services.generation.closed.producer import ClosedTagProducer
+from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
+from tagplatform.services.tags.library import (
     DIR_ASSET,
     Directory,
     TagDef,
     TagLibrary,
     try_load_library,
 )
-from tagplatform.llm.client import LLMResponse
-from tagplatform.llm.parsing import LLMParseError, parse_closed_output
-from tagplatform.prompts import get_active_prompt, render_prompt
+from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
+from tagplatform.capabilities.prompts import get_prompt, render_prompt
+from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.settings import Settings
-from tagplatform.tasks.runner import _render_content_text
 from tests.library_fixture import library_root, write_library
 
 def _evi(ec: int, es: int, ef: int,
@@ -140,6 +140,11 @@ def test_closed_recall_global_top_k_and_dedup():
 
 
 class _FixedRecallEmbedder:
+    # name 是 Embedder 协议字段（library 的向量缓存键按它区分模型）——
+    # 与其余替身（RecordingEmbedder/_FixedEmbedder 等）同约定
+    name = "fixed-recall"
+    dim = 2
+
     def __init__(self, passage_vectors: dict[str, list[float]]):
         self.passage_vectors = passage_vectors
 
@@ -226,11 +231,14 @@ def test_closed_recall_respects_dir_scope():
 
 def _build_spec(session: Session, content_fixture, run_id: str,
                 policy=None) -> GenerationSpec:
-    """按 runner 职责模拟组装：渲染 closed prompt（候选分组由 produce 注入）。"""
+    """按 runner 职责模拟组装：渲染 closed prompt（候选分组由 produce 注入）。
+
+    四层重构 Task 3 起模板为本地常量（get_prompt），session 仅随签名保留。
+    """
     library = try_load_library()
     policy = policy or GenerationPolicy()
     prompt_text = render_prompt(
-        get_active_prompt(session, "closed"),
+        get_prompt("closed"),
         content=_render_content_text(content_fixture),
     )
     return GenerationSpec(
@@ -657,7 +665,7 @@ def test_closed_produce_parse_retry_recovers(
 
     llm = _FlakyLLM()
     with caplog.at_level(logging.WARNING,
-                         logger="tagplatform.generation.closed"):
+                         logger="tagplatform.services.generation.closed.producer"):
         out = ClosedTagProducer().produce(spec, session,
                                           llm, MOCK_EMBEDDER)
     # 重试后该组正常贡献：两组标签都在，任务未失败
@@ -754,7 +762,7 @@ def test_closed_produce_unmountable_dropped_before_selection(
             {"tag_id": "tag_004", "applicability": 4,
              "evidence": _evi(1, 1, 1)}],
     }
-    with caplog.at_level(logging.INFO, logger="tagplatform.generation.closed"):
+    with caplog.at_level(logging.INFO, logger="tagplatform.services.generation.closed.producer"):
         out = ClosedTagProducer().produce(spec, session,
                                           _ScriptedLLM(responses), MOCK_EMBEDDER)
     # tag_101 挂载失败在前置阶段淘汰：M=2 名额由两个可挂载组头占满

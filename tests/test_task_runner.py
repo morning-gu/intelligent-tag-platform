@@ -21,7 +21,8 @@
 
 Mock 技巧（与 llm/mock.py 咬合）：
 - MockLLM 模式 A 按 sha256(run_id + tag_id) < 0.4 独立采样选中，分值为
-  4 或 5；run_id 由 runner 内部 uuid 生成不可控——成功路径测试播种 30 枚候选，零选中
+  4 或 5；run_id 由执行序列（execute.py）内部 uuid 生成不可控——成功路径
+  测试播种 30 枚候选，零选中
   概率 0.6^30 ≈ 2e-7，构造上消除 flake；默认 policy 解析路径由失败类测试
   覆盖（produce 异常前 policy 已解析）。
 """
@@ -35,21 +36,17 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import (
     Base,
     MediaAsset,
     PreAssetTag,
     TagGenerationTask,
 )
-from tagplatform.llm.client import LLMResponse
-from tagplatform.tasks import (
-    TaskExecutor,
-    reset_orphan_running,
-    run_generation_task,
-)
-from tagplatform.tasks.runner import assemble_spec
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.tasks import TaskExecutor, reset_orphan_running
+from tagplatform.capabilities.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(
@@ -219,7 +216,7 @@ def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch
     闭环生产器会先滤掉未知候选，所以
     这里直接替换 persist_tags 制造"已写一半再失败"。
     """
-    from tagplatform.db.models import PreAssetTag
+    from tagplatform.capabilities.storage.models import PreAssetTag
 
     _seed_catalog(session)
 
@@ -230,7 +227,7 @@ def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch
         sess.flush()
         raise ValueError("persist 中途失败（桩）")
 
-    monkeypatch.setattr("tagplatform.tasks.runner.persist_tags", boom)
+    monkeypatch.setattr("tagplatform.services.generation.execute.persist_tags", boom)
     t = _make_task(session)
     run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert t.status == "failed" and "persist 中途失败" in t.error
@@ -322,25 +319,6 @@ def test_executor_workers_zero_synchronous(tmp_path):
     engine.dispose()
 
 
-# ---- assemble_spec：spec 组装公共化（执行器与闭环评测共用）----
-
-
-def test_assemble_spec_closed_renders_active_template(session, content_fixture):
-    """closed 模式：assemble_spec 取激活模板渲染 content 文本组装 spec。
-
-    prompt 行沿用既有 runner 测试的模式——session fixture 建表时
-    models._seed_prompt_v1 已播种 closed v1 激活行，(mode, version) 唯一
-    约束下不能重复插 v1，测试直接依赖种子激活模板。
-    """
-    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
-                                   task_id="t1", asset_id="a1", run_id="r1")
-    assert spec.library is not None and spec.task_id == "t1"
-    assert "摘要" in spec.prompt_text and template.version == 1
-
-
-def test_assemble_spec_policy_json_overrides_default(session, content_fixture):
-    """非空 policy_json 覆盖默认 GenerationPolicy（max_tags 默认 30 → 5）。"""
-    spec, template = assemble_spec(session, mode="closed", content=content_fixture,
-                                   task_id="t1", asset_id="a1", run_id="r1",
-                                   policy_json='{"max_tags": 5}')
-    assert spec.policy.max_tags == 5 and template.version == 1
+# spec 组装公共段的两级化测试（load_assembly_context/build_spec）已迁往
+# tests/test_assemble.py（四层重构 Task 5）；本文件的端到端用例经
+# run_generation_task 走 load → build 全链路。

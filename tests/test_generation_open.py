@@ -19,13 +19,13 @@ import re
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.generation import GenerationPolicy, GenerationSpec
-from tagplatform.generation.mtg import keyframes as keyframes_mod
-from tagplatform.generation.mtg import pipeline as mtg_pipeline
-from tagplatform.generation.mtg.merge import merge_candidates
-from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.llm.client import LLMResponse
-from tagplatform.library import try_load_library
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
+from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.merge import merge_candidates
+from tagplatform.services.generation.open.producer import OpenTagProducer
+from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.services.tags.library import try_load_library
 from tagplatform.settings import Settings
 from tests.library_fixture import add_tags
 
@@ -409,7 +409,7 @@ def test_open_llm_failure_raises(session, content_fixture, mtg_settings):
 
 def test_open_judge_parse_failure_raises(session, content_fixture, mtg_settings):
     """judge 两次都解析失败 → JudgeError（任务应 failed，不放行）。"""
-    from tagplatform.generation.mtg.judge import JudgeError
+    from tagplatform.services.generation.open.mtg.judge import JudgeError
     spec = _build_spec(session, content_fixture, run_id="r9")
     with pytest.raises(JudgeError):
         OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER,

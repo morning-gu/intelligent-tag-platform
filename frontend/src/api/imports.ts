@@ -6,7 +6,6 @@ export interface ImportIssue {
   tag_name: string
   code: string
   detail: string
-  similar_to: string | null
 }
 
 /** 单行解析失败明细（与后端 ParseErrorOut / governance.excel.RowError 一致）。 */

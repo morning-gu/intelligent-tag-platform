@@ -17,12 +17,12 @@ import numpy as np
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.db.models import TagCatalog, TagDefine
-from tagplatform.library import try_load_library
+from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
+from tagplatform.services.tags.library import try_load_library
 from tests.library_fixture import add_tags
-from tagplatform.generation import GenerationPolicy, GenerationSpec
-from tagplatform.generation.mtg import pipeline as mtg_pipeline
-from tagplatform.generation.mtg.catalog_align import (
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.catalog_align import (
     BAND_DUPLICATE,
     BAND_NEW,
     BAND_SUSPECT,
@@ -32,9 +32,9 @@ from tagplatform.generation.mtg.catalog_align import (
     recall_library_hints,
     summarize_bands,
 )
-from tagplatform.generation.open_gen import OpenTagProducer
+from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.settings import Settings
-from tagplatform.vectors import encode_vector
+from tagplatform.capabilities.vectors import encode_vector
 
 
 class _FixedEmbedder:
@@ -331,7 +331,7 @@ class _VerifyClient:
         self.calls = 0
 
     def complete(self, messages, run_id):
-        from tagplatform.llm.client import LLMResponse
+        from tagplatform.capabilities.llm.client import LLMResponse
         self.calls += 1
         text = messages[0]["content"]
         rows = [line[2:] for line in text.splitlines()
@@ -419,7 +419,7 @@ def test_pipeline_switch_off_disables_library(
 
 def test_duplicate_library_names_pick_deterministically():
     """库里同名多条（"其他" 出现 30 次）→ 稳定取 tag_id 最小的一条。"""
-    from tagplatform.generation.mtg.catalog_align import LibraryTag, align_candidates
+    from tagplatform.services.generation.open.mtg.catalog_align import LibraryTag, align_candidates
 
     vec = MOCK_EMBEDDER.embed(["其他"], role="passage")[0]
     index = [LibraryTag(tag_id="tag_b", name="其他", vector=vec),

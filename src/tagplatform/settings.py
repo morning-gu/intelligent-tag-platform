@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # 句向量模型（1024 维）。2026-11-05 由 e5-base 换到 BGE-M3：
     # 同一批 87 条人工标注上 AUC 0.903→0.928，且"重复 vs 新词"的分差
     # 0.028→0.187（e5 把所有中文短词挤在 0.85-0.95，阈值只能在噪声里切）。
-    # 换模型必须重灌 tag_catalog.embedding（scripts/reembed_catalog.py）。
+    # 换模型必须重灌 tag_catalog.embedding（python -m tagplatform.reembed）。
     embedding_model: str = "BAAI/bge-m3"
     # 导入校验：与库内标签余弦 ≥ 该值判"疑似重复"（含等于）。
     # e5 时代是 0.90；换 BGE-M3 后 0.90 只对几乎逐字相同的对子触发，下调到 0.85。
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # 嵌入后端：local（默认，sentence-transformers 本地加载）/ remote
     # （OpenAI 兼容 /v1/embeddings，如 http://9.15.87.193:8193/v1 的 bge-m3）。
     # 两后端同模型同一语义空间（bge-m3 纯文本无前缀），阈值无需重校准；
-    # 切换后端后库内存量向量建议跑 scripts/reembed_catalog.py 重灌归一。
+    # 切换后端后库内存量向量建议跑 python -m tagplatform.reembed 重灌归一。
     embedding_backend: str = "local"
     # remote 后端服务地址（含 /v1 前缀，与 OPENAI_BASE_URL 口径一致）
     embedding_api_base: str = ""
@@ -146,10 +146,10 @@ class Settings(BaseSettings):
     def mtg_modality_set(self) -> frozenset[str]:
         """`mtg_modalities` → 模态集合（空/全空串回落 full，不让任务裸跑）。
 
-        `eval/ablation.py` 的 `Variant` 会用同一套名字校验，非法值在这里就
-        报错，而不是等流水线跑到一半才发现拼错了。
+        `services/eval/ablation.py` 的 `Variant` 会用同一套名字校验，非法值
+        在这里就报错，而不是等流水线跑到一半才发现拼错了。
         """
-        from tagplatform.eval.ablation import MODALITIES
+        from tagplatform.services.eval.ablation import MODALITIES
 
         names = {part.strip().lower() for part in self.mtg_modalities.split(",")
                  if part.strip()}
@@ -188,8 +188,10 @@ class Settings(BaseSettings):
     # 生成前注入的库内标签个数（只给名字）
     open_library_hint_enabled: bool = True
     open_library_hint_count: int = 30
-    # 分档阈值：余弦 ≥ 该值判"疑似重复"。
-    # 0.87 ≈ 候选×库随机配对的 99.9% 分位（实测 0.866），不是拍脑袋的数。
+    # 分档阈值：余弦 ≥ 该值判"疑似重复"。历史标定 0.87（候选×库随机配对的
+    # 99.9% 分位，实测 0.866）；现行默认 0.74 更宽——suspect 档只决定"进 LLM
+    # 复核 + 排序降级"，复核不通过回退 new，不直接改写产出，口子可以放宽。
+    # 运行口径以 docs/open-tag-generation.md §5.1 分档表（0.74）为准。
     open_library_suspect_cosine: float = 0.74
     # 名字字符重合度（Jaccard）≥ 该值判"疑似重复"
     open_library_name_overlap: float = 0.40

@@ -10,8 +10,8 @@
 
 import json
 
-from tagplatform.content_io import is_upstream_shape, load_content
-from tagplatform.db.models import MediaAsset
+from tagplatform.services.content.content_io import is_upstream_shape, load_content
+from tagplatform.capabilities.storage.models import MediaAsset
 from tagplatform.schemas import parse_content
 
 TEMPLATE = {

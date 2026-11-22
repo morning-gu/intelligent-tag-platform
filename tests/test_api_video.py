@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.db.models import MediaAsset
+from tagplatform.capabilities.storage.models import MediaAsset
 
 # 1024 字节已知模式：content[i] = i % 256（分块字节级断言的期望值来源）
 CONTENT = bytes(range(256)) * 4
@@ -226,7 +226,7 @@ def test_video_file_uri_resolution(client, tmp_path, monkeypatch):
     C:/... 解析出的 /C:/... 不指向真实文件——故以桩替其返回值，用入参
     断言钉死 (video_uri, None) 复用契约，再服务真实临时文件验证端到端。
     """
-    import tagplatform.api.routers.video as video_router
+    import tagplatform.orchestration.media as video_flow
 
     file_path = tmp_path / "video.mp4"
     file_path.write_bytes(CONTENT)
@@ -242,7 +242,7 @@ def test_video_file_uri_resolution(client, tmp_path, monkeypatch):
         calls["args"] = (uri, video_root)
         return str(file_path)
 
-    monkeypatch.setattr(video_router, "resolve_video_path", fake_resolve)
+    monkeypatch.setattr(video_flow, "resolve_video_path", fake_resolve)
     resp = client.get("/api/v1/assets/asset_video_mp4/video")
     assert resp.status_code == 200
     assert resp.content == CONTENT

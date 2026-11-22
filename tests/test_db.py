@@ -6,7 +6,7 @@
 
 from sqlalchemy import text
 
-from tagplatform.db import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 
 
 def test_engine_wal_and_fk(tmp_path):

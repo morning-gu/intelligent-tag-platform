@@ -18,7 +18,7 @@
 - POST /api/v1/generation/tasks/{task_id}/retry：仅 failed 可重试（否则
   422 "仅失败任务可重试"）——先造 failed 任务（标签库未导入时 closed
   生成失败），补导标签库后重试至 succeeded；未知任务 404；
-- GET /api/v1/prompts?mode=：v1 种子模板列表（closed/open 各一）；
+- GET /api/v1/prompts?mode=：只读契约视图（closed/open 各一，无版本字段）；
 - GET /api/v1/assets/{asset_id}/tags：资产全部标签行（摘要形状 + 行 id
   主键 + tag_id/candidate_name 原样）；未知资产 404。
 
@@ -259,8 +259,8 @@ def test_create_task_empty_asset_ids_422(client):
 
 def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_path,
                                                                    monkeypatch):
-    from tagplatform.generation.mtg import pipeline
-    from tagplatform.llm.mock import MockLLMClient
+    from tagplatform.services.generation.open.mtg import pipeline
+    from tagplatform.capabilities.llm.mock import MockLLMClient
     from tests.library_fixture import add_tags
 
     movie = deepcopy(CONTENT_FIXTURE_DICT)
@@ -398,7 +398,7 @@ def test_create_task_scene_and_movie_deduped(client):
 
 def test_create_task_orphan_scene_422(client):
     """父级影片也无识别内容（上传占位场景）→ 422，detail 指明场景与父级。"""
-    from tagplatform.db.models import MediaAsset
+    from tagplatform.capabilities.storage.models import MediaAsset
 
     with client.app.state.session_factory() as s:
         s.add(MediaAsset(asset_id="movie_blank", asset_type="movie",
@@ -417,7 +417,7 @@ def test_create_task_orphan_scene_422(client):
 
 def test_create_task_movie_without_content_422(client):
     """非场景资产自身未识别内容且无父级 → 422 保持原文案。"""
-    from tagplatform.db.models import MediaAsset
+    from tagplatform.capabilities.storage.models import MediaAsset
 
     with client.app.state.session_factory() as s:
         s.add(MediaAsset(asset_id="movie_raw", asset_type="movie",
@@ -525,29 +525,27 @@ def test_task_list_filters_and_pagination(client):
 
 
 def test_prompts_list(client):
-    """种子模板：closed/open v1 激活；open 另有 v2 过时标注（inactive）。"""
+    """只读契约视图（四层重构 Task 3 本地化）：closed/open 各一项、无版本
+    字段（git 即版本），closed 正文为三模态 evidence 版。"""
     rows = client.get("/api/v1/prompts").json()
-    assert {(r["mode"], r["version"], r["is_active"]) for r in rows} == {
-        ("closed", 1, True), ("open", 1, True), ("open", 2, False)}
-    assert all(r["created_at"] is not None for r in rows)
-    # template_text 直接随列表返回（运营侧新建版本预填依赖，阶段 4 审查轮 1）
-    by_key = {(r["mode"], r["version"]): r for r in rows}
-    assert "{content}" in by_key[("closed", 1)]["template_text"]
-    assert "{candidates}" not in by_key[("closed", 1)]["template_text"]
-    closed_text = by_key[("closed", 1)]["template_text"]
+    assert [r["mode"] for r in rows] == ["closed", "open"]
+    assert all(set(r.keys()) == {"mode", "template_text",
+                                "allowed_fields", "required_placeholders"}
+               for r in rows)
+    by_key = {r["mode"]: r for r in rows}
+    closed_text = by_key["closed"]["template_text"]
+    assert "{content}" in closed_text
+    assert "{candidates}" not in closed_text
     assert "Applicability" in closed_text
     assert "Evidence Strength" in closed_text
     assert "applicability" in closed_text and "evidence_strength" in closed_text
     assert "evidences" in closed_text
     assert "1=完全不适用" in closed_text
     assert "5=证据直接、充分且能够相互印证" in closed_text
-    assert "{content}" in by_key[("open", 1)]["template_text"]
-    # open v2 是"已过时"标注行：inactive，且正文写明不再被消费
-    assert "已过时" in by_key[("open", 2)]["template_text"]
+    assert "{content}" in by_key["open"]["template_text"]
 
     closed = client.get("/api/v1/prompts?mode=closed").json()
-    assert [(r["mode"], r["version"], r["is_active"]) for r in closed] == \
-        [("closed", 1, True)]
+    assert [r["mode"] for r in closed] == ["closed"]
     assert "{candidates}" not in closed[0]["template_text"]
 
 
@@ -570,8 +568,8 @@ def test_lifespan_orphan_reset_on_startup(tmp_path):
     from fastapi.testclient import TestClient
 
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.db.models import Base, MediaAsset, TagGenerationTask
+    from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+    from tagplatform.capabilities.storage.models import Base, MediaAsset, TagGenerationTask
     from tagplatform.settings import Settings
 
     db_path = str(tmp_path / "orphan.db")
@@ -608,8 +606,8 @@ def test_result_out_falls_back_to_tag_id_for_legacy_row():
     上一轮已落库的行指向旧 tag_catalog 的 id，切库后查不到名称；这类行
     必须回退到 tag_id，否则资产标签视图会出现无名标签。
     """
-    from tagplatform.api.routers.generation import _result_out
-    from tagplatform.db.models import PreAssetTag
+    from tagplatform.orchestration._shared import _result_out
+    from tagplatform.capabilities.storage.models import PreAssetTag
 
     row = PreAssetTag(asset_id='a1', target_type='content', target_id='a1',
                       tag_id='tag_legacy_0001', origin='closed',
@@ -618,3 +616,70 @@ def test_result_out_falls_back_to_tag_id_for_legacy_row():
     out = _result_out(row, {})
     assert out.tag_name == 'tag_legacy_0001'
     assert out.dir_id is None and out.dir_name is None
+
+
+# ---------- Task 12：N+1 消除（端点级单次库加载） ----------
+
+
+def _run_closed_task(client) -> str:
+    """预置库/内容并跑一个 closed 任务到 succeeded，返回 task_id。"""
+    _import_catalog(client)
+    _import_content(client)
+    resp = client.post("/api/v1/generation/tasks", json={
+        "asset_ids": ["movie_001"], "mode": "closed",
+        "policy": {"max_tags": 30, "min_confidence": 0.5}})
+    assert resp.status_code == 200
+    item = resp.json()["tasks"][0]
+    assert item["status"] == "succeeded"
+    return item["task_id"]
+
+
+def _spy_shared_library_load(monkeypatch):
+    """对标签库加载计数（打点在 services.tags.library.load_library——所有
+    try_load_library 包装与其余编排模块的 from-import 都经由该模块全局
+    调用，补丁对全部加载路径生效）。"""
+    from tagplatform.services.tags import library as library_mod
+
+    real = library_mod.load_library
+    calls: list[int] = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(library_mod, "load_library", spy)
+    return calls
+
+
+def test_task_detail_single_library_load_per_request(client, monkeypatch):
+    """任务详情（GET /generation/tasks/{id}）一次请求只做一次标签库加载
+    （Task 12 消 N+1：编排入口 load 一次传参；旧行为 _tag_info 一次 +
+    逐行 _result_out→_dir_info 各自 try_load_library）。"""
+    task_id = _run_closed_task(client)
+    calls = _spy_shared_library_load(monkeypatch)
+
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}")
+    assert detail.status_code == 200
+    results = detail.json()["results"]
+    assert len(results) >= 1  # 多行装配场景成立
+    # 旧行为（_tag_info + 逐行 _dir_info）在此 RED：计数 > 1
+    assert len(calls) == 1
+
+
+def test_asset_tags_single_library_load_per_request(client, monkeypatch):
+    """资产挂载视图（GET /assets/{id}/tags）一次请求只做一次标签库加载
+    （Task 12 消 N+1：旧行为 _tag_info 一次 + 逐挂载 _dir_info 各自加载）。"""
+    task_id = _run_closed_task(client)
+    # 审核通过第一行 → asset_tag 正式挂载非空（视图逐行解析目录）
+    detail = client.get(f"/api/v1/generation/tasks/{task_id}")
+    row_id = detail.json()["results"][0]["id"]
+    review = client.post(f"/api/v1/asset-tags/{row_id}/review",
+                         json={"action": "approve"})
+    assert review.status_code == 200
+    calls = _spy_shared_library_load(monkeypatch)
+
+    resp = client.get("/api/v1/assets/movie_001/tags")
+    assert resp.status_code == 200
+    assert len(resp.json()) >= 1
+    # 旧行为在此 RED：计数 > 1
+    assert len(calls) == 1

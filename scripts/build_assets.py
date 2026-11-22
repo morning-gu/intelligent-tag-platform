@@ -26,8 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from tagplatform.assets import AssetBuilder  # noqa: E402
-from tagplatform.llm import LLMResponse  # noqa: E402
+from tagplatform.services.content.assets import AssetBuilder  # noqa: E402
+from tagplatform.capabilities.llm import LLMResponse  # noqa: E402
 
 
 class DryRunClient:
@@ -80,7 +80,7 @@ def main() -> int:
     if args.dry_run:
         client = DryRunClient()
     else:
-        from tagplatform.llm import make_llm_client
+        from tagplatform.capabilities.llm import make_llm_client
         from tagplatform.settings import get_settings
         client = make_llm_client(get_settings())
 

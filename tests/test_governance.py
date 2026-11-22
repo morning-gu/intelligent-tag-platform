@@ -15,24 +15,22 @@
 - tag_change_log action='import'：after_json 带 task_id（revoke/export
   反查键），kind 区分 dir/tag 行；
 - 复活：deprecated 同 (dir,name) 再导入恢复 active、保留原 tag_id；
-- 批量编码：全批一次 embed 调用；GovernanceConfig 随 semantic_similar
-  退役为空壳（v1 allowed_tag_types 白名单校验早已随 tag_type 枚举化退役）。
+- 批量编码：全批一次 embed 调用；GovernanceConfig 空壳与 Issue.similar_to
+  占位已删除（v1 allowed_tag_types 白名单校验早已随 tag_type 枚举化退役）。
 
 状态字面量：v2 统一 "deprecated"（v1 "deprecate" 退役）。
 """
 
 import json
-from dataclasses import fields
 from datetime import datetime, timezone
 
 import numpy as np
 import pytest
 
 from conftest import MOCK_EMBEDDER
-from tagplatform.db.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
-from tagplatform.governance import TagRow, run_governance
-from tagplatform.governance.pipeline import (
-    GovernanceConfig,
+from tagplatform.capabilities.storage.models import TagCatalog, TagChangeLog, TagDefine, TagImportTask
+from tagplatform.services.tags.governance import TagRow, parse_tag_excel, run_governance
+from tagplatform.services.tags.governance.pipeline import (
     is_directory_row,
     referenced_dir_names,
 )
@@ -83,6 +81,36 @@ def test_is_dir_marker_overrides_reference_inference():
     assert is_directory_row(by_name["剧情"], referenced) is True
     assert is_directory_row(by_name["冒名标签"], referenced) is False  # False 优先
     assert is_directory_row(by_name["被引用"], referenced) is True  # None→被引用
+
+
+# ---------- 解析输出净化（Task 8：excel.py pprint 调试残留删除） ----------
+
+def test_parse_tag_excel_prints_nothing(capsys):
+    """治理解析三条生产路径（扁平/层级/双表模板）都不再打印 stdout。
+
+    excel.py 曾在三处解析路径尾部 pprint 整个解析结果（调试残留），
+    经 API 上传导入时会污染服务日志与任务输出。
+    """
+    from tests.test_excel_dual_sheet_parse import build_dual_xlsx
+    from tests.test_excel_parse import build_xlsx
+
+    parse_tag_excel(build_xlsx([
+        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
+        ["悬疑", "val_fixed", "以悬念为核心", "剧情", "悬念,推理", "active"],
+    ]))
+    assert capsys.readouterr().out == ""
+    parse_tag_excel(build_xlsx([
+        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述",
+         "标签生成方式"],
+        ["内容", "剧情", None, "反转", "结局出人意料", None],
+    ]))
+    assert capsys.readouterr().out == ""
+    parse_tag_excel(build_dual_xlsx(
+        dir_rows=[[None, 1, None, "内容特征标签", "dir_static", "content",
+                   "目录描述", ""]],
+        tag_rows=[["tag_x", "悬疑", "内容特征标签", "val_fixed", "以悬念为核心", ""]],
+    ))
+    assert capsys.readouterr().out == ""
 
 
 # ---------- 落位拆分（Review Focus 5） ----------
@@ -412,14 +440,13 @@ def test_change_log_import_rows_carry_task_id(session):
 
 # ---------- 配置与批量编码 ----------
 
-def test_governance_config_threshold_only(session):
-    # GovernanceConfig 随 semantic_similar 退役为空壳：无字段，显式传参
-    # 不再影响判定（不同名同向量余弦 1.0 依旧放行）
-    assert not [f.name for f in fields(GovernanceConfig)]
+def test_semantic_similar_check_retired(session):
+    # semantic_similar 检查退役（v2 随手动导入取消余弦相似控制，治理无
+    # 配置面——旧 GovernanceConfig 空壳已删）：不同名同向量（余弦 1.0）
+    # 依旧放行，不产生任何问题项
     run_governance([_row("推理", desc="以解谜推进")], session, SameVecEmbedder())
-    cfg = GovernanceConfig()
     res = run_governance([_row("侦探", desc="另一段描述")], session,
-                         SameVecEmbedder(), config=cfg)
+                         SameVecEmbedder())
     assert res.issues == [] and len(res.inserted) == 1
 
 

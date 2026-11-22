@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 import openpyxl
 import pytest
 
-from tagplatform.db.models import (
+from tagplatform.capabilities.storage.models import (
     AssetTag,
     MediaAsset,
     PreAssetTag,
@@ -467,6 +467,43 @@ def test_list_kind_filter(client):
     assert client.get("/api/v1/tags", params={"kind": "leaf"}).status_code == 422
 
 
+def test_list_includes_total_and_sql_pagination(client):
+    """Task 12 白名单改造：响应带 total（过滤后节点总数，分页切口前口径），
+    分页走 SQL LIMIT/OFFSET——大偏移量返回空列表 + 正确 total。
+
+    total 为白名单内唯一响应结构变化（前端同步在 Task 14）。
+    """
+    _import(client, HIER_XLSX)  # 4 目录 + 3 标签 = 7 节点
+    body = client.get("/api/v1/tags").json()
+    assert body["total"] == 7
+    assert len(body["items"]) == 7
+
+    # 大偏移量：items 空、total 不变（SQL OFFSET 越界）
+    far = client.get("/api/v1/tags", params={"offset": 100, "limit": 100}).json()
+    assert far["items"] == []
+    assert far["total"] == 7
+
+    # 逐页走完恰好不重不漏（窗口跨目录/标签两段接续）
+    seen: list[str] = []
+    offset = 0
+    while True:
+        page = client.get("/api/v1/tags", params={"limit": 2, "offset": offset}).json()
+        seen.extend(i["id"] for i in page["items"])
+        offset += 2
+        if not page["items"]:
+            break
+    assert len(seen) == len(set(seen)) == 7
+
+    # kind 过滤口径：total 只计该 kind
+    assert client.get("/api/v1/tags", params={"kind": "dir"}).json()["total"] == 4
+    assert client.get("/api/v1/tags", params={"kind": "tag"}).json()["total"] == 3
+    far_tag = client.get("/api/v1/tags", params={"kind": "tag", "offset": 50}).json()
+    assert far_tag["items"] == [] and far_tag["total"] == 3
+
+    # q 过滤同样计入 total 口径
+    assert client.get("/api/v1/tags", params={"q": "剧情"}).json()["total"] == 1
+
+
 def test_list_scope_subtree(client):
     """scope_id：后代目录 + 后代目录下的标签；scope 本体与其直挂标签不在内。"""
     _import(client, HIER_XLSX)
@@ -679,6 +716,31 @@ def test_export_zip_carries_dir_ancestor_paths(client):
     top = xml_root.find("level1")
     assert top.get("name") == "内容"
     assert {t.text for t in top.iter("tag")} == {"反转", "多线", "温馨"}
+
+
+def test_export_leaf_order_is_tag_id_ascending(client):
+    """导出叶子序 = tag_id 升序（v1 产物契约）：Task 12 分批装配
+    （yield_per 分批物化叶子）后仍由 SQL ORDER BY tag_id 保证——分批不
+    改变顺序。播种用确定性 tag_id（导入生成的 id 是随机 uuid，无法作序）。"""
+    factory = client.app.state.session_factory
+    with factory() as s:
+        s.add(TagCatalog(dir_id="dir_order", dir_name="顺序目录",
+                         dir_type="dir_dynamic", description="",
+                         applicable_scope="content"))
+        s.flush()
+        # 故意乱序入库：导出必须按 tag_id 升序（甲乙丙）
+        for tid, name in [("tag_002", "乙标签"), ("tag_001", "甲标签"),
+                          ("tag_003", "丙标签")]:
+            s.add(TagDefine(tag_id=tid, tag_name=name, tag_type="val_fixed",
+                            description=f"描述-{name}", dir_id="dir_order"))
+        s.commit()
+
+    resp = client.get("/api/v1/tags/export")
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        workbook = openpyxl.load_workbook(io.BytesIO(archive.read("tags-export.xlsx")))
+    names = [r[3] for r in workbook.active.iter_rows(min_row=2, values_only=True)]
+    assert names == ["甲标签", "乙标签", "丙标签"]
 
 
 def test_export_scope_and_q_filters(client):

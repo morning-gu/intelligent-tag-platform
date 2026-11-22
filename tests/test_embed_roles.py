@@ -16,10 +16,10 @@ from test_generation_open import _build_spec
 from test_task_runner import _make_task, _seed_catalog
 from tests.library_fixture import add_tags
 
-from tagplatform.generation.open_gen import OpenTagProducer
-from tagplatform.generation.recall import recall_candidates
-from tagplatform.library import try_load_library
-from tagplatform.tasks import run_generation_task
+from tagplatform.services.generation.open.producer import OpenTagProducer
+from tagplatform.services.generation.closed.recall import recall_candidates
+from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.services.tags.library import try_load_library
 
 
 class RecordingEmbedder:

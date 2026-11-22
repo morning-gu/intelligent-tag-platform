@@ -38,7 +38,7 @@ describe('fetchReviewItems 查询串组装', () => {
     )
   })
 
-  it('全参数：七筛选 + 分页全部按序拼入', async () => {
+  it('全参数：八筛选 + 分页全部按序拼入', async () => {
     mockedApiFetch.mockResolvedValue({ items: [], total: 0, page: 3 } as never)
 
     await fetchReviewItems({

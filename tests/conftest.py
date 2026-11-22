@@ -17,8 +17,8 @@ import tempfile
 import pytest
 from fastapi.testclient import TestClient
 
-from tagplatform.embed import make_embedder
-from tagplatform.llm import MockLLMClient
+from tagplatform.capabilities.embed import make_embedder
+from tagplatform.capabilities.llm import MockLLMClient
 from tagplatform.settings import Settings
 
 # 测试隔离：mtg 流水线的审计报告与数据集根都指向临时目录，
@@ -44,9 +44,9 @@ def tag_library(tmp_path):
     fixture 之后会再绑它们自己的引擎并灌默认行（那一步受
     `@pytest.mark.empty_library` 控制，避免污染"空库"用例）。
     """
-    from tagplatform import library as library_mod
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.services.tags import library as library_mod
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
     from tests.library_fixture import bind_engine, unbind_engine, write_library
 
     engine = create_engine_for(str(tmp_path / "taglibrary.db"))
@@ -89,8 +89,8 @@ def client(tmp_path, request):
     # 表结构切换期（Task 1-10）未就位时拖垮整个测试套件的收集；放进
     # fixture 体内只影响使用 client 的测试。
     from tagplatform.api import create_app
-    from tagplatform.db import create_engine_for
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for
+    from tagplatform.capabilities.storage.models import Base
 
     db_path = tmp_path / "tagplatform.db"
     settings = Settings(database_path=str(db_path), use_mock_embedder=True,
@@ -160,8 +160,8 @@ def session(tag_library, request):
     `pre_asset_tag` 的外键父行、以及“库内已有标签”的用例都不必各自造数据。
     断言"空库"行数的模块用 `@pytest.mark.empty_library` 关掉这次预置。
     """
-    from tagplatform.db import create_engine_for, make_session_factory
-    from tagplatform.db.models import Base
+    from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+    from tagplatform.capabilities.storage.models import Base
     from tests.library_fixture import bind_engine, seed_database, unbind_engine
 
     engine = create_engine_for(":memory:")

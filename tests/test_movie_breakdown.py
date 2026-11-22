@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from tagplatform.eval.closed_ranking import ClosedSample, evaluate_closed
-from tagplatform.eval.movie_breakdown import (
+from tagplatform.services.eval.closed_ranking import ClosedSample, evaluate_closed
+from tagplatform.services.eval.movie_breakdown import (
     breakdown_movie,
     pick_k,
     pick_theta,

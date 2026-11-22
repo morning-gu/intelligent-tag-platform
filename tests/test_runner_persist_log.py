@@ -1,11 +1,13 @@
-"""runner.py 入库汇总日志行的契约锁定（观测盲点修复）。
+"""入库汇总日志行的契约锁定（观测盲点修复；四层重构 Task 6 起该日志
+随执行序列住在 services/generation/execute.py，logger 名同步更新）。
 
 背景（排查 gen_d873e057289c“选了 10 只入库 5”与 gen_80bb0cd888d9“0 条产出”
 两次扑空）：persist_tags 的 skipped_finalized 原先完全静默——命中资产既有
 行（任何 origin、任何状态）被跳过时不落库、不打日志，前端按 task_id 查任务
 详情只能看到 inserted 的行，“产出 N 条 ≠ 入库 N 条”的差值无处可查。
 
-runner.py 现在在 persist 后必打一行 INFO：
+执行序列（services/generation/execute.py，原 runner.py）在 persist 后
+必打一行 INFO：
 
     任务 {task_id} 入库汇总：产出 N 条 → 新插 X 条（自动通过 Y、挂载 Z）、
     撞既有行跳过 S 条
@@ -25,8 +27,8 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import PreAssetTag
-from tagplatform.tasks import run_generation_task
+from tagplatform.capabilities.storage.models import PreAssetTag
+from tagplatform.services.generation.execute import run_generation_task
 
 from tests.test_task_runner import _make_task, _seed_catalog, _utcnow
 
@@ -58,7 +60,8 @@ def test_persist_summary_log_line_present(seeded_task, session, caplog):
     Mock 模式 A 选中项 applicability 恒 ≥4（mock.py _score_five_point），
     全部过门控；closed 产出入审（doc §3.3）：自动通过与挂载恒为 0。
     """
-    with caplog.at_level(logging.INFO, logger="tagplatform.tasks.runner"):
+    with caplog.at_level(logging.INFO,
+                         logger="tagplatform.services.generation.execute"):
         run_generation_task(seeded_task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     m = _persist_log(caplog, seeded_task.task_id)
     assert m is not None, "入库汇总 INFO 行缺失：persist 观测盲点将复发"
@@ -99,7 +102,8 @@ def test_persist_summary_log_reports_skipped_on_rerun(
 
     seeded_task.status = "queued"
     session.commit()
-    with caplog.at_level(logging.INFO, logger="tagplatform.tasks.runner"):
+    with caplog.at_level(logging.INFO,
+                         logger="tagplatform.services.generation.execute"):
         run_generation_task(seeded_task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     m = _persist_log(caplog, seeded_task.task_id)
     assert m is not None

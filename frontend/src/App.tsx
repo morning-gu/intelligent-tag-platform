@@ -3,22 +3,25 @@
 // MemoryRouter 注入。全部业务页面已实现：工作台/审核中心/质量评估/内容资产
 // （列表+详情）/生产任务/标签导入/标签库/用户管理（admin）/模型配置（admin）/
 // 闭环评测（admin）。
+// 页面按模块归位（Task 14）：tag-management/content-management/generation/
+// review/closed-eval/config 七目录（open-eval 占位）；Dashboard/Layout/Login
+// 为跨模块外壳页，留在 pages 根。
 import { useEffect, useState } from 'react'
 import { Navigate, Outlet, Route, Routes, useOutletContext } from 'react-router-dom'
 import { getMe, type UserBrief } from './api/client'
-import AssetDetail from './pages/AssetDetail'
-import AssetList from './pages/AssetList'
-import ClosedEval from './pages/ClosedEval'
+import AssetDetail from './pages/content-management/AssetDetail'
+import AssetList from './pages/content-management/AssetList'
+import ClosedEval from './pages/closed-eval/ClosedEval'
 import Dashboard from './pages/Dashboard'
-import GenerationTasks from './pages/GenerationTasks'
+import GenerationTasks from './pages/generation/GenerationTasks'
 import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
-import ModelConfig from './pages/ModelConfig'
-import Quality from './pages/Quality'
-import ReviewCenter from './pages/ReviewCenter'
-import TagCatalog from './pages/TagCatalog'
-import TagImports from './pages/TagImports'
-import Users from './pages/Users'
+import ModelConfig from './pages/config/ModelConfig'
+import Quality from './pages/review/Quality'
+import ReviewCenter from './pages/review/ReviewCenter'
+import TagCatalog from './pages/tag-management/TagCatalog'
+import TagImports from './pages/tag-management/TagImports'
+import Users from './pages/config/Users'
 
 type GateState =
   | { phase: 'loading' }

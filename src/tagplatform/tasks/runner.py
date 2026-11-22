@@ -1,27 +1,18 @@
-"""生成任务执行器：任务状态机、prompt 组装、线程池执行与孤儿清理（Task 8）。
+"""生成任务管理器（横切执行器）：线程池调度、提交与孤儿重置。
 
-把前序部件串成完整执行链（计划钉死的八步流程）：
-状态机（queued → running → succeeded|failed，running 置位先落库防长任务
-重复提交）→ 内容解析 → producer 分发（get_producer，closed/open 注册于
-tagplatform.generation 导入）→ prompt 组装渲染（content 文本两模式共用；
-closed 的候选标签由 producer 在 produce 内部按目录分组注入）→ policy
-解析 → produce → persist_tags（不 commit）→ 模式 A 回填媒体上下文摘要向量
-→ 终态一次性 commit（生成结果与任务终态同事务落库——Review Focus 1 原子性）。
-
-事务语义：
-- 失败路径统一 `rollback → failed → commit`：回滚丢弃 persist/回填的未提交
-  写入，保证零半截 asset_tag；任务置 failed 后返回、不 re-raise——调用方
-  （API 层/线程池）经状态与 error 字段感知失败；
-- 捕获范围取 Exception 而非仅 brief 列举的 ValueError/RuntimeError/
-  LLMParseError：这三类覆盖 produce 的预期失败，其余未预期异常（坏 mode、
-  坏 content_json、缺激活模板等配置错误）若外抛会把任务永久滞留 running，
-  任务级事务必须保证任何失败都落终态（进程崩溃除外，由孤儿重置兜底）。
+四层重构 Task 6 定稿：本模块是**纯任务管理器**，只管任务生命周期——
+线程池封装（TaskExecutor：submit_batch/submit/shutdown，workers=0 同步
+模式）、进程重启孤儿清理（reset_orphan_running / reset_orphan_tasks）。单任务的完整执行
+序列（状态机 + 装配 → produce → persist，八步流程与事务语义）在
+`tagplatform.services.generation.execute.run_generation_task`，本模块
+线程体只调它——装配+produce+persist 业务序列住服务层（spec「tasks
+纯任务管理器」定稿；评测共享装配与计算、切开持久化的复用协议见
+execute.py docstring）。
 
 TaskExecutor 为线程池封装：线程内独立 session（SQLite 文件库跨线程可见，
 :memory: 不可），异常吞并记日志；workers=0 同步执行（T9 钉死的测试模式）。
-reset_orphan_running 供 create_app 启动时清理进程重启留下的 running 孤儿。
-
-assemble_spec 为执行器与闭环评测（closed_eval）共用的 spec 组装段。
+reset_orphan_running / reset_orphan_tasks 供 create_app 启动时清理进程重启
+留下的在途孤儿（生成任务 running；资产构建 running 与标签导入 processing）。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
@@ -32,279 +23,20 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from uuid import uuid4
 
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from tagplatform.db.models import MediaAsset, PromptTemplate, TagGenerationTask
-from tagplatform.eval.tag_quality import snapshot
-from tagplatform.generation import GenerationPolicy, GenerationSpec, get_producer
-from tagplatform.generation.mtg.prompt_samples import PromptSampleBatch
-from tagplatform.filtering import FilterContext, run_filter_chain
-from tagplatform.prompts import get_active_prompt, render_prompt
-from tagplatform.results import persist_tags
-from tagplatform.content_io import load_content
-from tagplatform.ingest import record_alias
-from tagplatform.library import try_load_library
-from tagplatform.schemas import ContentJSON, parse_content
+from tagplatform.capabilities.storage.models import (
+    AssetBuildTask,
+    TagGenerationTask,
+    TagImportTask,
+)
+from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.tasks.tag_quality import QualityExecutor
 
 logger = logging.getLogger(__name__)
-
-
-# prompt 明细注入上限：长片场景多，防止 content 文本无界增长（token 成本）
-_MAX_CAST_LINES = 8
-_MAX_DIALOGUE_LINES = 3
-_MAX_AUDIO_EVENTS = 2
-_MAX_CHARACTER_EMOTIONS = 6
-
-
-def _render_cast_line(content: ContentJSON) -> str | None:
-    """角色表 → 单行 "人物：..."（无角色返回 None，保证老数据渲染逐字不变）。"""
-    cast = content.content.characters
-    if not cast:
-        return None
-    names = [
-        f"{ch.name}（{ch.description}）" if ch.description else ch.name
-        for ch in cast[:_MAX_CAST_LINES]
-    ]
-    return "人物：" + "、".join(names)
-
-
-def _render_scene_details(scene) -> list[str]:
-    """单场景的上游扩展明细（氛围 / 地点 / 声音 / 台词）。
-
-    缩进行、不以 "- " 开头：与场景行 `- {scene_id} [start-end] desc` 的
-    解析契约（llm/mock.py _SCENE_LINE_RE）天然互斥，不会污染证据解析。
-    """
-    lines: list[str] = []
-    if scene.emotions:
-        lines.append("  氛围：" + "、".join(scene.emotions))
-    emotions = [f"{ce.character}（{ce.emotion}）"
-                for ce in scene.character_emotions[:_MAX_CHARACTER_EMOTIONS]]
-    if not emotions:
-        # 严格贴模板的内容里没有场景级人物情绪：从台词情绪回推，别让标签丢掉
-        # 这条证据（沉默角色仍拿不到，这是模板的建模边界）
-        seen: set[str] = set()
-        for dialogue in scene.dialogues:
-            tone = dialogue.emotion.text_emotion if dialogue.emotion else None
-            speaker = dialogue.speaker_name or dialogue.speaker
-            if tone and speaker and speaker not in seen:
-                seen.add(speaker)
-                emotions.append(f"{speaker}（{tone}）")
-            if len(emotions) >= _MAX_CHARACTER_EMOTIONS:
-                break
-    if emotions:
-        lines.append("  人物情绪：" + "、".join(emotions))
-    if scene.location:
-        lines.append(f"  地点：{scene.location}")
-    if scene.background_music:
-        lines.append(f"  音乐：{scene.background_music}")
-    for event in scene.audio_events[:_MAX_AUDIO_EVENTS]:
-        lines.append(f"  声音：{event.description}")
-    for dialogue in scene.dialogues[:_MAX_DIALOGUE_LINES]:
-        tone = ""
-        if dialogue.emotion and dialogue.emotion.text_emotion:
-            tone = f"（{dialogue.emotion.text_emotion}）"
-        lines.append(f"  台词：{dialogue.speaker}{tone}：{dialogue.text}")
-    return lines
-
-
-def _render_content_text(content: ContentJSON) -> str:
-    """内容 JSON → prompt 的 content 文本（两模式共用，格式计划钉死）。
-
-    首行《标题》与摘要行，其后每场景一行：
-
-    《示例电影》
-    摘要：影片整体剧情摘要
-    - scene_001 [120000-180000] 两名人物在仓库中发生激烈争执
-
-    2026-11 上游对接增量：摘要后可有 "人物：" 一行；每个场景行之后可跟
-    缩进的明细行（氛围/地点/声音/台词）。老数据（无角色/情绪/音频/台词）
-    渲染结果与扩展前逐字一致——场景行格式是 MockLLM 证据解析的契约，
-    不能改。
-    """
-    parts: list[str] = [f"《{content.asset.title}》",
-                        f"摘要：{content.content.summary}"]
-    cast = _render_cast_line(content)
-    if cast:
-        parts.append(cast)
-    for scene in content.content.scenes:
-        parts.append(
-            f"- {scene.scene_id}"
-            f" [{scene.time_range.start_ms}-{scene.time_range.end_ms}]"
-            f" {scene.description}")
-        parts.extend(_render_scene_details(scene))
-    return "\n".join(parts)
-
-
-def assemble_spec(
-    session: Session, *, mode: str, content: ContentJSON,
-    task_id: str, asset_id: str, run_id: str, policy_json: str = "",
-) -> tuple[GenerationSpec, PromptTemplate | None]:
-    """组装单次生成的 GenerationSpec（执行器与闭环评测 closed_eval 共用）。
-
-    run_generation_task 八步流程中的组装段（4/5/4b + spec 构造）原样搬出，
-    闭环评测复用同一组装语义，保证两侧 prompt/policy/库加载零漂移：
-    try_load_library → policy 解析（空 policy_json → 默认）→ get_producer
-    → 非 builds_prompt 生产器取 get_active_prompt 激活模板并渲染 content
-    文本 → 组装 GenerationSpec。返回 (spec, template)：builds_prompt=True
-    的生产器自己拼 prompt，template 为 None。异常语义不变：坏 policy JSON、
-    缺激活模板等配置错误原样外抛，由调用方的事务语义落失败终态。
-    """
-    # 标签库与 producer 分发（库在任务开始时加载一次，JSON 读取有缓存）
-    library = try_load_library()
-    # 策略解析（空 policy_json → 默认）
-    raw_policy = (policy_json or "").strip()
-    policy = (GenerationPolicy(**json.loads(raw_policy))
-              if raw_policy else GenerationPolicy())
-    # producer 分发与 prompt 组装渲染
-    #    builds_prompt=True 的生产器自己拼 prompt（如 open 的多轮多模态
-    #    流水线），不取 DB 模板、不渲染 content 文本；其余模式走模板
-    #    （closed 候选分组由 ClosedTagProducer.produce 注入，runner 不再组装）。
-    producer = get_producer(mode)
-    template = None
-    prompt_text = ""
-    if not getattr(producer, "builds_prompt", False):
-        template = get_active_prompt(session, mode)
-        fields: dict[str, str] = {"content": _render_content_text(content)}
-        prompt_text = render_prompt(template, **fields)
-    spec = GenerationSpec(
-        task_id=task_id, asset_id=asset_id, content=content,
-        policy=policy, prompt_text=prompt_text, run_id=run_id,
-        library=library,
-    )
-    return spec, template
-
-
-def run_generation_task(
-    task_id: str, session: Session, llm, embedder, *,
-    prompt_samples: PromptSampleBatch | None = None,
-) -> TagGenerationTask:
-    """执行单个生成任务：状态机 + prompt 组装 + 生成 + 入库（内含完整事务）。
-
-    八步流程（计划钉死）：
-    1. 取 task；非 queued → ValueError("任务状态非 queued")；置 running、commit；
-    2. 资产或其 content_json 缺失 → failed + error、commit、返回 task；
-    3. load_content(asset.content_json)；资产 id 即 task.asset_id（任务直绑资产）；
-    4. assemble_spec 组装 spec（库加载/producer 分发/模板渲染，闭环评测共用）：
-       render_prompt 渲染激活模板（closed/open 均只传 content——closed 的
-       候选标签由 produce 内部按目录分组注入）；
-    5. assemble_spec 内：policy_json 空 → 默认 GenerationPolicy，否则按
-       JSON 构造；
-    6. producer.produce(spec, session, llm, embedder)——任一异常：回滚半截
-       写入后置 failed（error=str(e)、finished_at）、commit、返回 task
-       （不 re-raise，调用方看状态）；
-    7. persist_tags 写 pre_asset_tag（不 commit，随终态同事务落库）；
-    8. task.model_version = llm.model、prompt_version = 激活模板版本
-       （写入字符串）、succeeded、finished_at、一次性 commit、返回 task。
-    """
-    task = session.get(TagGenerationTask, task_id)
-    if task is None:
-        raise ValueError(f"任务不存在: {task_id}")
-    if task.status != "queued":
-        raise ValueError("任务状态非 queued")
-    # 1. running 置位先落库：长任务期间其余会话可见，防重复提交
-    task.status = "running"
-    session.commit()
-
-    # 2. 资产/内容缺失属数据错误：显式失败，不留 running 僵尸
-    asset = session.get(MediaAsset, task.asset_id)
-    if asset is None or not (asset.content_json or "").strip():
-        task.status = "failed"
-        task.error = (
-            f"资产不存在: {task.asset_id}" if asset is None
-            else f"资产无识别内容: {task.asset_id}")
-        task.finished_at = datetime.now(timezone.utc)
-        session.commit()
-        return task
-
-    try:
-        # 3. 内容解析与资产归属（任务即资产，content 内 id 仅作校验兜底）
-        content = load_content(asset.content_json)
-        asset_id = task.asset_id
-
-        # 4/5. spec 组装（assemble_spec 公共段，闭环评测共用）：标签库加载、
-        #    策略解析、producer 分发与模板渲染。run_id 含随机段：同任务重跑
-        #    换 run_id，Mock 哈希采样随之变化
-        run_id = f"{task.task_id}:{uuid4().hex[:6]}"
-        spec, template = assemble_spec(
-            session, mode=task.mode, content=content,
-            task_id=task.task_id, asset_id=asset_id, run_id=run_id,
-            policy_json=task.policy_json)
-        spec.prompt_samples = prompt_samples
-        # producer 供 produce 调用与 prompt_version 兜底使用（assemble_spec
-        # 按钉死签名只回 spec/template；注册表分发幂等，二次查询无副作用）
-        producer = get_producer(task.mode)
-        # 6. 生成
-        tags = producer.produce(spec, session, llm, embedder)
-        # 6.5 过滤责任链（合 main 的 filtering 能力）：质量评估 → 信息围栏，
-        #     通过者才进审核队列。被丢弃的标签不落 pre 表、不以 rejected
-        #     落库（rejected = 人工终审语义，重跑跳过）。两环节当前均占位
-        #     透传；环节抛错走下方任务级事务：回滚 + failed，零半截写入。
-        candidate_count = len(tags)
-        tags, reports = run_filter_chain(
-            tags,
-            FilterContext(task_id=task.task_id, asset_id=asset_id,
-                          mode=task.mode, content=content),
-            session,
-        )
-        if reports:
-            logger.info(
-                "任务 %s 过滤汇总：%d 条候选 → %d 条入库；各环节 %s",
-                task.task_id, candidate_count, len(tags),
-                "、".join(f"{report.name}(保留 {report.kept}/丢弃 "
-                          f"{report.dropped})" for report in reports))
-        # 7. 结果入库（不 commit）：persist_tags 内部先清同 origin 的 pending
-        #    行再逐条插入，重跑不会在审核队列里叠加历史候选
-        summary = persist_tags(session, asset_id, task.task_id, tags, task.mode)
-        # persist 口径留痕：产出 N 条 ≠ 入库 N 条——命中资产既有行（任何
-        # origin、任何状态）会被静默跳过且不留痕，"选了 M 个只入库 k 个"
-        # 的排查两次都扑在这个观测盲点上，故每次必打、零跳过也打
-        logger.info(
-            "任务 %s 入库汇总：产出 %d 条 → 新插 %d 条（自动通过 %d、"
-            "挂载 %d）、撞既有行跳过 %d 条",
-            task.task_id, len(tags), summary.inserted,
-            summary.auto_approved, summary.mounted, summary.skipped_finalized)
-        if summary.cleared:
-            logger.info("重跑替换：资产 %s 清掉 %d 条未审核候选",
-                        asset_id, summary.cleared)
-        # 相似并入的行把模型原词登记成别名（写 tag_define.aliases + 变更日志；
-        # 失败不影响任务）。注意 record_alias 的第一个参数是 session——合 main 后
-        # 别名从 JSON 库搬进了 tag_define 表，签名从 (library, ...) 改成
-        # (session, ...)，这里曾漏改，导致 open 生成一走到 catalog 命中就
-        # AttributeError: 'TagLibrary' object has no attribute 'get'。
-        for tag in tags:
-            if tag.origin == "catalog" and tag.alias_name and tag.tag_id:
-                try:
-                    record_alias(
-                        session, tag_id=tag.tag_id, alias=tag.alias_name,
-                        source={"asset_id": asset_id, "task_id": task.task_id,
-                                "origin": task.mode, "auto": True})
-                except (OSError, ValueError) as exc:
-                    logger.warning("别名预览写入失败：%s", exc)
-
-        # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
-        #    （标签库改由 assemble_spec 装载并随 spec 携带，此处取 spec.library）
-        snapshot(session, task, spec, summary, asset.content_json, spec.library)
-        task.model_version = llm.model
-        # prompt_version 列为 TEXT：写入侧即字符串，与读回一致；
-        # 自拼 prompt 的生产器写自己的口径版本（如 mtg-v1）
-        task.prompt_version = (str(template.version) if template is not None
-                               else getattr(producer, "prompt_version", ""))
-        task.status = "succeeded"
-        task.finished_at = datetime.now(timezone.utc)
-        session.commit()
-        return task
-    except Exception as e:  # noqa: BLE001 —— 任务级事务：任何失败都落任务终态
-        # 先回滚丢弃 persist/回填的未提交写入（零半截 asset_tag），再落
-        # failed 终态；不 re-raise，调用方经状态与 error 感知失败
-        session.rollback()
-        task.status = "failed"
-        task.error = str(e)
-        task.finished_at = datetime.now(timezone.utc)
-        session.commit()
-        return task
 
 
 class TaskExecutor:
@@ -383,3 +115,38 @@ def reset_orphan_running(session: Session) -> int:
         task.finished_at = now
     session.commit()
     return len(orphans)
+
+
+def reset_orphan_tasks(engine: Engine) -> int:
+    """进程重启后的非生成类孤儿清理：资产构建与标签导入任务复位 failed。
+
+    AssetBuildTask 的 running 行复位为 failed（error="进程重启中断"，措辞
+    对齐 reset_orphan_running）；TagImportTask 的在途行（processing，其
+    "running" 等位状态）复位为 failed——该表无 error 列，说明写
+    result_summary JSON，文案保留导入侧含用户恢复指引的既有文案（前端
+    展示用，controller 裁定；与导入失败收尾同构）。收引擎、内部自建独立
+    session 一次事务提交（lifespan 启动时调用），返回复位总数。
+    """
+    with Session(engine) as session:
+        now = datetime.now(timezone.utc)
+        builds = (
+            session.query(AssetBuildTask)
+            .filter(AssetBuildTask.status == "running")
+            .all()
+        )
+        for task in builds:
+            task.status = "failed"
+            task.error = "进程重启中断"
+            task.finished_at = now
+        imports = (
+            session.query(TagImportTask)
+            .filter(TagImportTask.status == "processing")
+            .all()
+        )
+        for task in imports:
+            task.status = "failed"
+            task.result_summary = json.dumps(
+                {"error": "服务重启中断了导入，请重新上传文件"},
+                ensure_ascii=False)
+        session.commit()
+        return len(builds) + len(imports)

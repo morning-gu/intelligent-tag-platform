@@ -1,6 +1,7 @@
 """`/api/v1/users` 路由：账号列表与建号（仅 admin）。
 
-薄路由层：直接调用 tagplatform.auth 服务（create_user / UserAccount 查询），
+薄路由层：直接调用 tagplatform.services.auth 服务（create_user /
+UserAccount 查询），
 router 只做协议转换——role 取值与字段合法性由 pydantic 声明校验
 （Literal/非空 → 422），重名冲突（服务层 ValueError）映射 409，权限门槛
 require_admin（非 admin 403）。登录门槛（get_current_user）由 create_app
@@ -16,8 +17,8 @@ from sqlalchemy.orm import Session
 from tagplatform.api import get_session
 from tagplatform.api.depends import require_admin
 from tagplatform.api.schemas import UtcDatetime
-from tagplatform.auth import create_user as create_user_account
-from tagplatform.db.models import UserAccount
+from tagplatform.services.auth import create_user as create_user_account
+from tagplatform.capabilities.storage.models import UserAccount
 
 router = APIRouter(prefix="/api/v1/users")
 

@@ -1,6 +1,6 @@
 """树状 XML 标签导入测试。"""
 
-from tagplatform.governance import parse_tag_xml
+from tagplatform.services.tags.governance import parse_tag_xml
 
 
 def test_parse_nested_xml_imports_hierarchy_nodes():

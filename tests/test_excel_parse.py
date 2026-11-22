@@ -16,7 +16,7 @@ import io
 
 import openpyxl
 
-from tagplatform.governance import parse_tag_excel
+from tagplatform.services.tags.governance import parse_tag_excel
 
 # 模板常用 6 列（tag_id/applicable_scope 两列可选，见 test_full_eight_column_template）；
 # 外层再包一行，使 build_xlsx(HEADERS + [...]) 拼出的都是"行"的列表

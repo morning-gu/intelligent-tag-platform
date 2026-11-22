@@ -17,9 +17,9 @@
 
 import pytest
 
-from tagplatform.db.models import MediaAsset, PreAssetTag
-from tagplatform.library import DIR_ASSET
-from tagplatform.review import ConflictError, apply_review
+from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag
+from tagplatform.services.tags.library import DIR_ASSET
+from tagplatform.services.generation.review import ConflictError, apply_review
 from tests.library_fixture import add_dirs
 
 
@@ -229,7 +229,7 @@ def test_service_commits_immediately(session):
 
 def test_approve_new_word_writes_tag_define(session):
     """通过一条新词 → 真的插进 tag_define（含 create 日志与来源追溯）。"""
-    from tagplatform.db.models import TagChangeLog, TagDefine
+    from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
 
     row = _seed_row(session, candidate_name="时间循环")
     apply_review(session, row.id, "approve", "alice", {"comment": "新增"})
@@ -254,7 +254,7 @@ def test_approve_new_word_in_static_dir_raises(session):
 
 def test_approve_new_word_in_asset_dir_writes_tag_define(session):
     """dir_asset 目录同 dir_dynamic：审核通过可扩充新标签。"""
-    from tagplatform.db.models import TagDefine
+    from tagplatform.capabilities.storage.models import TagDefine
 
     add_dirs([{"dir_id": "dir_kw_asset", "level": 1, "dir_name": "搜索关键词",
                "dir_type": DIR_ASSET, "applicable_scope": "content",
@@ -280,7 +280,7 @@ def test_approve_new_word_scope_mismatch_raises(session):
 
 def test_merge_appends_alias_to_tag_define(session):
     """相似并入 → 原候选名写进目标标签的 aliases。"""
-    from tagplatform.db.models import TagDefine
+    from tagplatform.capabilities.storage.models import TagDefine
 
     row = _seed_row(session, candidate_name="报仇")
     apply_review(session, row.id, "merge", "alice",
@@ -301,7 +301,7 @@ def test_merge_appends_alias_to_tag_define(session):
 
 def test_approve_new_word_mounts_asset_tag(session):
     """新词通过 → 除 tag_define 外还要写一行 asset_tag 挂载。"""
-    from tagplatform.db.models import AssetTag, TagDefine
+    from tagplatform.capabilities.storage.models import AssetTag, TagDefine
 
     row = _seed_row(session, candidate_name="时间循环")
     apply_review(session, row.id, "approve", "alice", None)
@@ -317,7 +317,7 @@ def test_approve_new_word_mounts_asset_tag(session):
 def test_approve_catalog_row_mounts_and_records_alias(session):
     """命中库内标签的候选（judge 判重替换/人工改成库内名）：
     原候选名落成别名，同时写正式挂载行。"""
-    from tagplatform.db.models import AssetTag, TagDefine
+    from tagplatform.capabilities.storage.models import AssetTag, TagDefine
 
     row = _seed_row(session, origin="closed", tag_id="tag_revenge")
     row.candidate_alias = "报仇雪恨"
@@ -332,7 +332,7 @@ def test_approve_catalog_row_mounts_and_records_alias(session):
 
 def test_reject_writes_no_mount(session):
     """驳回不挂载：asset_tag 保持为空。"""
-    from tagplatform.db.models import AssetTag
+    from tagplatform.capabilities.storage.models import AssetTag
 
     row = _seed_row(session)
     apply_review(session, row.id, "reject", "bob", {"comment": "证据不足"})
@@ -341,8 +341,8 @@ def test_reject_writes_no_mount(session):
 
 def test_mount_is_idempotent(session):
     """同一资产同一标签重复挂载不会多插行（重复审核/同片多候选）。"""
-    from tagplatform.review.service import _mount_asset_tag
-    from tagplatform.db.models import AssetTag
+    from tagplatform.services.generation.review.service import _mount_asset_tag
+    from tagplatform.capabilities.storage.models import AssetTag
 
     row = _seed_row(session)
     from datetime import datetime, timezone
@@ -357,8 +357,8 @@ def test_mount_is_idempotent(session):
 
 def test_refresh_mounted_tag_names_syncs_redundant_copy(session):
     """定义侧改名后，挂载行的 tag_name 冗余拷贝要被刷新（doc §6.3）。"""
-    from tagplatform.db.models import AssetTag, TagDefine
-    from tagplatform.review import refresh_mounted_tag_names
+    from tagplatform.capabilities.storage.models import AssetTag, TagDefine
+    from tagplatform.services.generation.review import refresh_mounted_tag_names
 
     row = _seed_row(session)
     apply_review(session, row.id, "approve", "alice", None)
@@ -371,7 +371,7 @@ def test_refresh_mounted_tag_names_syncs_redundant_copy(session):
 
 
 def test_refresh_unknown_tag_raises(session):
-    from tagplatform.review import refresh_mounted_tag_names
+    from tagplatform.services.generation.review import refresh_mounted_tag_names
 
     with pytest.raises(ValueError, match="标签定义不存在"):
         refresh_mounted_tag_names(session, "tag_ghost")

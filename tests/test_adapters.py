@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tagplatform.adapters import (
+from tagplatform.capabilities.adapters import (
     PlatformAdapter,
     get_adapter,
     list_adapters,

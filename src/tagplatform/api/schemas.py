@@ -6,26 +6,13 @@ API 序列化时把 naive 一律视为 UTC 补回 tzinfo，JSON 输出带 `Z` �
 （如 `2026-11-18T10:31:32Z`）——前端解析后即可正确转本地时区展示，
 修复"UTC 裸时间戳被当成本地时间读"的 8 小时误读（2026-11-18 排查
 gen_4845957f9239 的根因链：任务实际 4 分钟成功，纯展示层误读）。
+
+四层重构 Task 11：响应模型随编排层下沉（orchestration/_shared 等），
+而编排层不得反向 import api——`UtcDatetime` 的定义随之迁往
+`tagplatform.orchestration._shared`，本模块 re-export 保持接入层
+（routers）引用路径不变。
 """
 
-from datetime import datetime, timezone
-from typing import Annotated
+from tagplatform.orchestration._shared import UtcDatetime
 
-from pydantic import WrapSerializer
-
-
-def _serialize_utc(value: datetime, handler):
-    """naive 值按 UTC 补 tzinfo 后交给 Pydantic 缺省序列化。
-
-    历史行与现行写入点均为 UTC，故在序列化侧统一补 UTC（读侧不转换）；
-    已带 tzinfo 的值原样通过。None 由 Pydantic 在进入序列化器前短路，
-    不会调到这里。返回值不标类型：JSON 模式出 str、python 模式出
-    datetime，标任一端都会触发 Pydantic 序列化警告。
-    """
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return handler(value)
-
-
-UtcDatetime = Annotated[datetime, WrapSerializer(_serialize_utc)]
-"""响应模型 datetime 字段注解：naive 视为 UTC，输出 ISO-8601 带 Z。"""
+__all__ = ["UtcDatetime"]

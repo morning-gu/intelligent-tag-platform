@@ -31,21 +31,21 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.content_io import load_content
-from tagplatform.db import create_engine_for, make_session_factory
-from tagplatform.db.models import (
+from tagplatform.services.content.content_io import load_content
+from tagplatform.capabilities.storage import create_engine_for, make_session_factory
+from tagplatform.capabilities.storage.models import (
     MediaAsset,
     PreAssetTag,
     TagCatalog,
     TagChangeLog,
     TagDefine,
 )
-from tagplatform.generation.mtg.descriptions import (
+from tagplatform.services.generation.open.mtg.descriptions import (
     clean_description,
     content_names,
     fill_descriptions,
 )
-from tagplatform.generation.mtg.merge import normalize_tag
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.settings import get_settings
 
 _BATCH = 8
@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"数据库不存在: {database}", file=sys.stderr)
         return 2
 
-    from tagplatform.llm import OpenAIClient
+    from tagplatform.capabilities.llm import OpenAIClient
 
     client = OpenAIClient(
         model=settings.mtg_judge_model,
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
                     client, items, names=names, run_id="backfill:define")
                 for row in batch:
                     planned.append((row, "tag_define",
-                                    filled.get(normalize_tag(row.tag_name)), names))
+                                    filled.get(normalize_key(row.tag_name)), names))
         for asset_id, rows in pre_by_asset.items():
             names = _names_of_asset(session, asset_id)
             items = [{"tag": row.candidate_name or "", "dir": paths.get(row.candidate_dir_id)}
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
                 names=names, run_id=f"backfill:{asset_id}")
             for row, item in zip(rows, items):
                 planned.append((row, "pre_asset_tag",
-                                filled.get(normalize_tag(item["tag"])), names))
+                                filled.get(normalize_key(item["tag"])), names))
 
         changed = 0
         for row, kind, desc, _names in planned:

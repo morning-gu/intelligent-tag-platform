@@ -2,13 +2,13 @@
 
 import json
 
-from tagplatform.generation.mtg.verify import (
+from tagplatform.services.generation.open.mtg.verify import (
     VERIFY_MARKER,
     build_verify_messages,
     parse_verify_results,
     verify_pairs,
 )
-from tagplatform.llm.client import LLMResponse
+from tagplatform.capabilities.llm.client import LLMResponse
 
 
 class _Client:

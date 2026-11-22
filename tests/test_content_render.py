@@ -10,10 +10,10 @@
 import json
 from pathlib import Path
 
-from tagplatform.llm.mock import _parse_scenes
+from tagplatform.capabilities.llm.mock import _parse_scenes
 from tagplatform.schemas import parse_content
-from tagplatform.tasks.runner import _render_content_text
-from tagplatform.tasks.runner import _MAX_CAST_LINES
+from tagplatform.services.generation.assemble import _render_content_text
+from tagplatform.services.generation.assemble import _MAX_CAST_LINES
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "content_movie.json").read_text(
@@ -98,7 +98,7 @@ def test_character_emotions_fall_back_to_dialogue_tone():
 
 def test_new_contract_content_renders_character_emotions():
     """new_json.txt 口径的资产（情绪挂在事件参与人上）也能渲染出人物情绪。"""
-    from tagplatform.content_io import load_content
+    from tagplatform.services.content.content_io import load_content
 
     payload = {
         "schema_version": "1.0",

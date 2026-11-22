@@ -16,8 +16,8 @@ import json
 
 import pytest
 
-from tagplatform.content_import import import_content, resolve_video_path
-from tagplatform.db.models import MediaAsset
+from tagplatform.services.content.content_import import import_content, resolve_video_path
+from tagplatform.capabilities.storage.models import MediaAsset
 
 
 def test_import_creates_hierarchy(session, content_fixture):
@@ -64,7 +64,7 @@ def test_scene_rows_pruned_when_gone(session, content_fixture):
 
 def test_prune_removes_tags_of_dropped_scene(session, content_fixture):
     """删场景行前先删其待审标签，否则外键会挡住。"""
-    from tagplatform.db.models import PreAssetTag
+    from tagplatform.capabilities.storage.models import PreAssetTag
 
     r1 = import_content(content_fixture, session, None)
     scene_id = r1.scene_asset_ids[0]

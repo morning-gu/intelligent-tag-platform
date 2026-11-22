@@ -44,6 +44,22 @@ async function readErrorDetail(response: Response): Promise<string> {
   return `请求失败（HTTP ${response.status}）`
 }
 
+/** 查询参数 → URLSearchParams 的统一拼装（Task 14 收口：此前 assets/
+ * catalog/review/tasks 五处各写一份 for-Object.entries 循环）。规则：
+ * undefined / 空串 / 布尔 false 一律不拼入——false 不发送即 catalog
+ * root=false 与后端默认同值不发送的既有语义（数字 0 照常序列化，
+ * "offset=0 显式发送"不受影响；各调用点此前无布尔字段，行为不变）。 */
+export function buildSearchParams<Q extends object>(query: Q = {} as Q): URLSearchParams {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === '' || value === false) {
+      continue
+    }
+    params.set(key, String(value))
+  }
+  return params
+}
+
 /** 统一请求入口：自动 JSON、携带会话 cookie、401 拦截（跳 /login）。
  * body 为 FormData 时（multipart 上传，如标签 Excel 导入）不设 Content-Type
  * ——浏览器自动补 `multipart/form-data; boundary=...`，强设 application/json
