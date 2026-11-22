@@ -1,8 +1,8 @@
 // 应用路由装配：/login 公开；其余页面统一套路由门禁（RequireAuth）与主布局。
 // Router 由 main.tsx 提供（BrowserRouter）——App 只含 Routes，测试以
-// MemoryRouter 注入。全部业务页面已实现：工作台/审核中心/质量评估/内容资产
-// （列表+详情）/生产任务/标签导入/标签库/用户管理（admin）/模型配置（admin）/
-// 闭环评测（admin）。
+// MemoryRouter 注入。全部业务页面已实现：工作台（总览，吸收质量评估）/
+// 审核中心/内容资产（列表+详情）/生产任务/标签导入/标签库/用户管理（admin）/
+// 模型配置（admin）/闭环评测（admin）；旧 /quality 入口重定向回工作台。
 // 页面按模块归位（Task 14）：tag-management/content-management/generation/
 // review/closed-eval/config 七目录（open-eval 占位）；Dashboard/Layout/Login
 // 为跨模块外壳页，留在 pages 根。
@@ -17,7 +17,6 @@ import GenerationTasks from './pages/generation/GenerationTasks'
 import Layout, { type AuthedOutlet } from './pages/Layout'
 import Login from './pages/Login'
 import ModelConfig from './pages/config/ModelConfig'
-import Quality from './pages/review/Quality'
 import ReviewCenter from './pages/review/ReviewCenter'
 import TagCatalog from './pages/tag-management/TagCatalog'
 import TagImports from './pages/tag-management/TagImports'
@@ -79,7 +78,8 @@ export default function App() {
           <Route path="tasks" element={<GenerationTasks />} />
           <Route path="imports" element={<TagImports />} />
           <Route path="tags" element={<TagCatalog />} />
-          <Route path="quality" element={<Quality />} />
+          {/* 旧 /quality 入口已并入工作台总览，重定向保书签 */}
+          <Route path="quality" element={<Navigate to="/" replace />} />
           <Route element={<AdminRoute />}>
             <Route path="users" element={<Users />} />
             <Route path="model-config" element={<ModelConfig />} />
