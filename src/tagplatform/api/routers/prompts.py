@@ -19,6 +19,7 @@ from tagplatform.capabilities.prompts import (
     REQUIRED_PLACEHOLDERS,
     get_prompt,
 )
+from tagplatform.capabilities.prompts.registry import list_prompt_registry
 
 router = APIRouter(prefix="/api/v1")
 
@@ -33,6 +34,21 @@ class PromptContractOut(BaseModel):
     template_text: str
     allowed_fields: list[str]
     required_placeholders: list[str]
+
+
+class RegistryItemOut(BaseModel):
+    """全量文案清单条目：常量名 + 文案本体。"""
+
+    name: str
+    text: str
+
+
+class RegistryGroupOut(BaseModel):
+    """全量文案清单组：按流水线分组（closed/mtg/assets/quality）。"""
+
+    module: str
+    title: str
+    items: list[RegistryItemOut]
 
 
 @router.get("/prompts", response_model=list[PromptContractOut])
@@ -50,3 +66,14 @@ def list_prompts(mode: str | None = Query(None)) -> list[PromptContractOut]:
         for m in modes
         if m in MODES
     ]
+
+
+@router.get("/prompts/registry", response_model=list[RegistryGroupOut])
+def prompt_registry() -> list[dict]:
+    """全量 Prompt 文案只读清单（2026-11-22 文案集中新增）。
+
+    四组（closed/mtg/assets/quality），条目 = 常量名 + 文案本体；与
+    capabilities/prompts 各模块常量单一来源（registry 静态聚合，无第二份
+    拷贝）。只读：文案是代码常量，git 即版本，无写端点。
+    """
+    return list_prompt_registry()

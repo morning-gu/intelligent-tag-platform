@@ -41,6 +41,11 @@ def test_mtg_module_layering():
     _layering_clean("mtg.py")
 
 
+@pytest.mark.parametrize("module", ["assets.py", "quality.py", "registry.py"])
+def test_central_modules_layering(module):
+    _layering_clean(module)
+
+
 @pytest.mark.parametrize("text", [GENERATION_ROLE_TEXT, SCENE_GOAL_TEXT,
     HOW_TO_FILL_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT,
     LIBRARY_HINT_HEAD_TEXT, JUDGE_CRITERIA, JUDGE_ROLE_BRIEF,
