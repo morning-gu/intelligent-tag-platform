@@ -186,6 +186,19 @@ def test_review_honors_modalities():
     assert "台词：" not in client.calls[0][1]["content"]
 
 
+def test_review_empty_material_raises():
+    """dialogue-only modalities：render_content 对 script 关闭静默返回空
+    材料（台词在 script 通道渲染）→ 摘录核验无从进行，按评审失败语义
+    响亮抛错（绝不产出貌似合法的全 fail 报告）。"""
+    client = StubClient(_OK_TEXT)
+    with pytest.raises(ReviewRequestError) as exc_info:
+        review_movie_tags(client, _content(), _rows(), run_id="r1:m1",
+                          modalities=("dialogue",))
+    assert "评审材料为空" in str(exc_info.value)
+    assert "摘录核验无从进行" in str(exc_info.value)
+    assert client.calls == []  # 材料不足不出请求，不烧 token
+
+
 # ---- 解析容错（Review Focus 1：畸形家族） ----
 
 

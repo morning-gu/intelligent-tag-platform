@@ -107,13 +107,21 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
     原样保留；即便行里带了生成侧 reason 等多余字段也不会进提示（防同模
     锚定——清单只投影评审需要的五个字段）。
 
-    抛 ReviewRequestError 的三种情况：请求失败（含传输异常）、同一批两
-    次解析失败、全部行漏判。部分漏判不抛——漏判行 pass=None 占位，由
-    指标层排除出分母（None≠0 纪律）。
+    抛 ReviewRequestError 的四种情况：材料为空（modalities 未含 script
+    ——台词在 script 通道渲染，摘录核验无从进行，绝不产出假的全 fail
+    报告）、请求失败（含传输异常）、同一批两次解析失败、全部行漏判。
+    部分漏判不抛——漏判行 pass=None 占位，由指标层排除出分母（None≠0
+    纪律）。
     """
     if not tag_rows:
         return []
     haystack = render_content(content, modalities=modalities)
+    # render_content 对 script 关闭静默返回 ""（台词随 script 通道一起被
+    # 关掉）——空材料下摘录核验无从进行，每个 pass 都会被拦成 fail，
+    # 得到一份貌似合法的全 fail 报告（最坏的静默错误形状）。本层自防：
+    # 按评审失败语义响亮抛出，而非依赖上层起跑校验。
+    if not haystack.strip():
+        raise ReviewRequestError("评审材料为空（modalities 未含 script），摘录核验无从进行")
     results: dict[int, dict] = {}
     errors: list[str] = []
 
