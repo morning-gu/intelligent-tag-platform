@@ -107,7 +107,10 @@ def client(tmp_path, request):
                         # 往这里写迷你 MovieTags，绝不扫真实 /cache/MovieTags），
                         # 产物根指向 tmp（报告/meta 落盘不污染 data/eval）
                         eval_dataset_root=str(tmp_path / "eval-ds"),
-                        eval_output_root=str(tmp_path / "eval-out"))
+                        eval_output_root=str(tmp_path / "eval-out"),
+                        # 开放评测产物根同理隔离（open-eval Task 6）：默认
+                        # data/eval/open 是相对路径，会污染真实工作区
+                        open_eval_output_root=str(tmp_path / "open-eval-out"))
     engine = create_engine_for(str(db_path))
     Base.metadata.create_all(engine)
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎

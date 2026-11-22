@@ -1,5 +1,6 @@
 """闭环评测 admin API 路由契约（Task 6 基础 + Task 2 单片明细）：13 端点
-+ 错误映射 + app 装配。
++ 错误映射 + app 装配；open-eval Task 6 追加开放评测端点族
+（/api/v1/eval/open 11 端点，文件末节）。
 
 路由契约钉死（plan Task 6，全部端点 require_admin）：
 - GET /datasets → DatasetInfoOut（usable_movies 输出为**数量**；畸形 gt
@@ -98,12 +99,12 @@ def _start_run(client: TestClient, dataset: str = "emotion",
 
 
 def _await_terminal(client: TestClient, run_id: str,
-                    timeout: float = 15.0) -> dict:
+                    timeout: float = 15.0, base: str = _BASE) -> dict:
     """轮询 GET /runs/{run_id} 至终态（mock llm 毫秒级；闸门用例由
-    release 后收敛）。超时 fail 不静默。"""
+    release 后收敛）。超时 fail 不静默。base：closed/open 端点族共用。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        body = client.get(f"{_BASE}/runs/{run_id}").json()
+        body = client.get(f"{base}/runs/{run_id}").json()
         if body.get("status") != "running":
             return body
         time.sleep(0.01)
@@ -111,16 +112,16 @@ def _await_terminal(client: TestClient, run_id: str,
 
 
 def _await_report(client: TestClient, run_id: str,
-                  timeout: float = 15.0):
+                  timeout: float = 15.0, base: str = _BASE):
     """轮询报告端点至 200。
 
     终态落盘存在文档化的非原子窗口（meta→raw→report 写序，注册表先翻
     终态、报告后落盘；读侧 404「无报告」是既定容错语义）——测试轮询到
-    报告出现再断言内容，不赌毫秒级窗口。
+    报告出现再断言内容，不赌毫秒级窗口。base：closed/open 端点族共用。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        r = client.get(f"{_BASE}/runs/{run_id}/report")
+        r = client.get(f"{base}/runs/{run_id}/report")
         if r.status_code == 200:
             return r
         time.sleep(0.01)
@@ -128,20 +129,38 @@ def _await_report(client: TestClient, run_id: str,
 
 
 def _await_file(client: TestClient, run_id: str, name: str,
-                timeout: float = 5.0):
+                timeout: float = 5.0, base: str = _BASE):
     """轮询产物文件端点至 200。
 
     write_report 写序 report.json → report.md → metrics.csv（closed_eval
     :1209 起）：等 report.json 200 后紧接断言 md/csv 仍可能撞上毫秒级
     窗口（负载下的实测 flake，2026-11-21）——同 _await_report 口径轮询。
+    base：closed/open 端点族共用。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        r = client.get(f"{_BASE}/runs/{run_id}/files/{name}")
+        r = client.get(f"{base}/runs/{run_id}/files/{name}")
         if r.status_code == 200:
             return r
         time.sleep(0.01)
     pytest.fail(f"run {run_id} 的产物 {name} 未在 {timeout}s 内落盘")
+
+
+def _await_busy_released(service, timeout: float = 5.0) -> None:
+    """轮询评测服务 active 位释放至 None。
+
+    既有语义窗口：worker 把注册表 status 翻成终态在先、终态落盘与 busy 位
+    释放在后（delete 守卫依赖 active 位覆盖写盘窗口——见
+    OpenEvalService.delete docstring）。跨服务互斥用例在「等对端终态」
+    之后立刻反向起跑会撞上这个窗口（对端 active 位尚未释放 → 409），
+    轮询到空闲再发起——同 test_delete_run_endpoint 的删除轮询口径。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if service.active_run_id() is None:
+            return
+        time.sleep(0.01)
+    pytest.fail("对端评测 active 位未在时限内释放")
 
 
 # ---------------------------------------------------------------- 数据集列表
@@ -807,3 +826,272 @@ def test_movies_theta_non_admin_401(client):
                       params={"theta_p": 0.2}).status_code == 401
     assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
                       params={"theta_r": 0.8}).status_code == 401
+
+
+# ---------------------------------------------------------------- 开放评测端点族（open-eval Task 6）
+
+# open 端点族前缀（本节用例共用；dataset 三别名与 closed 共享 override 状态）
+_OPEN = "/api/v1/eval/open"
+
+
+def _open_start_run(client: TestClient, dataset: str = "emotion",
+                    movies: dict | None = None, **extra) -> dict:
+    """open 起跑（默认 all 模式）→ 响应 body（断言 200 由调用方按需做）。"""
+    payload = {"dataset": dataset,
+               "movies": movies or {"mode": "all"}, **extra}
+    return client.post(f"{_OPEN}/runs", json=payload)
+
+
+def test_open_dataset_endpoints_share_closed_state(client, tmp_path):
+    """dataset 三别名 Depends(get_closed_eval)（共享 override 状态、零新逻辑）：
+    closed 页设置的 dataset-root 对 open 端点立即可见，反向（POST /open/
+    dataset-root 写同一 override）closed 同步可见；datasets / movies 与
+    闭环同状态（读路径走 effective_root）。"""
+    _seed_dataset_and_library(client)
+    # 默认态：open 与 closed 同读一个根、同 is_default
+    r = client.get(f"{_OPEN}/dataset-root")
+    assert r.status_code == 200
+    assert r.json() == {"root": str(client.app.state.settings.eval_dataset_root),
+                        "is_default": True}
+    assert client.get(f"{_BASE}/dataset-root").json() == r.json()
+    # closed 页设置 override → open 三别名全部跟随（共享状态）
+    root_b = tmp_path / "ds-b"
+    root_b.mkdir()
+    _write_dataset(root_b)
+    assert client.post(f"{_BASE}/dataset-root",
+                       json={"root": str(root_b)}).status_code == 200
+    assert client.get(f"{_OPEN}/dataset-root").json() == {
+        "root": str(root_b), "is_default": False}
+    rows = client.get(f"{_OPEN}/datasets").json()
+    assert len(rows) == 1 and rows[0]["id"] == "emotion"
+    assert rows[0]["gt_path"].startswith(str(root_b))
+    assert client.get(f"{_OPEN}/datasets/emotion/movies").json() == [
+        {"tt": "tt0000001", "title": "A Movie"},
+        {"tt": "tt0000002", "title": "B Movie"}]
+    assert client.get(f"{_OPEN}/datasets/nope/movies").status_code == 404
+    # 反向：POST /open/dataset-root 写的是同一个 override → closed 可见
+    root_c = tmp_path / "ds-c"
+    root_c.mkdir()
+    _write_dataset(root_c)
+    assert client.post(f"{_OPEN}/dataset-root",
+                       json={"root": str(root_c)}).status_code == 200
+    assert client.get(f"{_BASE}/dataset-root").json() == {
+        "root": str(root_c), "is_default": False}
+
+
+def test_open_start_validation_order(client):
+    """open 起跑校验序（端点层复验）：未知 dataset 404 → modalities 非法
+    400（video 显式拒绝文案 / 缺 script 文案，Review Focus 5）→
+    concurrency<1 400；detail 语义与闭环映射一致。"""
+    _seed_dataset_and_library(client)
+    r = _open_start_run(client, dataset="nope")
+    assert r.status_code == 404 and "不存在" in r.json()["detail"]
+    # modalities 含 video：400 带 v1 文本模态文案
+    r2 = _open_start_run(client, modalities=["video"])
+    assert r2.status_code == 400 and "video" in r2.json()["detail"]
+    # dialogue-only：400 缺 script 文案（台词随 script 通道渲染）
+    r3 = _open_start_run(client, modalities=["dialogue"])
+    assert r3.status_code == 400 and "script" in r3.json()["detail"]
+    r4 = _open_start_run(client, concurrency=0)
+    assert r4.status_code == 400
+
+
+def test_open_start_busy_409_cross_service(client):
+    """跨服务互斥双向（端点层）：closed 活跃 → open 起跑 409（detail 带
+    对端 run_id）；反向 open 活跃 → closed 起跑 409。时间窗由闸门 LLM
+    显式控制（镜像既有 closed busy 用例模式）。"""
+    _seed_dataset_and_library(client)
+    closed = client.app.state.closed_eval
+    open_svc = client.app.state.open_eval
+    # 方向一：closed 活跃（闸门 LLM 保持活跃）→ open 起跑 409
+    gate = _GateLLM()
+    gate.hold()
+    original_llm = closed._llm
+    closed._llm = gate
+    try:
+        r1 = _start_run(client)
+        assert r1.status_code == 200
+        closed_run = r1.json()["run_id"]
+        r2 = _open_start_run(client)
+        assert r2.status_code == 409
+        assert closed_run in r2.json()["detail"]
+    finally:
+        gate.release()
+        closed._llm = original_llm
+    assert _await_terminal(client, closed_run)["status"] == "succeeded"
+    _await_busy_released(closed)  # active 位释放窄窗口（见 helper docstring）
+    # 方向二：open 活跃（闸门换入 open 服务）→ closed 起跑 409
+    gate2 = _GateLLM()
+    gate2.hold()
+    original_open_llm = open_svc._llm
+    open_svc._llm = gate2
+    try:
+        r3 = _open_start_run(client)
+        assert r3.status_code == 200
+        open_run = r3.json()["run_id"]
+        r4 = _start_run(client)
+        assert r4.status_code == 409
+        assert open_run in r4.json()["detail"]
+    finally:
+        gate2.release()
+        open_svc._llm = original_open_llm
+    assert _await_terminal(client, open_run,
+                           base=_OPEN)["status"] == "succeeded"
+    _await_busy_released(open_svc)  # 终态落盘窗口等尽，teardown 零悬挂
+
+
+def test_open_run_end_to_end(client):
+    """open 端到端一条龙：起跑 → 终态 succeeded（mock 评审不可用按 spec §6
+    契约不算失败）→ 报告 200 → 白名单五件套 200 / 白名单外与 report.json
+    404 → 历史一行（五摘要键位透出）。"""
+    _seed_dataset_and_library(client)
+    r = _open_start_run(client)
+    assert r.status_code == 200
+    run_id = r.json()["run_id"]
+    body = _await_terminal(client, run_id, base=_OPEN)
+    assert body["status"] == "succeeded"
+    assert body["done"] == body["total"] == 2 and body["failed"] == 0
+    assert body["finished_at"] is not None
+
+    rep = _await_report(client, run_id, base=_OPEN)
+    assert rep.json()["sample_accounting"]["ok"] == 2
+
+    # 白名单五件套（md/csv 在 json 后毫秒级落盘，逐文件轮询——同闭环口径）
+    for name in ("report.md", "metrics.csv", "raw_results.json",
+                 "meta.json", "progress.jsonl"):
+        assert _await_file(client, run_id, name, base=_OPEN).status_code == 200, name
+    assert client.get(f"{_OPEN}/runs/{run_id}/files/report.json").status_code == 404
+    assert client.get(f"{_OPEN}/runs/{run_id}/files/whatever.txt").status_code == 404
+
+    # 历史列表含本 run：五摘要键位透出（mock 评审不可用 → 值可能 None，
+    # 键位契约在此钉死；取值规则专测见 test_open_history_summary_five_keys）
+    rows = client.get(f"{_OPEN}/runs").json()
+    mine = next(row for row in rows if row["run_id"] == run_id)
+    assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
+    assert {"accuracy40", "new_pass", "hit_pass", "agreement40",
+            "new_ratio"} <= set(mine)
+
+
+def test_open_history_summary_five_keys(client):
+    """history 摘要五键取值透出：手写终态 run 目录（meta + report.json，
+    磁盘夹具模式同 test_get_run_disk_only_fallback）→ GET /runs 行五键
+    按 _read_open_summary 统一取格出值（最近 0.4 有值格 + 宏平均直读）；
+    详情端点磁盘兜底同口径（注册表没有 → history 行）。"""
+    _seed_dataset_and_library(client)
+    out = Path(client.app.state.settings.open_eval_output_root)
+    d = out / "run-open-disk"
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({
+        "run_id": "run-open-disk", "status": "succeeded", "done": 2,
+        "total": 2, "failed": 0, "started_at": "2026-11-22T10:00:00+00:00",
+        "finished_at": "2026-11-22T10:00:05+00:00",
+        "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
+    (d / "report.json").write_text(json.dumps({
+        "theta_rows": [
+            {"theta": 0.2, "accuracy": 0.5, "agreement": 0.75},
+            {"theta": 0.4, "accuracy": 0.6, "agreement": 0.8}],
+        "pass_rates": {"new_macro": 0.7, "hit_macro": 0.9},
+        "new_ratio": {"macro": 0.3},
+    }, ensure_ascii=False), encoding="utf-8")
+    rows = client.get(f"{_OPEN}/runs").json()
+    mine = next(row for row in rows if row["run_id"] == "run-open-disk")
+    assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
+    assert mine["accuracy40"] == pytest.approx(0.6)  # 最近 headline 0.4 有值格
+    assert mine["agreement40"] == pytest.approx(0.8)
+    assert mine["new_pass"] == pytest.approx(0.7)
+    assert mine["hit_pass"] == pytest.approx(0.9)
+    assert mine["new_ratio"] == pytest.approx(0.3)
+    # 详情端点磁盘兜底（与 /runs 列表同口径）
+    body = client.get(f"{_OPEN}/runs/run-open-disk").json()
+    assert body["status"] == "succeeded" and body["total"] == 2
+    assert body["finished_at"] == "2026-11-22T10:00:05+00:00"
+
+
+def test_open_run_dir_guard(client):
+    """run_id 路径守卫（open 版 _run_dir 镜像闭环）：`..%2F` 路由不匹配
+    404；反斜杠/绝对路径形态进端点、被守卫拒——files 端点 detail 含
+    「不存在」（守卫 404，非路由裸 Not Found），report 端点 404「无报告」。"""
+    _seed_dataset_and_library(client)
+    assert client.get(
+        f"{_OPEN}/runs/..%2Fescape/files/report.md").status_code == 404
+    r = client.get(f"{_OPEN}/runs/..%5Cescape/files/report.md")
+    assert r.status_code == 404 and "不存在" in r.json()["detail"]
+    r2 = client.get(f"{_OPEN}/runs/C:%5CWindows%5Ctemp/files/report.md")
+    assert r2.status_code == 404 and "不存在" in r2.json()["detail"]
+    r3 = client.get(f"{_OPEN}/runs/..%5Cescape/report")
+    assert r3.status_code == 404 and "无报告" in r3.json()["detail"]
+
+
+def test_open_cancel_and_delete(client):
+    """cancel：受理 {ok:true} → cancelled 终态、重复取消 ok=false；运行中
+    删除 → 409「不可删除」、运行中报告未落盘 → 404；终态删除 {ok:true} →
+    详情 404 / 重复删除 404 / 历史不含。"""
+    _seed_dataset_and_library(client)
+    open_svc = client.app.state.open_eval
+    gate = _GateLLM()
+    gate.hold()
+    original_llm = open_svc._llm
+    open_svc._llm = gate
+    try:
+        run_id = _open_start_run(client).json()["run_id"]
+        # 运行中删除 → 409（active 位守卫，镜像闭环 delete 用例）
+        d = client.delete(f"{_OPEN}/runs/{run_id}")
+        assert d.status_code == 409 and "不可删除" in d.json()["detail"]
+        # 在途运行、报告未落盘 → 404（读侧容错，与闭环同口径）
+        assert client.get(f"{_OPEN}/runs/{run_id}/report").status_code == 404
+        c = client.post(f"{_OPEN}/runs/{run_id}/cancel")
+        assert c.status_code == 200 and c.json() == {"ok": True}
+    finally:
+        gate.release()
+        open_svc._llm = original_llm
+    body = _await_terminal(client, run_id, base=_OPEN)
+    assert body["status"] == "cancelled"
+    # 幂等：已终态再取消 → ok=false
+    assert client.post(f"{_OPEN}/runs/{run_id}/cancel").json() == {"ok": False}
+    # 终态删除（活跃位释放有毫秒级窗口：短轮询到 200，同闭环 delete 用例）
+    _await_report(client, run_id, base=_OPEN)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        r = client.delete(f"{_OPEN}/runs/{run_id}")
+        if r.status_code == 200:
+            break
+        time.sleep(0.01)
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert client.get(f"{_OPEN}/runs/{run_id}").status_code == 404
+    assert client.delete(f"{_OPEN}/runs/{run_id}").status_code == 404
+    assert all(row["run_id"] != run_id
+               for row in client.get(f"{_OPEN}/runs").json())
+
+
+def test_open_admin_403_401(client):
+    """open 端点族 11 个全部仅 admin：reviewer → 403（require_admin）；
+    未登录 → 401（get_current_user 先行短路）。"""
+    _seed_dataset_and_library(client)
+    assert client.post("/api/v1/users", json={
+        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
+    }).status_code == 200
+    client.post("/api/v1/auth/logout")
+    client.post("/api/v1/auth/login",
+                json={"username": "bob", "password": "pw-bob-1"})
+    run_id = "run-anything"
+    checks = [
+        lambda: client.get(f"{_OPEN}/dataset-root"),
+        lambda: client.post(f"{_OPEN}/dataset-root",
+                            json={"root": "/cache/MovieTags"}),
+        lambda: client.get(f"{_OPEN}/datasets"),
+        lambda: client.get(f"{_OPEN}/datasets/emotion/movies"),
+        lambda: client.post(f"{_OPEN}/runs",
+                            json={"dataset": "emotion",
+                                  "movies": {"mode": "all"}}),
+        lambda: client.get(f"{_OPEN}/runs"),
+        lambda: client.get(f"{_OPEN}/runs/{run_id}"),
+        lambda: client.post(f"{_OPEN}/runs/{run_id}/cancel"),
+        lambda: client.delete(f"{_OPEN}/runs/{run_id}"),
+        lambda: client.get(f"{_OPEN}/runs/{run_id}/report"),
+        lambda: client.get(f"{_OPEN}/runs/{run_id}/files/report.md"),
+    ]
+    for check in checks:
+        assert check().status_code == 403
+    client.post("/api/v1/auth/logout")
+    for check in checks:
+        assert check().status_code == 401

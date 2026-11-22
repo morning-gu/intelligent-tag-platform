@@ -23,6 +23,6 @@
 - `imports.py`    标签导入任务（接收/列表/详情/导出/撤销）
 - `content.py`    内容导入与资产查询 + 影片目录导入
 - `media.py`      媒体上传/文件名预检/构建任务/进度页/视频流
-- `eval.py`       闭环评测 admin 端点（数据集根/数据集/run 生命周期/报告/单片明细）
+- `eval.py`       评测 admin 端点（闭环 + 开放 open-eval Task 6：数据集根/数据集/run 生命周期/报告）
 - `config.py`     只读运行配置视图（直读 Settings 拼装，无 services/config）
 """
