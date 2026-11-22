@@ -45,6 +45,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from tagplatform.capabilities.llm.usage import combined_usage
+from tagplatform.capabilities.prompts.assets import (
+    SCENE_ANALYSIS_OUTPUT_TEXT, SCENE_ANALYSIS_ROLE_TEXT,
+    SUMMARY_OUTPUT_TEXT, SUMMARY_REQUIREMENTS_TEXT, SUMMARY_TASK_TEXT,
+)
 from tagplatform.services.content.assets.dataset import normalize
 from tagplatform.services.content.assets.emotions import FEELINGS, MOODS, prompt_catalog, to_emotions
 from tagplatform.services.content.assets.subtitles import SubtitleLine, lines_for_scene, load_subtitles
@@ -159,8 +163,9 @@ def scene_messages(title: str, year: str, genres: list[str],
     else:
         dialogue_block = "（本场景无字幕行）"
     text = (
-        "你是影视内容分析助手。请结合这场戏的原始剧情、字幕行与关键帧，"
-        "输出中文结构化分析。\n\n"
+        # 头/尾指令文案为中央常量（capabilities.prompts.assets）；
+        # 中段数据行（电影头/场景时间/角色/剧情/字幕/含情绪词表的要求块）就地拼
+        f"{SCENE_ANALYSIS_ROLE_TEXT}"
         f"电影：《{title}》({year})，类型：{'、'.join(genres) or '未知'}\n"
         f"场景时间：{_mmss(plan.start_ms)} – {_mmss(plan.end_ms)}\n"
         f"已知角色（人物情绪与说话人必须从这里选，不要编造）：{cast}\n"
@@ -176,10 +181,7 @@ def scene_messages(title: str, year: str, genres: list[str],
         "5. virtual_time（剧情时间，如“1945年夏末 / 现代，深夜23:40，暴雨”）"
         "与 location（地点），不确定就填空串。\n"
         "6. 人名一律保留影片原名（英文），不要音译。\n\n"
-        '只输出 JSON：{"description":"...","atmosphere":["悬疑神秘"],'
-        '"events":[{"description":"...","participants":[{"name":"...",'
-        '"emotions":["愤怒"]}]}],"virtual_time":"","location":"",'
-        '"dialogues":[{"line":1,"speaker":"..."}]}'
+        f"{SCENE_ANALYSIS_OUTPUT_TEXT}"
     )
     content: list[dict] = [{"type": "text", "text": text}]
     content.extend({"type": "image_url", "image_url": {"url": url}}
@@ -191,12 +193,11 @@ def summary_messages(title: str, year: str, genres: list[str],
                      synopsis: str) -> list[dict]:
     """整片剧情摘要请求：英文简介 → 200–300 字中文（JSON 模式，键 summary）。"""
     text = (
-        "把下面这部影片的英文剧情简介改写成中文整片剧情描述。\n"
+        f"{SUMMARY_TASK_TEXT}"
         f"电影：《{title}》({year})，类型：{'、'.join(genres) or '未知'}\n"
         f"英文简介：\n{synopsis.strip()}\n\n"
-        "要求：200–300 字，交代主要人物、核心冲突与结局走向；"
-        "人名保留影片原名（英文），不要音译。\n"
-        '只输出 JSON：{"summary": "中文剧情描述"}'
+        f"{SUMMARY_REQUIREMENTS_TEXT}"
+        f"{SUMMARY_OUTPUT_TEXT}"
     )
     return [{"role": "user", "content": text}]
 

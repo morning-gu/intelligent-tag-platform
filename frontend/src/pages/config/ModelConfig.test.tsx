@@ -9,7 +9,7 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ModelConfig from './ModelConfig'
 import { apiFetch } from '../../api/client'
-import type { PromptContractItem } from '../../api/prompts'
+import type { PromptContractItem, PromptRegistryGroup } from '../../api/prompts'
 import type { RuntimeConfig } from '../../api/config'
 
 vi.mock('../../api/client', async (importOriginal) => {
@@ -47,6 +47,15 @@ const CONFIG: RuntimeConfig = {
   database_path: '/data/tagplatform/tagplatform.db',
 }
 
+/** 流水线文案 registry 夹具（与后端 RegistryGroupOut 契约同形）。 */
+const REGISTRY: PromptRegistryGroup[] = [
+  {
+    module: 'quality',
+    title: '标签质量评估',
+    items: [{ name: 'PROMPT_VERSION', text: 'tag-quality-v4' }],
+  },
+]
+
 // ---------- mock 装配 ----------
 
 interface MockOptions {
@@ -54,9 +63,12 @@ interface MockOptions {
   promptsError?: Error
   config?: RuntimeConfig
   configError?: Error
+  registry?: PromptRegistryGroup[]
+  registryError?: Error
 }
 
-/** 按路径分发的 apiFetch 桩（页面只有 GET /prompts 与 GET /config 两个读端点）。 */
+/** 按路径分发的 apiFetch 桩（页面读端点：GET /prompts、GET /config、
+ * GET /prompts/registry 三者）。 */
 function mockApis(options: MockOptions = {}) {
   mockedApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/v1/prompts') {
@@ -66,6 +78,10 @@ function mockApis(options: MockOptions = {}) {
     if (path === '/api/v1/config') {
       if (options.configError) throw options.configError
       return options.config ?? CONFIG
+    }
+    if (path === '/api/v1/prompts/registry') {
+      if (options.registryError) throw options.registryError
+      return options.registry ?? REGISTRY
     }
     throw new Error(`未预期的请求：${path}`)
   })
@@ -100,8 +116,8 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(closedPre).toHaveTextContent('闭卷：{content} 候选清单：{candidates} 只输出 JSON。')
     const openPre = screen.getByText(/开卷：\{content\}/)
     expect(openPre).toHaveTextContent('开卷：{content} 自由生成标签。')
-    // 页头只读标识
-    expect(screen.getByText('只读 · 文案随代码版本')).toBeInTheDocument()
+    // 页头只读标识（Prompt 模板卡与流水线文案卡各一枚）
+    expect(screen.getAllByText('只读 · 文案随代码版本')).toHaveLength(2)
   })
 
   it('必需占位符说明动态来自 GET /prompts 契约（不手写文案）', async () => {
@@ -192,11 +208,32 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     mockedApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/v1/config') throw new Error('后端不可用')
       if (path === '/api/v1/prompts') return PROMPTS
+      if (path === '/api/v1/prompts/registry') return REGISTRY
       throw new Error(`未预期的请求：${path}`)
     })
     render(<ModelConfig />)
 
     expect(await screen.findByText('运行配置加载失败')).toBeInTheDocument()
     expect(screen.getByText('后端不可用')).toBeInTheDocument()
+  })
+
+  it('流水线文案区：按分组折叠渲染常量名与文案（默认展开）', async () => {
+    mockApis()
+    render(<ModelConfig />)
+
+    expect(await screen.findByText('流水线文案')).toBeInTheDocument()
+    expect(screen.getByText('标签质量评估')).toBeInTheDocument()
+    expect(screen.getByText('PROMPT_VERSION')).toBeInTheDocument()
+    expect(screen.getByText('tag-quality-v4')).toBeInTheDocument()
+  })
+
+  it('registry 加载失败：区内错误提示，Prompt 模板区不受影响', async () => {
+    mockApis({ registryError: new Error('后端不可用') })
+    render(<ModelConfig />)
+
+    expect(await screen.findByText('流水线文案加载失败')).toBeInTheDocument()
+    expect(screen.getByText('后端不可用')).toBeInTheDocument()
+    // Prompt 模板区独立加载不受影响
+    expect(await screen.findByText('Prompt 模板 · 封闭生成（closed）')).toBeInTheDocument()
   })
 })

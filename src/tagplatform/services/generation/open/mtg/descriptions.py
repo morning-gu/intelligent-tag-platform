@@ -17,6 +17,9 @@ import re
 from collections.abc import Iterable, Sequence
 
 from tagplatform.capabilities.llm.usage import accumulate_usage
+from tagplatform.capabilities.prompts.mtg import (
+    DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT,
+)
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import MTGParseError, extract_json_array
 
@@ -38,35 +41,6 @@ _SCENE_ID = re.compile(r"scene_\d+", re.I)
 _WRAP = "`'\"“”‘’《》〈〉"
 # 库内词条不带句末标点（"以…为特征的犯罪题材类型"），补写的句子结尾统一去掉
 _TAIL = "。．.；;，,、 "
-_RETRY_HINT = (
-    "\n\n上一版不合格：出现了具体影片信息、专名或长度越界。"
-    "请严格照要求重写，只输出 JSON。"
-)
-
-# ---- 指令文案（与解析器互为协议）----
-# 提取自 build_description_messages 的函数体字面量，逐字未改。本模块的
-# _parse_items / clean_description / is_general 就是这段文案的解析端：条目
-# 形状 {"tag","desc"}、desc 的长度带（DESC_MIN/DESC_MAX）与"通用性"规则两侧
-# 必须同改——文案要求什么、解析就认什么，改动只落一侧=静默丢数据。
-DESCRIPTION_INSTRUCTIONS = (
-    "## 通用释义（标签描述补写）\n"
-    "你在维护一个影视标签库。下面是待新增的标签（名称 + 归属目录），"
-    "请为每个标签写一句**通用释义**。\n"
-    "这句释义以后会脱离任何影片单独使用（标签库检索、审核界面展示），"
-    "必须只解释**这个词本身**指什么、具备什么特征。\n"
-    "硬性要求：\n"
-    "1. 长度 10-32 字，一句话；\n"
-    "2. 像词典条目，不叙述任何影片的剧情；\n"
-    "3. 禁止出现片名、人名、地名、具体情节、具体镜头或时间点，"
-    "禁止用“本片/这部片/影片中/主角/结尾”等指代；\n"
-    "4. 句式可参考现有标签库：\n"
-    "   - 宏大史诗：整体氛围宏大壮阔，具有史诗般的叙事格局\n"
-    "   - 黑色电影：以愤世嫉俗、道德模糊、阴暗氛围为特征的犯罪题材类型\n"
-    "   - 怀旧：以追忆过往和怀旧情感为主要观看需求\n"
-    "5. 只输出 JSON：{\"items\":[{\"tag\":\"标签名\",\"desc\":\"通用释义\"}]}，"
-    "不要解释、不要 Markdown 代码块。\n\n"
-    "标签清单：\n"
-)
 
 
 def clean_description(text: str | None) -> str:
@@ -127,7 +101,8 @@ def build_description_messages(items: Sequence[dict]) -> list[dict]:
 
 def build_description_template() -> dict:
     items = [{"tag": "{{候选标签}}", "dir": "{{归属目录全路径}}"}]
-    return {"messages": build_description_messages(items), "retry_suffix": _RETRY_HINT}
+    return {"messages": build_description_messages(items),
+            "retry_suffix": DESCRIPTION_RETRY_HINT}
 
 
 def _parse_items(content: str) -> list[dict]:
@@ -156,7 +131,7 @@ def fill_descriptions(client, items: Sequence[dict], *, names: Iterable[str] = (
     for attempt in range(retries + 1):
         request = messages if attempt == 0 else [{
             "role": "user",
-            "content": messages[0]["content"] + _RETRY_HINT,
+            "content": messages[0]["content"] + DESCRIPTION_RETRY_HINT,
         }]
         try:
             response = client.complete(

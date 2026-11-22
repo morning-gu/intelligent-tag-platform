@@ -67,3 +67,16 @@ OPEN_TEMPLATE_TEXT = "\n".join([
     "",
     "只输出 JSON 数组，不要输出其他文字。输出 5 到 15 个标签。",
 ])
+
+# closed 模式解析重试的格式纠正提示（2026-11-22 文案集中：逐字搬自
+# closed/producer.py 的 _RETRY_HINT，重调本组一次）。解析端是
+# closed/parse.parse_closed_output——重试描述的输出形状与解析契约
+# 两侧必须同改。
+CLOSED_RETRY_HINT = (
+    "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
+    '每个元素必须同时包含 "tag_id"（字符串）、"applicability"（1–5 整数）'
+    '与 "evidence"（对象）。evidence 内必须含 "content"、"scene"、"frame"'
+    ' 三个模态节，每节含 "evidence_strength"（1–5 整数）与 "evidences"'
+    '（数组，元素含 "scene_id" 与 "evidence" 字符串）。不要用对象包装、'
+    "不要任何解释文字或 Markdown 代码块。"
+)
