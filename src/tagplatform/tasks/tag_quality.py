@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, undefer
 
+from tagplatform.capabilities.prompts.quality import FIVE_LEVEL_PROMPT_VERSIONS
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.services.eval.tag_quality import (
     MAX_SCORE, PROMPT_VERSION, DimensionMetrics, QualityMetrics, ScoreDetails,
@@ -179,7 +180,7 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
             status = evaluation.status
             labels = evaluation.labels
             film_scores = list(evaluation.scores.values())
-            film_max = MAX_SCORE if evaluation.prompt_version == "tag-quality-v4" else 2
+            film_max = MAX_SCORE if evaluation.prompt_version in FIVE_LEVEL_PROMPT_VERSIONS else 2
             if film_scores:
                 scored_scales.add(film_max)
             total += len(labels)

@@ -162,8 +162,12 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     raw = json.loads((sample_dir / "quality_result.txt").read_text(encoding="utf-8"))
     assert raw["tags"] == [_item(requests["movie_other"][0][2][0]["id"], 0, 1)]
     template = json.loads((sample_dir / "quality_template.json").read_text(encoding="utf-8"))
-    assert template["prompt_version"] == "tag-quality-v4"
-    assert "恰有一项限定" in template["messages"][0]["content"]
+    assert template["prompt_version"] == "tag-quality-v5"
+    prompt = template["messages"][0]["content"]
+    assert example["messages"][0]["content"] == prompt
+    assert "准确概括影片的核心题材、主要叙事类型" in prompt
+    assert "与封闭标签的重复另行判断" in prompt
+    assert "恰有一项限定" in prompt
     assert "image_url" in {part["type"] for part in template["messages"][1]["content"]}
     assert isinstance(template["messages_without_keyframes"][1]["content"], str)
 

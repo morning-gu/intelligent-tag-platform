@@ -67,7 +67,7 @@ def test_registry_closed_and_quality_content(client):
     closed_texts = [i["text"] for i in groups["closed"]["items"]]
     assert any("候选标签按目录分组" in t for t in closed_texts)      # CLOSED_TEMPLATE_TEXT 特征串
     quality_items = {i["name"]: i["text"] for i in groups["quality"]["items"]}
-    assert quality_items["PROMPT_VERSION"] == "tag-quality-v4"
+    assert quality_items["PROMPT_VERSION"] == "tag-quality-v5"
     assert "## 标签质量评估" in quality_items["RUBRIC_TEXT"]
 
 
