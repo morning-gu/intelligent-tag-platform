@@ -297,8 +297,11 @@ report.json 的 summary，缺失或截断 → null（宁缺勿假）。**与闭�
 
 **重评审（rereview）**：`POST /runs/{id}/rereview` 复用 produced/ 快照
 重新评审、重写报告，**不重跑生成**——换评审模型或阈值后想看新口径效果
-时用。评审客户端设 `max_tokens=8192` 上限（镜像质量评估），防推理模型
-无上限推理撞 SDK 超时。
+时用。评审客户端设 `max_tokens=8192` 上限（镜像质量评估）；并携带
+`reasoning_effort=low`（`TAGPLT_OPEN_EVAL_REVIEW_REASONING_EFFORT`，默认
+low）——glm-5.3-flash 始终思考、默认推理量极大（实测单条 8000+ token 全
+耗在推理、正文未输出即截断致漏判），low 档推理几百 token 即完整输出，
+单条约 30s。模型不支持该字段时设空串。
 
 **逐条并发评审 + 实时报告**：评审逐条进行（每条一个请求，并发 4 路），
 每条携带「该片全部标签」兄弟清单作上下文保留跨标签视野（相对价值/语义

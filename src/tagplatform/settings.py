@@ -227,6 +227,10 @@ class Settings(BaseSettings):
     open_eval_review_model: str = ""
     open_eval_review_base_url_env: str = ""
     open_eval_review_api_key_env: str = ""
+    # 评审模型推理强度（extra_body.reasoning_effort）：glm-5.3-flash 始终思考、
+    # 默认推理量极大会撞 max_tokens 截断致漏判，low 档推理几百 token 即完整
+    # 输出。空串 = 不携带（模型不支持该字段时设空）。
+    open_eval_review_reasoning_effort: str = "low"
 
 
 @lru_cache

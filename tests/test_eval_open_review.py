@@ -302,6 +302,14 @@ def test_make_review_client_builds_independent_client():
     assert client.temperature == 0.0
     assert client.max_tokens == 8192
     assert client.request_interval == 0.7
+    assert client.extra_body == {"reasoning_effort": "low"}
+
+
+def test_make_review_client_reasoning_effort_empty_omits_extra_body():
+    settings = Settings(open_eval_review_model="review-x",
+                        open_eval_review_reasoning_effort="")
+    client = make_review_client(settings, MainLLM())
+    assert client.extra_body == {}
 
 
 def test_make_review_client_env_names_fall_back_to_main():

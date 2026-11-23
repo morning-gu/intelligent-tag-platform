@@ -90,16 +90,20 @@ def make_review_client(settings: Settings, llm):
     if not settings.open_eval_review_model:
         return llm
     from tagplatform.capabilities.llm import OpenAIClient
+    # 推理强度（glm 始终思考，默认推理量极大撞上限截断致漏判；low 档完整
+    # 输出）；空串不携带 extra_body（模型不支持时设空）。
+    extra_body = ({"reasoning_effort": settings.open_eval_review_reasoning_effort}
+                  if settings.open_eval_review_reasoning_effort else None)
     return OpenAIClient(
         model=settings.open_eval_review_model,
         base_url_env=settings.open_eval_review_base_url_env or settings.llm_base_url_env,
         api_key_env=settings.open_eval_review_api_key_env or settings.llm_api_key_env,
         temperature=0.0,
         request_interval=settings.llm_request_interval,
-        # 评审输出上限（镜像 tag_quality 的 8192）：推理模型面对整片标签
-        # 会无上限地推理，不设上限会撞 SDK 超时再重试、整片评审卡死。
-        # 超限截断走既有二分切分，代价可控。
+        # 评审输出上限（镜像 tag_quality 的 8192）：配合 low 推理强度，
+        # 单条输出小、不超限。
         max_tokens=8192,
+        extra_body=extra_body,
     )
 
 
