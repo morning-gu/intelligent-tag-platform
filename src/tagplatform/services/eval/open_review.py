@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tagplatform.capabilities.prompts.open_review import (
     REVIEW_PROMPT, REVIEW_PROMPT_VERSION, REVIEW_RETRY_HINT,
@@ -113,128 +115,120 @@ def review_calibre(settings: Settings, llm) -> dict:
     return {"model": model, "same_model": model == settings.llm_model}
 
 
+# 逐条评审并发度：单条请求输出小、推理聚焦，不会超上限反复切分；并发压
+# 墙钟时间。材料每条重发（token 成本上升），评测专用可接受。批量评审遇
+# 推理模型会反复超限切分（实测 glm 11 条递归切到单条耗十几分钟），故逐条。
+REVIEW_CONCURRENCY = 4
+
+
 def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
-                      run_id: str, modalities=("script", "dialogue")) -> list[dict]:
-    """对一片的全部产出标签做三维独立评审，同序回填三维分与推导的 pass。
+                      run_id: str, modalities=("script", "dialogue"),
+                      on_result=None, concurrency: int = REVIEW_CONCURRENCY) -> list[dict]:
+    """对一片产出标签做三维独立评审：**逐条并发**，每条携带全量兄弟清单。
 
-    入参行 {"id","name","desc","level","scenes":[scene_id,...]，可选
-    "judge_reference"}；返回同序行追加 {"relevance"/"semantics"/"value":
-    {"score","reason"}, "pass": bool | None, "reason": str, "quote"}。送进
-    模型的 id 一律按批次位置重编为 "t0".."tN"（防名称撞车——模型按 id
-    回填，不按名称匹配），结果按位置映射回原行：入参行的 id 与其余字段
-    原样保留；即便行里带了生成侧 reason 等多余字段也不会进提示（防同模
-    锚定——清单只投影评审需要的字段）。
+    逐条而非批量：单条输出小、推理聚焦，不超上限切分；并发压墙钟。每条
+    请求附「该片全部标签」名清单作上下文——保留跨标签视野（相对价值与
+    语义重复判断），但只评目标一条。on_result(index, row) 每条完成时回调
+    （供运行器增量落实时报告），回调异常不影响评审。
 
-    抛 ReviewRequestError 的四种情况：材料为空（modalities 未含 script
-    ——台词在 script 通道渲染，摘录核验无从进行，绝不产出假的全 fail
-    报告）、请求失败（含传输异常）、同一批两次解析失败、全部行漏判。
-    部分漏判不抛——漏判行 pass=None 占位，由指标层排除出分母（None≠0
-    纪律）。
+    入参行 {"id","name","desc","level","scenes",judge_reference?}；同序回填
+    三维分与推导 pass。材料为空 → ReviewRequestError；全部漏判/全部调用
+    失败 → ReviewRequestError；部分漏判 pass=None（None≠0，排除出分母）。
     """
     if not tag_rows:
         return []
     haystack = render_content(content, modalities=modalities)
-    # render_content 对 script 关闭静默返回 ""（台词随 script 通道一起被
-    # 关掉）——空材料下摘录核验无从进行，每个 pass 都会被拦成 fail，
-    # 得到一份貌似合法的全 fail 报告（最坏的静默错误形状）。本层自防：
-    # 按评审失败语义响亮抛出，而非依赖上层起跑校验。
     if not haystack.strip():
         raise ReviewRequestError("评审材料为空（modalities 未含 script），摘录核验无从进行")
+    quote_haystack = _normalize_quote(haystack)
+    sibling_names = [row.get("name") for row in tag_rows]
     results: dict[int, dict] = {}
     errors: list[str] = []
+    lock = threading.Lock()
 
-    def batch(rows_slice: list[dict], offset: int) -> None:
-        if errors:  # 已有硬失败（端点死亡/协议失败）：后续批次不再烧 token
-            return
-        messages = _build_messages(haystack, rows_slice)
+    def review_one(index: int, row: dict):
+        messages = _build_single_messages(haystack, sibling_names, row)
+        tag_run_id = f"{run_id}:t{index}"
+        local_errors: list[str] = []
         try:
-            response = client.complete(messages, run_id)
-        except Exception as exc:  # noqa: BLE001 —— 端点任何异常统一按调用失败记
-            errors.append(f"评审调用失败：{exc}")
-            return
+            response = client.complete(messages, tag_run_id)
+        except Exception as exc:  # noqa: BLE001 —— 单条调用失败只影响该条
+            return index, None, f"评审调用失败：{exc}"
         text, ok, transport_error = _unwrap(response)
-        truncated = _truncated(response)
-        if (truncated or (not ok and _input_limit(transport_error.lower()))) \
-                and len(rows_slice) > 1:
-            middle = len(rows_slice) // 2
-            logger.info("评审请求超长，二分重试 run_id=%s batch_sizes=%d,%d",
-                        run_id, middle, len(rows_slice) - middle)
-            batch(rows_slice[:middle], offset)
-            batch(rows_slice[middle:], offset + middle)
-            return
         if not ok:
-            errors.append(f"评审调用失败：{transport_error}")
-            return
-        if truncated:
-            errors.append("评审输出超出长度限制")
-            return
-        verdicts = _parse_with_retry(client, messages, text, len(rows_slice),
-                                     run_id, errors)
-        if errors or verdicts is None:
-            return
-        for index, verdict in verdicts.items():
-            results[offset + index] = verdict  # 批内 id 重编 → 全局位置回填
-
-    batch(tag_rows, 0)
-    if errors:
-        raise ReviewRequestError("；".join(dict.fromkeys(errors)))
-    if not results:
-        raise ReviewRequestError("评审响应未包含任何有效判决（全部漏判）")
-    # 摘录必核：高 relevance 分且摘录核不中 → 降档到 1（空口高分在这里拦下）。
-    # 核验 haystack 归一化——对齐生产 judge 的判法（_require_quotes 对
-    # render_content 结果先 _normalize_quote 再核）：quote 的 8 字窗跨过
-    # 标点/换行时，raw 文本中间隔着标点会误杀真高分。
-    quote_haystack = _normalize_quote(haystack)
-    for verdict in results.values():
+            return index, None, f"评审调用失败：{transport_error}"
+        if _truncated(response):
+            return index, None, "评审输出超出长度限制"
+        verdicts = _parse_with_retry(client, messages, text, 1, tag_run_id, local_errors)
+        if local_errors:
+            return index, None, "；".join(local_errors)
+        verdict = (verdicts or {}).get(0)
+        if verdict is None:
+            return index, None, None  # 漏判（无硬错误）
+        # 摘录必核：高 relevance 且摘录核不中归一化材料 → 降档到 1。
         relevance = verdict["relevance"]["score"]
         if isinstance(relevance, int) and relevance >= REVIEW_PASS_FLOORS["relevance"] \
                 and not _quote_ok(verdict["quote"], quote_haystack):
             verdict["relevance"] = {"score": 1, "reason": "摘录未命中原文"}
-    # 同序回填：漏判行占位 None（排除出分母，计 review_missing 由上层做）；
-    # pass 由三维分按阈值推导——显式 null 分不算通过（计 undetermined）。
-    for index, row in enumerate(tag_rows):
-        verdict = results.get(index)
-        if verdict is None:
-            verdict = {axis: {"score": None, "reason": "评审未返回该条判定"}
-                       for axis in REVIEW_PASS_FLOORS}
-            verdict.update({"pass": None, "reason": "评审未返回该条判定",
-                            "quote": None})
-        else:
-            verdict["pass"] = all(
-                isinstance(verdict[axis]["score"], int)
-                and verdict[axis]["score"] >= floor
-                for axis, floor in REVIEW_PASS_FLOORS.items())
-            verdict["reason"] = "；".join(
-                verdict[axis]["reason"] for axis in REVIEW_PASS_FLOORS
-                if verdict[axis]["reason"])
-        row.update(verdict)
+        verdict["pass"] = all(
+            isinstance(verdict[axis]["score"], int) and verdict[axis]["score"] >= floor
+            for axis, floor in REVIEW_PASS_FLOORS.items())
+        verdict["reason"] = "；".join(
+            verdict[axis]["reason"] for axis in REVIEW_PASS_FLOORS
+            if verdict[axis]["reason"])
+        return index, verdict, None
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        futures = [pool.submit(review_one, i, row) for i, row in enumerate(tag_rows)]
+        for future in as_completed(futures):
+            index, verdict, error = future.result()
+            with lock:
+                if error:
+                    errors.append(error)
+                if verdict is not None:
+                    results[index] = verdict
+                    tag_rows[index].update(verdict)
+                else:
+                    tag_rows[index].update(
+                        {axis: {"score": None, "reason": "评审未返回该条判定"}
+                         for axis in REVIEW_PASS_FLOORS})
+                    tag_rows[index].update(
+                        {"pass": None, "reason": error or "评审未返回该条判定",
+                         "quote": None})
+            if on_result is not None:
+                try:
+                    on_result(index, tag_rows[index])
+                except Exception:  # noqa: BLE001 —— 实时回调失败不影响评审
+                    logger.exception("评审实时回调失败（不影响评审）")
+    if not results:
+        if errors:
+            raise ReviewRequestError("；".join(dict.fromkeys(errors)))
+        raise ReviewRequestError("评审响应未包含任何有效判决（全部漏判）")
     return tag_rows
 
 
-def _build_messages(haystack: str, rows: list[dict]) -> list[dict]:
-    """评审消息：system = REVIEW_PROMPT（rubric + 补充 + 协议），user = 材料 + 清单。
+def _build_single_messages(haystack: str, sibling_names: list, row: dict) -> list[dict]:
+    """单条评审消息：system = REVIEW_PROMPT，user = 材料 + 兄弟清单 + 目标标签。
 
-    清单按批次位置重编 id（"t0".."tN"）并只投影评审字段——防名称撞车与
-    生成侧 reason 锚定；judge_reference（生产 judge 三维分与理由）仅在
-    行里有时附上，rubric 补充说明已把它定位为仅供参考。清单标题与 rubric
-    的「待评估标签」一致（Mock 质量分支也按这个标题切分材料）。
+    「该片全部标签」名清单作上下文（保留跨标签视野），「待评估标签」只放
+    目标一条（id 重编 t0，防名称撞车）；judge_reference 仅在有时附上。
+    清单标题与 rubric 的「待评估标签」一致（Mock 质量分支按此标题切分）。
     """
-    listing = []
-    for position, row in enumerate(rows):
-        entry = {
-            "id": f"t{position}",
-            "name": row.get("name"),
-            "desc": row.get("desc"),
-            "level": row.get("level"),
-            "scenes": list(row.get("scenes") or []),
-        }
-        if row.get("judge_reference") is not None:
-            entry["judge_reference"] = row["judge_reference"]
-        listing.append(entry)
+    target = {
+        "id": "t0",
+        "name": row.get("name"),
+        "desc": row.get("desc"),
+        "level": row.get("level"),
+        "scenes": list(row.get("scenes") or []),
+    }
+    if row.get("judge_reference") is not None:
+        target["judge_reference"] = row["judge_reference"]
     user_content = (
         haystack
+        + "\n\n## 该片全部标签（上下文）\n"
+        + json.dumps(sibling_names, ensure_ascii=False)
         + "\n\n## 待评估标签\n"
-        + json.dumps(listing, ensure_ascii=False)
+        + json.dumps([target], ensure_ascii=False)
     )
     return [
         {"role": "system", "content": REVIEW_PROMPT},

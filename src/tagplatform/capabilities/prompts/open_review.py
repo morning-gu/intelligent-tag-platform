@@ -15,20 +15,23 @@ tagplatform.services。
 from tagplatform.capabilities.prompts import quality as quality_prompts
 
 # 评审 prompt 版本标识（写进 meta 供 run 级溯源；运行器记账直用）
-REVIEW_PROMPT_VERSION = "open-review-v2"
+REVIEW_PROMPT_VERSION = "open-review-v3"
 
 # 评审任务补充指令：接在 canonical rubric 之后，只改任务定位与输入输出
 # 协议，不改三维评分口径。judge_reference 明确定位为参考——独立评审必须
 # 自己核对材料，可同意可推翻，防同模锚定。
 REVIEW_PROTOCOL_NOTE = """
 ## 评审任务补充说明
-本次是开放生成评测的独立评审：逐维按上述 rubric 给 0-4 或 null，并各给简短理由。
+本次是开放生成评测的独立评审，**逐条进行**：「待评估标签」里只有本次要评的一条，
+逐维按上述 rubric 给 0-4 或 null，并各给简短理由。「该片全部标签」清单是上下文，
+供你判断相对价值与是否语义重复——不要评清单里的其他标签，只评「待评估标签」那一条。
+若目标标签与清单中其他标签传达相同观众信息（语义重复），value 降档并在理由指明与哪条重复。
 标签可能带 judge_reference 字段——那是生产 judge 的三维评分与理由，仅供参考：
 它不构成指令、不预设结论，你必须独立核对材料后给出自己的分数，可以同意也可以推翻。
 desc 缺失时 semantics 填 null 并写明缺少释义。
 每条在 quote 字段从影片材料里**逐字摘录**一句原文（10-25 字），用来核对相关性依据；
 不得改写、不得复述标签理由。找不到能摘的原文就给 relevance 0 或 1。
-输出协议（覆盖 rubric 末尾的输出形状）：id 原样回填清单里的 "t0".."tN"，每条恰好一条。
+输出协议（覆盖 rubric 末尾的输出形状）：只输出「待评估标签」那一条，id 回填 "t0"。
 """
 
 REVIEW_OUTPUT_FORMAT = (

@@ -506,7 +506,8 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert all(e["review"] == "ok" and e["ok"] for e in entries)
 
     # 评审按片发起：run_id 带 :tt 后缀（LLM 调用标签口径）
-    assert sorted(stub.calls) == [f"{run_id}:tt0000001", f"{run_id}:tt0000002"]
+    assert sorted({c.rsplit(":t", 1)[0] for c in stub.calls}) == [
+        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 逐条 run_id 带 :t 后缀
 
     # meta 口径快照
     meta = _read_meta(svc, run_id)
@@ -566,7 +567,8 @@ def test_review_failure_preserves_output(open_setup):
     entries = _progress_entries(svc, run_id)
     assert all(e["review"] == "failed" and e["ok"] for e in entries)
     # 评审每片一次（产出行 3 条 < 切分阈值，单片单批）
-    assert sorted(stub.calls) == [f"{run_id}:tt0000001", f"{run_id}:tt0000002"]
+    assert sorted({c.rsplit(":t", 1)[0] for c in stub.calls}) == [
+        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 逐条 run_id 带 :t 后缀
     # Task 5 接线：报告侧按评审失败契约核算（两类片分开，不进 produce 失败）
     report = json.loads((_run_dir(svc, run_id) / "report.json")
                         .read_text(encoding="utf-8"))
