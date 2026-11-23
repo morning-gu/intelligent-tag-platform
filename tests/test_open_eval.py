@@ -274,11 +274,14 @@ class _ReviewOkStub:
         if self._delay:
             time.sleep(self._delay)
         self.calls.append(run_id)
-        reviews = [{"id": f"t{i}",
+        labels = json.loads(messages[-1]["content"].rsplit("## 待评估标签\n", 1)[1])
+        reviews = [{"id": label["id"],
+                    "pass": True if label["desc"] else None,
+                    "reason": "场景检索有独立价值" if label["desc"] else "缺少释义，暂无法决定",
                     "relevance": {"score": 4, "reason": "场景有据"},
                     "semantics": {"score": 3, "reason": "名称清晰"},
                     "value": {"score": 3, "reason": "有区分度"},
-                    "evidence_scene_ids": ["scene_001", "scene_002"]} for i in range(self._total)]
+                    "evidence_scene_ids": ["scene_001", "scene_002"]} for label in labels[:self._total]]
         return json.dumps({"reviews": reviews}, ensure_ascii=False)
 
 
@@ -488,6 +491,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert h1["desc"] == "评测夹具标签"
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
+    assert h1["review"]["reason"] == "场景检索有独立价值"
     assert h1["review"]["evidence_scene_ids"] == ["scene_001", "scene_002"]
     assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")

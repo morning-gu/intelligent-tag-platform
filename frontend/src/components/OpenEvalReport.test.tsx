@@ -43,7 +43,7 @@ function review(pass: boolean | null, r = 4, s = 3, v = 3): TagReview {
     relevance: { score: r, reason: '相关理由' },
     semantics: { score: s, reason: '语义理由' },
     value: { score: v, reason: '价值理由' },
-    reason: '相关理由；语义理由；价值理由',
+    reason: '有独立检索价值，建议保留',
     evaluated: pass !== null, evidence_scene_ids: ['scene_1'],
   }
 }
@@ -94,7 +94,8 @@ function baseReport(over: Partial<OpenEvalReportData> = {}): OpenEvalReportData 
     calibre: {
       llm_model: 'qwen3.8-27b', embedding_model: 'bge-m3',
       prompt_version: 'mtg-v6-graded-judge', review_model: 'deepseek-v4.1-flash',
-      review_same_model: false, review_prompt_version: 'open-review-v2',
+      review_same_model: false, review_prompt_version: 'open-review-v7',
+      review_config: { pass_mode: 'model' },
       library_version: 'lib-v3', dataset_id: 'genome-scores',
       modalities: ['script', 'dialogue'],
     },
@@ -173,6 +174,8 @@ describe('OpenEvalReport 报告视图', () => {
     // 展开第一行（antd 展开按钮 aria-label）
     const expandButtons = within(section).getAllByRole('button', { name: /展开行|Expand row/ })
     fireEvent.click(expandButtons[0])
+    expect(await within(section).findByText('有独立检索价值，建议保留')).toBeInTheDocument()
+    expect(within(section).getByText('评审理由')).toBeInTheDocument()
     expect(await within(section).findByText('judge 依据')).toBeInTheDocument()
     expect(within(section).getByText(/生产 judge，仅供参考/)).toBeInTheDocument()
     expect(within(section).getAllByText('原文摘录').length).toBeGreaterThan(0)

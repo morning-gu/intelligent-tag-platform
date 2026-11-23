@@ -160,11 +160,11 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
 ]
 
 /** 展开行：评审理由 / 摘录核验 / judge 参考（仅供参考，评审独立判断）。 */
-function labelDetail(row: LabelRow) {
+function labelDetail(row: LabelRow, modelDecision: boolean) {
   const reference = row.judge_reference
   return (
     <Descriptions size="small" column={1} items={[
-      { key: 'reason', label: '评审理由', children: row.review?.reason || '—' },
+      { key: 'reason', label: modelDecision ? '评审理由' : '评分理由汇总', children: row.review?.reason || '—' },
       { key: 'evidence', label: '评审引用场景', children: row.review?.evidence_scene_ids?.join('、') || '—' },
       { key: 'quote', label: '生产 judge 摘录', children: reference?.quote || '—' },
       {
@@ -301,7 +301,7 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
                     dataSource={movieLabelRows(movie)}
                     pagination={false}
                     scroll={{ x: 760 }}
-                    expandable={{ expandedRowRender: labelDetail }}
+                    expandable={{ expandedRowRender: (row) => labelDetail(row, calibre.review_config?.pass_mode === 'model') }}
                   />
                 )}
               </Space>

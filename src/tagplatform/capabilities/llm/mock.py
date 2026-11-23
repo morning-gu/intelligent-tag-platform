@@ -214,17 +214,25 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     return items
 
 
-def _quality_output(text: str) -> dict:
+def _quality_output(text: str, *, open_review: bool = False) -> dict:
     material, _, label_json = text.rpartition("\n\n## 待评估标签\n")
     labels = json.loads(label_json)
     scenes = _parse_scenes(material)
-    return {"tags": [{
+    rows = [{
         "id": label["id"],
         "relevance": {"score": 2 if scenes else None, "reason": "模拟内容评分"},
         "semantics": {"score": 2 if label["desc"] else None, "reason": "模拟语义评分"},
         "value": {"score": 2 if scenes else None, "reason": "模拟标签价值评分"},
         "evidence": scenes[:1],
-    } for label in labels]}
+    } for label in labels]
+    if open_review:
+        for row in rows:
+            row["pass"] = bool(scenes)
+            row["reason"] = "模拟总评：标签值得保留" if scenes else "模拟总评：影片缺少相关材料"
+            row["evidence_scene_ids"] = [scene["scene_id"] for scene in scenes[:2]]
+            del row["evidence"]
+        return {"reviews": rows}
+    return {"tags": rows}
 
 
 class MockLLMClient:
@@ -244,7 +252,7 @@ class MockLLMClient:
     def complete(self, messages: list[dict], run_id: str) -> LLMResponse:
         text = _extract_text(messages)
         if str(messages[0]["content"]).startswith("## 标签质量评估"):
-            out = _quality_output(text)
+            out = _quality_output(text, open_review="## 开放评测补充规则" in str(messages[0]["content"]))
         elif _MTG_JUDGE_MARKER in text:
             out = _judge_output(text, run_id)
         elif _MTG_VERIFY_MARKER in text:

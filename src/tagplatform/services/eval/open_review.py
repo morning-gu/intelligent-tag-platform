@@ -15,7 +15,6 @@ from tagplatform.settings import Settings
 # canonical 在 prompt 常量模块（文案与版本同驻），这里转出口给运行器记账
 # （meta.review.prompt_version），import 路径与 make_review_client 对齐。
 __all__ = [
-    "REVIEW_PASS_FLOORS",
     "REVIEW_PROMPT_VERSION",
     "ReviewRequestError",
     "make_review_client",
@@ -24,10 +23,7 @@ __all__ = [
 ]
 
 
-# 评审通过阈值：与生产 judge 的保留阈值（pipeline._JUDGE_SCORE_FLOORS）
-# 对齐——relevance/semantics ≥3、value ≥2。评审通过率即"独立评审认为达到
-# 生产保留标准的标签占比"。null 分（无法判断）不算通过。
-REVIEW_PASS_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
+_REVIEW_DIMENSIONS = ("relevance", "semantics", "value")
 
 
 class ReviewRequestError(RuntimeError):
@@ -68,7 +64,7 @@ def review_calibre(settings: Settings, llm, client=None) -> dict:
         "reasoning_effort": (getattr(client, "extra_body", None) or {}).get("reasoning_effort"),
         "max_tokens": getattr(client, "max_tokens", None),
         "max_concurrent_requests": settings.open_eval_review_concurrency,
-        "pass_floors": dict(REVIEW_PASS_FLOORS),
+        "pass_mode": "model",
         "batch_mode": "movie",
     }
 
@@ -138,7 +134,7 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         verdict = results.get(index)
         if verdict is None:
             error = errors[index]
-            row.update({axis: {"score": None, "reason": error} for axis in REVIEW_PASS_FLOORS})
+            row.update({axis: {"score": None, "reason": error} for axis in _REVIEW_DIMENSIONS})
             row.update({"pass": None, "reason": error, "evidence_scene_ids": [], "evaluated": False})
         else:
             label = labels[index]
@@ -148,16 +144,10 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
             verdict["evidence_scene_ids"] = sorted(cited)
             relevance = verdict["relevance"]["score"]
             minimum = {"scene": 1, "film": 2}.get(label["level"], 1)
-            if isinstance(relevance, int) and relevance >= REVIEW_PASS_FLOORS["relevance"] and len(cited) < minimum:
+            if isinstance(relevance, int) and relevance >= 3 and len(cited) < minimum:
                 verdict["relevance"] = {"score": None, "reason": "有效来源场景不足，无法核验所给相关性高分"}
             if not (label["desc"] or "").strip():
                 verdict["semantics"] = {"score": None, "reason": "缺少释义"}
-            scores = {axis: verdict[axis]["score"] for axis in REVIEW_PASS_FLOORS}
-            below_floor = any(score is not None and score < REVIEW_PASS_FLOORS[axis]
-                              for axis, score in scores.items())
-            verdict["pass"] = False if below_floor else None if None in scores.values() else True
-            verdict["reason"] = "；".join(verdict[axis]["reason"] for axis in REVIEW_PASS_FLOORS
-                                        if verdict[axis]["reason"])
             row.update(verdict, evaluated=True)
     if not results:
         raise ReviewRequestError("；".join(dict.fromkeys(errors.values())))
@@ -165,7 +155,7 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
 
 
 def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
-    """按影片全局行序号解析三维分数和引用场景。
+    """按影片全局行序号解析三维分数、总评和引用场景。
 
     畸形家族容错：首尾整圈 ``` 围栏剥除（tag_quality 同款）、直读失败按
     首尾大括号抠对象（verify._loads 同款）、reviews 为按 id 索引的单
@@ -203,18 +193,25 @@ def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
             continue
         seen.add(index)
         dimensions: dict[str, dict] = {}
-        for axis in REVIEW_PASS_FLOORS:
+        for axis in _REVIEW_DIMENSIONS:
             if axis not in item:  # 缺维度键 = 未完成（显式 null 才是无法判断）
                 break
             score, reason = _clean_dimension(item[axis])
             if score is _MISSING:
                 break
             dimensions[axis] = {"score": score, "reason": reason}
-        if len(dimensions) != len(REVIEW_PASS_FLOORS):
+        if len(dimensions) != len(_REVIEW_DIMENSIONS):
+            continue
+        decision = item.get("pass")
+        reason = item.get("reason")
+        if ("pass" not in item or (decision is not None and not isinstance(decision, bool))
+                or not isinstance(reason, str) or not reason.strip()):
             continue
         evidence = item.get("evidence_scene_ids")
         results[index] = {
             **dimensions,
+            "pass": decision,
+            "reason": reason.strip(),
             "evidence_scene_ids": ([scene_id for scene_id in evidence if isinstance(scene_id, str)]
                                    if isinstance(evidence, list) else []),
         }

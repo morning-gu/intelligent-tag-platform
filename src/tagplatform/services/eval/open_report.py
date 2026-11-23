@@ -8,7 +8,7 @@ gt 排序任务。报告改为分支式内容组织：汇总卡（通过率 + �
 
 输入是 OpenMovieResult 列表（干跑运行器的原子产出）：hits/new_words
 行带 review = {"pass","relevance","semantics","value","reason","evidence_scene_ids","evaluated"}
-（三维各 {"score","reason"}，pass 由评审层按阈值推导）或 None（该片
+（三维各 {"score","reason"}，pass 和总评由评审模型直接给出）或 None（该片
 评审失败，产出不作废）。三维汇总复用 services/eval/tag_quality 的
 quality_metrics（与生产批次汇总同一套指标机制）。
 

@@ -46,7 +46,7 @@ docstring 的说明）。
 
 **无 gt / 无 θ**（2026-11-23 三维化）：开放生成没有排序真值任务，
 闭环遗留的 gt 加载、θ 网格、集合准确率与标定全部移除；头条指标是
-评审通过率（三维分按阈值推导）与新词占比。
+评审通过率（按模型给出的保留结论统计）与新词占比。
 
 历史扫描：`history()` 扫
 `open_eval_output_root/*/meta.json` 出历史行：meta.status=running 且
@@ -158,7 +158,7 @@ class OpenMovieResult:
     - `hits` 行 `{"tag_id","tag_name","judge_reference","review"}`：
       tag_id 非空的产出（库内命中）；review 为
       `{"pass","relevance","semantics","value","reason","quote"}`（三维
-      各 {"score","reason"}，pass 由分数按阈值推导）或 None（该片评审失败）；
+      各 {"score","reason"}，pass 由评审模型直接给出）或 None（该片评审失败）；
     - `new_words` 行 `{"name","desc","level","judge_reference","review"}`：
       tag_id 为空的产出（模型新词）；desc 取 candidate_description（生成侧
       通用释义）；judge_reference 为生产 judge 三维分（审计缺失时 None）；

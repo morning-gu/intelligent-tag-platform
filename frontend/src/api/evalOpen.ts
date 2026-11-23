@@ -60,8 +60,7 @@ export interface DimensionScore {
   reason: string
 }
 
-/** 标签评审结果：pass 由三维分按阈值推导（relevance≥3 / semantics≥3 /
- * value≥2），null = 漏判（排除出通过率分母，None≠0）。 */
+/** 标签评审结果，pass 由终评模型直接给出。 */
 export interface TagReview {
   pass: boolean | null
   relevance: DimensionScore
@@ -209,7 +208,7 @@ export interface OpenEvalReport {
       reasoning_effort?: string | null
       max_tokens?: number | null
       max_concurrent_requests?: number
-      pass_floors?: Record<string, number>
+      pass_mode?: 'model'
     }
     library_version: string | null
     dataset_id: string | null

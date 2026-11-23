@@ -9,7 +9,6 @@ from tagplatform.capabilities.llm import LLMResponse, MockLLMClient, OpenAIClien
 from tagplatform.capabilities.prompts.open_review import REVIEW_PROMPT
 from tagplatform.schemas import ContentJSON
 from tagplatform.services.eval.open_review import (
-    REVIEW_PASS_FLOORS,
     ReviewRequestError,
     make_review_client,
     review_calibre,
@@ -59,8 +58,9 @@ def _rows(count: int = 2) -> list[dict]:
     return (head + tail)[:count]
 
 
-def _v(r=4, s=3, v=3, evidence=("scene_001", "scene_002"), reason="台词有据"):
-    return {"relevance": {"score": r, "reason": reason},
+def _v(r=4, s=3, v=3, evidence=("scene_001", "scene_002"), reason="台词有据", decision=True, overall="提供独立检索价值，建议保留"):
+    return {"pass": decision, "reason": overall,
+            "relevance": {"score": r, "reason": reason},
             "semantics": {"score": s, "reason": "名称清晰"},
             "value": {"score": v, "reason": "有区分度"},
             "evidence_scene_ids": list(evidence)}
@@ -117,7 +117,7 @@ def test_batch_message_has_full_labels_without_judge_reference():
 
 
 def test_normal_pass_and_fail():
-    client = StubClient(by_name={"逃离安排": _v(), "街道晨跑": _v(r=1)})
+    client = StubClient(by_name={"逃离安排": _v(), "街道晨跑": _v(r=1, decision=False)})
     rows = _rows()
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1")
     assert result is rows
@@ -127,23 +127,37 @@ def test_normal_pass_and_fail():
     assert result[1]["relevance"]["score"] == 1
 
 
-def test_pass_derived_from_floors():
-    assert REVIEW_PASS_FLOORS == {"relevance": 3, "semantics": 3, "value": 2}
-    cases = [(_v(3, 3, 2), True), (_v(r=2), False), (_v(s=2), False), (_v(v=1), False)]
-    for verdict, expected in cases:
-        result = review_movie_tags(StubClient(default=verdict), _content(),
-                                   _rows(1), run_id="r1:m1")
-        assert result[0]["pass"] is expected
+@pytest.mark.parametrize(("verdict", "expected"), [
+    (_v(4, 4, 4, decision=False, overall="同组标签已完整表达该信息"), False),
+    (_v(2, 2, 1, decision=True), True),
+    (_v(4, 4, 4, decision=None, overall="无法确认用途"), None),
+])
+def test_model_decision_and_overall_reason_are_independent_of_scores(verdict, expected):
+    result = review_movie_tags(StubClient(default=verdict), _content(),
+                               _rows(1), run_id="r1:m1")[0]
+    assert result["pass"] is expected
+    assert result["reason"] == verdict["reason"]
+    assert result["relevance"] == verdict["relevance"]
+
+
+@pytest.mark.parametrize("field", ["pass", "reason"])
+def test_missing_decision_or_overall_reason_is_not_inferred(field):
+    incomplete = _v()
+    incomplete.pop(field)
+    client = StubClient(by_name={"街道晨跑": incomplete}, default=_v())
+    rows = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert rows[1]["evaluated"] is False and rows[1]["pass"] is None
 
 
 def test_redundancy_instruction_in_prompt():
-    assert "其余条目的 value 至多 1 分" in REVIEW_PROMPT
+    assert "独立保留价值" in REVIEW_PROMPT
+    assert '"evidence":' not in REVIEW_PROMPT
 
 
 def test_film_high_relevance_requires_two_valid_distinct_scenes():
     client = StubClient(default=_v(evidence=["scene_001", "scene_001", "invented"]))
     result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")[0]
-    assert result["evaluated"] is True and result["pass"] is None
+    assert result["evaluated"] is True and result["pass"] is True
     assert result["relevance"]["score"] is None
     assert result["evidence_scene_ids"] == ["scene_001"]
 
@@ -151,7 +165,8 @@ def test_film_high_relevance_requires_two_valid_distinct_scenes():
 def test_scene_evidence_must_be_in_target_scene_ids():
     client = StubClient(default=_v(evidence=["scene_002"]))
     result = review_movie_tags(client, _content(), [_rows()[1]], run_id="r1:m1")[0]
-    assert result["pass"] is None
+    assert result["pass"] is True
+    assert result["relevance"]["score"] is None
     assert result["evidence_scene_ids"] == []
 
 
@@ -183,7 +198,7 @@ def test_partial_miss_marks_none():
 def test_explicit_null_is_not_missed():
     result = review_movie_tags(StubClient(default=_v(s=None)), _content(),
                                _rows(1), run_id="r1:m1")
-    assert result[0]["pass"] is None and result[0]["evaluated"] is True
+    assert result[0]["pass"] is True and result[0]["evaluated"] is True
     assert result[0]["semantics"]["score"] is None
 
 
