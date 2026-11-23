@@ -152,9 +152,11 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
   {
     title: '层级',
     dataIndex: 'level',
-    render: (level: string | null) =>
-      level ? <Tag>{level === 'scene' ? '场景级' : '全片级'}</Tag>
-            : <Typography.Text type="secondary">—</Typography.Text>,
+    render: (level: string | null) => {
+      if (!level) return <Typography.Text type="secondary">—</Typography.Text>
+      const isScene = level === 'scene'
+      return <Tag color={isScene ? 'cyan' : 'default'}>{isScene ? '场景级' : '全片级'}</Tag>
+    },
   },
   { title: '内容相关性', render: (_, row) => <ScoreCell rating={row.review?.relevance} /> },
   { title: '语义准确性', render: (_, row) => <ScoreCell rating={row.review?.semantics} /> },

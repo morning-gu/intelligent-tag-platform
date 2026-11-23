@@ -58,7 +58,7 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
       review: review(true),
     }],
     new_words: [{
-      name: '新词甲', desc: '通用释义', level: 'film',
+      name: '新词甲', desc: '通用释义', level: 'scene',
       judge_reference: null, review: review(false, 2),
     }],
     pass_rate: 0.5, new_pass: 0, hit_pass: 1, review_missing: 0, review_pending: 0,
@@ -160,7 +160,8 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getAllByText('相关理由').length).toBeGreaterThan(0)
     expect(within(section).getByText('通过')).toBeInTheDocument()
     expect(within(section).getByText('未通过')).toBeInTheDocument()
-    expect(within(section).getAllByText('全片级').length).toBeGreaterThan(0)
+    expect(within(section).getByText('场景级')).toHaveClass('ant-tag-cyan')
+    expect(within(section).getByText('全片级')).not.toHaveClass('ant-tag-cyan')
     // 失败片置顶：第一个折叠头是失败片
     const headers = within(section).getAllByText(/produce 失败|完成/)
     expect(headers[0]).toHaveTextContent('produce 失败')
