@@ -221,87 +221,79 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 
 ---
 
-## 5. 开放评测口径（`services/eval/open_ranking.py` + `open_report.py` + `open_service.py`）
+## 5. 开放评测口径（`services/eval/open_service.py` + `open_report.py` + `open_review.py`）
 
-回答的问题：**开放生成给一部片打的标签，库内命中集合准不准、产出过不过得了评审？**
+回答的问题：**开放生成给一部片打的标签，质量过不过得了独立评审？新词补充了多少？**
 
-以 `/cache/MovieTags` 基因（genome 0–1 相关性）为真值干跑整条开放管线，
-每部成功片一条样本，在 θ 网格上算**集合式准确率**（命中集合里 gt≥θ 的
-占比，不截 K）+ nDCG（产出序、连续增益）+ 覆盖率，配随机（r/n 解析解）
-与先验（gt 全影片均值序）两条基线；同时把评审员当被测对象——新词/命中
-分别报二值评审通过率，再用 gt≥θ 标定评审员（一致率 + FP/FN 方向分解）。
-指标装配在 `open_ranking.py`（纯标准库，与闭环 `closed_ranking.py` 同款
-红线）；干跑运行器与报告组装/渲染/落盘在 `open_service.py` +
-`open_report.py`（镜像闭环三分，报告只落
+零漂移干跑整条开放管线（`build_spec` + `OpenTagProducer.produce`，与正式
+生成同一路径，只是结果不入库），对每片全部产出（库内命中 + 新词）做
+**三维独立评审**：评审模型按 tag-quality-v4 rubric 逐维评
+relevance/semantics/value（0–4 或 null），每条附生产 judge 的三维分作
+**参考**（judge_reference，明确仅供参考、须独立核对材料）。通过与否由
+评审层按阈值推导（`REVIEW_PASS_FLOORS`：relevance≥3 / semantics≥3 /
+value≥2，与生产 judge 保留阈值对齐），模型只给分不回 pass/fail。
+干跑运行器在 `open_service.py`，报告组装/渲染/落盘在 `open_report.py`，
+评审调用/解析/摘录核验在 `open_review.py`（报告只落
 `settings.open_eval_output_root/<run_id>/`）。
 
-**真值与闭环同款银标准**（§4 同款警示）：genome
-relevance 是相关性**模型输出**，近似而非人工标注——所有指标衡量的是
-「系统与该模型口径的一致性」。报告头固定渲染这条警示；**标定一致率不是
-评审员的「错误率」**——评审 pass 的语义是质量三条件，gt≥θ 的语义是
-genome 相关性，一致率衡量两个口径的对齐程度，低一致率先查口径差再谈对错。
+**2026-11-23 口径变更**：闭环遗留的 gt 加载、θ 网格、集合准确率、nDCG、
+随机/先验基线、标定（一致率 + FP/FN）整体移除（`open_ranking.py` 已删）——
+开放生成没有排序真值任务，genome 相关性也不该当开放标签的质量真值。
+头条指标改为**评审通过率**（新词/命中分开）与**新词占比**，配三维均分/
+满分率/分布。银标准警示（note）保留：评审分仍是模型输出，不是人工标注。
 
 ### 样本构造
 
-每部成功片一条样本（`OpenSample`）：
-
-- `hit_ids` = 全部命中（保持产出序）；`hit_in_flags` = 是否落在该片
-  **库∩gt 交集**内；`intersection` = 该片 gt 向量限交集（覆盖率与随机
-  基线的分母要用）；
-- **交集外命中只计数**（`no_gt`）：不占准确率/标定的分子分母（不白给
-  precision 也不冤枉 recall），只进命中通过率；
-- **produce 失败片不进样本**：结构与指标都无法表达，进 `failed_movies`
-  单独核算（`sample_accounting.failed` 由组装层自算——镜像闭环）；
-- **评审失败片契约**（produce 成功但评审失败，spec §6）：产出不作废，
-  `hit_pass`/`new_pass` 整体 None——不进通过率/标定，准确率照常可算，
-  命中标签计入 `review_missing`，该片保留在 ok；
-- 条目级 None = 模型漏判：排除出通过率与标定的分子分母，计入
-  `review_missing`。报告与前端一律标「**缺评审条目**」（缺评审 ≠ 模型
-  漏判：还含评审失败片的整体缺位）——n_valid / n_calibrated / new_n /
-  hit_n 都是**片数口径**。
+- 每部 ok 片的产出计 `total_tags` / `new_ratio`（新词占比微口径 =
+  新词数 / 全部产出）；**评审成功片**的产出才进通过率与三维指标分母；
+- **produce 失败片不进样本**：进 `failed_movies` 单独核算
+  （`sample_accounting.failed`）；
+- **评审失败片契约**：produce 成功但评审失败（ReviewRequestError 或任何
+  异常）时**产出不作废**——hits/new_words 行原样保留（review=null）、
+  review_error 落 raw，该片仍计 ok；通过率/三维指标整体排除出分母
+  （None≠0：不是评审 0 分），计入 `sample_accounting.review_failed`；
+- 条目级 pass=null = 评审漏判：排除出通过率分母，计 `review_missing`；
+  显式 null 分（无法判断）是有效评分，pass=False 且计 undetermined，
+  与漏判不同。
 
 ### 五条必须写明的口径
 
-**集合准确率语义**。准确率@θ = |命中 ∩ {gt≥θ}| / |命中|，分母是产出集合
-本身（不截 K、不按候选池折算）——衡量「产出的标签里有多少真相关」；与
-闭环 P@K（分母固定为 K）语义不同。产出多少是模型自己的决定，产出规模
-（produced_stats 的 min/中位/max）与覆盖率必须同读。
+**通过率语义**。通过率 = 评审通过条数 / 有判定条数（微口径），「通过」
+= 三维分同时过阈值（relevance≥3 / semantics≥3 / value≥2）——衡量「独立
+评审认为达到生产保留标准的标签占比」。新词/命中分开报；产出规模
+（produced_stats 的 min/中位/max）必须同读。
 
-**θ 是 gt 的二值化档，整条网格一起报**。θ∈{0.2, 0.4, 0.6, 0.8} 全算
-（结论是否随 θ 稳健本身就是结果的一部分）；历史摘要取最接近 0.4
-（`DEFAULT_THETA_HEADLINE`）的**有值**档，距离并列取小；nDCG 用连续
-增益、不按 θ 二值化。
+**judge 参考不是评审结论**。评审清单附生产 judge 的三维分与理由
+（judge_reference），提示词明确定位为仅供参考——评审必须独立核对材料，
+可同意可推翻。judge 审计段（自滤保留率 / 三维分聚合 / 淘汰原因 / 库内
+分档）单独呈现生产侧行为，不与评审通过率混算。
 
-**None ≠ 0**（通用纪律第 1 条的网格版）。无有效片（交集内命中为空，
-只计 `invalid`，不进 θ 族平均）、无新词片、该 θ 下交集内无 gt≥θ 标签
-（覆盖率无片可算）、无片可标定——一律 None（算不出），不是 0 分；计数
-类（`no_gt` / `review_missing` / 各 n_*）如实记 0。
+**None ≠ 0**。无产出、评审失败片、漏判条目——一律 null（算不出/排除），
+不是 0 分；计数类（review_missing / 各核算数）如实记 0。
 
-**随机 + 先验基线必读**。随机基线 = 同长度集合从交集均匀抽的期望准确率
-（r/n 解析解，不采样、逐片宏平均）；先验基线 = 标签按 gt **全影片**均值
-降序的固定排序（并列取 tag_id），逐片取前 |命中| 条——「不看内容只看
-先验」能到哪。没有基线的绝对分数不可解读，系统与基线（含 95% 自举 CI）
-分不分得开才是判据。
+**摘录必核**。评审给 relevance≥3 必须附 10–25 字原文摘录，经归一化
+渲染文本核验（8 字连续窗口，对齐生产 judge 判法）；核不中降档到 1
+（理由记「摘录未命中原文」），防评审员空口给高分。
 
-**同模评审警示 + 标定语义警示**。评审与生成同模型时（`review_same_model`）
-报告头 banner 明写：通过率绝对值系统性偏高，趋势对比可用、绝对值需打折
-解读；标定一致率不是评审员「错误率」（见节首），FP/FN 只是方向分解。
+**同模评审警示**。评审与生成同模型时（`review_same_model`）报告头
+banner 明写：通过率绝对值系统性偏高，趋势对比可用、绝对值需打折解读。
+评审端点经 `open_eval_review_model/_base_url_env/_api_key_env` 三键
+独立配置，全空回落主 LLM（同模）。
 
 ### 产物与历史
 
 每个 run 落 `<run_id>/` 六件 + audit/：meta.json（口径快照）、
-progress.jsonl（增量落盘）、raw_results.json（逐片留痕）、report.json
-（前端契约结构）、report.md（人读版）、metrics.csv（长表
-`metric,theta,macro,ci_low,ci_high,random_baseline,prior_baseline,
-n_valid`，θ 无关行 theta 空），`audit/<tt>.json` 为 mtg 管线自落的评审官
-审计（报告 judge 段跨片聚合读它：自滤率 / verdicts 分布 / dropped 原因 /
-对齐分档）。报告头 banner 聚合三档警示：部分运行（status 未全量成功
-完成——取消/中止/失败/缩量都不可与全量横比）、同模评审、小样本（失败
-核算三类 failed/review_failed/invalid 任一占比 >10%）。历史列表只扫磁盘：
-meta.status=running 且无进程内注册表项 → `interrupted`；report.json
-缺失或截断的 run 摘要列「暂无」（宁缺勿假）。报告末节固定「与闭环评测
-的口径关系」：**独立口径组不横比**；同片集（preset30 同 seed）下只做
-**定性对照**。
+progress.jsonl（增量落盘）、raw_results.json（逐片留痕，含三维评审与
+judge 参考）、report.json（前端契约结构）、report.md（人读版）、
+metrics.csv（长表 `metric,value,n`：通过率族 + 三维均分/满分率 +
+新词占比），`audit/<tt>.json` 为 mtg 管线自落的评审官审计（报告 judge
+段跨片聚合读它）。报告头 banner 聚合三档警示：部分运行（status 未全量
+成功完成——取消/中止/失败/缩量都不可与全量横比）、同模评审、小样本
+（failed/review_failed 任一占比 >10%）。历史列表只扫磁盘：
+meta.status=running 且无进程内注册表项 → `interrupted`；摘要五键
+（pass_rate / new_pass / hit_pass / new_ratio / three_high）直读
+report.json 的 summary，缺失或截断 → null（宁缺勿假）。**与闭环评测
+独立口径组不横比**；同片集下只做定性对照。
 
 ---
 
