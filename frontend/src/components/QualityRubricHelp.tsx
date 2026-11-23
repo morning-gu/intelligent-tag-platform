@@ -66,7 +66,7 @@ export default function QualityRubricHelp() {
       <Modal title="五档标签评分标准" open={open} onCancel={() => setOpen(false)}
         footer={null} width={840} destroyOnHidden>
         <Typography.Paragraph>
-          每个维度独立按 0–4 分判定，从低分档往上核对，取首个符合条件的分档。材料不足以区分相邻档时记为「无法判断」。历史三档记录的满分为 2。
+          每个维度独立按 0–4 分判定，从低分档往上核对，取首个符合条件的分档。材料不足以区分相邻档时记为「无法判断」。
         </Typography.Paragraph>
         <Tabs items={[
           {
