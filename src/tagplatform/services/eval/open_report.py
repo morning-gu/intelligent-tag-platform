@@ -212,8 +212,10 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
     汇总口径：全部 ok 片产出计 total_tags / new_ratio；评审成功片的产出
     计通过率与三维指标（评审失败片产出不作废但不进分母，None≠0）。
     `audit_dir` = run 目录的 audit/ 子目录（None = 无审计，judge 空段 +
-    警示）。
+    警示）。行序按 tt 稳定排序——运行器 results 是线程池完成序，报告
+    落盘要可跨 run 对比，不随并发调度漂移。
     """
+    results = sorted(results, key=lambda r: r.tt)
     counts: list[dict] = []
     movies: list[dict] = []
     ok_films: list[str] = []
