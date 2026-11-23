@@ -490,7 +490,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert set(h1) == {"tag_id", "tag_name", "level", "judge_reference", "review"}
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
-    assert h1["review"]["quote"] == _QUOTE
+    assert h1["review"]["quote"] is None  # mock 审计无 judge 判决 → 无摘录
     assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")
     assert hx["review"]["pass"] is True

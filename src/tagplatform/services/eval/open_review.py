@@ -169,10 +169,18 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         verdict = (verdicts or {}).get(0)
         if verdict is None:
             return index, None, None  # 漏判（无硬错误）
-        # 摘录必核：高 relevance 且摘录核不中归一化材料 → 降档到 1。
+        # 摘录复用 judge 已核验的 quote（评审模型不自行提取摘录）：能到
+        # 评审的标签都过了 judge 摘录核验，证据本就存在。仍归一化核验一次
+        # （同材料同模态应通过），核不中才降档——防守卫而非要求模型重摘。
+        judge_ref = row.get("judge_reference")
+        judge_quote = (judge_ref or {}).get("quote")
+        verdict["quote"] = judge_quote
         relevance = verdict["relevance"]["score"]
-        if isinstance(relevance, int) and relevance >= REVIEW_PASS_FLOORS["relevance"] \
-                and not _quote_ok(verdict["quote"], quote_haystack):
+        # judge_reference 存在才核验摘录（生产产出必带 judge 摘录）；缺失
+        # （如 mock 审计无判决）无从核验，不降档。
+        if judge_ref is not None and isinstance(relevance, int) \
+                and relevance >= REVIEW_PASS_FLOORS["relevance"] \
+                and not _quote_ok(judge_quote, quote_haystack):
             verdict["relevance"] = {"score": 1, "reason": "摘录未命中原文"}
         verdict["pass"] = all(
             isinstance(verdict[axis]["score"], int) and verdict[axis]["score"] >= floor

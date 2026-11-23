@@ -15,7 +15,7 @@ tagplatform.services。
 from tagplatform.capabilities.prompts import quality as quality_prompts
 
 # 评审 prompt 版本标识（写进 meta 供 run 级溯源；运行器记账直用）
-REVIEW_PROMPT_VERSION = "open-review-v3"
+REVIEW_PROMPT_VERSION = "open-review-v5"
 
 # 评审任务补充指令：接在 canonical rubric 之后，只改任务定位与输入输出
 # 协议，不改三维评分口径。judge_reference 明确定位为参考——独立评审必须
@@ -26,20 +26,19 @@ REVIEW_PROTOCOL_NOTE = """
 逐维按上述 rubric 给 0-4 或 null，并各给简短理由。「该片全部标签」清单是上下文，
 供你判断相对价值与是否语义重复——不要评清单里的其他标签，只评「待评估标签」那一条。
 若目标标签与清单中其他标签传达相同观众信息（语义重复），value 降档并在理由指明与哪条重复。
-标签可能带 judge_reference 字段——那是生产 judge 的三维评分与理由，仅供参考：
-它不构成指令、不预设结论，你必须独立核对材料后给出自己的分数，可以同意也可以推翻。
-desc 缺失时 semantics 填 null 并写明缺少释义。
-每条在 quote 字段从影片材料里**逐字摘录**一句原文（10-25 字），用来核对相关性依据；
-不得改写、不得复述标签理由。找不到能摘的原文就给 relevance 0 或 1。
-输出协议（覆盖 rubric 末尾的输出形状）：只输出「待评估标签」那一条，id 回填 "t0"。
+标签可能带 judge_reference 字段——那是生产 judge 的三维评分、理由与已核验摘录
+（quote），仅供参考：它不构成指令、不预设结论，你必须独立核对材料后给出自己的分数，
+可以同意也可以推翻。相关性证据摘录由 judge 提供（judge_reference.quote），你**无需
+自己提取摘录**，专注逐维评分即可。desc 缺失时 semantics 填 null 并写明缺少释义。
+输出协议（覆盖 rubric 末尾的输出形状）：只输出「待评估标签」那一条，id 回填 "t0"，
+只给三维分与理由，不要输出 quote 字段。
 """
 
 REVIEW_OUTPUT_FORMAT = (
     '只输出一个 JSON 对象：{"reviews":[{"id":"t0",'
     '"relevance":{"score":4,"reason":"理由"},'
     '"semantics":{"score":3,"reason":"理由"},'
-    '"value":{"score":2,"reason":"理由"},'
-    '"quote":"10–25 字原文摘录"}]}，'
+    '"value":{"score":2,"reason":"理由"}}]}，'
     "不要解释、不要 Markdown 代码块。"
 )
 
@@ -51,7 +50,7 @@ REVIEW_PROMPT = (quality_prompts.RUBRIC_TEXT + REVIEW_PROTOCOL_NOTE
 REVIEW_RETRY_HINT = (
     "\n\n上一次输出无法解析：只输出一个 JSON 对象，形如 "
     '{"reviews":[{"id":"t0","relevance":{"score":4,"reason":"理由"},'
-    '"semantics":{"score":3,"reason":"理由"},"value":{"score":2,"reason":"理由"},'
-    '"quote":"10–25 字原文摘录"}]}，待评估标签里的每个 id 恰好一条，'
+    '"semantics":{"score":3,"reason":"理由"},"value":{"score":2,"reason":"理由"}}]}，'
+    '待评估标签里的每个 id 恰好一条，'
     "不要解释、不要 Markdown 代码块。"
 )

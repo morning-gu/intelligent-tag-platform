@@ -252,6 +252,7 @@ def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
             "semantics": verdict.get("semantics"),
             "value": verdict.get("value"),
             "reason": verdict.get("reason") or "",
+            "quote": verdict.get("quote"),
         }
     return references
 

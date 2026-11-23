@@ -56,9 +56,13 @@ def _content() -> ContentJSON:
 def _rows(count: int = 2) -> list[dict]:
     head = [
         {"id": "t0", "name": "逃离安排", "desc": "主角察觉生活被全程安排并决意逃离",
-         "level": "film", "scenes": []},
+         "level": "film", "scenes": [],
+         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3,
+                             "reason": "judge 依据", "quote": QUOTE}},
         {"id": "t1", "name": "街道晨跑", "desc": "清晨在小镇街道跑步的情节",
-         "level": "scene", "scenes": ["scene_001"]},
+         "level": "scene", "scenes": ["scene_001"],
+         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3,
+                             "reason": "judge 依据", "quote": QUOTE}},
     ]
     tail = [{"id": f"t{i}", "name": f"标签{i}", "desc": f"第 {i} 条测试标签",
              "level": "film", "scenes": []} for i in range(2, count)]
@@ -119,8 +123,6 @@ class MainLLM:
 def test_per_tag_message_shape():
     client = StubClient(default=_v())
     rows = _rows()
-    rows[0]["judge_reference"] = {"relevance": 4, "semantics": 3, "value": 3,
-                                  "reason": "judge 依据"}
     review_movie_tags(client, _content(), rows, run_id="r1:m1")
     assert len(client.calls) == 2  # 逐条：两条各一次
     for messages in client.calls:
@@ -133,7 +135,7 @@ def test_per_tag_message_shape():
     assert all(t["id"] == "t0" for t in targets)  # 目标重编 t0
     by_name = {t["name"]: t for t in targets}
     assert by_name["逃离安排"]["judge_reference"]["relevance"] == 4
-    assert "judge_reference" not in by_name["街道晨跑"]
+    assert by_name["街道晨跑"]["judge_reference"]["quote"] == QUOTE
 
 
 def test_normal_pass_and_fail():
@@ -165,15 +167,18 @@ def test_redundancy_instruction_in_prompt():
 
 
 def test_high_relevance_quote_must_hit():
-    client = StubClient(default=_v(quote="这句原文根本不在影片材料里"))
-    result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
+    rows = _rows(1)
+    rows[0]["judge_reference"]["quote"] = "这句原文根本不在影片材料里"
+    result = review_movie_tags(StubClient(default=_v()), _content(), rows, run_id="r1:m1")
     assert result[0]["pass"] is False
     assert result[0]["relevance"] == {"score": 1, "reason": "摘录未命中原文"}
+    assert result[0]["quote"] == "这句原文根本不在影片材料里"  # 摘录来自 judge
 
 
 def test_quote_spanning_punctuation_stays_high():
-    client = StubClient(default=_v(quote="小镇街道晨跑，电台广播"))
-    result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
+    rows = _rows(1)
+    rows[0]["judge_reference"]["quote"] = "小镇街道晨跑，电台广播"
+    result = review_movie_tags(StubClient(default=_v()), _content(), rows, run_id="r1:m1")
     assert result[0]["pass"] is True
     assert result[0]["relevance"]["score"] == 4
 
