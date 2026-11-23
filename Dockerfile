@@ -35,7 +35,14 @@ ENV PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1
 
 COPY src/ ./src/
-COPY alembic/ alembic.ini run_server.py ./
+# Docker COPY 的目录源语义是「目录**内容**进 dest」（与尾斜杠无关）：
+# `COPY alembic/ ... ./` 会把 env.py/script.py.mako/versions 拍平进 /app
+# 顶层，镜像里不存在 /app/alembic——而 alembic.ini 的
+# script_location=alembic 指向 /app/alembic，容器内 alembic upgrade 因此
+# FAILED（2026-11-24 147.3 全新库部署首踩：空库无表 + 迁移目录不可用
+# 双层叠加致 crashloop）。dest 必须显式写出目录名（src 行同理所以一直正常）。
+COPY alembic.ini run_server.py ./
+COPY alembic ./alembic
 COPY --from=frontend /build/dist ./frontend/dist
 
 # 权限归一化：COPY 会保留构建上下文的文件模式（受宿主 umask 影响）并把属主
