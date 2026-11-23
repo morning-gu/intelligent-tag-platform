@@ -774,6 +774,35 @@ def test_cancel_keeps_completed_results(open_setup, root6):
 
 # ---------------------------------------------------------------- 历史扫描
 
+def test_live_report_published(open_setup):
+    """运行落 live.json（实时报告）；评审逐条回填触发增量发布。"""
+    svc, _ = open_setup()
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)
+    d = _run_dir(svc, run_id)
+    assert (d / "live.json").exists()
+    live = json.loads((d / "live.json").read_text(encoding="utf-8"))
+    assert live["summary"]["total_tags"] == 5
+
+
+def test_review_produced_publishes_per_tag(open_setup):
+    """_review_produced 带 result/publish：初始 + 逐条回调，行回填评审。"""
+    svc, _ = open_setup()
+    svc._review_client = _ReviewOkStub()
+    content = open_service.load_movie_content(svc.effective_root, "tt0000001")
+    snapshot = [{"tag_id": None, "name": "新词甲", "desc": "通用释义",
+                 "level": "film", "scenes": [], "judge_reference": None}]
+    result = open_service.OpenMovieResult(
+        tt="tt0000001", title="x", ok=True, error=None, hits=[],
+        new_words=[], review_error=None, elapsed_ms=0)
+    calls = []
+    svc._review_produced("tt0000001", snapshot, content, "run-x",
+                         result=result, publish=lambda: calls.append(1))
+    assert len(calls) >= 2  # 初始一次 + 逐条至少一次
+    assert result.new_words[0]["review"]["pass"] is True
+
+
 def test_rereview_reuses_snapshot_without_produce(open_setup):
     """rereview 复用产出快照重评审：不重跑生成，换评审替身后报告更新。"""
     svc, fake = open_setup()

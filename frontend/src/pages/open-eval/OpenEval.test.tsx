@@ -527,6 +527,18 @@ describe('OpenEval 开放评测页', () => {
     expect(screen.getByRole('button', { name: /取\s*消/ })).toBeInTheDocument()
   })
 
+  it('open 活跃：实时报告按钮取 live 报告并标注评审进行中', async () => {
+    mockActiveRunApis()
+    mockedGetOpenReport.mockResolvedValue(REPORT)
+    render(<OpenEval />)
+    expect(await screen.findByText(/已完成\s*8\s*\/\s*30/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '实时报告' }))
+    expect(
+      await screen.findByText(/评测报告：run-20261121-120000-xy90（评审进行中…）/),
+    ).toBeInTheDocument()
+    expect(mockedGetOpenReport).toHaveBeenCalledWith('run-20261121-120000-xy90')
+  })
+
   it('取消：点击后调用 cancelOpenRun(run_id) 并提示受理', async () => {
     mockActiveRunApis()
     mockedCancelOpenRun.mockResolvedValue({ ok: true })

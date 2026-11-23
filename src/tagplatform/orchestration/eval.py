@@ -659,13 +659,16 @@ def get_open_run_report(settings: Settings, run_id: str) -> dict:
     无报告/截断 → 404（读侧容错，不把非原子写序窗口打成 500）。"""
     run_dir = _open_run_dir(settings, run_id)
     if run_dir is not None:
-        try:
-            report = json.loads((run_dir / "report.json")
-                                .read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            report = None
-        if isinstance(report, dict):
-            return report
+        # 终态 report.json 优先；运行中回落 live.json（评审逐条增量发布），
+        # 前端轮询即可看到标签逐条出现。两者皆无 → 404。
+        for name in ("report.json", "live.json"):
+            try:
+                report = json.loads((run_dir / name)
+                                    .read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                report = None
+            if isinstance(report, dict):
+                return report
     raise HTTPException(status_code=404,
                         detail=f"该 run 无报告：{run_id!r}")
 

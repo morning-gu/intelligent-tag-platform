@@ -972,6 +972,22 @@ def test_open_run_end_to_end(client):
             "three_high"} <= set(mine)
 
 
+def test_open_report_falls_back_to_live(client):
+    """运行中无 report.json → 报告端点回落 live.json（实时部分报告）。"""
+    _seed_dataset_and_library(client)
+    out = Path(client.app.state.settings.open_eval_output_root)
+    d = out / "run-live-only"
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({
+        "run_id": "run-live-only", "status": "running", "done": 1,
+        "total": 1, "dataset": {"id": "emotion"}}), encoding="utf-8")
+    (d / "live.json").write_text(json.dumps({
+        "summary": {"total_tags": 3}, "banner": []}), encoding="utf-8")
+    r = client.get(f"{_OPEN}/runs/run-live-only/report")
+    assert r.status_code == 200
+    assert r.json()["summary"]["total_tags"] == 3
+
+
 def test_open_history_summary_five_keys(client):
     """history 摘要五键取值透出：手写终态 run 目录（meta + report.json，
     磁盘夹具模式同 test_get_run_disk_only_fallback）→ GET /runs 行五键

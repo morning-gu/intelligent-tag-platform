@@ -62,6 +62,7 @@ persist_tags（评测只读）；评测产物只写 `settings.open_eval_output_r
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -71,7 +72,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -218,6 +219,9 @@ class _OpenJob:
     dataset_root: str
     context: AssemblyContext
     run_settings: Settings
+    # 实时报告状态：tt → OpenMovieResult（评审逐条回填，_publish_live 增量
+    # 落 live.json）。受 service._lock 保护；仅运行期使用，终态以 report.json 为准。
+    live: dict = field(default_factory=dict)
 
 
 def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
@@ -720,6 +724,11 @@ class OpenEvalService:
             except Exception as exc:  # noqa: BLE001 —— 单片失败兜底：记 error 继续收敛
                 error = f"{type(exc).__name__}: {exc}"
                 produced = []
+        result = OpenMovieResult(tt=tt, title=title, ok=error is None,
+                                 error=error, hits=hits, new_words=new_words,
+                                 review_error=review_error, elapsed_ms=0)
+        with self._lock:
+            job.live[tt] = result
         if error is None and produced:
             # judge 三维分从 run 审计关联到最终标签名，作评审参考（缺失 →
             # None，不影响评审）；产出落快照，供 rereview 复用（不重跑生成）
@@ -731,12 +740,12 @@ class OpenEvalService:
                 "judge_reference": references.get(tag.tag_name),
             } for tag in produced]
             self._save_snapshot(job.run_id, tt, snapshot)
-            hits, new_words, review_error = self._review_produced(
-                tt, snapshot, content, job.run_id)
-        return OpenMovieResult(tt=tt, title=title, ok=error is None,
-                               error=error, hits=hits, new_words=new_words,
-                               review_error=review_error,
-                               elapsed_ms=int((time.perf_counter() - started) * 1000))
+            # 评审逐条回填 result 并增量发布 live.json（实时报告）
+            self._review_produced(tt, snapshot, content, job.run_id,
+                                  result=result, publish=lambda: self._publish_live(job))
+        result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self._publish_live(job)
+        return result
 
     def _save_snapshot(self, run_id: str, tt: str, snapshot: list[dict]) -> None:
         """产出快照落盘 `produced/<tt>.json`（rereview 复用，不重跑生成）。"""
@@ -744,8 +753,29 @@ class OpenEvalService:
         path.parent.mkdir(parents=True, exist_ok=True)
         _dump_json(path, snapshot)
 
+    def _publish_live(self, job: _OpenJob) -> None:
+        """增量发布实时报告 live.json（评审逐条完成时调用）。
+
+        从 job.live 快照当前已开始的影片结果（deepcopy 防并发回填竞态），
+        组装部分报告落 live.json。运行中报告端点回落读它；终态以
+        report.json 为准。发布失败只告警，不影响评审主流程。
+        """
+        run_dir = Path(self.settings.open_eval_output_root) / job.run_id
+        try:
+            with self._lock:
+                results = [copy.deepcopy(job.live[tt])
+                           for tt in job.movies if tt in job.live]
+                meta = {**job.meta, "status": "running",
+                        "done": len(results), "total": len(job.movies),
+                        "failed": sum(1 for r in results if not r.ok)}
+            report = assemble_open_report(results, meta, audit_dir=run_dir / "audit")
+            _dump_json(run_dir / "live.json", report)
+        except Exception as exc:  # noqa: BLE001 —— 实时发布失败不拖累评审
+            logger.warning("实时报告发布失败 %s：%s", job.run_id, exc)
+
     def _review_produced(self, tt: str, snapshot: list[dict], content,
-                         run_id: str) -> tuple[list, list, str | None]:
+                         run_id: str, *, result=None,
+                         publish=None) -> tuple[list, list, str | None]:
         """产出快照 → (hits, new_words, review_error)：二分 + 独立评审。
 
         _run_movie 与 rereview 共用：快照行 {tag_id,name,desc,level,scenes,
@@ -776,21 +806,32 @@ class OpenEvalService:
                 "judge_reference": reference,
             })
             owners.append(row)
+        if result is not None:
+            result.hits, result.new_words = hits, new_words
+        if publish is not None:
+            publish()
+
+        def relay(index, reviewed_row):
+            owners[index]["review"] = {
+                k: reviewed_row[k] for k in
+                ("pass", "relevance", "semantics", "value", "reason", "quote")}
+            if publish is not None:
+                publish()
+
         review_error = None
         if review_rows:
             try:
-                reviewed = review_movie_tags(
+                review_movie_tags(
                     self._review_client, content, review_rows,
-                    run_id=f"{run_id}:{tt}")
-                for row, verdict in zip(owners, reviewed):
-                    row["review"] = {"pass": verdict["pass"],
-                                     "relevance": verdict["relevance"],
-                                     "semantics": verdict["semantics"],
-                                     "value": verdict["value"],
-                                     "reason": verdict["reason"],
-                                     "quote": verdict["quote"]}
+                    run_id=f"{run_id}:{tt}", on_result=relay)
             except Exception as exc:  # noqa: BLE001 —— 评审失败：产出不作废
                 review_error = f"{type(exc).__name__}: {exc}"
+                # 整片评审失败（全部漏判/调用失败）：行 review 复位 None
+                # （逐条 relay 可能已写入占位 dict），契约 review=None。
+                for row in owners:
+                    row["review"] = None
+        if result is not None:
+            result.review_error = review_error
         return hits, new_words, review_error
 
     def rereview(self, run_id: str) -> dict:

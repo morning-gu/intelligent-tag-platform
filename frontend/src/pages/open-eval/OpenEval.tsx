@@ -213,6 +213,30 @@ export default function OpenEval() {
 
   // —— 报告取数位（Task 8 的 OpenEvalReport 组件消费 report.data） ——
   const [report, setReport] = useState<{ runId: string; data: OpenEvalReport } | null>(null)
+  // 实时报告：正在查看的 run 仍在跑 → 每 2s 轮询 live.json（评审逐条出现）；
+  // run 终态后拉一次终版 report.json（live.json 是部分报告）。
+  const reportIsLive = report !== null && activeRun?.run_id === report.runId
+  const prevActiveRunRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!reportIsLive || report === null) return
+    const runId = report.runId
+    const timer = setInterval(() => {
+      getOpenReport(runId)
+        .then((data) => setReport((prev) => (prev?.runId === runId ? { runId, data } : prev)))
+        .catch(() => { /* 瞬时错误忽略，下轮再试 */ })
+    }, 2000)
+    return () => clearInterval(timer)
+  }, [reportIsLive, report?.runId])
+  useEffect(() => {
+    const prev = prevActiveRunRef.current
+    const cur = activeRun?.run_id ?? null
+    prevActiveRunRef.current = cur
+    if (prev && prev !== cur && report?.runId === prev) {
+      getOpenReport(prev)
+        .then((data) => setReport({ runId: prev, data }))
+        .catch(() => { /* 终态落盘窗口忽略 */ })
+    }
+  }, [activeRun?.run_id, report?.runId])
   // —— 数据集根（页面级切换：输入值 / 服务端生效值 / 应用中） ——
   const [rootInput, setRootInput] = useState('')
   const [effectiveRoot, setEffectiveRoot] = useState<string | null>(null)
@@ -670,9 +694,14 @@ export default function OpenEval() {
         <Card
           title={`进行中：${activeRun.run_id}`}
           extra={
-            <Button danger size="small" onClick={() => void handleCancel()}>
-              取消
-            </Button>
+            <Space>
+              <Button size="small" onClick={() => void openReport(activeRun.run_id)}>
+                实时报告
+              </Button>
+              <Button danger size="small" onClick={() => void handleCancel()}>
+                取消
+              </Button>
+            </Space>
           }
         >
           <Progress
@@ -713,7 +742,7 @@ export default function OpenEval() {
       </Card>
 
       {report !== null && (
-        <Card title={`评测报告：${report.runId}`}>
+        <Card title={`评测报告：${report.runId}${reportIsLive ? '（评审进行中…）' : ''}`}>
           {/* Task 8: 报告视图（components/OpenEvalReport.tsx）接管占位 */}
           <OpenEvalReportView report={report.data} runId={report.runId} />
         </Card>
