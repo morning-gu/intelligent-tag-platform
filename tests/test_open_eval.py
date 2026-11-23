@@ -487,7 +487,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     # 产出二分：命中行 / 新词行（judge_reference 替身审计无判决 → None）
     assert len(row1["hits"]) == 2 and len(row1["new_words"]) == 1
     h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
-    assert set(h1) == {"tag_id", "tag_name", "judge_reference", "review"}
+    assert set(h1) == {"tag_id", "tag_name", "level", "judge_reference", "review"}
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
     assert h1["review"]["quote"] == _QUOTE

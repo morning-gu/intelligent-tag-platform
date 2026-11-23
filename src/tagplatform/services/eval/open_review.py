@@ -206,7 +206,7 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                 for axis, floor in REVIEW_PASS_FLOORS.items())
             verdict["reason"] = "；".join(
                 verdict[axis]["reason"] for axis in REVIEW_PASS_FLOORS
-                if verdict[axis]["reason"])[:200]
+                if verdict[axis]["reason"])
         row.update(verdict)
     return tag_rows
 

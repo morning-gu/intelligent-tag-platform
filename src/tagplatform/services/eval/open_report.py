@@ -402,16 +402,17 @@ def render_open_report_md(report: dict) -> str:
         rows = ([{**r, "_group": "命中"} for r in movie.get("hits") or []]
                 + [{**r, "_group": "新词"} for r in movie.get("new_words") or []])
         if rows:
-            lines += ["", "| 组 | 标签 | 相关 | 语义 | 价值 | 通过 | 理由 |",
-                      "| --- | --- | --- | --- | --- | --- | --- |"]
+            lines += ["", "| 组 | 标签 | 层级 | 相关 | 语义 | 价值 | 通过 | 理由 |",
+                      "| --- | --- | --- | --- | --- | --- | --- | --- |"]
             for row in rows:
                 review = row.get("review")
                 name = row.get("tag_name") or row.get("name")
+                level = {"scene": "场景", "film": "全片"}.get(row.get("level"), "—")
                 passed = ("—" if review is None else
                           ("是" if review.get("pass") else
                            ("漏判" if review.get("pass") is None else "否")))
                 reason = (review or {}).get("reason") or ""
-                lines.append(f"| {row['_group']} | {name} "
+                lines.append(f"| {row['_group']} | {name} | {level} "
                              f"| {_score_cell(review, 'relevance')} "
                              f"| {_score_cell(review, 'semantics')} "
                              f"| {_score_cell(review, 'value')} "

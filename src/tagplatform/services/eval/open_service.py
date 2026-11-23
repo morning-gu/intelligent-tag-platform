@@ -760,6 +760,7 @@ class OpenEvalService:
             reference = item.get("judge_reference")
             if item.get("tag_id") is not None:
                 row = {"tag_id": item["tag_id"], "tag_name": item["name"],
+                       "level": item.get("level"),
                        "judge_reference": reference, "review": None}
                 hits.append(row)
             else:

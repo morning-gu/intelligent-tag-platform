@@ -284,6 +284,7 @@ const REPORT: OpenEvalReport = {
         {
           tag_id: 't1',
           tag_name: '悬疑',
+          level: 'film',
           judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据' },
           review: {
             pass: true,

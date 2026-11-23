@@ -108,7 +108,7 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       group: '命中' as const,
       name: hit.tag_name,
       desc: null,
-      level: null,
+      level: hit.level,
       judge_reference: hit.judge_reference,
       review: hit.review,
     })),
@@ -144,6 +144,13 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
       </Space>
     ),
     width: '24%',
+  },
+  {
+    title: '层级',
+    dataIndex: 'level',
+    render: (level: string | null) =>
+      level ? <Tag>{level === 'scene' ? '场景级' : '全片级'}</Tag>
+            : <Typography.Text type="secondary">—</Typography.Text>,
   },
   { title: '内容相关性', render: (_, row) => <ScoreCell rating={row.review?.relevance} /> },
   { title: '语义准确性', render: (_, row) => <ScoreCell rating={row.review?.semantics} /> },

@@ -83,6 +83,7 @@ export interface JudgeReference {
 export interface OpenHitRow {
   tag_id: string
   tag_name: string
+  level: string | null
   judge_reference: JudgeReference | null
   review: TagReview | null
 }

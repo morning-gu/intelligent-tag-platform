@@ -53,7 +53,7 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
     tt: 'tt0000001', title: '铁道游击队', ok: true, error: null,
     review_error: null, elapsed_ms: 1000, n_hits: 1, n_new_words: 1,
     hits: [{
-      tag_id: 't1', tag_name: '悬疑',
+      tag_id: 't1', tag_name: '悬疑', level: 'film',
       judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据' },
       review: review(true),
     }],
@@ -158,6 +158,7 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getAllByText('相关理由').length).toBeGreaterThan(0)
     expect(within(section).getByText('通过')).toBeInTheDocument()
     expect(within(section).getByText('未通过')).toBeInTheDocument()
+    expect(within(section).getAllByText('全片级').length).toBeGreaterThan(0)
     // 失败片置顶：第一个折叠头是失败片
     const headers = within(section).getAllByText(/produce 失败|完成/)
     expect(headers[0]).toHaveTextContent('produce 失败')
@@ -180,7 +181,7 @@ describe('OpenEvalReport 报告视图', () => {
     const reviewed = movie({
       tt: 'tt0000002', title: '评审失败片',
       review_error: 'ReviewRequestError: 评审端点超时',
-      hits: [{ tag_id: 't2', tag_name: '保留标签', judge_reference: null, review: null }],
+      hits: [{ tag_id: 't2', tag_name: '保留标签', level: 'film', judge_reference: null, review: null }],
       new_words: [], n_hits: 1, n_new_words: 0,
       pass_rate: null, new_pass: null, hit_pass: null, metrics: null,
     })

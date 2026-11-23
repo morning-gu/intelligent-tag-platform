@@ -48,7 +48,7 @@ _DEFAULT = object()  # 区分"缺省给过线评审"与"显式 None（评审失�
 
 
 def _hit(tag_id, name="命中标签", review=_DEFAULT, reference=None):
-    return {"tag_id": tag_id, "tag_name": name,
+    return {"tag_id": tag_id, "tag_name": name, "level": "film",
             "judge_reference": reference,
             "review": _review() if review is _DEFAULT else review}
 
