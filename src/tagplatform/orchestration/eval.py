@@ -52,7 +52,6 @@ from tagplatform.services.eval.dataset import movie_entries, scan_datasets
 from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
 from tagplatform.services.eval.open_service import (
     DEFAULT_CONCURRENCY as OPEN_DEFAULT_CONCURRENCY,
-    DEFAULT_THETAS as OPEN_DEFAULT_THETAS,
     EvalValidationError as OpenEvalValidationError,
     RunActiveError as OpenRunActiveError,
     RunBusyError as OpenRunBusyError,
@@ -144,10 +143,10 @@ class RunSummaryOut(BaseModel):
 
 class OpenRunSummaryOut(BaseModel):
     """开放评测历史行（OpenEvalService.history()）：基础行字段与闭环同形；
-    摘要五键（accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）
-    由 open_report._read_open_summary 读 report.json 出（统一取格约定见其
-    docstring；报告缺失/截断 → 对应键 None 宁缺勿假，None 安全）。
-    闭环侧的 ndcg10/p10/r20/coverage_median 不在开放口径内，不设字段。"""
+    摘要五键（pass_rate / new_pass / hit_pass / new_ratio / three_high）
+    由 open_report._read_open_summary 读 report.json 出（报告缺失/截断 →
+    对应键 None 宁缺勿假，None 安全）。闭环侧的 θ/排序指标不在开放口径
+    内，不设字段。"""
 
     run_id: str
     dataset_id: str | None = None
@@ -158,11 +157,11 @@ class OpenRunSummaryOut(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
-    accuracy40: float | None = None
+    pass_rate: float | None = None
     new_pass: float | None = None
     hit_pass: float | None = None
-    agreement40: float | None = None
     new_ratio: float | None = None
+    three_high: float | None = None
 
 
 class MovieSummaryRowOut(BaseModel):
@@ -574,25 +573,23 @@ def create_open_run(
     service,
     dataset: str,
     movies: dict,
-    thetas: Sequence[float] | None,
     modalities: Sequence[str] | None,
     concurrency: int | None,
 ) -> RunCreatedOut:
     """开放评测起跑（错误映射集中处，镜像 create_eval_run）：未知 dataset
-    404 → 服务层校验失败 400（选片越权/为空/thetas/modalities 非法/库未
-    就绪/并发非法）→ busy 409（自有活跃或对端活跃——detail 含活跃
-    run_id）。thetas/modalities/concurrency 缺省 None → 服务端默认
-    （OPEN_DEFAULT_THETAS / ("script", "dialogue") / OPEN_DEFAULT_CONCURRENCY）。"""
+    404 → 服务层校验失败 400（选片越权/为空/modalities 非法/库未就绪/
+    并发非法）→ busy 409（自有活跃或对端活跃——detail 含活跃 run_id）。
+    modalities/concurrency 缺省 None → 服务端默认（("script", "dialogue")
+    / OPEN_DEFAULT_CONCURRENCY）。"""
     _dataset_or_404(service.effective_root, dataset)
     try:
         run_id = service.start(
             dataset, movies,
-            thetas=(thetas if thetas is not None else OPEN_DEFAULT_THETAS),
             modalities=(tuple(modalities) if modalities is not None
                         else ("script", "dialogue")),
             concurrency=(concurrency if concurrency is not None
                          else OPEN_DEFAULT_CONCURRENCY))
-    except OpenEvalValidationError as exc:  # 选片越权/为空/thetas/modalities/库未就绪
+    except OpenEvalValidationError as exc:  # 选片越权/为空/modalities/库未就绪
         raise HTTPException(status_code=400, detail=str(exc))
     except OpenRunBusyError as exc:  # 单进程同时只允许一个评测 run（含跨服务）
         raise HTTPException(status_code=409, detail=str(exc))

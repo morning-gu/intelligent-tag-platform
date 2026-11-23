@@ -68,14 +68,13 @@ class StartRunRequest(BaseModel):
 
 
 class StartOpenRunRequest(BaseModel):
-    """开放评测起跑请求（open-eval Task 6）：thetas/modalities/concurrency
-    缺省 None → 服务端默认（DEFAULT_THETAS / ("script","dialogue") /
-    DEFAULT_CONCURRENCY）；modalities 词表校验（非空 ⊆ {script, dialogue}
-    且必含 script）在服务层 → 400。"""
+    """开放评测起跑请求：modalities/concurrency 缺省 None → 服务端默认
+    （("script","dialogue") / DEFAULT_CONCURRENCY）；modalities 词表校验
+    （非空 ⊆ {script, dialogue} 且必含 script）在服务层 → 400。开放评测
+    无 gt 排序任务，不设 thetas（闭环遗留口径已移除）。"""
 
     dataset: str
     movies: MovieSelection
-    thetas: list[float] | None = None
     modalities: list[str] | None = None
     concurrency: int | None = None
 
@@ -285,7 +284,7 @@ def open_start_run(
     互斥——closed 活跃时 detail 带对端 run_id）。"""
     return eval_orch.create_open_run(
         service, payload.dataset, payload.movies.model_dump(),
-        payload.thetas, payload.modalities, payload.concurrency)
+        payload.modalities, payload.concurrency)
 
 
 @open_router.get("/runs", response_model=list[OpenRunSummaryOut])

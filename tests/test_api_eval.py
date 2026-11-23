@@ -968,15 +968,15 @@ def test_open_run_end_to_end(client):
     rows = client.get(f"{_OPEN}/runs").json()
     mine = next(row for row in rows if row["run_id"] == run_id)
     assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
-    assert {"accuracy40", "new_pass", "hit_pass", "agreement40",
-            "new_ratio"} <= set(mine)
+    assert {"pass_rate", "new_pass", "hit_pass", "new_ratio",
+            "three_high"} <= set(mine)
 
 
 def test_open_history_summary_five_keys(client):
     """history 摘要五键取值透出：手写终态 run 目录（meta + report.json，
     磁盘夹具模式同 test_get_run_disk_only_fallback）→ GET /runs 行五键
-    按 _read_open_summary 统一取格出值（最近 0.4 有值格 + 宏平均直读）；
-    详情端点磁盘兜底同口径（注册表没有 → history 行）。"""
+    按 _read_open_summary 直读 summary 出值；详情端点磁盘兜底同口径
+    （注册表没有 → history 行）。"""
     _seed_dataset_and_library(client)
     out = Path(client.app.state.settings.open_eval_output_root)
     d = out / "run-open-disk"
@@ -987,20 +987,18 @@ def test_open_history_summary_five_keys(client):
         "finished_at": "2026-11-22T10:00:05+00:00",
         "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
     (d / "report.json").write_text(json.dumps({
-        "theta_rows": [
-            {"theta": 0.2, "accuracy": 0.5, "agreement": 0.75},
-            {"theta": 0.4, "accuracy": 0.6, "agreement": 0.8}],
-        "pass_rates": {"new_macro": 0.7, "hit_macro": 0.9},
-        "new_ratio": {"macro": 0.3},
+        "summary": {"pass_rate": 0.6, "new_pass": 0.7, "hit_pass": 0.9,
+                    "new_ratio": 0.3,
+                    "metrics": {"three_dimension_high_rate": 0.25}},
     }, ensure_ascii=False), encoding="utf-8")
     rows = client.get(f"{_OPEN}/runs").json()
     mine = next(row for row in rows if row["run_id"] == "run-open-disk")
     assert mine["status"] == "succeeded" and mine["dataset_id"] == "emotion"
-    assert mine["accuracy40"] == pytest.approx(0.6)  # 最近 headline 0.4 有值格
-    assert mine["agreement40"] == pytest.approx(0.8)
+    assert mine["pass_rate"] == pytest.approx(0.6)
     assert mine["new_pass"] == pytest.approx(0.7)
     assert mine["hit_pass"] == pytest.approx(0.9)
     assert mine["new_ratio"] == pytest.approx(0.3)
+    assert mine["three_high"] == pytest.approx(0.25)
     # 详情端点磁盘兜底（与 /runs 列表同口径）
     body = client.get(f"{_OPEN}/runs/run-open-disk").json()
     assert body["status"] == "succeeded" and body["total"] == 2

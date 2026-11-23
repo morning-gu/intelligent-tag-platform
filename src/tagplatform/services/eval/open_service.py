@@ -17,13 +17,13 @@ metrics.csv）。**audit/<tt>.json 由 mtg 管线自己落盘**：run 级 settin
 run 语义契约（本模块的三个核心语义，改动前先读）
 ================================================
 
-**评审失败契约（spec §6）**：produce 成功后对该片全部产出标签（命中 +
-新词）做一次二值评审；评审失败（ReviewRequestError 或任何异常）时
-**产出不作废**——hits/new_words 行原样保留（review=None 占位）、
-review_error 记录进结果与 raw_results，该片仍计 ok（failed 只统计
-produce 失败）。通过率/标定侧按「该片评审失败」整体排除出分母
-（None≠0：不是评审 0 分），准确率族照常可算——排除逻辑在 Task 5
-报告组装，本层只负责如实落盘。
+**评审失败契约**：produce 成功后对该片全部产出标签（命中 + 新词）做
+一次三维独立评审（judge 三维分仅作参考附在清单里）；评审失败
+（ReviewRequestError 或任何异常）时**产出不作废**——hits/new_words 行
+原样保留（review=None 占位）、review_error 记录进结果与 raw_results，
+该片仍计 ok（failed 只统计 produce 失败）。通过率/三维指标按「该片
+评审失败」整体排除出分母（None≠0：不是评审 0 分）——排除逻辑在报告
+组装，本层只负责如实落盘。
 
 **双熔断（完成序，互相独立）**：
 - produce 熔断：完成序连续 ABORT_CONSECUTIVE(5) 片 produce 失败 →
@@ -44,14 +44,14 @@ B 持 B 锁探 A）。读单个 Python 属性是原子的，无锁读安全；�
 目的是友好拒绝而非硬事务边界，接受（同 ClosedEvalService.busy_probe
 docstring 的说明）。
 
-**库∩gt 零交集不拒绝**（与闭环的差异点）：open 的头条指标之二（评审
-通过率/新词占比）不需要 gt，零交集只让集合准确率/标定无 gt 可评——
-meta 落 warning、报告侧按 None≠0 报 None，绝不产出假 0。
+**无 gt / 无 θ**（2026-11-23 三维化）：开放生成没有排序真值任务，
+闭环遗留的 gt 加载、θ 网格、集合准确率与标定全部移除；头条指标是
+评审通过率（三维分按阈值推导）与新词占比。
 
 历史扫描：`history()` 扫
 `open_eval_output_root/*/meta.json` 出历史行：meta.status=running 且
 不在进程内注册表 → interrupted（进程死亡在磁盘上可辨认）；五摘要键
-（accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）由
+（pass_rate / new_pass / hit_pass / new_ratio / three_high）由
 open_report._read_open_summary 读该 run 的 report.json（缺失全 None，
 宁缺勿假）。
 
@@ -62,7 +62,6 @@ persist_tags（评测只读）；评测产物只写 `settings.open_eval_output_r
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -78,13 +77,10 @@ from pathlib import Path
 
 from tagplatform.capabilities.prompts.open_review import REVIEW_PROMPT_VERSION
 from tagplatform.services.eval.dataset import (
-    _gt_path,
-    load_gt,
     load_movie_content,
     scan_datasets,
     select_movies,
 )
-from tagplatform.services.eval.open_ranking import DEFAULT_THETAS
 from tagplatform.services.eval.open_report import (
     _read_open_summary,
     assemble_open_report,
@@ -107,7 +103,6 @@ __all__ = [
     "ABORT_CONSECUTIVE",
     "ABORT_REVIEW_CONSECUTIVE",
     "DEFAULT_CONCURRENCY",
-    "DEFAULT_THETAS",
     "RETRY_PER_MOVIE",
     "EvalValidationError",
     "OpenEvalService",
@@ -149,21 +144,21 @@ class RunActiveError(RuntimeError):
 
 
 class EvalValidationError(ValueError):
-    """评测起跑校验失败：数据集不存在 / 选片越权或为空 / thetas 或
-    modalities 非法 / 库未就绪（库∩gt 零交集**不**在此列——open 落
-    warning 照常起跑）。"""
+    """评测起跑校验失败：数据集不存在 / 选片越权或为空 / modalities
+    非法 / 库未就绪 / 并发非法。"""
 
 
 @dataclass
 class OpenMovieResult:
     """单片干跑结果（评测的原子产出，Task 5 报告组装的输入）。
 
-    - `hits` 行 `{"tag_id","tag_name","gt","review"}`：tag_id 非空的产出
-      （库内命中）；gt 查该片 gt 表（None = 交集外），review 为
+    - `hits` 行 `{"tag_id","tag_name","judge_reference","review"}`：
+      tag_id 非空的产出（库内命中）；review 为
       `{"pass","relevance","semantics","value","reason","quote"}`（三维
       各 {"score","reason"}，pass 由分数按阈值推导）或 None（该片评审失败）；
-    - `new_words` 行 `{"name","desc","level","review"}`：tag_id 为空的
-      产出（模型新词）；desc 取 candidate_description（生成侧通用释义）；
+    - `new_words` 行 `{"name","desc","level","judge_reference","review"}`：
+      tag_id 为空的产出（模型新词）；desc 取 candidate_description（生成侧
+      通用释义）；judge_reference 为生产 judge 三维分（审计缺失时 None）；
     - `review_error`：该片评审失败原因（produce 失败片为 None——评审
       根本未发起）；评审成功（含零产出）为 None；
     - `ok=False` 时 `error` 记最后一次 produce 异常（含异常类型名），
@@ -203,9 +198,6 @@ class RunState:
 class _OpenJob:
     """一次 run 的不可变上下文（start 时快照，worker 线程消费）。
 
-    - `gt` 与 `library_ids`（库标签 id，排序）随 job 持有：终态写
-      raw_results 时并入 gt 向量；Task 5 报告组装按 library_ids 求
-      库∩gt 交集口径；
     - `run_settings`：run 级 settings 副本——mtg_modalities 收敛为本次
       起跑模态、mtg_report_dir 重定向进 run 目录的 audit/，随片传给
       produce（审计落位 + 文本模态由副本钉死，run 中途改全局设置不影响
@@ -218,8 +210,6 @@ class _OpenJob:
 
     run_id: str
     movies: list[str]
-    gt: dict[str, dict[str, float]]
-    library_ids: list[str]
     concurrency: int
     started_at: str
     meta: dict
@@ -228,6 +218,38 @@ class _OpenJob:
     dataset_root: str
     context: AssemblyContext
     run_settings: Settings
+
+
+def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
+    """run 审计 → {最终标签名: judge 三维参考分}。
+
+    审计 verdicts 按候选名记 judge 分，accepted 行记候选→最终名映射
+    （库内对齐可能改名）。读不到审计/映射缺失 → 空 dict：参考缺失不
+    影响独立评审（评审层对 judge_reference=None 的行不附参考）。
+    """
+    try:
+        audit = json.loads((Path(run_settings.mtg_report_dir) / f"{tt}.json")
+                           .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(audit, dict):
+        return {}
+    verdicts = {str(row["tag"]): row for row in audit.get("verdicts") or []
+                if isinstance(row, dict) and row.get("tag")}
+    references: dict[str, dict] = {}
+    for row in audit.get("accepted") or []:
+        if not isinstance(row, dict) or not row.get("tag"):
+            continue
+        verdict = verdicts.get(str(row.get("candidate")))
+        if verdict is None:
+            continue
+        references[str(row["tag"])] = {
+            "relevance": verdict.get("relevance"),
+            "semantics": verdict.get("semantics"),
+            "value": verdict.get("value"),
+            "reason": verdict.get("reason") or "",
+        }
+    return references
 
 
 def _now_iso() -> str:
@@ -292,20 +314,17 @@ class OpenEvalService:
     # ---------------------------------------------------------------- 对外接口
 
     def start(self, dataset_id: str, movies: dict,
-              thetas: Sequence[float] = DEFAULT_THETAS,
               modalities: Sequence[str] = ("script", "dialogue"),
               concurrency: int = DEFAULT_CONCURRENCY, *,
               wait: bool = False) -> str:
         """起一次开放评测 run（校验 → 注册 → 骨架 → daemon worker）→ run_id。
 
-        校验序（spec 钉死）：数据集存在 → 选片非空 → concurrency ≥ 1 →
-        thetas 非空且 ∈ (0,1] → modalities 非空 ⊆ {script, dialogue} 且
-        必含 script（video 显式拒绝：v1 文本模态，关键帧接入为后续扩展）
-        → gt 可读 → 库就绪 → busy（自有 + 对端 probe）。**库∩gt 零交集
-        不拒绝**（open 头条指标之二不需要 gt）：meta 落 warning。校验
-        失败抛 `EvalValidationError`（不占 busy 位）；已有 run 在跑抛
-        `RunBusyError`。`wait=True` 供测试同步等完（join worker 线程后
-        返回）。
+        校验序：数据集存在 → 选片非空 → concurrency ≥ 1 → modalities
+        非空 ⊆ {script, dialogue} 且必含 script（video 显式拒绝：v1 文本
+        模态，关键帧接入为后续扩展）→ 库就绪 → busy（自有 + 对端
+        probe）。校验失败抛 `EvalValidationError`（不占 busy 位）；
+        已有 run 在跑抛 `RunBusyError`。`wait=True` 供测试同步等完
+        （join worker 线程后返回）。
         """
         root = self.effective_root
         info = next((i for i in scan_datasets(root, set())
@@ -323,37 +342,13 @@ class OpenEvalService:
             raise EvalValidationError("评测影片集为空：选片结果 0 部")
         if concurrency < 1:
             raise EvalValidationError(f"concurrency 必须 ≥ 1（收到 {concurrency}）")
-        theta_values = self._validate_thetas(thetas)
         mods = self._validate_modalities(modalities)
-        try:
-            gt = load_gt(root, dataset_id)
-        except ValueError as exc:
-            raise EvalValidationError(str(exc)) from None
         # 装配一次（快照语义）：库/策略/生产器在起跑时定格——干跑循环
         # 只走 build_spec（纯内存），run 中途改库行不影响本 run 产出
         context = load_assembly_context("open")
         if context.library is None:
             raise EvalValidationError("标签库未就绪，无法启动开放评测")
         library = context.library
-        library_ids = {tag.tag_id for tag in library.tags()}
-        # 库∩gt 零交集不拒绝（open 头条指标之二不需要 gt）：meta 落
-        # warning，报告侧按 None≠0 报 None（绝不产出假 0 指标）
-        gt_tags = {tag for tags in gt.values() for tag in tags}
-        zero_warning = None
-        if not gt_tags & library_ids:
-            zero_warning = (
-                f"标签库与 gt 零交集（gt {len(gt_tags)} 标签 ∩ 库 "
-                f"{len(library_ids)} 标签）——集合准确率与标定无 gt 可评"
-                "（报告侧 None≠0），评审通过与产出统计不受影响")
-
-        # run 上下文快照（口径起跑时定格；纯读，失败前置到校验段）
-        gt_path = _gt_path(root, dataset_id)
-        n_rows = sum(len(row) for row in gt.values())
-        try:
-            with open(gt_path, "rb") as f:
-                gt_sha8 = hashlib.sha256(f.read()).hexdigest()[:8]
-        except OSError:
-            gt_sha8 = ""
 
         # Busy 检查 + 注册（同一锁内原子完成：并发 start 只放行一个）。
         # probe 是对端服务的无锁读——本锁内再取对端锁会与对端的对称探测
@@ -374,8 +369,7 @@ class OpenEvalService:
 
         meta = {
             "run_id": run_id,
-            "dataset": {"id": dataset_id, "gt_path": gt_path,
-                        "gt_sha8": gt_sha8, "n_rows": n_rows},
+            "dataset": {"id": dataset_id},
             "library": {"version": library.version,
                         "n_dirs": len(library.dirs()),
                         "n_tags": len(library.tags())},
@@ -387,12 +381,9 @@ class OpenEvalService:
             "embedding_model": getattr(self._embedder, "name", ""),
             "movies": {"mode": (movies or {}).get("mode"),
                        "ids": list(selected)},
-            "thetas": theta_values,
             "modalities": list(mods),
             "concurrency": concurrency,
         }
-        if zero_warning is not None:
-            meta["warning"] = zero_warning
         # run 级 settings 副本：模态收敛为本次起跑取值、审计目录重定向进
         # run 目录（audit/<task_id>.json，task_id=影片 id，Task 5 judge
         # 段按此读）；原 settings 不被 run 污染
@@ -401,8 +392,7 @@ class OpenEvalService:
             "mtg_modalities": ",".join(mods),
             "mtg_report_dir": str(run_dir / "audit"),
         })
-        job = _OpenJob(run_id=run_id, movies=list(selected), gt=gt,
-                       library_ids=sorted(library_ids),
+        job = _OpenJob(run_id=run_id, movies=list(selected),
                        concurrency=concurrency, started_at=started_at,
                        meta=meta, dataset_root=root, context=context,
                        run_settings=run_settings)
@@ -431,21 +421,6 @@ class OpenEvalService:
         if wait:
             thread.join()
         return run_id
-
-    @staticmethod
-    def _validate_thetas(thetas: Sequence[float]) -> list[float]:
-        """thetas 校验：非空、可数值化、值 ∈ (0,1]；返回 float 列表入 meta。"""
-        try:
-            values = [float(t) for t in (thetas or ())]
-        except (TypeError, ValueError):
-            raise EvalValidationError(
-                f"thetas 含非数值项：{list(thetas)!r}") from None
-        if not values:
-            raise EvalValidationError("thetas 为空：至少一个相关门槛（θ ∈ (0,1]）")
-        bad = [t for t in values if not 0 < t <= 1]
-        if bad:
-            raise EvalValidationError(f"thetas 越界：{bad}（须 ∈ (0,1]）")
-        return values
 
     @staticmethod
     def _validate_modalities(modalities: Sequence[str]) -> tuple[str, ...]:
@@ -548,9 +523,9 @@ class OpenEvalService:
         磁盘是持久层、注册表是进程内存：meta.status=running 且不在注册表 →
         进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
         读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过。五摘要键
-        （accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）由
-        `_read_open_summary` 读该 run 的 report.json（取格规则见其
-        docstring）；报告缺失/截断 → 五键 None（宁缺勿假）。
+        （pass_rate / new_pass / hit_pass / new_ratio / three_high）由
+        `_read_open_summary` 读该 run 的 report.json；报告缺失/截断 →
+        五键 None（宁缺勿假）。
         """
         root = Path(self.settings.open_eval_output_root)
         try:
@@ -585,13 +560,13 @@ class OpenEvalService:
                 "started_at": meta.get("started_at"),
                 "finished_at": meta.get("finished_at"),
                 "error": meta.get("error"),
-                # 历史摘要五键（accuracy40/new_pass/hit_pass/agreement40/
-                # new_ratio）：_read_open_summary 读 report.json，缺失全 None
-                "accuracy40": summary["accuracy40"],
+                # 历史摘要五键（pass_rate/new_pass/hit_pass/new_ratio/
+                # three_high）：_read_open_summary 读 report.json，缺失全 None
+                "pass_rate": summary["pass_rate"],
                 "new_pass": summary["new_pass"],
                 "hit_pass": summary["hit_pass"],
-                "agreement40": summary["agreement40"],
                 "new_ratio": summary["new_ratio"],
+                "three_high": summary["three_high"],
             })
         rows.sort(key=lambda row: row.get("started_at") or "", reverse=True)
         return rows
@@ -717,7 +692,7 @@ class OpenEvalService:
         库，未来 producer 改用会话会以 AttributeError 显式失败，不静默
         漂移；run 级 settings 副本随片传入，模态与审计目录在起跑定格）。
         produce 失败清空产出（半截产出不可信）。成功后产出二分：
-        tag_id 非空 = 命中行（gt 查该片 gt 表，None = 交集外），否则新词
+        tag_id 非空 = 命中行，否则新词
         行；两路行合拼成评审清单（id 按位置合成，open_review 侧再按批次
         位置重编）——评审异常 → review_error 记录、行保留 review=None、
         产出不作废（spec §6 契约）。内容从起跑快照根加载（job.dataset_root）
@@ -746,19 +721,22 @@ class OpenEvalService:
                 error = f"{type(exc).__name__}: {exc}"
                 produced = []
         if error is None and produced:
-            # 产出二分：命中行带 gt 查表（交集外 → None），新词行带 desc/level
-            gt_table = job.gt.get(tt, {})
+            # 产出二分：命中行 / 新词行（带 desc/level）；judge 三维分从
+            # run 审计关联到最终标签名，作评审参考（缺失 → None，不影响评审）
+            references = _judge_references(job.run_settings, tt)
             review_rows: list[dict] = []
             owners: list[dict] = []  # 评审行序 → 结果行（hits/new_words 混排）
             for tag in produced:
+                reference = references.get(tag.tag_name)
                 if tag.tag_id is not None:
                     row = {"tag_id": tag.tag_id, "tag_name": tag.tag_name,
-                           "gt": gt_table.get(tag.tag_id), "review": None}
+                           "judge_reference": reference, "review": None}
                     hits.append(row)
                 else:
                     row = {"name": tag.tag_name,
                            "desc": tag.candidate_description,
-                           "level": tag.level, "review": None}
+                           "level": tag.level,
+                           "judge_reference": reference, "review": None}
                     new_words.append(row)
                 review_rows.append({
                     "id": f"t{len(review_rows)}",
@@ -766,6 +744,7 @@ class OpenEvalService:
                     "desc": tag.candidate_description,
                     "level": tag.level,
                     "scenes": [ev.scene_id for ev in (tag.evidence or [])],
+                    "judge_reference": reference,
                 })
                 owners.append(row)
             try:
@@ -817,14 +796,11 @@ class OpenEvalService:
         """终态写盘（worker 主线程）：meta.json → raw_results.json → 报告三件套。
 
         写序非原子（meta 先行、报告最后）：读侧（history）对缺失/截断的
-        report.json 按「该 run 无报告」容错。报告口径用 job 携带的
-        gt/library_ids（起跑时定格，run 中途换库不影响本 run）与终态
-        meta（banner 需要 status/done/total）；audit/ 已由 mtg 管线经
-        run 级 settings 副本落进本目录，judge 段按 run_dir/audit 读。
-        组装/落盘异常向上抛（worker 兜底记日志）——meta/raw 已先行落盘，
-        报告缺失按「无报告」容错，不滞留 running。raw 行结构（组装
-        open_report 的输入形状）：gt 向量并入（无内容片的满表向量也在
-        ——报告侧按交集口径自行取用）。
+        report.json 按「该 run 无报告」容错。报告口径用终态 meta（banner
+        需要 status/done/total）；audit/ 已由 mtg 管线经 run 级 settings
+        副本落进本目录，judge 段按 run_dir/audit 读。组装/落盘异常向上抛
+        （worker 兜底记日志）——meta/raw 已先行落盘，报告缺失按「无报告」
+        容错，不滞留 running。
         """
         run_dir = Path(self.settings.open_eval_output_root) / job.run_id
         meta = dict(job.meta)
@@ -840,18 +816,15 @@ class OpenEvalService:
             meta["error"] = error
         rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
                  "hits": r.hits, "new_words": r.new_words,
-                 "review_error": r.review_error, "gt": job.gt.get(r.tt, {}),
-                 "elapsed_ms": r.elapsed_ms}
+                 "review_error": r.review_error, "elapsed_ms": r.elapsed_ms}
                 for r in results]
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)
         # 报告三件套（report.json / report.md / metrics.csv）：
         # assemble_open_report → write_open_report（镜像闭环 _write_artifacts
         # 的写序）；judge 段读 run 目录的 audit/<tt>.json
-        report = assemble_open_report(
-            results, job.gt, job.library_ids,
-            meta.get("thetas") or DEFAULT_THETAS, meta,
-            audit_dir=run_dir / "audit")
+        report = assemble_open_report(results, meta,
+                                      audit_dir=run_dir / "audit")
         write_open_report(run_dir, report)
 
     def _progress_path(self, run_id: str) -> str:

@@ -25,13 +25,13 @@ _ReviewFailStub）替换 `svc._review_client`——make_review_client 的
 6. modalities 校验：video 拒绝（v1 文本模态，关键帧为后续扩展）、
    缺 script 拒绝（台词随 script 通道渲染，缺了评审材料为空）、
    未知模态拒绝、空集拒绝；
-7. 库∩gt 零交集不拒绝（open 头条指标之二不需要 gt）：meta 落 warning
-   照常起跑；
+7. 无 gt 依赖：库标签与历史 gt 无交集也照常起跑（开放评测没有排序
+   真值任务，θ/集合准确率口径已移除）；
 8. delete 路径守卫（`.`/嵌套段/越界按不存在，绝不 rmtree 输出根）；
 9. review calibre（model / same_model / prompt_version）进 meta；
-10. history 五摘要键（accuracy40 / new_pass / hit_pass / agreement40 /
-    new_ratio）由 open_report._read_open_summary 读 report.json（Task 5
-    接线）；取格规则的专测在 test_eval_open_report.py。
+10. history 五摘要键（pass_rate / new_pass / hit_pass / new_ratio /
+    three_high）由 open_report._read_open_summary 读 report.json；
+    报告组装的专测在 test_eval_open_report.py。
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ from tagplatform.services.eval.open_service import (
     ABORT_CONSECUTIVE,
     ABORT_REVIEW_CONSECUTIVE,
     DEFAULT_CONCURRENCY,
-    DEFAULT_THETAS,
     RETRY_PER_MOVIE,
     EvalValidationError,
     OpenEvalService,
@@ -408,13 +407,12 @@ def test_runner_constants():
     assert RETRY_PER_MOVIE == 2
     assert ABORT_CONSECUTIVE == 5
     assert ABORT_REVIEW_CONSECUTIVE == 5
-    assert DEFAULT_THETAS == (0.2, 0.4, 0.6, 0.8)
 
 
 # ---------------------------------------------------------------- 起跑校验
 
 def test_start_validation_order(open_setup):
-    """校验序前段：数据集存在 → 选片非空 → concurrency → thetas（失败不占 busy 位）。"""
+    """校验序前段：数据集存在 → 选片非空 → concurrency（失败不占 busy 位）。"""
     svc, _ = open_setup()
     with pytest.raises(EvalValidationError, match="数据集不存在"):
         svc.start("nope", {"mode": "all"})
@@ -422,12 +420,6 @@ def test_start_validation_order(open_setup):
         svc.start("emotion", {"mode": "custom", "ids": []})
     with pytest.raises(EvalValidationError, match="concurrency"):
         svc.start("emotion", {"mode": "all"}, concurrency=0)
-    with pytest.raises(EvalValidationError, match="为空"):
-        svc.start("emotion", {"mode": "all"}, thetas=())
-    with pytest.raises(EvalValidationError, match="越界"):
-        svc.start("emotion", {"mode": "all"}, thetas=(0.0, 0.5))
-    with pytest.raises(EvalValidationError, match="越界"):
-        svc.start("emotion", {"mode": "all"}, thetas=(1.5,))
     assert svc.active_run_id() is None
 
 
@@ -469,37 +461,41 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert (d / "metrics.csv").exists()
     report = json.loads((d / "report.json").read_text(encoding="utf-8"))
     assert report["sample_accounting"] == {
-        "total": 2, "ok": 2, "failed": 0, "review_failed": 0, "invalid": 0}
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
     # 全量成功、无失败核算超 10%，但夹具未配独立评审端点 → 仅同模警示
     assert report["banner"] == ["评审与生成同模型，通过率绝对值系统性偏高，"
                                 "趋势对比可用、绝对值需打折解读"]
     # 替身审计（{"task_id","stub":True}）无 merged/accepted → judge 空聚合
     assert report["judge"]["self_filter"] is None
-    assert report["judge"]["verdicts"] == {"supported": 0, "insufficient": 0,
-                                           "contradicted": 0}
+    assert report["judge"]["scores"]["relevance"]["n"] == 0
     assert report["calibre"]["review_same_model"] is True
+    # 汇总：5 条产出（3+2），新词 2 条；替身评审全过线 → 通过率 1.0
+    assert report["summary"]["total_tags"] == 5
+    assert report["summary"]["new_words"] == 2
+    assert report["summary"]["new_ratio"] == pytest.approx(2 / 5)
+    assert report["summary"]["pass_rate"] == pytest.approx(1.0)
+    assert report["summary"]["metrics"]["relevance"]["average"] == pytest.approx(4.0)
 
     rows = _raw_rows(svc, run_id)
     assert len(rows) == 2 and all(r["ok"] for r in rows)
     row1 = next(r for r in rows if r["tt"] == "tt0000001")
     # raw 行契约（Task 5 组装 open_report 的输入形状）
     assert set(row1) == {"tt", "title", "ok", "error", "hits", "new_words",
-                         "review_error", "gt", "elapsed_ms"}
+                         "review_error", "elapsed_ms"}
     assert row1["title"] == "A Movie" and row1["error"] is None
-    assert row1["gt"] == {"t1": 0.9, "t2": 0.4, "t7": 0.1, "t9": 0.8}
     assert row1["review_error"] is None
-    # 产出二分：命中行四键（t1 交集内带 gt 分、tX 交集外 gt=None）+ 新词行四键
+    # 产出二分：命中行 / 新词行（judge_reference 替身审计无判决 → None）
     assert len(row1["hits"]) == 2 and len(row1["new_words"]) == 1
     h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
-    assert set(h1) == {"tag_id", "tag_name", "gt", "review"}
-    assert h1["gt"] == 0.9
+    assert set(h1) == {"tag_id", "tag_name", "judge_reference", "review"}
+    assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
     assert h1["review"]["quote"] == _QUOTE
     assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")
-    assert hx["gt"] is None and hx["review"]["pass"] is True
+    assert hx["review"]["pass"] is True
     nw = row1["new_words"][0]
-    assert set(nw) == {"name", "desc", "level", "review"}
+    assert set(nw) == {"name", "desc", "level", "judge_reference", "review"}
     assert nw["name"] == "新词甲" and nw["review"]["pass"] is True
 
     # 增量进度：每片一行，review="ok"
@@ -515,11 +511,10 @@ def test_run_completes_writes_all_artifacts(open_setup):
     # meta 口径快照
     meta = _read_meta(svc, run_id)
     assert meta["dataset"]["id"] == "emotion"
-    assert len(meta["dataset"]["gt_sha8"]) == 8
     assert meta["prompt"] == {"mode": "open", "version": "mtg-fake-v1"}
     assert meta["llm_model"] == "mock-1" and meta["embedding_model"] == "mock"
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
-    assert meta["thetas"] == list(DEFAULT_THETAS)
+    assert "thetas" not in meta  # 闭环遗留口径已移除
     assert meta["modalities"] == ["script", "dialogue"]
     assert meta["concurrency"] == DEFAULT_CONCURRENCY
     assert (meta["status"], meta["done"], meta["total"],
@@ -568,7 +563,6 @@ def test_review_failure_preserves_output(open_setup):
     assert len(row1["hits"]) == 2 and len(row1["new_words"]) == 1  # 产出保留
     assert all(h["review"] is None for h in row1["hits"])
     assert all(n["review"] is None for n in row1["new_words"])
-    assert row1["gt"] == {"t1": 0.9, "t2": 0.4, "t7": 0.1, "t9": 0.8}
     entries = _progress_entries(svc, run_id)
     assert all(e["review"] == "failed" and e["ok"] for e in entries)
     # 评审每片一次（产出行 3 条 < 切分阈值，单片单批）
@@ -577,7 +571,9 @@ def test_review_failure_preserves_output(open_setup):
     report = json.loads((_run_dir(svc, run_id) / "report.json")
                         .read_text(encoding="utf-8"))
     assert report["sample_accounting"] == {
-        "total": 2, "ok": 2, "failed": 0, "review_failed": 2, "invalid": 0}
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 2}
+    assert report["summary"]["pass_rate"] is None  # 评审失败排除出分母（None≠0）
+    assert report["summary"]["total_tags"] == 5  # 产出不作废
     assert [m["tt"] for m in report["review_failed_movies"]] == [
         "tt0000001", "tt0000002"]
     assert all(m["hit_pass"] is None and m["new_pass"] is None
@@ -693,26 +689,21 @@ def test_effective_root_uses_owner_override(open_setup, root):
 
 # ---------------------------------------------------------------- 零交集 / calibre
 
-def test_zero_intersection_library_proceeds_with_warning(open_setup):
-    """库∩gt 零交集不拒绝（open 头条指标之二不需要 gt）：meta 落 warning 照常跑完。"""
+def test_library_without_gt_overlap_proceeds(open_setup):
+    """开放评测无 gt 依赖：库标签与历史 gt 零交集也照常跑完（无 warning）。"""
     svc, fake = open_setup()
     write_library(library_root(), dirs=_EVAL_DIRS, tags=_DISJOINT_TAGS)
     svc._review_client = _ReviewOkStub()
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
     state = svc.get(run_id)
-    assert state.status == "succeeded"  # 不拒绝（闭环同场景显式报错）
+    assert state.status == "succeeded"
     meta = _read_meta(svc, run_id)
-    assert "零交集" in (meta.get("warning") or "")
-    # Task 5 接线：报告照常组装——命中行按「库∩gt 交集」成员判定
-    # （替身产出 t1 越库也算交集外），全部片 invalid 而非误进准确率族，
-    # evaluate_open 的随机基线 r/n 不在空交集上除零
+    assert meta.get("warning") is None
     report = json.loads((_run_dir(svc, run_id) / "report.json")
                         .read_text(encoding="utf-8"))
     assert report["sample_accounting"] == {
-        "total": 2, "ok": 2, "failed": 0, "review_failed": 0, "invalid": 2}
-    assert report["no_gt"] == 3  # t1/tX/t9 全在交集外
-    assert all(row["accuracy"] is None for row in report["theta_rows"])
-    assert report["pass_rates"]["hit_macro"] == pytest.approx(1.0)
+        "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
+    assert report["summary"]["hit_pass"] == pytest.approx(1.0)
 
 
 def test_review_calibre_in_meta(open_setup):
@@ -803,15 +794,14 @@ def test_history_summary_from_report(open_setup):
     assert mine["status"] == "succeeded"
     assert mine["finished_at"] is not None
     assert mine["dataset_id"] == "emotion"
-    # 夹具全 pass：θ=0.4 行 accuracy/agreement 均 1.0、通过率均 1.0、
-    # 新词占比 (1/3 + 1/2)/2 = 5/12（手算见 test_eval_open_report.py）
-    assert mine["accuracy40"] == pytest.approx(1.0)
-    assert mine["agreement40"] == pytest.approx(1.0)
+    # 夹具全 pass：通过率均 1.0；新词占比微口径 2/5；三维 4/3/3 非全满分
+    assert mine["pass_rate"] == pytest.approx(1.0)
     assert mine["new_pass"] == pytest.approx(1.0)
     assert mine["hit_pass"] == pytest.approx(1.0)
-    assert mine["new_ratio"] == pytest.approx(5 / 12)
+    assert mine["new_ratio"] == pytest.approx(2 / 5)
+    assert mine["three_high"] == pytest.approx(0.0)
     assert by_id["run-ghost"]["status"] == "interrupted"
-    five = ("accuracy40", "new_pass", "hit_pass", "agreement40", "new_ratio")
+    five = ("pass_rate", "new_pass", "hit_pass", "new_ratio", "three_high")
     assert all(by_id["run-ghost"][k] is None for k in five)
     # started_at 降序
     started = [r["started_at"] or "" for r in rows]
