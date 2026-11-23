@@ -3,8 +3,9 @@
 与平台原 open 实现的差别（2026-11 替换）：
 - 输入不是一份文本 prompt，而是"资产 JSON 的场景文本 + 按场景对齐的关键帧"；
 - 逐场单独生成，再用全片材料和逐场候选综合生成影片级标签，两级候选一起去重聚类；
-- 产出先过 judge（deepseek-v4.1-flash）逐条判内容支持度，只有 supported
-  且置信度过线的候选才落 `asset_tag`；
+- 产出先过 judge（deepseek-v4.1-flash）逐条做三维结果导向评分
+  （relevance/semantics/value，0-4），只有三维分数过线且置信度过线的
+  候选才落 `asset_tag`；
 - 证据锚点必须是资产里真实存在的场景（模型编的 id 直接丢），
   与 MovieTagGen 的"证据可追溯"要求对齐。
 
@@ -80,7 +81,9 @@ logger = logging.getLogger(__name__)
 # v2 = 引入标签库（提示注入 + 候选分档 + 分档参与排序），与 v1（纯生成）分开记。
 # v3 = 生成阶段就注入"可扩展目录"清单，由模型给出 dir（校验不过才回退向量归类）。
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
-MTG_VERSION = "mtg-v5-scene-context"
+# v6 = judge 改三维结果导向评分（relevance/semantics/value 0-4/null），
+#      按分数阈值筛选标签，value 分取代 importance 参与排序。
+MTG_VERSION = "mtg-v6-graded-judge"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -88,12 +91,17 @@ _MAX_EVIDENCE = 3
 # judge 置信度下限：只挡"模型自己都不确定"的判定，不拿它跟
 # policy.min_confidence 比——两者语义不同（一个是模型对标签的自评，一个是
 # 审核判定把握），硬套 0.7 会误杀事实正确的标签（实测把 Memento 的
-# "倒叙结构" 0.65 判死）。supported 的判定本来就该交给人工复核。
+# "倒叙结构" 0.65 判死）。过线的判定本来就该交给人工复核。
 _JUDGE_CONFIDENCE_FLOOR = 0.5
+
+# judge 三维分数的保留阈值：relevance/semantics ≥3（内容支持可推导、名称
+# 清晰无歧义），value ≥2（至少能筛到一类内容——0/1 档的泛泛评价与情节
+# 依赖词在这里淘汰）。null 分按未过线处理，绝不猜分放行。
+_JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 
 # judge 必须引用原文：判决里给出 quote，与内容逐字对上（容忍标点/省略号差异）
 # 才采信。这条把"judge 复读生成侧理由"变成可检测的失败：没有原文锚点的
-# supported 一律淘汰，而不是凭一句"内容有依据"放行。
+# 高 relevance 分一律降档淘汰，而不是凭一句"内容有依据"放行。
 _QUOTE_MIN_CHARS = 8
 _QUOTE_STRIP_RE = re.compile(
     r"[\s「」『』“”‘’\"'…—·,，。、；;：:！!？?（）()\[\]【】]+")
@@ -115,22 +123,19 @@ def _quote_ok(quote: str | None, haystack: str) -> bool:
 
 
 def _require_quotes(verdicts: dict[str, dict], haystack: str) -> None:
-    """引用不到原文的 supported 判决降级为 insufficient。
+    """引用不到原文的高 relevance 评分压到 1（只有话题、无可核验依据）。
 
-    并入判定本身（不单开一道闸、不加淘汰原因）：judge 说"有依据"但给不出
-    可核对的原文，等同于没依据。
+    并入评分本身（不单开一道闸、不加淘汰原因）：judge 给了 ≥3 的内容支持
+    分但给不出可核对的原文，等同于没依据——降档后自然过不了保留阈值。
     """
     for verdict in verdicts.values():
-        if verdict.get("verdict") != "supported":
+        relevance = verdict.get("relevance")
+        if not isinstance(relevance, int) or relevance < _JUDGE_SCORE_FLOORS["relevance"]:
             continue
         if _quote_ok(verdict.get("quote"), haystack):
             continue
-        verdict["verdict"] = "insufficient"
+        verdict["relevance"] = 1
         verdict["reason"] = (verdict.get("reason") or "未引用可核对原文")[:40]
-
-
-# judge 重要度排序（core 优先），队列截断的第一关键字
-_IMPORTANCE_RANK = {"core": 3, "secondary": 2, "incidental": 1}
 
 
 def _make_stage_client(settings: Settings, llm, *, temperature: float,
@@ -460,7 +465,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
 
 def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
                        modalities, merged) -> tuple[list, list[dict]]:
-    """小节 4：过滤 + 证据 + 目录匹配（judge 判决/把握度/场景证据逐条把关）。"""
+    """小节 4：过滤 + 证据 + 目录匹配（judge 三维分/把握度/场景证据逐条把关）。"""
     scene_index = {scene.scene_id: scene for scene in contents.content.scenes}
     if settings.mtg_judge_enabled:
         # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
@@ -475,9 +480,14 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
             if verdict is None:
                 dropped.append({"tag": candidate.tag, "why": "judge 未返回判决"})
                 continue
-            if verdict["verdict"] != "supported":
+            below = [f"{axis}={'null' if verdict.get(axis) is None else verdict[axis]}"
+                     f" < {floor}"
+                     for axis, floor in _JUDGE_SCORE_FLOORS.items()
+                     if not isinstance(verdict.get(axis), int)
+                     or verdict[axis] < floor]
+            if below:
                 dropped.append({"tag": candidate.tag,
-                                "why": f"judge={verdict['verdict']}"})
+                                "why": "judge 评分未过线（" + "；".join(below) + "）"})
                 continue
             if verdict["confidence"] < _JUDGE_CONFIDENCE_FLOOR:
                 dropped.append({"tag": candidate.tag,
@@ -545,17 +555,18 @@ def _band_rank(alignment: dict[str, Alignment], tag: str) -> int:
 
 def _rank(alignment: dict[str, Alignment], item
           ) -> tuple[int, int, float, int]:
-    """队列排序：重要度 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
+    """队列排序：value 分 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
 
-    先看重要度而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
-    对影片重要；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
-    而 core 的"视角反转"被挤掉。分档插在重要度之后、把握之前：
-    同样重要的两条，优先留库外新词。
+    先看标签价值而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
+    对用户有用；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
+    而高价值的"视角反转"被挤掉。分档插在价值之后、把握之前：
+    同样有用的两条，优先留库外新词。
     """
     candidate, verdict, _ = item
-    importance = _IMPORTANCE_RANK.get((verdict or {}).get("importance"), 0)
+    value = (verdict or {}).get("value")
+    value_rank = value if isinstance(value, int) else 0
     confidence = verdict["confidence"] if verdict else 0.8
-    return (-importance, -_band_rank(alignment, candidate.tag), -confidence,
+    return (-value_rank, -_band_rank(alignment, candidate.tag), -confidence,
             -candidate.runs)
 
 
@@ -580,7 +591,7 @@ def _plan(alignment: dict[str, Alignment], settings: Settings,
 def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
                        accepted: list, limits: _GenerationLimits
                        ) -> tuple[list, list[dict], dict]:
-    """小节 5 中段：按重要度/分档排序，再按总量、来源与场景级配额截断。"""
+    """小节 5 中段：按 value 分/分档排序，再按总量、来源与场景级配额截断。"""
     total_limit = limits.total_limit
     limit = limits.limit
     scene_limit = limits.scene_limit
@@ -816,6 +827,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             "max_frames": settings.mtg_max_frames,
             "merge_threshold": settings.mtg_merge_threshold,
             "judge_confidence_floor": _JUDGE_CONFIDENCE_FLOOR,
+            "judge_score_floors": dict(_JUDGE_SCORE_FLOORS),
             "max_final_tags": limit,
             "library_enabled": bool(settings.open_library_enabled),
             "library_hint_count": len(hints),

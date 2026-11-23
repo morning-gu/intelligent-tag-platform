@@ -48,7 +48,7 @@ def _spec(content, run_id: str) -> GenerationSpec:
 
 
 class _Judge:
-    """全判 supported 的 judge 桩：引用首个场景行的原文。"""
+    """全给过线三维分（4/3/3）的 judge 桩：引用首个场景行的原文。"""
 
     def complete(self, messages, run_id):
         text = messages[0]["content"]
@@ -57,8 +57,9 @@ class _Judge:
         items = []
         for line in text.splitlines():
             if line.startswith("- ") and "｜" in line:
-                items.append({"tag": line[2:].split("｜")[0], "verdict": "supported",
-                              "importance": "core", "confidence": 0.9,
+                items.append({"tag": line[2:].split("｜")[0],
+                              "relevance": 4, "semantics": 3, "value": 3,
+                              "confidence": 0.9,
                               "scenes": [], "quote": quote, "reason": "桩"})
         return LLMResponse(content=json.dumps(items, ensure_ascii=False),
                            usage={"prompt_tokens": 10, "completion_tokens": 5},

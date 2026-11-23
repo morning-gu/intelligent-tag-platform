@@ -79,35 +79,53 @@ LIBRARY_HINT_HEAD_TEXT = (
 )
 
 # ---- judge 指令文案（与解析器互为协议）----
-# judge 输出的解析端是 parse.parse_judge_items（verdict/importance 取值集、
+# judge 输出的解析端是 parse.parse_judge_items（三维分值 0-4/null 清洗、
 # confidence 夹取、quote/reason 截断都在那里），JUDGE_RETRY_HINT 是同一输出
-# 协议的第三次出现——改字段名、取值集或输出 JSON 形状时三处必须同改。
+# 协议的第三次出现——改字段名、分值范围或输出 JSON 形状时三处必须同改。
+# 三维口径与 capabilities/prompts/quality.py 的评估 rubric 同源但任务不同：
+# judge 在释义补写之前评审，semantics 只评名称本身；评估侧评名称↔释义。
 JUDGE_ROLE_BRIEF = (
-    "你是严格的影视内容标签审核员。下面是候选标签与影片内容，"
-    "请逐个判定候选标签是否被内容真实支持。\n\n"
+    "你是严格的影视内容标签审核员。下面是候选标签和影片内容。"
+    "请逐个评审候选标签的实际效果：它被内容支持得有多准确、名称是否清晰、"
+    "对检索和浏览有多大实际作用——不是评它听起来好不好。\n\n"
 )
 JUDGE_CRITERIA = (
-    "## 判定标准\n"
-    "- supported：内容中有明确依据（如场景描述、台词、氛围或人物情绪）；\n"
-    "- insufficient：内容不足以判断（不要臆测）；\n"
-    "- contradicted：内容明显与标签矛盾；\n"
-    "- importance：film 按全片展示价值评 core / secondary / incidental。"
-    "scene 按本场检索价值评 core（精确且有区分度）/ secondary（相关但较泛）/ "
-    "incidental（难以帮助定位片段），无需衡量在全片中的重要性。\n"
-    "- confidence：0-1，你对判定结果的把握；\n"
+    "## 评分标准\n"
+    "三个维度各从 0 到 4 评分，命中第一档即停；材料不足以区分相邻档时填 null，"
+    "并在 reason 里写明缺什么。\n"
+    "- relevance（内容支持）：内容对标签核心概念和每个会改变含义的限定的支持程度。"
+    "0 内容直接反驳，或找不到相关对象、事件和属性；"
+    "1 只有相关对象、场所或话题，核心动作或属性本身无依据；"
+    "2 核心概念有依据，但至少一项必要限定缺失，或 film 级证据仍集中在同一事件；"
+    "3 核心及全部限定可从具体细节推出（允许一步推理），证据覆盖相应层级；"
+    "4 核心及全部限定可在场景描述、台词或人物材料中直接定位。\n"
+    "- semantics（名称清晰度）：此阶段还没有释义，只评名称本身——没看过影片的"
+    "读者能否准确、独立地理解。"
+    "0 名称无法解读或自相矛盾；1 指代含糊，无法确定说的是什么；"
+    "2 大致可懂但边界模糊或有歧义，不同读者会理解成不同东西；"
+    "3 清晰无歧义，脱离剧情也能独立理解；"
+    "4 清晰且区分条件自明，读者可据此判断新实例是否属于这个词。\n"
+    "- value（实际作用）：这个标签能帮用户筛掉多少无关内容。只看名称本身，"
+    "不拿候选理由替名称补词。"
+    "0 脱离剧情无法解读成独立属性或查询；1 只能表达存在性、情节编号或泛泛评价；"
+    "2 能筛到一类内容，但只是普通类目或事件类型；"
+    "3 scene 恰有一项可在依据场景核实的有效限定（参与者、对象、地点、动作方式、"
+    "可识别的视听细节等），film 描述有证据的具体次要属性；"
+    "4 scene 至少两项独立限定，film 直接表达主线、主要冲突或主导视听风格。\n"
+    "- confidence：0-1，你对评分结果的把握；\n"
     "- scenes：引用的场景 id，必须是上面出现过的 id；没有就空数组；\n"
     "- quote：从上面内容里**逐字摘录**的一句原文（10-25 字，可以是场景描述、"
     "台词、氛围或情绪词），用来让人核对你的依据。**不得改写、不得复述候选标签的"
-    "理由**；找不到能摘的原文就判 insufficient。\n"
-    "- reason：一句话说明这句原文怎么支撑（或不支撑）该标签，不要照抄候选理由。\n"
-    "按候选标明的作用域审核。film 判 supported 时，scenes 必须列出至少两个共同支撑它的真实场景；"
-    "只有一处依据时判 insufficient。scene 只在候选标明的依据场景内核验并引用原文。\n"
-    "只有 quote 能在内容里逐字找到的判定才算数，没有原文依据一律 insufficient。\n"
-    "宁可判 insufficient，也不要放过没有依据的标签。\n\n"
+    "理由**；找不到能摘的原文就给 relevance 0 或 1。\n"
+    "- reason：一句话说明评分依据（命中哪档、什么事实阻止升档），不要照抄候选理由。\n"
+    "按候选标明的作用域审核。film 的 relevance ≥3 时，scenes 必须列出至少两个"
+    "共同支撑它的独立场景；只有一处依据时 relevance 至多 2。"
+    "scene 只在候选标明的依据场景内核验并引用原文。\n"
+    "只有 quote 能在内容里逐字找到的评分才算数，没有原文依据的 relevance 至多 1。\n"
+    "宁可给低分，也不要放过没有依据的标签。\n\n"
     "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
-    '{"verdicts":[{"tag":"候选标签原文","verdict":"supported|insufficient|contradicted",'
-    '"importance":"core|secondary|incidental","confidence":0.0,'
-    '"scenes":["场景 id"],"quote":"原文逐字摘录","reason":"30 字以内"}]}'
+    '{"verdicts":[{"tag":"候选标签原文","relevance":4,"semantics":3,"value":3,'
+    '"confidence":0.0,"scenes":["场景 id"],"quote":"原文逐字摘录","reason":"30 字以内"}]}'
 )
 
 # ---- 标签通用释义补写指令（descriptions）----
@@ -168,7 +186,7 @@ VERIFY_RETRY_HINT = (
 # ---- judge 解析重试提示 ----
 JUDGE_RETRY_HINT = (
     "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
-    '每个元素形如 {"tag":"标签","verdict":"supported","importance":"core",'
-    '"confidence":0.9,"scenes":["scene_id"],"reason":"依据"}。'
+    '每个元素形如 {"tag":"标签","relevance":4,"semantics":3,"value":3,'
+    '"confidence":0.9,"scenes":["scene_id"],"quote":"原文摘录","reason":"依据"}。'
     "不要用对象包装、不要任何解释文字或 Markdown 代码块。"
 )

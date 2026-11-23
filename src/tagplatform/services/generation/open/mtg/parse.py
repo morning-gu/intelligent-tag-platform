@@ -7,9 +7,8 @@
 清洗规则（与提示词契约对齐）：
 - 生成项：tag 去空白后非空且 ≤20 字；dimension 归一成五维中文名（未知或无
   则 None，交给合并层统计）；scenes 只留字符串；reason 去首尾空白后完整保留。
-- 审核项：verdict 只认 supported/insufficient/contradicted（其余按
-  insufficient 处理——保守，不放行）；confidence 夹到 [0,1]；importance 只认
-  三档，未知按 secondary；scenes 只留字符串。
+- 审核项：三维分值（relevance/semantics/value）只认 0-4 的整数，其余按
+  null 处理（保守，不放行）；confidence 夹到 [0,1]；scenes 只留字符串。
 """
 from __future__ import annotations
 
@@ -29,8 +28,8 @@ _DIMENSION_ALIASES: dict[str, str] = {
     "story": "叙事", "plot": "叙事", "角色特征": "角色",
 }
 
-_VERDICTS = ("supported", "insufficient", "contradicted")
-_IMPORTANCES = ("core", "secondary", "incidental")
+# judge 三维评分轴（与提示词 JUDGE_CRITERIA、pipeline 的分数阈值互为协议）
+_JUDGE_SCORE_AXES = ("relevance", "semantics", "value")
 
 
 class MTGParseError(ValueError):
@@ -179,13 +178,29 @@ def _clamp_confidence(value) -> float:
     return min(1.0, max(0.0, number))
 
 
+def _clean_score(value) -> int | None:
+    """三维分值清洗：只认 0-4 的整数（含整数值浮点）；其余按 null（保守）。
+
+    布尔、越界、非数值都视为"模型没给出有效分"——null 在过滤层按未过线
+    淘汰，绝不猜一个分数放行。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int) and 0 <= value <= 4:
+        return value
+    return None
+
+
 def parse_judge_items(text: str) -> list[dict]:
-    """审核输出 → [{tag, verdict, importance, confidence, scenes, reason}]。
+    """审核输出 → [{tag, relevance, semantics, value, confidence, scenes,
+    quote, reason}]（三维分值 0-4 或 None）。
 
     文案与解析互为协议：judge 提示词（prompts.JUDGE_CRITERIA / JUDGE_ROLE_BRIEF）
-    与重试提示（judge._RETRY_HINT）描述的输出形状就是本函数的输入契约——
-    verdict/importance 取值集、quote/reason 截断上限与本函数硬编码一致；
-    改字段名、取值集或 JSON 形状时提示与解析两侧必须同改。
+    与重试提示（JUDGE_RETRY_HINT）描述的输出形状就是本函数的输入契约——
+    分值范围、quote/reason 截断上限与本函数硬编码一致；
+    改字段名、分值范围或 JSON 形状时提示与解析两侧必须同改。
     """
     items: list[dict] = []
     for entry in extract_json_array(text):
@@ -194,18 +209,11 @@ def parse_judge_items(text: str) -> list[dict]:
         tag = _clean_tag(entry.get("tag") or entry.get("tag_name"))
         if not tag:
             continue
-        verdict = str(entry.get("verdict") or "").strip().lower()
-        if verdict not in _VERDICTS:
-            verdict = "insufficient"
-        importance = str(entry.get("importance") or "").strip().lower()
-        if importance not in _IMPORTANCES:
-            importance = "secondary"
         scenes = [s.strip() for s in entry.get("scenes") or []
                   if isinstance(s, str) and s.strip()]
         items.append({
             "tag": tag,
-            "verdict": verdict,
-            "importance": importance,
+            **{axis: _clean_score(entry.get(axis)) for axis in _JUDGE_SCORE_AXES},
             "confidence": _clamp_confidence(entry.get("confidence")),
             "scenes": scenes,
             "quote": str(entry.get("quote") or "").strip()[:60],

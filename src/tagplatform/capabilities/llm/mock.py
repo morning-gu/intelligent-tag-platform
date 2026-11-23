@@ -188,9 +188,9 @@ def _verify_output(text: str) -> dict:
 
 
 def _judge_output(text: str, run_id: str) -> list[dict]:
-    """judge：解析候选行，全部判 supported（confidence 0.9，引用首场景并摘原文）。
+    """judge：解析候选行，全部给过线三维分（4/3/3，confidence 0.9，引用首场景并摘原文）。
 
-    必须给 quote：流水线要求"判决引用内容原文"，模拟客户端从首场景描述里
+    必须给 quote：流水线要求"评分引用内容原文"，模拟客户端从首场景描述里
     截一段，口径与真实 judge 一致。
     """
     scenes = _parse_scenes(text)
@@ -203,8 +203,9 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
         cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
             "tag": tag.strip(),
-            "verdict": "supported",
-            "importance": "core",
+            "relevance": 4,
+            "semantics": 3,
+            "value": 3,
             "confidence": 0.9,
             "scenes": evidence,
             "quote": cited["description"][:12] if cited else quote,

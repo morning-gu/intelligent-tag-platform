@@ -1,15 +1,15 @@
 ﻿"""模式 B（开放式生成）测试：MovieTagGen 移植版流水线。
 
 覆盖契约（2026-11 替换后）：
-- 多轮生成 → 跨轮归一/语义合并 → judge 过滤 → 证据校验 → ProducedTag；
-- 只有 judge 判 supported 且置信度过线的候选才产出；
+- 多轮生成 → 跨轮归一/语义合并 → judge 三维评分过滤 → 证据校验 → ProducedTag；
+- 只有三维分数（relevance≥3 / semantics≥3 / value≥2）与置信度都过线的候选才产出；
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v5-scene-context`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v6-graded-judge`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
-视听风格），对审核 prompt 全部判 supported、confidence=0.9；`MOCK_EMBEDDER`
+视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
 是哈希伪向量，不同标签近似正交，所以语义合并不额外合并——归一化去重负责合并同名词。
 """
 
@@ -52,23 +52,26 @@ def mtg_settings(tmp_path, monkeypatch):
 
 
 class _JudgeClient:
-    """固定判决的 judge 桩：verdict/confidence/scenes/quote 由构造参数决定。
+    """固定评分的 judge 桩：三维分/confidence/scenes/quote 由构造参数决定。
 
     echo_full=True 复现真实调用的坏习惯：把整行候选（含维度/依据）抄进
     tag 字段——对齐逻辑必须仍能匹配回候选。
     quote 缺省时从审核 prompt 的首个场景行截一段原文（模拟"引用原文"）。
+    value_map 按标签名给 value 分（队列排序用例用）。
     """
 
-    def __init__(self, verdict="supported", confidence=0.9, scenes=None,
-                 omit: str | None = None, echo_full: bool = False,
-                 quote: str | None = "", importance_map: dict | None = None):
-        self.verdict = verdict
+    def __init__(self, relevance=4, semantics=3, value=3, confidence=0.9,
+                 scenes=None, omit: str | None = None, echo_full: bool = False,
+                 quote: str | None = "", value_map: dict | None = None):
+        self.relevance = relevance
+        self.semantics = semantics
+        self.value = value
         self.confidence = confidence
         self.scenes = scenes
         self.omit = omit
         self.echo_full = echo_full
         self.quote = quote
-        self.importance_map = importance_map or {}
+        self.value_map = value_map or {}
         self.calls = 0
 
     def complete(self, messages, run_id):
@@ -87,8 +90,9 @@ class _JudgeClient:
                 continue
             items.append({
                 "tag": row if self.echo_full else tag,
-                "verdict": self.verdict,
-                "importance": self.importance_map.get(tag, "core"),
+                "relevance": self.relevance,
+                "semantics": self.semantics,
+                "value": self.value_map.get(tag, self.value),
                 "confidence": self.confidence,
                 "scenes": self.scenes if self.scenes is not None else [],
                 "quote": quote,
@@ -129,7 +133,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v5-scene-context"
+    assert producer.prompt_version == "mtg-v6-graded-judge"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -147,7 +151,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v5-scene-context"
+    assert report["version"] == "mtg-v6-graded-judge"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
@@ -155,12 +159,49 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
 
 def test_open_judge_rejected_dropped(session, content_fixture, mtg_settings):
-    """judge 判 insufficient → 不进审核队列。"""
+    """judge 给低 relevance 分（<3）→ 不进审核队列。"""
     spec = _build_spec(session, content_fixture, run_id="r2")
     out = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(verdict="insufficient"))
+        judge_client=_JudgeClient(relevance=1))
     assert out == []
+
+
+def test_open_judge_null_score_dropped(session, content_fixture, mtg_settings):
+    """judge 某维给 null（材料不足以区分相邻档）→ 按未过线淘汰，不猜分放行。"""
+    spec = _build_spec(session, content_fixture, run_id="r2b")
+    out = OpenTagProducer().produce(
+        spec, session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(semantics=None))
+    assert out == []
+
+
+def test_open_judge_semantics_floor(session, content_fixture, mtg_settings):
+    """semantics=2（名称边界模糊）< 3 → 淘汰；=3 保留。"""
+    spec = _build_spec(session, content_fixture, run_id="r2c")
+    out = OpenTagProducer().produce(
+        spec, session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(semantics=2))
+    assert out == []
+    kept = OpenTagProducer().produce(
+        _build_spec(session, content_fixture, run_id="r2d"),
+        session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(semantics=3))
+    assert len(kept) == 3
+
+
+def test_open_judge_value_floor(session, content_fixture, mtg_settings):
+    """value=1（泛泛评价词）< 2 → 淘汰；=2（普通类目）保留。"""
+    spec = _build_spec(session, content_fixture, run_id="r2e")
+    out = OpenTagProducer().produce(
+        spec, session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(value=1))
+    assert out == []
+    kept = OpenTagProducer().produce(
+        _build_spec(session, content_fixture, run_id="r2f"),
+        session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(value=2))
+    assert len(kept) == 3
 
 
 def test_open_judge_low_confidence_dropped(session, content_fixture, mtg_settings):
@@ -211,21 +252,17 @@ def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
                                raw={}, ok=True)
 
     def verdict(tag):
-        return {"tag": tag, "verdict": "supported", "importance": "core",
+        return {"tag": tag, "relevance": 4, "semantics": 3, "value": 3,
                 "confidence": 0.9, "scenes": ["scene_001"],
                 "quote": "两名人物在仓库中发生激烈争执", "reason": "桩"}
 
+    keyed = {"relevance": 4, "semantics": 3, "value": 3,
+             "confidence": 0.9, "scenes": ["scene_001"],
+             "quote": "两名人物在仓库中发生激烈争执"}
     for payload in ({"verdicts": [verdict("多线叙事"), verdict("情感张力"),
                                   verdict("视听风格")]},
-                    {"多线叙事": {"verdict": "supported", "importance": "core",
-                                  "confidence": 0.9, "scenes": ["scene_001"],
-                                  "quote": "两名人物在仓库中发生激烈争执"},
-                     "情感张力": {"verdict": "supported", "importance": "core",
-                                  "confidence": 0.9, "scenes": ["scene_001"],
-                                  "quote": "两名人物在仓库中发生激烈争执"},
-                     "视听风格": {"verdict": "supported", "importance": "core",
-                                  "confidence": 0.9, "scenes": ["scene_001"],
-                                  "quote": "两名人物在仓库中发生激烈争执"}}):
+                    {"多线叙事": dict(keyed), "情感张力": dict(keyed),
+                     "视听风格": dict(keyed)}):
         spec = _build_spec(session, content_fixture, run_id="r11")
         out = OpenTagProducer().produce(
             spec, session, MOCK_LLM, MOCK_EMBEDDER,
@@ -369,12 +406,12 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
         ("scene", 3, 2), ("film", 1, 2)]
 
 
-# ---- 队列治理：judge 引用原文 + 重要度排序 ----
+# ---- 队列治理：judge 引用原文 + value 排序 ----
 
 
 def test_open_judge_without_quote_downgraded(session, content_fixture,
                                              mtg_settings):
-    """judge 判 supported 但引用不到原文 → 按 insufficient 处理（淘汰）。"""
+    """judge 给高 relevance 分但引用不到原文 → 降档到 1（淘汰）。"""
     spec = _build_spec(session, content_fixture, run_id="rq1")
     out = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
@@ -382,8 +419,8 @@ def test_open_judge_without_quote_downgraded(session, content_fixture,
     assert out == []
 
 
-def test_open_importance_orders_queue(session, content_fixture, mtg_settings):
-    """队列先按 judge 重要度排：core 排在 secondary 前（同把握同轮数时）。"""
+def test_open_value_orders_queue(session, content_fixture, mtg_settings):
+    """队列先按 judge value 分排：4 分排在 2 分前（同把握同轮数时）。"""
     spec = _build_spec(session, content_fixture, run_id="rq2")
     llm = _FixedGenLLM([
         {"tag": "次要标签", "dimension": "情绪", "scenes": ["scene_001"],
@@ -393,8 +430,7 @@ def test_open_importance_orders_queue(session, content_fixture, mtg_settings):
     ])
     out = OpenTagProducer().produce(
         spec, session, llm, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(importance_map={"核心标签": "core",
-                                                  "次要标签": "secondary"}))
+        judge_client=_JudgeClient(value_map={"核心标签": 4, "次要标签": 2}))
     assert [tag.tag_name for tag in out][0] == "核心标签"
 
 

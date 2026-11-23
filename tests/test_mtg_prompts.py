@@ -117,7 +117,7 @@ def test_judge_uses_dialogues_only_when_enabled():
     without_dialogue = build_judge_messages(
         content, candidates, include_dialogue=False)[0]["content"]
 
-    assert "scene 按本场检索价值" in with_dialogue
+    assert "scene 只在候选标明的依据场景内核验并引用原文" in with_dialogue
     assert "第1句台词" in with_dialogue
     assert "第1句台词" not in without_dialogue
 
