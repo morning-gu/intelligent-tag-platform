@@ -875,9 +875,14 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
 
 
 def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
-                        judge_client=None) -> list[ProducedTag]:
-    """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。"""
-    settings = get_settings()
+                        judge_client=None,
+                        settings: Settings | None = None) -> list[ProducedTag]:
+    """跑一次开放式生成，返回落库前的 ProducedTag 列表（不写库）。
+
+    `settings` 传 run 级副本（开放评测用：文本模态 + 重定向审计目录）；
+    None 时回落进程级 `get_settings()`，生产执行器不传参，行为不变。
+    """
+    settings = settings or get_settings()
     started = time.monotonic()
     contents = spec.content
 

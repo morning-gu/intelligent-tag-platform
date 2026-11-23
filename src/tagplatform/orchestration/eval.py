@@ -1,8 +1,11 @@
-"""闭环评测域编排（13 个 admin 用例）——orchestration/eval 域。
+"""评测域编排（闭环 13 个 + 开放 7 个 admin 用例）——orchestration/eval 域。
 
 用例清单（原 api/routers/eval.py 的装配与读侧容错，Task 11 原样下沉；
-服务层是 tagplatform.services.eval.service.ClosedEvalService——数据集
-扫描/干跑运行器/报告与历史，DB 零写入；SQL 装配零语义变化）：
+开放评测 7 用例随 open-eval Task 6 追加——错误映射与 `_run_dir` 守卫
+逐条镜像闭环同名函数，数据集族直接复用闭环函数零新逻辑）。闭环服务层
+是 tagplatform.services.eval.service.ClosedEvalService，开放服务层是
+tagplatform.services.eval.open_service.OpenEvalService（数据集扫描/
+干跑运行器/报告与历史，DB 零写入；SQL 装配零语义变化）：
 
 - `get_dataset_root`     当前生效数据集根（override ?? .env 默认）
 - `set_dataset_root`     设置数据集根（目录存在 + 扫描出数据集才生效）
@@ -18,8 +21,22 @@
 - `get_run_movies`       run 逐片摘要（badcase 视图主表，θ 门可拆）
 - `get_run_movie_detail` 单片明细（摘要行展开懒加载三表）
 
-run_id 守卫（`_run_dir` 路径越界防拼接）、读侧容错（非原子写序窗口不
-500）与 θ 门校验（非法档 400 带合法清单）随逻辑下沉本层原样保留。
+开放评测（open-eval Task 6，读侧走 settings.open_eval_output_root）：
+
+- `create_open_run`      开放评测起跑（404 → 400 → busy 409，busy 含
+                         跨服务互斥——detail 带对端活跃 run_id）
+- `list_open_runs`       开放评测历史行（磁盘扫描 + 摘要五键，None 安全）
+- `get_open_run`         开放评测 run 进度详情（注册表优先、磁盘兜底）
+- `cancel_open_run`      请求取消（幂等 {ok}）
+- `delete_open_run`      删除终态 run（活跃 409 / 不存在 404）
+- `get_open_run_report`  开放评测报告 JSON（缺失/截断 404，不 500）
+- `get_open_run_file`    开放评测产物下载（白名单五件套）
+
+run_id 守卫（`_run_dir` / `_open_run_dir` 路径越界防拼接）、读侧容错
+（非原子写序窗口不 500）随逻辑下沉本层原样保留；数据集三别名
+（/open/dataset-root、/open/datasets、/open/datasets/{id}/movies）与
+闭环共用上述 dataset 用例——override 状态挂在闭环服务上，open 路由
+Depends(get_closed_eval) 直读，一处写入两端可见。
 """
 
 import json
@@ -33,6 +50,13 @@ from pydantic import BaseModel
 from tagplatform.services.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.services.eval.dataset import movie_entries, scan_datasets
 from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
+from tagplatform.services.eval.open_service import (
+    DEFAULT_CONCURRENCY as OPEN_DEFAULT_CONCURRENCY,
+    DEFAULT_THETAS as OPEN_DEFAULT_THETAS,
+    EvalValidationError as OpenEvalValidationError,
+    RunActiveError as OpenRunActiveError,
+    RunBusyError as OpenRunBusyError,
+)
 from tagplatform.services.eval.service import (
     DEFAULT_CONCURRENCY,
     EvalValidationError,
@@ -116,6 +140,29 @@ class RunSummaryOut(BaseModel):
     p10: float | None = None
     r20: float | None = None
     coverage_median: float | None = None
+
+
+class OpenRunSummaryOut(BaseModel):
+    """开放评测历史行（OpenEvalService.history()）：基础行字段与闭环同形；
+    摘要五键（accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）
+    由 open_report._read_open_summary 读 report.json 出（统一取格约定见其
+    docstring；报告缺失/截断 → 对应键 None 宁缺勿假，None 安全）。
+    闭环侧的 ndcg10/p10/r20/coverage_median 不在开放口径内，不设字段。"""
+
+    run_id: str
+    dataset_id: str | None = None
+    status: str
+    done: int | None = None
+    total: int | None = None
+    failed: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+    accuracy40: float | None = None
+    new_pass: float | None = None
+    hit_pass: float | None = None
+    agreement40: float | None = None
+    new_ratio: float | None = None
 
 
 class MovieSummaryRowOut(BaseModel):
@@ -237,6 +284,18 @@ def _run_dir(settings: Settings, run_id: str) -> Path | None:
     """run 目录守卫：解析后必须仍在 eval_output_root 内（防 run_id 形态的
     路径拼接越界——`..`、绝对路径、分隔符变体一律 None → 404）。"""
     root = Path(settings.eval_output_root)
+    candidate = (root / run_id).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _open_run_dir(settings: Settings, run_id: str) -> Path | None:
+    """开放评测 run 目录守卫（open-eval Task 6）：逻辑镜像闭环 `_run_dir`，
+    输出根换成 settings.open_eval_output_root。"""
+    root = Path(settings.open_eval_output_root)
     candidate = (root / run_id).resolve()
     try:
         candidate.relative_to(root.resolve())
@@ -498,3 +557,119 @@ def get_run_movie_detail(
         raise HTTPException(status_code=404,
                             detail=f"影片不在该 run 明细中：{tt!r}")
     return MovieDetailOut(**detail)
+
+
+# ---------------------------------------------------------------- 开放评测用例（open-eval Task 6）
+#
+# 与闭环同名函数逐条镜像：错误映射、`_run_dir` 守卫、读侧容错、白名单
+# 全部同款，差异只有两处——服务层换成 OpenEvalService（busy 409 含跨
+# 服务互斥：detail 带对端活跃 run_id，probe 语义见 open_service 模块
+# docstring「跨服务互斥」）、读侧输出根换成 settings.open_eval_output_root。
+# 数据集三别名不设新用例：open 路由 Depends(get_closed_eval) 直接调上面
+# 的 get_dataset_root / set_dataset_root / list_datasets / list_dataset_movies
+# （override 状态挂闭环服务，一处写入两端可见）。
+
+
+def create_open_run(
+    service,
+    dataset: str,
+    movies: dict,
+    thetas: Sequence[float] | None,
+    modalities: Sequence[str] | None,
+    concurrency: int | None,
+) -> RunCreatedOut:
+    """开放评测起跑（错误映射集中处，镜像 create_eval_run）：未知 dataset
+    404 → 服务层校验失败 400（选片越权/为空/thetas/modalities 非法/库未
+    就绪/并发非法）→ busy 409（自有活跃或对端活跃——detail 含活跃
+    run_id）。thetas/modalities/concurrency 缺省 None → 服务端默认
+    （OPEN_DEFAULT_THETAS / ("script", "dialogue") / OPEN_DEFAULT_CONCURRENCY）。"""
+    _dataset_or_404(service.effective_root, dataset)
+    try:
+        run_id = service.start(
+            dataset, movies,
+            thetas=(thetas if thetas is not None else OPEN_DEFAULT_THETAS),
+            modalities=(tuple(modalities) if modalities is not None
+                        else ("script", "dialogue")),
+            concurrency=(concurrency if concurrency is not None
+                         else OPEN_DEFAULT_CONCURRENCY))
+    except OpenEvalValidationError as exc:  # 选片越权/为空/thetas/modalities/库未就绪
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OpenRunBusyError as exc:  # 单进程同时只允许一个评测 run（含跨服务）
+        raise HTTPException(status_code=409, detail=str(exc))
+    return RunCreatedOut(run_id=run_id)
+
+
+def list_open_runs(service) -> list[OpenRunSummaryOut]:
+    """开放评测历史 run 摘要（磁盘扫描，started_at 降序；摘要五键无报告
+    → None，history() 行已 None 安全——OpenRunSummaryOut 逐键直映射）。"""
+    return [OpenRunSummaryOut(**row) for row in service.history()]
+
+
+def get_open_run(service, run_id: str) -> RunStateOut:
+    """开放评测 run 进度详情（镜像 get_eval_run）：注册表优先（活值）；
+    磁盘历史兜底（上一进程的 run/中断 run）；两处都没有 → 404。"""
+    state = service.get(run_id)
+    if state is not None:
+        return _run_state_out(state)
+    row = next((r for r in service.history() if r["run_id"] == run_id), None)
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail=f"评测 run 不存在：{run_id!r}")
+    return RunStateOut(run_id=row["run_id"], status=row["status"],
+                       done=row["done"], total=row["total"],
+                       failed=row["failed"], started_at=row["started_at"],
+                       finished_at=row["finished_at"], error=row["error"])
+
+
+def cancel_open_run(service, run_id: str) -> dict:
+    """请求取消（镜像 cancel_eval_run）→ {ok}：受理 true（worker 不再提交
+    新片，在途片跑完）；run 不存在或已终态 → false（幂等意图）。"""
+    return {"ok": service.cancel(run_id)}
+
+
+def delete_open_run(service, run_id: str) -> dict:
+    """删除终态 open run（磁盘产物 + 进程内注册表，镜像 delete_eval_run）。
+
+    错误映射：活跃 run（含终态落盘窄窗口）→ 409 带原因；不存在/已删 →
+    404（与 GET 未知 run 同口径，重复删除即 404）。只动
+    open_eval_output_root 下本 run 目录，DB 零写入红线不变。"""
+    try:
+        ok = service.delete(run_id)
+    except OpenRunActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"评测 run 不存在：{run_id!r}")
+    return {"ok": True}
+
+
+def get_open_run_report(settings: Settings, run_id: str) -> dict:
+    """开放评测报告 JSON（report.json 原样透出，镜像 get_run_report）：
+    无报告/截断 → 404（读侧容错，不把非原子写序窗口打成 500）。"""
+    run_dir = _open_run_dir(settings, run_id)
+    if run_dir is not None:
+        try:
+            report = json.loads((run_dir / "report.json")
+                                .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            report = None
+        if isinstance(report, dict):
+            return report
+    raise HTTPException(status_code=404,
+                        detail=f"该 run 无报告：{run_id!r}")
+
+
+def get_open_run_file(settings: Settings, run_id: str, name: str) -> FileResponse:
+    """开放评测产物下载（镜像 get_run_file）：白名单五件套（report.json
+    走 /report 端点不在白名单）；白名单外 404；run 目录越界或文件不存在
+    → 404。"""
+    if name not in _FILE_WHITELIST:
+        raise HTTPException(status_code=404,
+                            detail=f"评测产物文件不存在：{name!r}")
+    run_dir = _open_run_dir(settings, run_id)
+    path = run_dir / name if run_dir is not None else None
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404,
+                            detail=f"评测产物文件不存在：{name!r}")
+    return FileResponse(path, filename=name)

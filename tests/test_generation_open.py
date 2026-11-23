@@ -522,3 +522,50 @@ def test_plan_scene_frames_missing_annotation_is_empty(tmp_path, content_fixture
     root = tmp_path / "empty"
     root.mkdir()
     assert keyframes_mod.plan_scene_frames(content_fixture, str(root)) == {}
+
+
+# ---- settings 透传（开放评测 per-run 副本的传递通路） ----
+
+
+def test_run_open_generation_honors_explicit_settings(session, content_fixture,
+                                                     mtg_settings, tmp_path):
+    """显式传 run 级 settings 副本：审计重定向 + 文本模态，原报告目录零写入。
+
+    开放评测给每次 run 传 `get_settings()` 的 model_copy（只改模态与审计
+    目录），不得影响进程级配置——所以副本生效的同时，get_settings 指向
+    的原报告目录必须一个字节都不写。
+    """
+    spec = _build_spec(session, content_fixture, run_id="r-explicit")
+    run_settings = mtg_settings.model_copy(update={
+        "mtg_modalities": "script,dialogue",
+        "mtg_report_dir": str(tmp_path)})
+    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER,
+                                    settings=run_settings)
+
+    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    # 1) 审计恰一份，落在重定向目录（task_id 命名）。
+    audits = list(tmp_path.glob("*.json"))
+    assert [p.name for p in audits] == ["t-r-explicit.json"]
+    # 2) 文本模态：视频帧相关字段为 0 / 只剩文本两模态。
+    report = json.loads(audits[0].read_text(encoding="utf-8"))
+    assert report["frames"] == 0
+    assert report["params"]["modalities"] == ["dialogue", "script"]
+    # 3) settings 原 mtg_report_dir（回退路径的目标目录）无新文件——
+    #    连目录都不该建出来。
+    audit_dir = tmp_path / "audit"
+    assert not audit_dir.exists() or list(audit_dir.iterdir()) == []
+
+
+def test_run_open_generation_settings_none_falls_back(session, content_fixture,
+                                                      mtg_settings, tmp_path):
+    """settings=None：回落 get_settings()，行为与现状一致。
+
+    沿用 `mtg_settings` 夹具的 monkeypatch 风格：get_settings 返回定制
+    settings，settings=None 时审计必须落进它的报告目录——证明回退被使用。
+    """
+    spec = _build_spec(session, content_fixture, run_id="r-fallback")
+    out = mtg_pipeline.run_open_generation(spec, session, MOCK_LLM,
+                                           MOCK_EMBEDDER, settings=None)
+
+    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert (tmp_path / "audit" / "t-r-fallback.json").exists()

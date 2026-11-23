@@ -216,6 +216,18 @@ class Settings(BaseSettings):
     # （DB 零写入红线；TAGPLT_EVAL_OUTPUT_ROOT 可覆盖）
     eval_output_root: str = "data/eval/closed"
 
+    # ---------- 阶段 9：开放评测（2026-11） ----------
+    # 开放评测产物落盘根（报告/meta/进度），评测代码唯一的写盘位置
+    # （DB 零写入红线；TAGPLT_OPEN_EVAL_OUTPUT_ROOT 可覆盖）
+    open_eval_output_root: str = "data/eval/open"
+    # 评审模型三件套（spec §6）：独立评审端点。回落链：三键全空 = 回落主
+    # LLM 设置（llm_model + llm_base_url_env/llm_api_key_env，当前即同模
+    # 评审——同模时报告头固定渲染警示）；model 配了而两个 env 名空时，
+    # env 名逐键回落主 LLM 的对应项（make_review_client 消费）。
+    open_eval_review_model: str = ""
+    open_eval_review_base_url_env: str = ""
+    open_eval_review_api_key_env: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

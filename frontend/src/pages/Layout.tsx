@@ -1,6 +1,6 @@
-// 主布局：左侧导航（七项菜单，"闭环评测"/"配置管理"仅 admin 角色可见；
-// "质量评估"已并入工作台、"标签库/导入任务"合一为标签管理、"用户/模型
-// 配置"合一为配置管理）+ 顶部用户名与登出。
+// 主布局：左侧导航（八项菜单，"闭环评测"/"开放评测"/"配置管理"仅 admin
+// 角色可见；"质量评估"已并入工作台、"标签库/导入任务"合一为标签管理、
+// "用户/模型配置"合一为配置管理）+ 顶部用户名与登出。
 // 登录用户经路由门禁（RequireAuth）的 Outlet context 注入，本组件只读不请求。
 import { Button, Layout as AntLayout, Menu, Space } from 'antd'
 import type { MenuProps } from 'antd'
@@ -25,9 +25,10 @@ const BASE_MENU_ITEMS: MenuItems = [
   { key: '/review', label: '审核中心' },
 ]
 
-/** admin 专属菜单项（闭环评测 + 配置管理），按 role 追加在全员项之后。 */
+/** admin 专属菜单项（闭环评测 + 开放评测 + 配置管理），按 role 追加在全员项之后。 */
 const ADMIN_MENU_ITEMS: MenuItems = [
   { key: '/eval-closed', label: '闭环评测' },
+  { key: '/eval-open', label: '开放评测' },
   { key: '/config', label: '配置管理' },
 ]
 

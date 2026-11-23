@@ -10,6 +10,8 @@
   `settings.generation_workers` 构建，0 = 同步执行，Task 9）；
 - `get_closed_eval`：app 级闭环评测服务单例（create_app 构建此后常驻，
   评测对业务表只读、产物只写 settings.eval_output_root，Task 6）；
+- `get_open_eval`：app 级开放评测服务单例（同上，产物只写
+  settings.open_eval_output_root，open-eval Task 6）；
 - `get_current_user` / `require_admin`（api/depends.py）：会话认证两级
   门槛（阶段 3 B2）。
 
@@ -36,6 +38,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy.orm import Session
 from tagplatform.services.auth import bootstrap_admin
+from tagplatform.services.eval.open_service import OpenEvalService
 from tagplatform.services.eval.service import ClosedEvalService
 from tagplatform.capabilities.storage import create_engine_for, make_session_factory
 from tagplatform.capabilities.embed import Embedder, build_embedder
@@ -94,6 +97,12 @@ def get_closed_eval(request: Request) -> ClosedEvalService:
     """闭环评测服务依赖：create_app 构建的 app 级单例（同 get_executor 模式，
     Task 6）。"""
     return request.app.state.closed_eval
+
+
+def get_open_eval(request: Request) -> OpenEvalService:
+    """开放评测服务依赖：create_app 构建的 app 级单例（同 get_closed_eval
+    模式，open-eval Task 6）。"""
+    return request.app.state.open_eval
 
 
 def get_tag_import_executor(request: Request) -> TagImportExecutor:
@@ -190,6 +199,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Task 11 裁定删除（服务体内零 DB，干跑装配走全局引擎）
     app.state.closed_eval = ClosedEvalService(
         app.state.llm, app.state.embedder, settings)
+    # 开放评测服务（open-eval Task 6）：app 级单例，红线同闭环——
+    # dataset_root_owner 挂闭环服务（数据集根共享其 override 状态：open
+    # 的数据集三端点 Depends(get_closed_eval)，override 只写闭环服务）；
+    # 双服务互挂 busy_probe = 对端 active_run_id_lockless（跨服务互斥：
+    # 同一时刻全进程只允许一个评测 run）。probe 必须无锁读——探测发生在
+    # 本服务 start 持有自身锁的窗口内，再取对端锁即锁序倒置死锁（见
+    # open_service 模块 docstring「跨服务互斥」）
+    app.state.open_eval = OpenEvalService(
+        app.state.llm, app.state.embedder, settings,
+        dataset_root_owner=app.state.closed_eval)
+    app.state.closed_eval.busy_probe = app.state.open_eval.active_run_id_lockless
+    app.state.open_eval.busy_probe = app.state.closed_eval.active_run_id_lockless
     # /health 开放（存活探测无需登录）；其余业务 router 统一挂会话保护
     # （一处 include 统一做法；users router 的 admin 门槛在其端点级
     # require_admin——依赖缓存保证 get_current_user 每请求只解析一次）
@@ -208,6 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(metrics.router, dependencies=protected_deps)
     app.include_router(config.router, dependencies=protected_deps)
     app.include_router(eval_router.router, dependencies=protected_deps)
+    app.include_router(eval_router.open_router, dependencies=protected_deps)
     # auth router：login 必须开放（见模块 docstring），/me 端点级自保护
     app.include_router(auth.router)
     return app

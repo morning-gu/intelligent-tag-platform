@@ -41,7 +41,8 @@ def test_mtg_module_layering():
     _layering_clean("mtg.py")
 
 
-@pytest.mark.parametrize("module", ["assets.py", "quality.py", "registry.py"])
+@pytest.mark.parametrize("module", ["assets.py", "quality.py", "registry.py",
+                                    "open_review.py"])
 def test_central_modules_layering(module):
     _layering_clean(module)
 
