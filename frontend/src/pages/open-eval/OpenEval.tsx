@@ -1,13 +1,12 @@
-// 开放评测页（open-eval Task 7，admin）：以评审官干跑开放管线（命中+新词
-// 全过二值评审）并出集合准确率/通过率/标定报告的页签。四块视图镜像
-// ClosedEval.tsx：① 创建表单——数据集下拉（选项带交集数提示）、影片集三态
-// （试点 30 / 全部 / 自定义多选，清单来自 datasets/{id}/movies）、θ 网格
-// （预填默认档 0.2,0.4,0.6,0.8 可编辑，清空不携带 → 服务端回退默认网格）、
-// 模态勾选（script+dialogue 默认勾选，必含 script 由前后端双重校验；video
-// 勾选禁用——v1 文本模态，关键帧接入为后续扩展）、并发度（默认 4）；
+// 开放评测页（admin）：零漂移干跑开放管线（命中+新词全过三维独立评审，
+// judge 三维分仅作参考）并出通过率/三维评分/新词占比报告的页签。四块视图
+// 镜像 ClosedEval.tsx：① 创建表单——数据集下拉、影片集三态（试点 30 /
+// 全部 / 自定义多选，清单来自 datasets/{id}/movies）、模态勾选
+// （script+dialogue 默认勾选，必含 script 由前后端双重校验；video 勾选
+// 禁用——v1 文本模态，关键帧接入为后续扩展）、并发度（默认 4）；
 // ② 进行中卡片——进度条 done/total + 取消（取消是受理语义，status 转
 // cancelled 终态由轮询推进发现，受理后不清轮询）；③ 历史表——五指标列
-// （准确率@θ0.4/新词通过率/命中通过率/标定一致率@θ0.4/新词占比）多轮趋势
+// （评审通过率/新词通过率/命中通过率/新词占比/三维满分率）多轮趋势
 // 一眼可见，null 一律「暂无」（None≠0 纪律）；④ 报告卡片——行点击取
 // report.json，OpenEvalReport 组件渲染报告视图（open-eval Task 8，镜像
 // ClosedEval.tsx 的 ClosedEvalReportView 接线，下载走 openFileUrl 五件套）。
@@ -106,54 +105,18 @@ const STATUS_COLORS: Record<string, string> = {
   failed: 'volcano',
 }
 
-/** 开放评测头条取格 θ（镜像后端 open_ranking.DEFAULT_THETA_HEADLINE；TS
- * 无法 import，值变更须两侧同步——闭环第 13 轮同款纪律）。历史表两个取格
- * 列头（准确率/标定一致率）与单片准确率口径都锚定本值。 */
-export const OPEN_HEADLINE_THETA = 0.4
-
 /** 起跑允许的模态词表（v1 文本模态，镜像 open_service._ALLOWED_MODALITIES）：
  * video 显式禁选（关键帧接入为后续扩展），UI 只渲染禁用勾选框作说明。 */
 const VIDEO_TOOLTIP = '关键帧接入为后续扩展（v1 文本模态）'
 
-/** 表单值：dataset 必选；movieMode 三态；ids 仅 custom 需要；θ 网格是原始
- * 输入串（预填默认档，提交时才解析，清空 = 不携带）；modalities 勾选集
- * （script+dialogue 默认）；concurrency 初始 4。 */
+/** 表单值：dataset 必选；movieMode 三态；ids 仅 custom 需要；modalities
+ * 勾选集（script+dialogue 默认）；concurrency 初始 4。 */
 interface OpenEvalFormValues {
   dataset: string
   movieMode: MovieSelection['mode']
   ids?: string[]
-  thetas?: string
   modalities?: string[]
   concurrency?: number
-}
-
-/** 逗号分隔数字串 → number[]；空串/全空 token → undefined（不携带，服务端
- * 回退默认网格——起跑可选项缺省即不携带是 eval.ts 的既定口径）。容忍全角
- * 逗号（中文输入法顺手）。与闭环页同款实现，本地持有勿跨页 import。 */
-function parseNumList(raw?: string): number[] | undefined {
-  const nums = (raw ?? '')
-    .split(/[,，]/)
-    .map((s) => s.trim())
-    .filter((s) => s !== '')
-    .map(Number)
-    .filter((n) => Number.isFinite(n))
-  return nums.length > 0 ? nums : undefined
-}
-
-/** θ 档位校验：非空 token 必须可解析为有限数字——顿号/混字手误显式报错，
- * 不静默丢档（少一档的网格结果会被误当成完整口径）。 */
-function numListRule() {
-  return {
-    validator: (_rule: unknown, value?: string) => {
-      const bad = (value ?? '')
-        .split(/[,，]/)
-        .map((s) => s.trim())
-        .filter((s) => s !== '' && !Number.isFinite(Number(s)))
-      return bad.length > 0
-        ? Promise.reject(new Error(`无法识别的档位：${bad.join('、')}（应为逗号分隔的数字）`))
-        : Promise.resolve()
-    },
-  }
 }
 
 /** 模态勾选校验：必含 script（台词在 script 通道渲染，缺 script 评审材料
@@ -219,17 +182,12 @@ const columns: NonNullable<TableProps<OpenRunSummary>['columns']> = [
       <Tag color={STATUS_COLORS[v] ?? 'default'}>{STATUS_LABELS[v] ?? v}</Tag>
     ),
   },
-  // 两个取格列头锚定 OPEN_HEADLINE_THETA（后端 _read_open_summary 统一取格：
-  // accuracy40/agreement40 = 最接近 θ0.4 的最近有值格，custom-θ run 回退）
-  { title: `准确率(θ${OPEN_HEADLINE_THETA})`, dataIndex: 'accuracy40', render: metricText },
+  // 摘要五键直读 report.json summary（后端 _read_open_summary）
+  { title: '评审通过率', dataIndex: 'pass_rate', render: metricText },
   { title: '新词通过率', dataIndex: 'new_pass', render: metricText },
   { title: '命中通过率', dataIndex: 'hit_pass', render: metricText },
-  {
-    title: `标定一致率(θ${OPEN_HEADLINE_THETA})`,
-    dataIndex: 'agreement40',
-    render: metricText,
-  },
   { title: '新词占比', dataIndex: 'new_ratio', render: metricText },
+  { title: '三维满分率', dataIndex: 'three_high', render: metricText },
 ]
 
 export default function OpenEval() {
@@ -476,9 +434,6 @@ export default function OpenEval() {
       // script 由表单校验保证；video 恒不在（v1 文本模态）
       modalities: values.modalities ?? ['script', 'dialogue'],
     }
-    // θ 网格仅在解析出值时携带（清空 → 服务端默认网格 0.2,0.4,0.6,0.8）
-    const thetas = parseNumList(values.thetas)
-    if (thetas !== undefined) req.thetas = thetas
     if (values.concurrency !== undefined && values.concurrency !== null) {
       req.concurrency = values.concurrency
     }
@@ -684,11 +639,6 @@ export default function OpenEval() {
               />
             </Form.Item>
           )}
-          <Form.Item name="thetas" label="θ 网格" rules={[numListRule()]} initialValue="0.2,0.4,0.6,0.8">
-            {/* 预填默认档（服务端 DEFAULT_THETAS 同值）供直接编辑；清空
-                不携带 → 服务端回退默认网格 */}
-            <Input aria-label="θ 网格" placeholder="默认档 0.2,0.4,0.6,0.8" allowClear />
-          </Form.Item>
           <Form.Item
             name="modalities"
             label="生成模态"

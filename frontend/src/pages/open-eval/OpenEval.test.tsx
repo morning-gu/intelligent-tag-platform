@@ -2,8 +2,7 @@
 // busy 探测走闭环 listRuns——镜像 ClosedEval.test.tsx 的 mock 结构，mock 到
 // 模块边界即隔离网络），覆盖：挂载双拉与历史行渲染（状态 Tag 文案、五指标
 // 列、null 一律「暂无」——None≠0 纪律）、datasets 拉取与选项交集数提示、
-// 起跑载荷组装（θ 网格预填默认档逗号串→number[]、modalities 默认
-// script+dialogue、并发默认 4、θ 清空不携带走服务端默认网格、custom 选片
+// 起跑载荷组装（modalities 默认 script+dialogue、并发默认 4、custom 选片
 // ids、缺 script 客户端拒绝）、video 勾选禁用+tooltip（v1 文本模态）、
 // closed 活跃 → 起跑禁用并注明占用 run（跨服务互斥的前端半边）、open 活跃
 // 挂载发现接管轮询、2s 轮询推进 running→succeeded 与 running→failed（终态
@@ -115,10 +114,10 @@ const RUNS_HISTORY: OpenRunSummary[] = [
     started_at: '2026-11-20T10:00:00',
     finished_at: '2026-11-20T11:30:00',
     error: null,
-    accuracy40: 0.66,
+    pass_rate: 0.66,
     new_pass: 0.8,
     hit_pass: 0.72,
-    agreement40: 0.64,
+    three_high: 0.25,
     new_ratio: 0.21,
   },
   {
@@ -131,10 +130,10 @@ const RUNS_HISTORY: OpenRunSummary[] = [
     started_at: '2026-11-19T09:00:00',
     finished_at: '2026-11-19T10:05:00',
     error: null,
-    accuracy40: null,
+    pass_rate: null,
     new_pass: null,
     hit_pass: null,
-    agreement40: null,
+    three_high: null,
     new_ratio: null,
   },
   {
@@ -147,10 +146,10 @@ const RUNS_HISTORY: OpenRunSummary[] = [
     started_at: null,
     finished_at: null,
     error: null,
-    accuracy40: null,
+    pass_rate: null,
     new_pass: null,
     hit_pass: null,
-    agreement40: null,
+    three_high: null,
     new_ratio: null,
   },
 ]
@@ -166,10 +165,10 @@ const RUNNING_SUMMARY: OpenRunSummary = {
   started_at: '2026-11-21T12:00:00',
   finished_at: null,
   error: null,
-  accuracy40: null,
+  pass_rate: null,
   new_pass: null,
   hit_pass: null,
-  agreement40: null,
+  three_high: null,
   new_ratio: null,
 }
 
@@ -180,10 +179,10 @@ const SUCCEEDED_SUMMARY: OpenRunSummary = {
   done: 30,
   failed: 2,
   finished_at: '2026-11-21T13:30:00',
-  accuracy40: 0.66,
+  pass_rate: 0.66,
   new_pass: 0.8,
   hit_pass: 0.72,
-  agreement40: 0.64,
+  three_high: 0.25,
   new_ratio: 0.21,
 }
 
@@ -216,57 +215,59 @@ const CLOSED_RUNNING_SUMMARY: RunSummary = {
 /** getOpenReport 成功夹具（与后端 assemble_open_report 键逐一镜像）。 */
 const REPORT: OpenEvalReport = {
   banner: ['部分运行：cancelled/aborted/failed 或 done<total 的 run 不可与全量横比'],
-  sample_accounting: { total: 30, ok: 28, failed: 2, review_failed: 1, invalid: 1 },
-  no_gt: 4,
-  theta_rows: [
-    {
-      theta: 0.4,
-      n_valid: 26,
-      accuracy: 0.66,
-      accuracy_ci: [0.5, 0.8],
-      accuracy_random: 0.21,
-      accuracy_prior: 0.3,
-      coverage: 0.75,
-      n_calibrated: 24,
-      agreement: 0.64,
-      agreement_ci: [0.5, 0.75],
-      fp_rate: 0.12,
-      fn_rate: 0.31,
-    },
-  ],
-  pass_rates: {
-    new_macro: 0.8,
-    new_micro: 0.82,
-    new_n: 27,
-    hit_macro: 0.72,
-    hit_micro: 0.74,
-    hit_n: 27,
+  sample_accounting: { total: 30, ok: 28, failed: 2, review_failed: 1 },
+  summary: {
+    total_tags: 120,
+    reviewed_tags: 110,
+    hits: 80,
+    new_words: 40,
+    new_ratio: 0.33,
+    pass_rate: 0.75,
+    new_pass: 0.8,
+    hit_pass: 0.72,
     review_missing: 3,
+    metrics: {
+      total_tags: 110,
+      evaluated_tags: 110,
+      max_score: 4,
+      coverage: 1,
+      joint_high_rate: 0.4,
+      three_dimension_high_rate: 0.25,
+      undetermined_tags: 4,
+      undetermined_rate: 0.036,
+      relevance: { evaluated_tags: 110, average: 3.2, high_rate: 0.5,
+        distribution: [2, 5, 18, 40, 45], undetermined: 4, undetermined_rate: 0.036 },
+      semantics: { evaluated_tags: 110, average: 3.0, high_rate: 0.4,
+        distribution: [1, 4, 25, 45, 35], undetermined: 2, undetermined_rate: 0.018 },
+      value: { evaluated_tags: 110, average: 2.6, high_rate: 0.3,
+        distribution: [3, 10, 35, 37, 25], undetermined: 1, undetermined_rate: 0.009 },
+    },
   },
-  ndcg: { macro: 0.58, ci: [0.45, 0.7] },
-  new_ratio: { macro: 0.21 },
   produced_stats: {
-    counts: [{ tt: 'tt0000001', hits_in: 12, hits_out: 2, new_words: 5 }],
+    counts: [{ tt: 'tt0000001', hits: 14, new_words: 5 }],
     min: 8,
     median: 15.5,
     max: 30,
   },
   judge: {
     self_filter: 0.15,
-    verdicts: { supported: 40, insufficient: 5, contradicted: 2 },
-    dropped: { 低置信: 3 },
+    scores: {
+      relevance: { n: 47, average: 3.4, distribution: [1, 3, 8, 15, 20], null: 2 },
+      semantics: { n: 49, average: 3.1, distribution: [0, 2, 10, 20, 17], null: 0 },
+      value: { n: 49, average: 2.8, distribution: [2, 6, 15, 16, 10], null: 0 },
+    },
+    dropped: { 'judge 评分未过线（value=1 < 2）': 3 },
     bands: { duplicate: 30, suspect: 5, new: 4 },
   },
   calibre: {
     llm_model: 'qwen3.8-27b',
     embedding_model: 'bge-m3',
-    prompt_version: 'open-v1',
+    prompt_version: 'mtg-v6-graded-judge',
     review_model: 'qwen3.8-27b',
     review_same_model: true,
-    review_prompt_version: 'open-review-v1',
+    review_prompt_version: 'open-review-v2',
     library_version: 'lib-v3',
     dataset_id: 'genome-scores',
-    gt_sha8: 'abcd1234',
     modalities: ['script', 'dialogue'],
   },
   movies: [
@@ -274,20 +275,52 @@ const REPORT: OpenEvalReport = {
       tt: 'tt0000001',
       title: '铁道游击队',
       ok: true,
-      review: 'ok',
-      hits_n: 14,
-      new_n: 5,
-      accuracy: 0.8,
-      new_pass: 0.8,
-      hit_pass: 0.9,
       error: null,
       review_error: null,
       elapsed_ms: 4210,
+      n_hits: 1,
+      n_new_words: 1,
+      hits: [
+        {
+          tag_id: 't1',
+          tag_name: '悬疑',
+          judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据' },
+          review: {
+            pass: true,
+            relevance: { score: 4, reason: '场景有据' },
+            semantics: { score: 3, reason: '名称清晰' },
+            value: { score: 3, reason: '有区分度' },
+            reason: '场景有据；名称清晰；有区分度',
+            quote: '原文摘录',
+          },
+        },
+      ],
+      new_words: [
+        {
+          name: '新词甲',
+          desc: '通用释义',
+          level: 'film',
+          judge_reference: null,
+          review: {
+            pass: false,
+            relevance: { score: 2, reason: '限定缺失' },
+            semantics: { score: 3, reason: '名称清晰' },
+            value: { score: 2, reason: '普通类目' },
+            reason: '限定缺失；名称清晰；普通类目',
+            quote: null,
+          },
+        },
+      ],
+      pass_rate: 0.5,
+      new_pass: 0,
+      hit_pass: 1,
+      review_missing: 0,
+      metrics: null,
     },
   ],
   failed_movies: [{ tt: 'tt0000003', error: 'RuntimeError: produce 失败' }],
   review_failed_movies: [{ tt: 'tt0000002', review_error: 'ReviewRequestError: 评审端点超时' }],
-  warnings: ['评审失败 1 部，已整体排除出通过率与标定'],
+  warnings: ['评审失败 1 部，已整体排除出通过率'],
   note: 'genome relevance 是模型输出非人工标注',
 }
 
@@ -341,13 +374,12 @@ describe('OpenEval 开放评测页', () => {
     mockIdleApis()
     render(<OpenEval />)
 
-    // 列头取格锚定 OPEN_HEADLINE_THETA（后端 open_ranking.DEFAULT_THETA_HEADLINE
-    // 的镜像常量，值变更两侧同步）
-    expect(screen.getByText('准确率(θ0.4)')).toBeInTheDocument()
-    expect(screen.getByText('标定一致率(θ0.4)')).toBeInTheDocument()
+    // 摘要五键列头（后端 _read_open_summary 直读 summary）
+    expect(screen.getByText('评审通过率')).toBeInTheDocument()
     expect(screen.getByText('新词通过率')).toBeInTheDocument()
     expect(screen.getByText('命中通过率')).toBeInTheDocument()
     expect(screen.getByText('新词占比')).toBeInTheDocument()
+    expect(screen.getByText('三维满分率')).toBeInTheDocument()
 
     // succeeded 行出现即证明挂载历史拉取完成
     const okRow = (await screen.findByText('2026-11-20 10:00:00')).closest('tr')!
@@ -359,8 +391,8 @@ describe('OpenEval 开放评测页', () => {
     expect(okRow).toHaveTextContent('0.66')
     expect(okRow).toHaveTextContent('0.8')
     expect(okRow).toHaveTextContent('0.72')
-    expect(okRow).toHaveTextContent('0.64')
     expect(okRow).toHaveTextContent('0.21')
+    expect(okRow).toHaveTextContent('0.25')
 
     // cancelled 行：12/30、失败 0，五指标 null → 暂无
     const cancelledRow = screen.getByText('2026-11-19 09:00:00').closest('tr')!
@@ -379,9 +411,9 @@ describe('OpenEval 开放评测页', () => {
     expect(screen.getByText('评测历史')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '数据集根路径' })).toBeInTheDocument()
     expect(screen.getByText(/当前生效：\/cache\/MovieTags/)).toBeInTheDocument()
-    // θ 网格预填默认档（可编辑），并发度初始 4
-    expect(screen.getByRole('textbox', { name: 'θ 网格' })).toHaveValue('0.2,0.4,0.6,0.8')
+    // 并发度初始 4（θ 网格已随闭环遗留口径移除）
     expect(screen.getByRole('spinbutton', { name: '并发度' })).toHaveValue('4')
+    expect(screen.queryByRole('textbox', { name: 'θ 网格' })).not.toBeInTheDocument()
   })
 
   it('datasets 拉取：下拉选项带库交集数提示', async () => {
@@ -411,42 +443,17 @@ describe('OpenEval 开放评测页', () => {
     expect(await screen.findByText('关键帧接入为后续扩展（v1 文本模态）')).toBeInTheDocument()
   })
 
-  it('起跑：默认 θ 网格与 modalities（script+dialogue）进载荷，并发默认 4', async () => {
+  it('起跑：modalities（script+dialogue）进载荷，并发默认 4，无 thetas 键', async () => {
     mockIdleApis()
     mockedStartOpenRun.mockResolvedValue({ run_id: 'run-20261121-120000-xy90' })
     render(<OpenEval />)
     await screen.findByText('2026-11-20 10:00:00')
 
     await selectDataset('genome-scores（交集 83）')
-    // θ 网格保持预填默认档（input value 为字符串）
-    expect(screen.getByRole('textbox', { name: 'θ 网格' })).toHaveValue('0.2,0.4,0.6,0.8')
-
     fireEvent.click(screen.getByRole('button', { name: /起\s*跑/ }))
 
     await waitFor(() => expect(mockedStartOpenRun).toHaveBeenCalledTimes(1))
-    expect(mockedStartOpenRun).toHaveBeenCalledWith({
-      dataset: 'genome-scores',
-      movies: { mode: 'preset30' },
-      thetas: [0.2, 0.4, 0.6, 0.8],
-      modalities: ['script', 'dialogue'],
-      concurrency: 4,
-    })
-  })
-
-  it('起跑：θ 网格清空不携带（服务端回退默认网格）', async () => {
-    mockIdleApis()
-    mockedStartOpenRun.mockResolvedValue({ run_id: 'run-20261121-120000-xy90' })
-    render(<OpenEval />)
-    await screen.findByText('2026-11-20 10:00:00')
-
-    await selectDataset('genome-scores（交集 83）')
-    fireEvent.change(screen.getByRole('textbox', { name: 'θ 网格' }), {
-      target: { value: '' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /起\s*跑/ }))
-
-    await waitFor(() => expect(mockedStartOpenRun).toHaveBeenCalledTimes(1))
-    // 严格深比较：载荷不含 thetas 键
+    // 严格深比较：载荷不含 thetas 键（闭环遗留口径已移除）
     expect(mockedStartOpenRun).toHaveBeenCalledWith({
       dataset: 'genome-scores',
       movies: { mode: 'preset30' },
@@ -489,7 +496,6 @@ describe('OpenEval 开放评测页', () => {
     expect(mockedStartOpenRun).toHaveBeenCalledWith({
       dataset: 'genome-scores',
       movies: { mode: 'custom', ids: ['tt0000001', 'tt0000002'] },
-      thetas: [0.2, 0.4, 0.6, 0.8],
       modalities: ['script', 'dialogue'],
       concurrency: 4,
     })

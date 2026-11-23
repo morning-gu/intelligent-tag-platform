@@ -1,41 +1,32 @@
-// 开放评测报告视图（open-eval Task 8）：report.json 的十块只读渲染，镜像
-// ClosedEvalReport 的 None 处理与结构——① banner 警示（list[str] 逐条
-// Alert.warning：部分运行/同模评审/小样本，开放侧把闭环单条扩成多条聚合）
-// + warnings 口径警示（非空才出）② 汇总卡（样本核算五数 Descriptions +
-// no_gt 次行 + 头条六值 Statistic）③ θ 网格表（n = 交集内命中非空的片数）
-// ④ 准确率 vs θ 三系 BarChart（系统/随机/先验逐 θ 组装，None 点跳过不造 0
-// ——BarItem.value 是 number，0 是真值不是缺失）⑤ 通过率与标定（宏/微/n +
-// 缺评审条目「缺评审 ≠ 模型漏判」+ 假阳/假阴口径说明：评审 pass 的语义是
-// 质量三条件、gt≥θ 的语义是 genome 相关性，一致率衡量口径对齐不是评审员
-// 「错误率」）⑥ 伴生指标（产出规模 min/中位/max + 每片计数 Collapse +
-// judge 审计段四行，Record<string,number> 的键原样渲染——dropped 原因可能
-// 是中文键）⑦ 每片明细折叠表（失败/评审失败置顶，排序在组件内做：ok=false
-// 最前、review=failed 次之、其余原序）⑧ failed_movies/review_failed_movies
-// 清单（两块分开，错误原文，空 → 整块不渲染）⑨ 产物下载五链接（openFileUrl
-// 拼路径 + <a download>）⑩ 银标准 note 恒渲染（Alert.warning）+ calibre
-// 小字（比闭环多 review_model/review_same_model/review_prompt_version/
-// modalities 四字段，同模评审括注如后端 report.md）。
-// null 一律「暂无」（None≠0 纪律）。头条取格 = theta_rows 的 θ0.4 行**精确
-// 匹配**（无 0.4 档 → 暂无，不回退最近有值档——与闭环汇总的回退取格不同，
-// 开放侧历史摘要的回退在后端 _read_open_summary，报告视图如实呈现该格）。
-import { Alert, Collapse, Descriptions, Statistic, Table, Typography } from 'antd'
+// 开放评测报告视图（三维评审口径，分支式内容组织）：report.json 的只读
+// 渲染——① banner 警示（list[str] 逐条 Alert.warning：部分运行/同模评审/
+// 小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维均分/
+// 满分率 + 新词占比）③ 评分分布表（0-4 五档 + 无法判断 + 联合满分率）
+// ④ judge 审计段（生产侧自滤保留率 + 三维分聚合 + 淘汰原因 + 库内分档）
+// ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考）
+// ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
+// ⑧ 银标准 note 恒渲染 + calibre 口径小字。null 一律「暂无」（None≠0）。
+import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import {
   openFileUrl,
+  type DimensionMetrics,
+  type DimensionScore,
+  type JudgeReference,
   type OpenEvalReport as OpenEvalReportData,
   type OpenFileName,
   type OpenMovieRow,
-  type OpenThetaRow,
+  type QualityMetrics,
+  type TagReview,
 } from '../api/evalOpen'
-import BarChart from './BarChart'
-import type { BarItem } from './BarChart'
 
 const NA = '暂无'
 
-/** 开放评测头条取格 θ：镜像后端 open_ranking.DEFAULT_THETA_HEADLINE 与
- * 页面 OpenEval.tsx 的同名常量（值变更须三处同步）；头条从 theta_rows
- * 精确匹配该档（无档 → 暂无，不回退）。 */
-const OPEN_HEADLINE_THETA = 0.4
+const DIMENSIONS = [
+  { key: 'relevance', title: '内容相关性' },
+  { key: 'semantics', title: '语义准确性' },
+  { key: 'value', title: '标签价值' },
+] as const
 
 /** 产物下载五件套（后端 files 端点白名单全量；report.json 有专用 /report
  * 端点、不在白名单）。 */
@@ -47,346 +38,318 @@ const DOWNLOADS: OpenFileName[] = [
   'progress.jsonl',
 ]
 
-/** 假阳/假阴与一致率的口径说明（spec §9 固定文案：评审 pass 语义 ≠ gt
- * 相关语义，一致率是口径对齐不是评审员「错误率」）。 */
-const CALIBRE_NOTE =
-  '评审 pass 的语义是质量三条件、gt≥θ 的语义是 genome 相关性——一致率衡量两个' +
-  '口径的对齐程度，不是评审员「错误率」；假阳率（FP）：gt 相关性未达 θ 却产出；' +
-  '假阴率（FN）：gt 相关性达 θ 却未产出——刻画的是产出与银标准口径的差异。'
-
-/** null → 「暂无」（None≠0）；数值原样字符串化（与闭环报告同口径）。 */
-function na(v: number | null): string {
-  return v === null ? NA : String(v)
+function percent(value: number | null | undefined): string {
+  return value === null || value === undefined ? NA : `${(value * 100).toFixed(1)}%`
 }
 
-/** 字符串版的 null 口径（calibre 可空字段用；空串同 None → 暂无，对齐后端
- * _fmt_cal 的「None / 空串 → 暂无」）。 */
-function naText(v: string | null): string {
-  return v === null || v === '' ? NA : v
+function average(value: number | null | undefined): string {
+  return value === null || value === undefined ? NA : `${value.toFixed(2)} / 4`
 }
 
-/** 指标 ±CI 渲染：值 null → 暂无；CI 缺失只出值；统一 `0.66 ± [0.5, 0.8]`。 */
-function ciText(v: number | null, ci: [number, number] | null): string {
-  if (v === null) return NA
-  return ci === null ? String(v) : `${v} ± [${ci[0]}, ${ci[1]}]`
+/** 评分分布表（汇总与逐片共用）：逐维均分/满分率/0-4 分布/无法判断。 */
+function ScoreDistribution({ metrics }: { metrics: QualityMetrics }) {
+  type Row = DimensionMetrics & { key: string; title: string }
+  const rows: Row[] = DIMENSIONS.map(({ key, title }) => ({ key, title, ...metrics[key] }))
+  const columns: TableProps<Row>['columns'] = [
+    { title: '评分维度', dataIndex: 'title' },
+    { title: '均分', render: (_, row) => average(row.average) },
+    { title: '满分率', render: (_, row) => percent(row.high_rate) },
+    ...Array.from({ length: 5 }, (_, score) => ({
+      key: `score-${score}`,
+      title: `${score} 分`,
+      render: (_: unknown, row: Row) => row.distribution[score] ?? '—',
+    })),
+    { title: '无法判断', dataIndex: 'undetermined' },
+  ]
+  return (
+    <Space direction="vertical" style={{ display: 'flex' }}>
+      <Table<Row> rowKey="key" columns={columns} dataSource={rows} size="small"
+        pagination={false} scroll={{ x: 680 }} />
+      <Space wrap size="large">
+        <Typography.Text type="secondary">
+          内容与语义同时满分 {percent(metrics.joint_high_rate)}
+        </Typography.Text>
+        <Typography.Text type="secondary">
+          三维同时满分 {percent(metrics.three_dimension_high_rate)}
+        </Typography.Text>
+      </Space>
+    </Space>
+  )
 }
 
-/** Record<string,number> → 原样键值串（键不翻译不映射——dropped 原因可能
- * 是中文键如「低置信」）；空 Record → 暂无。countPrefix 供 dropped 的 ×。 */
-function formatCounts(record: Record<string, number>, joiner: string, countPrefix = ''): string {
-  const entries = Object.entries(record)
-  if (entries.length === 0) return NA
-  return entries.map(([key, count]) => `${key} ${countPrefix}${count}`).join(joiner)
+/** 单维评分 cell：分值 + 理由（null = 无法判断）。 */
+function ScoreCell({ rating }: { rating: DimensionScore | null | undefined }) {
+  if (!rating) return <Typography.Text type="secondary">—</Typography.Text>
+  return (
+    <Space direction="vertical" size={0}>
+      <Typography.Text strong>
+        {rating.score === null ? '无法判断' : `${rating.score} / 4`}
+      </Typography.Text>
+      <Typography.Text type="secondary">{rating.reason}</Typography.Text>
+    </Space>
+  )
 }
 
-/** movies 行置顶排序秩：produce 失败（ok=false）最前、评审失败次之、其余。 */
-function movieRank(row: OpenMovieRow): 0 | 1 | 2 {
-  if (!row.ok) return 0
-  if (row.review === 'failed') return 1
-  return 2
+/** 逐片标签表行：命中/新词统一形状（组别 + 名称 + 评审 + judge 参考）。 */
+interface LabelRow {
+  key: string
+  group: '命中' | '新词'
+  name: string
+  desc: string | null
+  level: string | null
+  judge_reference: JudgeReference | null
+  review: TagReview | null
 }
 
-/** 每片计数行（produced_stats.counts 元素，具名化供 Table 泛型）。 */
-interface ProducedCount {
-  tt: string
-  hits_in: number
-  hits_out: number
-  new_words: number
+function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
+  return [
+    ...movie.hits.map((hit, index) => ({
+      key: `${movie.tt}-hit-${index}`,
+      group: '命中' as const,
+      name: hit.tag_name,
+      desc: null,
+      level: null,
+      judge_reference: hit.judge_reference,
+      review: hit.review,
+    })),
+    ...movie.new_words.map((word, index) => ({
+      key: `${movie.tt}-new-${index}`,
+      group: '新词' as const,
+      name: word.name,
+      desc: word.desc,
+      level: word.level,
+      judge_reference: word.judge_reference,
+      review: word.review,
+    })),
+  ]
 }
 
-/** θ 网格列（null 一律「暂无」；accuracy/agreement 带 CI 同格）。 */
-const thetaColumns: TableProps<OpenThetaRow>['columns'] = [
-  { title: 'θ', dataIndex: 'theta' },
-  { title: 'n', dataIndex: 'n_valid' },
-  { title: '准确率（±CI）', key: 'accuracy', render: (_, r) => ciText(r.accuracy, r.accuracy_ci) },
-  { title: '随机基线', dataIndex: 'accuracy_random', render: na },
-  { title: '先验基线', dataIndex: 'accuracy_prior', render: na },
-  { title: '覆盖率', dataIndex: 'coverage', render: na },
-  { title: '一致率（±CI）', key: 'agreement', render: (_, r) => ciText(r.agreement, r.agreement_ci) },
-  { title: 'FP率', dataIndex: 'fp_rate', render: na },
-  { title: 'FN率', dataIndex: 'fn_rate', render: na },
-  { title: '标定片数', dataIndex: 'n_calibrated' },
+function passTag(review: TagReview | null) {
+  if (review === null) return <Tag>未评审</Tag>
+  if (review.pass === null) return <Tag color="default">漏判</Tag>
+  return review.pass ? <Tag color="green">通过</Tag> : <Tag color="red">未通过</Tag>
+}
+
+const labelColumns: TableProps<LabelRow>['columns'] = [
+  {
+    title: '标签',
+    dataIndex: 'name',
+    render: (name: string, row) => (
+      <Space direction="vertical" size={0}>
+        <Space size={4}>
+          <Tag>{row.group}</Tag>
+          <Typography.Text strong>{name}</Typography.Text>
+        </Space>
+        {row.desc && <Typography.Text type="secondary">{row.desc}</Typography.Text>}
+      </Space>
+    ),
+    width: '24%',
+  },
+  { title: '内容相关性', render: (_, row) => <ScoreCell rating={row.review?.relevance} /> },
+  { title: '语义准确性', render: (_, row) => <ScoreCell rating={row.review?.semantics} /> },
+  { title: '标签价值', render: (_, row) => <ScoreCell rating={row.review?.value} /> },
+  { title: '评审', render: (_, row) => passTag(row.review) },
 ]
 
-/** 每片明细列（review 三态中文标签；片级准确率列头锚定头条 θ）。 */
-const REVIEW_LABELS: Record<string, string> = { ok: '正常', failed: '失败', skipped: '跳过' }
+/** 展开行：评审理由 / 摘录核验 / judge 参考（仅供参考，评审独立判断）。 */
+function labelDetail(row: LabelRow) {
+  const reference = row.judge_reference
+  return (
+    <Descriptions size="small" column={1} items={[
+      { key: 'reason', label: '评审理由', children: row.review?.reason || '—' },
+      { key: 'quote', label: '原文摘录', children: row.review?.quote || '—' },
+      {
+        key: 'judge',
+        label: 'judge 参考',
+        children: reference ? (
+          <Space direction="vertical" size={0}>
+            <Typography.Text>
+              相关 {reference.relevance ?? 'null'} · 语义 {reference.semantics ?? 'null'}
+              {' '}· 价值 {reference.value ?? 'null'}（生产 judge，仅供参考）
+            </Typography.Text>
+            {reference.reason && (
+              <Typography.Text type="secondary">{reference.reason}</Typography.Text>
+            )}
+          </Space>
+        ) : '—（审计无该标签判决）',
+      },
+    ]} />
+  )
+}
 
-const movieColumns: TableProps<OpenMovieRow>['columns'] = [
-  { title: 'tt', dataIndex: 'tt' },
-  { title: '标题', dataIndex: 'title' },
-  { title: '产出', dataIndex: 'ok', render: (v: boolean) => (v ? '成功' : '失败') },
-  { title: '评审', dataIndex: 'review', render: (v: string) => REVIEW_LABELS[v] ?? v },
-  { title: '命中', dataIndex: 'hits_n' },
-  { title: '新词', dataIndex: 'new_n' },
-  { title: `准确率(θ${OPEN_HEADLINE_THETA})`, dataIndex: 'accuracy', render: na },
-  { title: '新词通过率', dataIndex: 'new_pass', render: na },
-  { title: '命中通过率', dataIndex: 'hit_pass', render: na },
-  { title: '耗时(ms)', dataIndex: 'elapsed_ms' },
-]
-
-const countColumns: TableProps<ProducedCount>['columns'] = [
-  { title: 'tt', dataIndex: 'tt' },
-  { title: '交集内命中', dataIndex: 'hits_in' },
-  { title: '交集外命中', dataIndex: 'hits_out' },
-  { title: '新词', dataIndex: 'new_words' },
-]
-
-const failedColumns: TableProps<{ tt: string; error: string }>['columns'] = [
-  { title: 'tt', dataIndex: 'tt' },
-  { title: '错误', dataIndex: 'error' },
-]
-
-const reviewFailedColumns: TableProps<{ tt: string; review_error: string }>['columns'] = [
-  { title: 'tt', dataIndex: 'tt' },
-  { title: '评审错误', dataIndex: 'review_error' },
-]
-
-/** 准确率三系（BarChart 行名 × theta_rows 字段）：None 点不入 items（不出 0 假值）。 */
-const ACCURACY_SERIES = [
-  { name: '系统', field: 'accuracy' },
-  { name: '随机', field: 'accuracy_random' },
-  { name: '先验', field: 'accuracy_prior' },
-] as const
+function movieStatusTag(movie: OpenMovieRow) {
+  if (!movie.ok) return <Tag color="volcano">produce 失败</Tag>
+  if (movie.review_error) return <Tag color="orange">评审失败（产出保留）</Tag>
+  return <Tag color="green">完成</Tag>
+}
 
 export default function OpenEvalReport({ report, runId }: { report: OpenEvalReportData; runId: string }) {
-  const acc = report.sample_accounting
-  const pr = report.pass_rates
-  const stats = report.produced_stats
-  const judge = report.judge
-  const calibre = report.calibre
-
-  // 头条取格：theta_rows 的 θ0.4 行精确匹配（无档 → 暂无，不回退）
-  const theta04 = report.theta_rows.find((row) => row.theta === OPEN_HEADLINE_THETA)
-  const summary = [
-    {
-      key: 'accuracy40',
-      title: `准确率(θ${OPEN_HEADLINE_THETA})`,
-      value: theta04?.accuracy ?? null,
-    },
-    { key: 'new-pass', title: '新词通过率', value: pr.new_macro },
-    { key: 'hit-pass', title: '命中通过率', value: pr.hit_macro },
-    {
-      key: 'agreement40',
-      title: `标定一致率(θ${OPEN_HEADLINE_THETA})`,
-      value: theta04?.agreement ?? null,
-    },
-    { key: 'new-ratio', title: '新词占比', value: report.new_ratio.macro },
-    { key: 'ndcg', title: 'nDCG', value: report.ndcg.macro },
-  ]
-
-  // BarChart 三系组装：逐 θ 行（后端 theta_rows 序）逐系取值，None 点跳过
-  const accuracyBars: BarItem[] = []
-  for (const row of report.theta_rows) {
-    for (const series of ACCURACY_SERIES) {
-      const value = row[series.field]
-      if (value !== null) {
-        accuracyBars.push({ label: `θ${row.theta} ${series.name}`, value })
-      }
-    }
-  }
-
-  // 每片明细置顶排序（稳定：秩同值保持原序，idx 决胜）
-  const sortedMovies = report.movies
-    .map((row, idx) => ({ row, idx }))
-    .sort((a, b) => movieRank(a.row) - movieRank(b.row) || a.idx - b.idx)
-    .map((entry) => entry.row)
-
-  const modalitiesText =
-    calibre.modalities !== null && calibre.modalities.length > 0
-      ? calibre.modalities.join('、')
-      : NA
-
+  const { summary, sample_accounting: acc, judge, calibre } = report
+  const metrics = summary.metrics
+  // 失败/评审失败片置顶，其余原序
+  const movies = [...report.movies].sort((a, b) => {
+    const rank = (m: OpenMovieRow) => (!m.ok ? 0 : m.review_error ? 1 : 2)
+    return rank(a) - rank(b)
+  })
+  const judgeScoreRows = DIMENSIONS.map(({ key, title }) => ({
+    key,
+    title,
+    ...(judge.scores[key] ?? { n: 0, average: null, distribution: [], null: 0 }),
+  }))
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* ① banner 三态警示逐条 + warnings 口径警示（非空才出） */}
-      {report.banner.map((item) => (
-        <Alert key={item} type="warning" showIcon message={item} />
+      {report.banner.map((text) => (
+        <Alert key={text} type="warning" showIcon message={text} />
       ))}
-      {report.warnings.map((item) => (
-        <Alert key={item} type="warning" showIcon message={item} />
+      {report.warnings.map((text) => (
+        <Alert key={text} type="info" showIcon message={text} />
       ))}
 
-      {/* ② 汇总卡：样本核算五数 + 头条六值 */}
-      <div data-testid="summary-section">
+      <section aria-label="汇总">
         <Typography.Title level={5}>汇总</Typography.Title>
-        <div data-testid="accounting">
-          <Descriptions
+        <Descriptions size="small" column={3} items={[
+          { key: 'movies', label: '影片', children: `${acc.ok} 成功 / ${acc.failed} produce 失败 / ${acc.review_failed} 评审失败（共 ${acc.total}）` },
+          { key: 'tags', label: '产出标签', children: `${summary.total_tags}（新词 ${summary.new_words} / 命中 ${summary.hits}）` },
+          { key: 'reviewed', label: '已评审', children: `${summary.reviewed_tags}（漏判 ${summary.review_missing}）` },
+          { key: 'pass', label: '评审通过率', children: percent(summary.pass_rate) },
+          { key: 'new_pass', label: '新词通过率', children: percent(summary.new_pass) },
+          { key: 'hit_pass', label: '命中通过率', children: percent(summary.hit_pass) },
+          { key: 'new_ratio', label: '新词占比', children: percent(summary.new_ratio) },
+          { key: 'three_high', label: '三维同时满分', children: percent(metrics?.three_dimension_high_rate) },
+          { key: 'undetermined', label: '无法判断', children: metrics ? `${metrics.undetermined_tags} 条` : NA },
+        ]} />
+      </section>
+
+      {metrics && (
+        <section aria-label="评分分布">
+          <Typography.Title level={5}>评分分布（独立评审，0-4）</Typography.Title>
+          <ScoreDistribution metrics={metrics} />
+        </section>
+      )}
+
+      <section aria-label="judge 审计">
+        <Typography.Title level={5}>judge 审计（生产侧自滤）</Typography.Title>
+        <Space direction="vertical" style={{ display: 'flex' }}>
+          <Typography.Text>
+            自滤保留率 {percent(judge.self_filter)} · 库内分档：
+            {Object.entries(judge.bands).map(([band, count]) => `${band} ${count}`).join(' / ') || NA}
+          </Typography.Text>
+          <Table
+            rowKey="key"
             size="small"
-            column={5}
-            items={[
-              { key: 'total', label: '影片总数', children: acc.total },
-              { key: 'ok', label: 'produce 成功', children: acc.ok },
-              { key: 'failed', label: 'produce 失败', children: acc.failed },
-              { key: 'review-failed', label: '评审失败', children: acc.review_failed },
-              { key: 'invalid', label: '交集内命中为空', children: acc.invalid },
+            pagination={false}
+            dataSource={judgeScoreRows}
+            columns={[
+              { title: 'judge 维度', dataIndex: 'title' },
+              { title: '均分', render: (_, row) => average(row.average) },
+              { title: '评分条数', dataIndex: 'n' },
+              { title: 'null', dataIndex: 'null' },
+              ...Array.from({ length: 5 }, (_, score) => ({
+                key: `judge-${score}`,
+                title: `${score} 分`,
+                render: (_: unknown, row: (typeof judgeScoreRows)[number]) =>
+                  row.distribution[score] ?? '—',
+              })),
+            ]}
+            scroll={{ x: 680 }}
+          />
+          {Object.keys(judge.dropped).length > 0 && (
+            <Typography.Text type="secondary">
+              淘汰原因：{Object.entries(judge.dropped).map(([why, count]) => `${why} ×${count}`).join('；')}
+            </Typography.Text>
+          )}
+        </Space>
+      </section>
+
+      {movies.length > 0 && (
+        <section aria-label="逐片明细">
+          <Typography.Title level={5}>逐片明细</Typography.Title>
+          <Collapse items={movies.map((movie) => ({
+            key: movie.tt,
+            label: (
+              <Space wrap>
+                <Typography.Text strong>{movie.title || movie.tt}</Typography.Text>
+                <Typography.Text type="secondary">{movie.tt}</Typography.Text>
+                {movieStatusTag(movie)}
+                <Typography.Text type="secondary">
+                  {movie.n_hits + movie.n_new_words} 条标签 · 通过率 {percent(movie.pass_rate)}
+                </Typography.Text>
+              </Space>
+            ),
+            children: (
+              <Space direction="vertical" style={{ display: 'flex' }}>
+                {movie.error && <Alert type="error" showIcon message={movie.error} />}
+                {movie.review_error && (
+                  <Alert type="warning" showIcon
+                    message={`评审失败（产出保留，不计入通过率）：${movie.review_error}`} />
+                )}
+                {movie.metrics && <ScoreDistribution metrics={movie.metrics} />}
+                {movieLabelRows(movie).length > 0 && (
+                  <Table<LabelRow>
+                    size="small"
+                    rowKey="key"
+                    columns={labelColumns}
+                    dataSource={movieLabelRows(movie)}
+                    pagination={false}
+                    scroll={{ x: 760 }}
+                    expandable={{ expandedRowRender: labelDetail }}
+                  />
+                )}
+              </Space>
+            ),
+          }))} />
+        </section>
+      )}
+
+      {report.failed_movies.length > 0 && (
+        <section aria-label="produce 失败影片">
+          <Typography.Title level={5}>produce 失败（{report.failed_movies.length} 部）</Typography.Title>
+          <Table
+            rowKey="tt"
+            size="small"
+            pagination={false}
+            dataSource={report.failed_movies}
+            columns={[
+              { title: '影片', dataIndex: 'tt' },
+              { title: '原因', dataIndex: 'error' },
             ]}
           />
-        </div>
-        <Typography.Text type="secondary">
-          {`产出行落在 库∩gt 交集外 ${report.no_gt} 条（不计分只计数）`}
-        </Typography.Text>
-        <div data-testid="summary-row" style={{ display: 'flex', gap: 48, flexWrap: 'wrap' }}>
-          {summary.map((s) => (
-            <div key={s.key} data-testid={`summary-${s.key}`}>
-              <Statistic title={s.title} value={s.value === null ? NA : s.value} />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ③ θ 网格表 */}
-      <div data-testid="theta-section">
-        <Typography.Title level={5}>θ 网格（n = 交集内命中非空的片数）</Typography.Title>
-        <Table<OpenThetaRow>
-          rowKey={(r) => String(r.theta)}
-          columns={thetaColumns}
-          dataSource={report.theta_rows}
-          pagination={false}
-          size="small"
-        />
-      </div>
-
-      {/* ④ 准确率 vs θ 三系 BarChart（全空 → 暂无兜底） */}
-      <div data-testid="accuracy-chart-section">
-        <Typography.Title level={5}>准确率 vs θ（系统 / 随机 / 先验）</Typography.Title>
-        {accuracyBars.length > 0 ? (
-          <BarChart items={accuracyBars} />
-        ) : (
-          <Typography.Text type="secondary">{NA}</Typography.Text>
-        )}
-      </div>
-
-      {/* ⑤ 通过率与标定（宏/微/n + review_missing + 口径说明） */}
-      <div data-testid="pass-rates-section">
-        <Typography.Title level={5}>通过率与标定</Typography.Title>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span>{`命中通过率：宏 ${na(pr.hit_macro)} / 微 ${na(pr.hit_micro)}（${pr.hit_n} 片）`}</span>
-          <span>{`新词通过率：宏 ${na(pr.new_macro)} / 微 ${na(pr.new_micro)}（${pr.new_n} 片）`}</span>
-          <span>
-            {`缺评审条目 ${pr.review_missing} 条（缺评审 ≠ 模型漏判：含评审失败片的整体缺位与评审成功片的单条缺席）`}
-          </span>
-        </div>
-        <Typography.Text type="secondary">{CALIBRE_NOTE}</Typography.Text>
-      </div>
-
-      {/* ⑥ 伴生指标：产出规模 + 每片计数折叠 + judge 审计段 */}
-      <div data-testid="produced-section">
-        <Typography.Title level={5}>伴生指标</Typography.Title>
-        <Typography.Text>{`min ${na(stats.min)} · 中位 ${na(stats.median)} · max ${na(stats.max)}`}</Typography.Text>
-        <Typography.Text type="secondary">
-          {`（${stats.counts.length} 部成功片逐片产出行数：交集内 + 交集外命中 + 新词）`}
-        </Typography.Text>
-        <Collapse
-          items={[
-            {
-              key: 'produced-counts',
-              label: '每片产出计数',
-              children: (
-                <Table<ProducedCount>
-                  rowKey="tt"
-                  columns={countColumns}
-                  dataSource={stats.counts}
-                  pagination={false}
-                  size="small"
-                />
-              ),
-            },
-          ]}
-        />
-        <div data-testid="judge-section">
-          <Typography.Title level={5}>评审官审计（judge 自省）</Typography.Title>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span>{`自滤率（accepted / merged）：${na(judge.self_filter)}`}</span>
-            <span>{`verdicts 分布：${formatCounts(judge.verdicts, ' / ')}`}</span>
-            <span>{`dropped 原因：${formatCounts(judge.dropped, '、', '×')}`}</span>
-            <span>{`对齐分档：${formatCounts(judge.bands, ' / ')}`}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* ⑦ 每片明细折叠表（失败/评审失败置顶） */}
-      <div data-testid="movie-section">
-        <Typography.Title level={5}>每片明细</Typography.Title>
-        <Collapse
-          items={[
-            {
-              key: 'movies',
-              label: `每片明细（${report.movies.length}）`,
-              children: (
-                <Table<OpenMovieRow>
-                  rowKey="tt"
-                  columns={movieColumns}
-                  dataSource={sortedMovies}
-                  pagination={false}
-                  size="small"
-                />
-              ),
-            },
-          ]}
-        />
-      </div>
-
-      {/* ⑧ 失败清单两块分开（空 → 整块不渲染） */}
-      {report.failed_movies.length > 0 && (
-        <div data-testid="failed-section">
-          <Typography.Title level={5}>
-            {`失败影片（${report.failed_movies.length}）`}
-          </Typography.Title>
-          <Table
-            rowKey="tt"
-            columns={failedColumns}
-            dataSource={report.failed_movies}
-            pagination={false}
-            size="small"
-          />
-        </div>
+        </section>
       )}
       {report.review_failed_movies.length > 0 && (
-        <div data-testid="review-failed-section">
-          <Typography.Title level={5}>
-            {`评审失败影片（${report.review_failed_movies.length}）`}
-          </Typography.Title>
+        <section aria-label="评审失败影片">
+          <Typography.Title level={5}>评审失败（{report.review_failed_movies.length} 部，产出保留）</Typography.Title>
           <Table
             rowKey="tt"
-            columns={reviewFailedColumns}
-            dataSource={report.review_failed_movies}
-            pagination={false}
             size="small"
+            pagination={false}
+            dataSource={report.review_failed_movies}
+            columns={[
+              { title: '影片', dataIndex: 'tt' },
+              { title: '原因', dataIndex: 'review_error' },
+            ]}
           />
-        </div>
+        </section>
       )}
 
-      {/* ⑨ 产物下载五链接 */}
-      <div data-testid="downloads-section">
+      <section aria-label="产物下载">
         <Typography.Title level={5}>产物下载</Typography.Title>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+        <Space direction="vertical" size={4}>
           {DOWNLOADS.map((name) => (
-            <a key={name} href={openFileUrl(runId, name)} download>
-              {name}
-            </a>
+            <a key={name} href={openFileUrl(runId, name)} download>{name}</a>
           ))}
-        </div>
-      </div>
+        </Space>
+      </section>
 
-      {/* ⑩ 银标准警示恒渲染 + calibre 小字（review/same_model/modalities 增量） */}
-      <Alert
-        type="warning"
-        showIcon
-        message="银标准警示"
-        description={
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span>{report.note}</span>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }} data-testid="calibre">
-              <span>
-                {`模型 ${naText(calibre.llm_model)} · 向量 ${naText(calibre.embedding_model)} · prompt ${naText(calibre.prompt_version)} · 词库 ${naText(calibre.library_version)} · 数据集 ${naText(calibre.dataset_id)} · GT ${naText(calibre.gt_sha8)}`}
-              </span>
-              <span>
-                {`评审模型 ${naText(calibre.review_model)}${calibre.review_same_model === true ? '（同模评审）' : ''} · 评审 prompt ${naText(calibre.review_prompt_version)} · 模态 ${modalitiesText}`}
-              </span>
-            </Typography.Text>
-          </div>
-        }
-      />
+      <Alert type="warning" showIcon message={report.note} />
+      <Typography.Text type="secondary">
+        口径：数据集 {calibre.dataset_id ?? NA} · 生成 {calibre.llm_model || NA}
+        （{calibre.prompt_version ?? NA}） · 评审 {calibre.review_model ?? NA}
+        （{calibre.review_prompt_version ?? NA}
+        {calibre.review_same_model ? '，与生成同模——通过率绝对值需打折解读' : ''}）
+        · 嵌入 {calibre.embedding_model || NA} · 库版本 {calibre.library_version ?? NA}
+        · 模态 {(calibre.modalities ?? []).join(' + ') || NA}
+      </Typography.Text>
     </div>
   )
 }

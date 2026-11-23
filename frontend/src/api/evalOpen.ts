@@ -2,9 +2,8 @@
 // 端点数以后端 eval.py 路由模块 docstring 为准，不在此重复计数——固定数字
 // 曾随端点增加而过时。类型形状与后端 tagplatform/api/routers/eval.py 的
 // Pydantic 模型、open_service 组装的 run 行、open_report.assemble_open_report
-// 组装的 report.json 结构一致：后端 None（无报告/该 θ 无有效影片/无可标定
-// 片/算不出）一律以 null 透传，前端按「暂无」口径呈现（None≠0 纪律）；起跑
-// 可选项缺省即不携带，由服务端回退默认网格/模态/并发。dataset 三端点与
+// 组装的 report.json 结构一致：后端 None（无报告/评审失败/算不出）一律以 null 透传，前端按「暂无」口径呈现（None≠0 纪律）；起跑
+// 可选项缺省即不携带，由服务端回退默认模态/并发。dataset 三端点与
 // 闭环共享 override 状态（写的是同一个 override），本模块仍提供独立封装——
 // 路径语义清晰、两页互不 import。产物文件下载走 <a href> 原生下载，
 // openFileUrl 只拼路径不请求——同源导航自带会话 cookie，且文件是二进制/
@@ -21,26 +20,23 @@ import type {
 // 共享形状（与闭环后端契约逐一相同）经本模块转出口，页面侧一处 import：
 export type { DatasetInfo, DatasetRootInfo, MovieRef, MovieSelection, RunStatus }
 
-/** 起跑请求体（与后端 StartOpenRunRequest 一致）：thetas/modalities/
- * concurrency 缺省 → 服务端默认（DEFAULT_THETAS=(0.2,0.4,0.6,0.8) /
- * ("script","dialogue") / 4）。modalities 词表校验在服务层（非空 ⊆
- * {script, dialogue} 且必含 script——台词在 script 通道渲染，缺 script
- * 评审材料为空；video 显式拒绝：v1 文本模态）→ 400。 */
+/** 起跑请求体（与后端 StartOpenRunRequest 一致）：modalities/concurrency
+ * 缺省 → 服务端默认（("script","dialogue") / 4）。modalities 词表校验在
+ * 服务层（非空 ⊆ {script, dialogue} 且必含 script——台词在 script 通道
+ * 渲染，缺 script 评审材料为空；video 显式拒绝：v1 文本模态）→ 400。
+ * 开放评测无 gt 排序任务，不设 thetas（闭环遗留口径已移除）。 */
 export interface StartOpenRunRequest {
   dataset: string
   movies: MovieSelection
-  thetas?: number[]
   modalities?: string[]
   concurrency?: number
 }
 
 /** 历史摘要行（与后端 OpenRunSummaryOut 一致）：基础行字段与闭环同形
  * （done/total/failed/started_at/finished_at/error 允许 null——磁盘兜底行
- * 宁缺勿崩）；摘要五键（accuracy40/new_pass/hit_pass/agreement40/new_ratio）
- * 由 open_report._read_open_summary 读该 run 的 report.json 出（统一取格
- * 约定：accuracy40/agreement40 = 最接近 θ0.4 的最近有值格；new_pass/
- * hit_pass/new_ratio 直读宏平均；报告缺失/截断 → 对应键 null，宁缺勿假）。
- * 闭环侧的 ndcg10/p10/r20/coverage_median 不在开放口径内，不设字段。 */
+ * 宁缺勿崩）；摘要五键（pass_rate/new_pass/hit_pass/new_ratio/three_high）
+ * 由 open_report._read_open_summary 直读 report.json 的 summary 出（报告
+ * 缺失/截断 → 对应键 null，宁缺勿假）。three_high = 三维同时满分率。 */
 export interface OpenRunSummary {
   run_id: string
   dataset_id: string | null
@@ -51,58 +47,114 @@ export interface OpenRunSummary {
   started_at: string | null
   finished_at: string | null
   error: string | null
-  accuracy40: number | null
+  pass_rate: number | null
   new_pass: number | null
   hit_pass: number | null
-  agreement40: number | null
   new_ratio: number | null
+  three_high: number | null
 }
 
-/** θ 网格单行（report.json theta_rows 行，与 open_ranking.ThetaRow 一致）：
- * 指标 null 表示该 θ 无有效影片/无可标定片（None≠0）；CI 为逐样本自举
- * 百分位区间 [lo, hi]；随机/先验基线同行给出（与闭环 report 的 baselines
- * 分表不同——开放侧基线就在 θ 格内，可比性同源）。 */
-export interface OpenThetaRow {
-  theta: number
-  n_valid: number
-  accuracy: number | null
-  accuracy_ci: [number, number] | null
-  accuracy_random: number | null
-  accuracy_prior: number | null
+/** 单维评分（评审层回填）：score 0-4 或 null（无法判断）；reason 简短理由。 */
+export interface DimensionScore {
+  score: number | null
+  reason: string
+}
+
+/** 标签评审结果：pass 由三维分按阈值推导（relevance≥3 / semantics≥3 /
+ * value≥2），null = 漏判（排除出通过率分母，None≠0）。 */
+export interface TagReview {
+  pass: boolean | null
+  relevance: DimensionScore
+  semantics: DimensionScore
+  value: DimensionScore
+  reason: string
+  quote: string | null
+}
+
+/** 生产 judge 三维参考分（审计缺失时整条 null）：仅供参考，评审独立判断。 */
+export interface JudgeReference {
+  relevance: number | null
+  semantics: number | null
+  value: number | null
+  reason: string
+}
+
+/** 库内命中行（tag_id 非空的产出）。 */
+export interface OpenHitRow {
+  tag_id: string
+  tag_name: string
+  judge_reference: JudgeReference | null
+  review: TagReview | null
+}
+
+/** 新词行（tag_id 为空的产出）；desc 为生成侧通用释义。 */
+export interface OpenNewWordRow {
+  name: string
+  desc: string | null
+  level: string
+  judge_reference: JudgeReference | null
+  review: TagReview | null
+}
+
+/** 单维汇总（与后端 tag_quality.DimensionMetrics 一致）。 */
+export interface DimensionMetrics {
+  evaluated_tags: number
+  average: number | null
+  high_rate: number | null
+  distribution: number[]
+  undetermined: number
+  undetermined_rate: number | null
+}
+
+/** 三维汇总指标（与后端 tag_quality.QualityMetrics 一致，max_score=4）。 */
+export interface QualityMetrics {
+  total_tags: number
+  evaluated_tags: number
+  max_score: number | null
   coverage: number | null
-  n_calibrated: number
-  agreement: number | null
-  agreement_ci: [number, number] | null
-  fp_rate: number | null
-  fn_rate: number | null
+  joint_high_rate: number | null
+  three_dimension_high_rate: number | null
+  undetermined_tags: number
+  undetermined_rate: number | null
+  relevance: DimensionMetrics
+  semantics: DimensionMetrics
+  value: DimensionMetrics
 }
 
-/** 逐片折叠明细行（report.json movies 行）：review 三态 ok/failed/skipped
- * （failed=评审失败、skipped=produce 失败未发起评审）；accuracy 为片级
- * 集合准确率@θ0.4 取格（交集内命中为空 → null，None≠0）；new_pass/hit_pass
- * 为片级评审通过率（评审失败片整体 null，无可判定条目 → null）。 */
+/** judge 三维分跨片聚合（审计 verdicts 行）：n 有效分条数、null 无法判断数。 */
+export interface JudgeScoreSummary {
+  n: number
+  average: number | null
+  distribution: number[]
+  null: number
+}
+
+/** 逐片明细行（report.json movies 行）：产出原样携带（含三维评审与 judge
+ * 参考）+ 片级统计；评审失败片 pass_rate/metrics 为 null（产出不作废）。 */
 export interface OpenMovieRow {
   tt: string
   title: string
   ok: boolean
-  review: string
-  hits_n: number
-  new_n: number
-  accuracy: number | null
-  new_pass: number | null
-  hit_pass: number | null
   error: string | null
   review_error: string | null
   elapsed_ms: number
+  n_hits: number
+  n_new_words: number
+  hits: OpenHitRow[]
+  new_words: OpenNewWordRow[]
+  pass_rate: number | null
+  new_pass: number | null
+  hit_pass: number | null
+  review_missing: number
+  metrics: QualityMetrics | null
 }
 
 /** 开放评测报告（GET /runs/{id}/report，report.json 原样透出，与后端
  * assemble_open_report 结构一致，键名逐一镜像 open_report.py，改动前先读
- * 该模块的组装代码）：banner 为 **list[str]**（开放侧把闭环的单条扩成多条
- * 聚合——部分运行/同模评审/小样本，全量干净 run → 空数组）；warnings 为
- * 口径警示列表；note 为银标准警示原文（genome relevance 是模型输出非人工
- * 标注），展示时恒不可省。sample_accounting 分四块核算（produce 失败/
- * 评审失败/交集内命中为空分开点名）。 */
+ * 该模块的组装代码）：banner 为 **list[str]**（部分运行/同模评审/小样本，
+ * 全量干净 run → 空数组）；warnings 为口径警示列表；note 为银标准警示
+ * 原文，展示时恒不可省。汇总微口径：通过率分母只计有判定行，评审失败片
+ * 整体排除（None≠0）。 */
 export interface OpenEvalReport {
   banner: string[]
   sample_accounting: {
@@ -110,30 +162,28 @@ export interface OpenEvalReport {
     ok: number
     failed: number
     review_failed: number
-    invalid: number
   }
-  no_gt: number
-  theta_rows: OpenThetaRow[]
-  pass_rates: {
-    new_macro: number | null
-    new_micro: number | null
-    new_n: number
-    hit_macro: number | null
-    hit_micro: number | null
-    hit_n: number
+  summary: {
+    total_tags: number
+    reviewed_tags: number
+    hits: number
+    new_words: number
+    new_ratio: number | null
+    pass_rate: number | null
+    new_pass: number | null
+    hit_pass: number | null
     review_missing: number
+    metrics: QualityMetrics | null
   }
-  ndcg: { macro: number | null; ci: [number, number] | null }
-  new_ratio: { macro: number | null }
   produced_stats: {
-    counts: { tt: string; hits_in: number; hits_out: number; new_words: number }[]
+    counts: { tt: string; hits: number; new_words: number }[]
     min: number | null
     median: number | null
     max: number | null
   }
   judge: {
     self_filter: number | null
-    verdicts: Record<string, number>
+    scores: Record<string, JudgeScoreSummary>
     dropped: Record<string, number>
     bands: Record<string, number>
   }
@@ -146,7 +196,6 @@ export interface OpenEvalReport {
     review_prompt_version: string | null
     library_version: string | null
     dataset_id: string | null
-    gt_sha8: string | null
     modalities: string[] | null
   }
   movies: OpenMovieRow[]
