@@ -160,7 +160,8 @@ class OpenMovieResult:
 
     - `hits` 行 `{"tag_id","tag_name","gt","review"}`：tag_id 非空的产出
       （库内命中）；gt 查该片 gt 表（None = 交集外），review 为
-      `{"pass","reason","quote"}` 或 None（该片评审失败）；
+      `{"pass","relevance","semantics","value","reason","quote"}`（三维
+      各 {"score","reason"}，pass 由分数按阈值推导）或 None（该片评审失败）；
     - `new_words` 行 `{"name","desc","level","review"}`：tag_id 为空的
       产出（模型新词）；desc 取 candidate_description（生成侧通用释义）；
     - `review_error`：该片评审失败原因（produce 失败片为 None——评审
@@ -773,6 +774,9 @@ class OpenEvalService:
                     run_id=f"{job.run_id}:{tt}")
                 for row, verdict in zip(owners, reviewed):
                     row["review"] = {"pass": verdict["pass"],
+                                     "relevance": verdict["relevance"],
+                                     "semantics": verdict["semantics"],
+                                     "value": verdict["value"],
                                      "reason": verdict["reason"],
                                      "quote": verdict["quote"]}
             except Exception as exc:  # noqa: BLE001 —— 评审失败：产出不作废（spec §6）

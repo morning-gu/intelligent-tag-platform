@@ -1,15 +1,17 @@
-"""eval/open_review 的单测：二值评审层的解析纪律与摘录必核钉死。
+"""eval/open_review 的单测：三维独立评审层的解析纪律与摘录必核钉死。
 
-被测层（open-eval Task 3）在 produce 之后对每片产出标签做二值评审
-（spec §6）。测试用评审替身（.complete(messages, run_id) 直接回 canned
-响应）钉死几件容易写错的事：
+被测层（open-review-v2）在 produce 之后对每片产出标签做三维独立评审
+（relevance/semantics/value 0-4/null，复用 tag-quality-v4 rubric），pass
+由分数按 REVIEW_PASS_FLOORS 推导。测试用评审替身（.complete(messages,
+run_id) 直接回 canned 响应）钉死几件容易写错的事：
 
-1. 解析容错（Review Focus 1，147.3 端点家族畸形前科四起）——围栏包裹、
-   reviews 单对象（按 id 索引）、pass/is_pass 别名键、id 容忍 "t3"/3/"3"；
+1. 解析容错——围栏包裹、reviews/tags 单对象（按 id 索引）、裸分值形状、
+   id 容忍 "t3"/3/"3"；
 2. 漏判语义——漏判条目 pass=None（不判死、排除出分母），全部漏判才
-   ReviewRequestError（评审失败 ≠ 评审 0 分，产出不作废）；
-3. 摘录必核（Review Focus 4）——pass 且 quote 核不中渲染文本 → 改判
-   fail、reason 注明「摘录未命中原文」，空口通过在这里拦下；
+   ReviewRequestError（评审失败 ≠ 评审 0 分，产出不作废）；显式 null 分
+   是"无法判断"（pass=False），与漏判不同；
+3. 摘录必核——relevance ≥3 且 quote 核不中渲染文本 → 降档到 1、理由
+   注明「摘录未命中原文」，空口高分在这里拦下；
 4. 超长切分与格式重试——镜像 tag_quality 的二分行为与 judge 的重试后缀；
 5. 客户端工厂——三键全空/mock/零网络替身回落主客户端（同模评审），
    独立评审模型按三键构造（env 名逐键回落主 LLM 设置），构造即可断言、
@@ -19,7 +21,6 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 
 import pytest
 
@@ -31,6 +32,7 @@ from tagplatform.capabilities.prompts.open_review import (
 )
 from tagplatform.schemas import ContentJSON
 from tagplatform.services.eval.open_review import (
+    REVIEW_PASS_FLOORS,
     ReviewRequestError,
     make_review_client,
     review_calibre,
@@ -81,26 +83,30 @@ def _reviews(*items) -> str:
     return json.dumps({"reviews": list(items)}, ensure_ascii=False)
 
 
-def _pass(row_id: str, *, quote: str | None = QUOTE,
-          reason: str = "台词有据") -> dict:
-    item = {"id": row_id, "pass": True, "reason": reason}
+def _dim(score, reason: str = "理由") -> dict:
+    return {"score": score, "reason": reason}
+
+
+def _item(row_id: str, relevance=4, semantics=3, value=3, *,
+          quote: str | None = QUOTE, reason: str = "台词有据") -> dict:
+    """规范评审条目：默认三维过线（4/3/3）+ 命中摘录 → 推导 pass=True。"""
+    item = {"id": row_id,
+            "relevance": _dim(relevance, reason),
+            "semantics": _dim(semantics, "名称清晰"),
+            "value": _dim(value, "有区分度")}
     if quote is not None:
         item["quote"] = quote
     return item
 
 
-def _fail(row_id: str, reason: str = "材料无相关细节") -> dict:
-    return {"id": row_id, "pass": False, "reason": reason}
-
-
-# 与 _rows() 默认两行对齐的规范成功响应（t0 pass 带命中摘录，t1 fail）
-_OK_TEXT = _reviews(_pass("t0"), _fail("t1"))
+# 与 _rows() 默认两行对齐的规范成功响应（t0 过线带命中摘录，t1 低分）
+_OK_TEXT = _reviews(_item("t0"), _item("t1", relevance=1, quote=None))
 
 
 class StubClient:
     """评审替身：按调用序吐出 canned 响应并记录调用。
 
-    响应条目：str = 成功文本（Task 3 替身契约的最小形状）、LLMResponse =
+    响应条目：str = 成功文本（替身契约的最小形状）、LLMResponse =
     真客户端信封（失败/截断用）、Exception = 调用时抛出；handler 给出时
     优先按 (调用序号, 消息) 动态生成（切分测试用）。
     """
@@ -125,9 +131,9 @@ class StubClient:
 
 
 def _wire_ids(messages) -> list[str]:
-    """从调用消息里抠出本次送审的 id 清单（清单 JSON 无换行，格式行单行）。"""
-    blob = messages[1]["content"].split("## 待评审标签\n", 1)[1]
-    return [item["id"] for item in json.loads(blob.rsplit("\n", 1)[0])]
+    """从调用消息里抠出本次送审的 id 清单（清单 JSON 在 user 末尾）。"""
+    blob = messages[1]["content"].split("## 待评估标签\n", 1)[1]
+    return [item["id"] for item in json.loads(blob)]
 
 
 class MainLLM:
@@ -146,50 +152,78 @@ def test_review_normal_pass_and_fail():
     assert result is rows  # 同序同对象，追加而非重建
     assert [row["id"] for row in result] == ["t0", "t1"]
     assert result[0]["pass"] is True
-    assert result[0]["reason"] == "台词有据"
+    assert result[0]["relevance"] == {"score": 4, "reason": "台词有据"}
+    assert result[0]["semantics"]["score"] == 3
+    assert result[0]["value"]["score"] == 3
     assert result[0]["quote"] == QUOTE
     assert result[1]["pass"] is False
-    assert result[1]["reason"] == "材料无相关细节"
+    assert result[1]["relevance"]["score"] == 1
     assert result[1]["quote"] is None
-    # run_id 原样透传；system = REVIEW_PROMPT 逐字
+    # run_id 原样透传；system = REVIEW_PROMPT（rubric + 补充 + 输出协议）
     assert client.run_ids == ["r1:m1"]
     assert client.calls[0][0]["role"] == "system"
     assert client.calls[0][0]["content"] == REVIEW_PROMPT
+    assert REVIEW_OUTPUT_FORMAT in client.calls[0][0]["content"]
     user = client.calls[0][1]["content"]
-    assert "## 待评审标签" in user
-    assert REVIEW_OUTPUT_FORMAT in user
+    assert "## 待评估标签" in user
     assert "台词：陈晓：我要逃离这个被安排好的世界。" in user  # 渲染材料含台词
 
 
-def test_review_listing_projects_five_fields_only():
-    """送审清单只投影 id/name/desc/level/scenes 五字段——调用方行里即便
-    带了生成侧 reason 也不进提示（防同模锚定）。"""
+def test_review_pass_derived_from_floors():
+    """pass 由三维分按阈值推导：任一维低于阈值即不通过，模型不回 pass。"""
+    assert REVIEW_PASS_FLOORS == {"relevance": 3, "semantics": 3, "value": 2}
+    cases = [
+        (_item("t0", relevance=3, semantics=3, value=2), True),   # 压线全过
+        (_item("t0", relevance=2), False),
+        (_item("t0", semantics=2), False),
+        (_item("t0", value=1), False),
+    ]
+    for item, expected in cases:
+        result = review_movie_tags(StubClient(_reviews(item)), _content(),
+                                   _rows(1), run_id="r1:m1")
+        assert result[0]["pass"] is expected, item
+
+
+def test_review_listing_projects_review_fields_only():
+    """送审清单只投影 id/name/desc/level/scenes——调用方行里即便带了
+    生成侧 reason 也不进提示（防同模锚定）；judge_reference 仅在有时附上。"""
     rows = _rows()
     rows[0]["reason"] = "生成侧理由不该进评审提示"
     client = StubClient(_OK_TEXT)
     review_movie_tags(client, _content(), rows, run_id="r1:m1")
-    listing = json.loads(
-        client.calls[0][1]["content"].split("## 待评审标签\n", 1)[1].rsplit("\n", 1)[0])
+    listing = json.loads(client.calls[0][1]["content"].split("## 待评估标签\n", 1)[1])
     assert [item["id"] for item in listing] == ["t0", "t1"]
     assert all(set(item) == {"id", "name", "desc", "level", "scenes"}
                for item in listing)
 
 
+def test_review_listing_includes_judge_reference_when_present():
+    """行里带 judge_reference（生产 judge 三维分）→ 附进清单供参考。"""
+    rows = _rows(1)
+    rows[0]["judge_reference"] = {"relevance": 4, "semantics": 3, "value": 3,
+                                  "reason": "judge 依据"}
+    client = StubClient(_reviews(_item("t0")))
+    review_movie_tags(client, _content(), rows, run_id="r1:m1")
+    listing = json.loads(client.calls[0][1]["content"].split("## 待评估标签\n", 1)[1])
+    assert listing[0]["judge_reference"] == rows[0]["judge_reference"]
+    assert "仅供参考" in client.calls[0][0]["content"]  # 补充说明定位参考
+
+
 def test_review_honors_modalities():
-    """关掉 dialogue：台词不进渲染文本 → 台词摘录核不中 → pass 改判 fail。"""
-    client = StubClient(_reviews(_pass("t0")))
+    """关掉 dialogue：台词不进渲染文本 → 台词摘录核不中 → relevance 降档。"""
+    client = StubClient(_reviews(_item("t0")))
     rows = _rows()
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1",
                                modalities=("script",))
     assert result[0]["pass"] is False
-    assert "摘录未命中原文" in result[0]["reason"]
+    assert result[0]["relevance"] == {"score": 1, "reason": "摘录未命中原文"}
     assert "台词：" not in client.calls[0][1]["content"]
 
 
 def test_review_empty_material_raises():
     """dialogue-only modalities：render_content 对 script 关闭静默返回空
     材料（台词在 script 通道渲染）→ 摘录核验无从进行，按评审失败语义
-    响亮抛错（绝不产出貌似合法的全 fail 报告）。"""
+    响亮抛错（绝不产出貌似合法的全低分报告）。"""
     client = StubClient(_OK_TEXT)
     with pytest.raises(ReviewRequestError) as exc_info:
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1",
@@ -199,7 +233,8 @@ def test_review_empty_material_raises():
     assert client.calls == []  # 材料不足不出请求，不烧 token
 
 
-# ---- 解析容错（Review Focus 1：畸形家族） ----
+
+# ---- 解析容错（畸形家族） ----
 
 
 def test_review_fenced_output():
@@ -210,7 +245,7 @@ def test_review_fenced_output():
 
 
 def test_review_fenced_output_with_crlf():
-    """围栏行带 \r\n（端点流式输出的换行漂移）同样剥净。"""
+    """围栏行带 CRLF 换行（端点流式输出的换行漂移）同样剥净。"""
     client = StubClient("```json\r\n" + _OK_TEXT + "\r\n```")
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert result[0]["pass"] is True
@@ -220,8 +255,9 @@ def test_review_fenced_output_with_crlf():
 def test_review_single_object_reviews_form():
     """reviews 为按 id 索引的单对象（147.3 漂移形状）时展平。"""
     text = json.dumps({"reviews": {
-        "t0": {"pass": True, "reason": "台词有据", "quote": QUOTE},
-        "t1": {"pass": False, "reason": "材料无相关细节"},
+        "t0": {"relevance": _dim(4), "semantics": _dim(3), "value": _dim(3),
+               "quote": QUOTE},
+        "t1": {"relevance": _dim(1), "semantics": _dim(3), "value": _dim(2)},
     }}, ensure_ascii=False)
     client = StubClient(text)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
@@ -229,11 +265,12 @@ def test_review_single_object_reviews_form():
     assert result[1]["pass"] is False
 
 
-def test_review_alias_key_and_non_string_ids():
-    """is_pass 别名键兼容；id 容忍 0 / "1" 等非 "t" 前缀形状。"""
-    text = json.dumps({"reviews": [
-        {"id": 0, "is_pass": True, "reason": "台词有据", "quote": QUOTE},
-        {"id": "1", "pass": False, "reason": "材料无相关细节"},
+def test_review_tags_key_and_non_string_ids():
+    """rubric 原输出形状 {"tags":[...]} 容忍；id 容忍 0 / "1" 等非 "t" 前缀。"""
+    text = json.dumps({"tags": [
+        {"id": 0, "relevance": _dim(4), "semantics": _dim(3), "value": _dim(3),
+         "quote": QUOTE},
+        {"id": "1", "relevance": _dim(1), "semantics": _dim(3), "value": _dim(2)},
     ]}, ensure_ascii=False)
     client = StubClient(text)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
@@ -241,22 +278,64 @@ def test_review_alias_key_and_non_string_ids():
     assert result[1]["pass"] is False
 
 
+def test_review_flat_score_shape_tolerated():
+    """裸分值形状（无 {"score","reason"} 包装）容忍，理由留空。"""
+    text = _reviews({"id": "t0", "relevance": 4, "semantics": 3, "value": 3,
+                     "quote": QUOTE})
+    result = review_movie_tags(StubClient(text), _content(), _rows(1), run_id="r1:m1")
+    assert result[0]["pass"] is True
+    assert result[0]["relevance"] == {"score": 4, "reason": ""}
+
+
 # ---- 漏判语义 ----
 
 
 def test_review_partial_miss_marks_none():
     """漏判一行：该行 pass=None 占位（不判死），其余行正常。"""
-    client = StubClient(_reviews(_pass("t0")))
+    client = StubClient(_reviews(_item("t0")))
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert result[0]["pass"] is True
     assert result[1]["pass"] is None
+    assert result[1]["relevance"] == {"score": None, "reason": "评审未返回该条判定"}
     assert result[1]["reason"] == "评审未返回该条判定"
     assert result[1]["quote"] is None
 
 
+def test_review_explicit_null_is_not_missed():
+    """显式 null 分 = 无法判断：pass=False（未过线），不是漏判 None。"""
+    text = _reviews(_item("t0", semantics=None))
+    result = review_movie_tags(StubClient(text), _content(), _rows(1), run_id="r1:m1")
+    assert result[0]["pass"] is False
+    assert result[0]["semantics"]["score"] is None
+
+
+def test_review_invalid_dimension_shapes_are_missed():
+    """缺 score 键 / 布尔 / 越界 / 缺维度 → 整行按漏判（不猜分放行）。"""
+    bad_items = [
+        {"id": "t0", "relevance": {"reason": "无 score"},
+         "semantics": _dim(3), "value": _dim(3)},
+        {"id": "t0", "relevance": _dim(True), "semantics": _dim(3), "value": _dim(3)},
+        {"id": "t0", "relevance": _dim(5), "semantics": _dim(3), "value": _dim(3)},
+        {"id": "t0", "relevance": _dim(4), "semantics": _dim(3)},  # 缺 value
+    ]
+    for item in bad_items:
+        result = review_movie_tags(StubClient(_reviews(item, _item("t1"))),
+                                   _content(), _rows(2), run_id="r1:m1")
+        assert result[0]["pass"] is None, item
+        assert result[1]["pass"] is True  # 其余行不受影响
+
+
+def test_review_duplicate_id_is_missed():
+    """重复 id（镜像 tag_quality：重复即不可靠）→ 该行按漏判。"""
+    text = _reviews(_item("t0"), _item("t0", relevance=1), _item("t1"))
+    result = review_movie_tags(StubClient(text), _content(), _rows(2), run_id="r1:m1")
+    assert result[0]["pass"] is None
+    assert result[1]["pass"] is True
+
+
 def test_review_unmatched_ids_all_missed_raises():
     """模型按名称而非 id 回填（147.3 前科）：全部漏判 → ReviewRequestError。"""
-    client = StubClient(_reviews({"id": "逃离安排", "pass": True, "reason": "有据"}))
+    client = StubClient(_reviews(_item("逃离安排")))
     with pytest.raises(ReviewRequestError):
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
 
@@ -267,50 +346,42 @@ def test_review_empty_reviews_list_all_missed_raises():
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
 
 
-# ---- 摘录必核（Review Focus 4） ----
+# ---- 摘录必核 ----
 
 
-def test_review_pass_quote_must_hit_material():
-    """pass + 摘录命中 → 保留 pass；pass + 摘录不命中 / 缺摘录 → 改判 fail
-    且 reason 注明（空口通过在这里拦下）。"""
+def test_review_high_relevance_quote_must_hit_material():
+    """高 relevance + 摘录命中 → 保留；摘录不命中 / 缺摘录 → 降档到 1
+    且理由注明（空口高分在这里拦下）。"""
     text = _reviews(
-        _pass("t0"),
-        {"id": "t1", "pass": True, "reason": "有跑步"},  # 缺 quote
+        _item("t0"),
+        _item("t1", quote=None, reason="有跑步"),  # 缺 quote
     )
     client = StubClient(text)
     rows = _rows(3)
-    rows[2]["name"] = "标签2"
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1")
     assert result[0]["pass"] is True  # 正例：命中摘录原样保留
+    assert result[0]["relevance"]["score"] == 4
     assert result[1]["pass"] is False
-    assert result[1]["reason"] == "有跑步；摘录未命中原文"
-    assert result[2]["pass"] is None  # t3 行漏判照旧占位（本响应只回两条）
+    assert result[1]["relevance"] == {"score": 1, "reason": "摘录未命中原文"}
+    assert result[2]["pass"] is None  # t2 行漏判照旧占位（本响应只回两条）
 
 
-def test_review_quote_miss_appends_reason():
-    client = StubClient(_reviews(_pass("t0", quote="这句台词在影片材料里完全不存在")))
-    result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
-    assert result[0]["pass"] is False
-    assert result[0]["reason"] == "台词有据；摘录未命中原文"
+def test_review_low_relevance_quote_miss_not_annotated():
+    """relevance 本就 <3：摘录核不中不再降档（已低分），不追加说明。"""
+    text = _reviews(_item("t0", relevance=1, quote="这句台词在影片材料里完全不存在"))
+    result = review_movie_tags(StubClient(text), _content(), _rows(1), run_id="r1:m1")
+    assert result[0]["relevance"] == {"score": 1, "reason": "台词有据"}
 
 
-def test_review_quote_miss_with_empty_reason():
-    client = StubClient(_reviews(_pass("t0", quote="这句台词在影片材料里完全不存在",
-                                       reason="")))
-    result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
-    assert result[0]["pass"] is False
-    assert result[0]["reason"] == "摘录未命中原文"  # 空理由不出现开头分号
-
-
-def test_review_quote_spanning_punctuation_stays_pass():
-    """摘录跨标点边界仍 pass：核验对齐生产 judge（_require_quotes 对渲染
+def test_review_quote_spanning_punctuation_stays_high():
+    """摘录跨标点边界仍有效：核验对齐生产 judge（_require_quotes 对渲染
     文本先 _normalize_quote 再核）——quote 的 8 字窗跨过「，」时 raw 核验
-    会误杀真 pass，把通过率压低、标定 FN 抬高。"""
-    text = _reviews(_pass("t0", quote="小镇街道晨跑，电台广播"))
+    会误杀真高分，把通过率压低。"""
+    text = _reviews(_item("t0", quote="小镇街道晨跑，电台广播"))
     client = StubClient(text)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert result[0]["pass"] is True  # 归一化后「小镇街道晨跑电台广播」命中
-    assert result[0]["reason"] == "台词有据"
+    assert result[0]["relevance"]["score"] == 4
     assert result[0]["quote"] == "小镇街道晨跑，电台广播"
 
 
@@ -338,52 +409,33 @@ def test_review_failed_envelope_not_mistaken_as_truncated():
     请求走「评审调用失败」口径（tag_quality 的 ok 门镜像），不进切分。"""
     client = StubClient(LLMResponse(
         "", {}, {"error": "评审端点 502",
-                 "choices": [{"message": {"content": ""}, "finish_reason": "length"}]},
-        False))
+                 "choices": [{"finish_reason": "length"}]}, False))
     with pytest.raises(ReviewRequestError) as exc_info:
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert "评审端点 502" in str(exc_info.value)
-    assert "超出长度限制" not in str(exc_info.value)
-    assert len(client.calls) == 1  # 失败信封不触发二分
+    assert len(client.calls) == 1  # 没有切分重试
 
 
-def test_review_format_retry_once():
-    """首回不合法 → 附格式要求重发一次；重试成功后照常评审。"""
-    client = StubClient("抱歉，我无法以 JSON 输出，以下是逐条评审：t0 通过。",
-                        _OK_TEXT)
+def test_review_format_retry_appends_hint():
+    """首次解析失败 → 附 REVIEW_RETRY_HINT 重发一次（user 消息尾部）。"""
+    client = StubClient("不是 JSON", _OK_TEXT)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert result[0]["pass"] is True
     assert len(client.calls) == 2
-    assert REVIEW_RETRY_HINT not in client.calls[0][1]["content"]
     assert client.calls[1][1]["content"].endswith(REVIEW_RETRY_HINT)
+    assert client.calls[1][0] == client.calls[0][0]  # system 原样
 
 
 def test_review_two_parse_failures_raise():
-    client = StubClient("第一次说不清", "第二次还是说不清")
+    client = StubClient("不是 JSON", "还不是 JSON")
     with pytest.raises(ReviewRequestError) as exc_info:
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
-    assert "无法解析" in str(exc_info.value)
-    assert len(client.calls) == 2  # 格式重试恰好一次
-
-
-def test_review_truncated_retry_reports_length_error():
-    """重试响应截断 → 记「输出超出长度限制」而非误报「无法解析」（重试
-    响应同样过 _truncated 检查，失败原因如实）。"""
-    client = StubClient(
-        "抱歉，我无法以 JSON 输出。",
-        LLMResponse("", {},
-                    {"choices": [{"message": {"content": ""},
-                                  "finish_reason": "length"}]},
-                    ok=True))
-    with pytest.raises(ReviewRequestError) as exc_info:
-        review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
-    assert "超出长度限制" in str(exc_info.value)
-    assert "无法解析" not in str(exc_info.value)
+    assert "评审响应无法解析" in str(exc_info.value)
     assert len(client.calls) == 2
 
 
-def test_review_splits_on_input_limit():
-    """首回报输入超长 → 二分重试（镜像 tag_quality 切分行为）。"""
+def test_review_input_limit_splits_batch():
+    """输入超长（maximum context length）→ 对半切分（镜像 tag_quality）。"""
     rows = _rows(4)
 
     def handler(index, messages):
@@ -391,7 +443,7 @@ def test_review_splits_on_input_limit():
             return LLMResponse("", {},
                                {"error": "该请求超出 maximum context length 上限"},
                                False)
-        return _reviews(*(_pass(row_id) for row_id in _wire_ids(messages)))
+        return _reviews(*(_item(row_id) for row_id in _wire_ids(messages)))
 
     client = StubClient(handler=handler)
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1")
@@ -419,7 +471,7 @@ def test_review_output_truncated_splits():
                                {"choices": [{"message": {"content": ""},
                                              "finish_reason": "length"}]},
                                ok=True)
-        return _reviews(*(_fail(row_id) for row_id in _wire_ids(messages)))
+        return _reviews(*(_item(row_id, relevance=1) for row_id in _wire_ids(messages)))
 
     client = StubClient(handler=handler)
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1")
@@ -437,7 +489,7 @@ def test_review_empty_rows_returns_empty():
 
 
 def test_make_review_client_same_model_fallback_identity():
-    """评审三键全空 = 回落主客户端本身（同模评审，spec §6）。"""
+    """评审三键全空 = 回落主客户端本身（同模评审）。"""
     settings = Settings()
     llm = MainLLM()
     assert make_review_client(settings, llm) is llm

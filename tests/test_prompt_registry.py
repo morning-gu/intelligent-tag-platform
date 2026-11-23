@@ -81,8 +81,9 @@ def test_registry_mtg_items_match_constants(client):
 def test_registry_open_review_content(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     items = {i["name"]: i["text"] for i in groups["open_review"]["items"]}
-    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v1"
-    assert "## 标签评审（二值）" in items["REVIEW_PROMPT"]
+    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v2"
+    assert "## 评审任务补充说明" in items["REVIEW_PROMPT"]
+    assert "## 标签质量评估" in items["REVIEW_PROMPT"]  # canonical rubric 复用
     assert "10–25 字" in items["REVIEW_PROMPT"]      # 摘录长度要求（en-dash）
     assert "reviews" in items["REVIEW_OUTPUT_FORMAT"]
     assert "reviews" in items["REVIEW_RETRY_HINT"]

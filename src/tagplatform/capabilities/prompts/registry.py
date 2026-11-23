@@ -24,7 +24,7 @@ from tagplatform.capabilities.prompts.mtg import (
 )
 from tagplatform.capabilities.prompts.open_review import (
     REVIEW_OUTPUT_FORMAT, REVIEW_PROMPT, REVIEW_PROMPT_VERSION,
-    REVIEW_RETRY_HINT,
+    REVIEW_PROTOCOL_NOTE, REVIEW_RETRY_HINT,
 )
 from tagplatform.capabilities.prompts.quality import PROMPT_VERSION, RUBRIC_TEXT
 from tagplatform.capabilities.prompts.templates import (
@@ -100,6 +100,7 @@ def list_prompt_registry() -> list[dict]:
             "title": "开放评审",
             "items": [
                 {"name": "REVIEW_PROMPT", "text": REVIEW_PROMPT},
+                {"name": "REVIEW_PROTOCOL_NOTE", "text": REVIEW_PROTOCOL_NOTE},
                 {"name": "REVIEW_OUTPUT_FORMAT", "text": REVIEW_OUTPUT_FORMAT},
                 {"name": "REVIEW_RETRY_HINT", "text": REVIEW_RETRY_HINT},
                 {"name": "REVIEW_PROMPT_VERSION", "text": REVIEW_PROMPT_VERSION},

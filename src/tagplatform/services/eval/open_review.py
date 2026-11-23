@@ -1,20 +1,23 @@
-"""开放评测的二值评审层：调用 / 解析 / 摘录核验 / 超长切分（spec §6）。
+"""开放评测的三维独立评审层：调用 / 解析 / 摘录核验 / 超长切分。
 
-open-eval 运行器（Task 4）在 produce 之后对每片全部产出标签（新词 +
-库内命中）做一次二值评审。语义边界：
+open-eval 运行器在 produce 之后对每片全部产出标签（新词 + 库内命中）做
+一次独立三维评审（open-review-v2）：复用 tag-quality-v4 canonical rubric
+逐维评 relevance/semantics/value（0-4 或 null），每条附生产 judge 的三维
+分作参考（judge_reference，明确仅供参考）。通过与否由本层按阈值推导
+（REVIEW_PASS_FLOORS，与生产 judge 保留阈值对齐），模型只给分。语义边界：
 
 - 一片一批（全部标签一次请求，超长才切分——镜像 tag_quality 的二分
   行为，输入超长与输出截断两种触发都切）；
-- 解析纪律（Review Focus 1；147.3 端点家族畸形前科四起）：剥首尾整圈
-  ``` 围栏、reviews 单对象（按 id 索引的 dict）容忍、裸列表容忍、
-  pass/is_pass 别名键兼容、id 容忍 "t3" / 3 / "3"；漏判 id 的行
-  pass=None（不判 pass 也不判 fail，排除出分母、计 review_missing），
-  全部行漏判 → ReviewRequestError（评审失败 ≠ 评审 0 分）；
-- 摘录必核（Review Focus 4）：pass 且 quote 经 _quote_ok 核不中**归一
-  化**渲染文本（对齐生产 judge 的 _require_quotes 判法——quote 8 字窗
-  跨标点/换行时 raw 核验会误杀真 pass）→ 改判 fail、reason 追加
-  「摘录未命中原文」——与生产 judge 的「引用不过改判 insufficient」
-  同款纪律，防评审员空口通过；
+- 解析纪律：剥首尾整圈 ``` 围栏、reviews/tags 单对象（按 id 索引的
+  dict）容忍、裸列表容忍、id 容忍 "t3" / 3 / "3"；维度对象缺 score 键 /
+  非法分值 / 重复 id 的行按漏判处理——pass=None（不判通过也不判不通过，
+  排除出分母、计 review_missing），全部行漏判 → ReviewRequestError
+  （评审失败 ≠ 评审 0 分）；显式 null 分是"无法判断"，pass=False 且计入
+  undetermined，与漏判不同；
+- 摘录必核：relevance ≥3 且 quote 经 _quote_ok 核不中**归一化**渲染文本
+  （对齐生产 judge 的 _require_quotes 判法）→ relevance 降档到 1、理由
+  记「摘录未命中原文」——与生产 judge「引用不过降档」同款纪律，防评审员
+  空口给高分；
 - 格式重试一次（附格式要求重发，镜像 judge/verify 的重试后缀），仍
   失败 → ReviewRequestError；请求失败（传输异常 / ok=False 信封）同样
   → ReviewRequestError。评审失败由上层记 review_failed（produce 产出
@@ -31,8 +34,7 @@ import json
 import logging
 
 from tagplatform.capabilities.prompts.open_review import (
-    REVIEW_OUTPUT_FORMAT, REVIEW_PROMPT, REVIEW_PROMPT_VERSION,
-    REVIEW_RETRY_HINT,
+    REVIEW_PROMPT, REVIEW_PROMPT_VERSION, REVIEW_RETRY_HINT,
 )
 from tagplatform.schemas import ContentJSON
 from tagplatform.services.generation.open.mtg.pipeline import (
@@ -47,12 +49,19 @@ logger = logging.getLogger(__name__)
 # canonical 在 prompt 常量模块（文案与版本同驻），这里转出口给运行器记账
 # （meta.review.prompt_version），import 路径与 make_review_client 对齐。
 __all__ = [
+    "REVIEW_PASS_FLOORS",
     "REVIEW_PROMPT_VERSION",
     "ReviewRequestError",
     "make_review_client",
     "review_calibre",
     "review_movie_tags",
 ]
+
+
+# 评审通过阈值：与生产 judge 的保留阈值（pipeline._JUDGE_SCORE_FLOORS）
+# 对齐——relevance/semantics ≥3、value ≥2。评审通过率即"独立评审认为达到
+# 生产保留标准的标签占比"。null 分（无法判断）不算通过。
+REVIEW_PASS_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 
 
 class ReviewRequestError(RuntimeError):
@@ -102,14 +111,15 @@ def review_calibre(settings: Settings, llm) -> dict:
 
 def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                       run_id: str, modalities=("script", "dialogue")) -> list[dict]:
-    """对一片的全部产出标签做二值评审，同序回填 pass / reason / quote。
+    """对一片的全部产出标签做三维独立评审，同序回填三维分与推导的 pass。
 
-    入参行 {"id","name","desc","level","scenes":[scene_id,...]}；返回同序
-    行追加 {"pass": bool | None, "reason": str, "quote": str | None}。送进
+    入参行 {"id","name","desc","level","scenes":[scene_id,...]，可选
+    "judge_reference"}；返回同序行追加 {"relevance"/"semantics"/"value":
+    {"score","reason"}, "pass": bool | None, "reason": str, "quote"}。送进
     模型的 id 一律按批次位置重编为 "t0".."tN"（防名称撞车——模型按 id
     回填，不按名称匹配），结果按位置映射回原行：入参行的 id 与其余字段
     原样保留；即便行里带了生成侧 reason 等多余字段也不会进提示（防同模
-    锚定——清单只投影评审需要的五个字段）。
+    锚定——清单只投影评审需要的字段）。
 
     抛 ReviewRequestError 的四种情况：材料为空（modalities 未含 script
     ——台词在 script 通道渲染，摘录核验无从进行，绝不产出假的全 fail
@@ -166,45 +176,61 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         raise ReviewRequestError("；".join(dict.fromkeys(errors)))
     if not results:
         raise ReviewRequestError("评审响应未包含任何有效判决（全部漏判）")
-    # 摘录必核：pass 且摘录核不中 → 改判 fail（空口通过在这里拦下）。
+    # 摘录必核：高 relevance 分且摘录核不中 → 降档到 1（空口高分在这里拦下）。
     # 核验 haystack 归一化——对齐生产 judge 的判法（_require_quotes 对
     # render_content 结果先 _normalize_quote 再核）：quote 的 8 字窗跨过
-    # 标点/换行时，raw 文本中间隔着标点会误杀真 pass。
+    # 标点/换行时，raw 文本中间隔着标点会误杀真高分。
     quote_haystack = _normalize_quote(haystack)
     for verdict in results.values():
-        if verdict["pass"] and not _quote_ok(verdict["quote"], quote_haystack):
-            verdict["pass"] = False
-            verdict["reason"] = (f"{verdict['reason']}；摘录未命中原文"
-                                 if verdict["reason"] else "摘录未命中原文")
-    # 同序回填：漏判行占位 None（排除出分母，计 review_missing 由上层做）
+        relevance = verdict["relevance"]["score"]
+        if isinstance(relevance, int) and relevance >= REVIEW_PASS_FLOORS["relevance"] \
+                and not _quote_ok(verdict["quote"], quote_haystack):
+            verdict["relevance"] = {"score": 1, "reason": "摘录未命中原文"}
+    # 同序回填：漏判行占位 None（排除出分母，计 review_missing 由上层做）；
+    # pass 由三维分按阈值推导——显式 null 分不算通过（计 undetermined）。
     for index, row in enumerate(tag_rows):
         verdict = results.get(index)
         if verdict is None:
-            verdict = {"pass": None, "reason": "评审未返回该条判定", "quote": None}
+            verdict = {axis: {"score": None, "reason": "评审未返回该条判定"}
+                       for axis in REVIEW_PASS_FLOORS}
+            verdict.update({"pass": None, "reason": "评审未返回该条判定",
+                            "quote": None})
+        else:
+            verdict["pass"] = all(
+                isinstance(verdict[axis]["score"], int)
+                and verdict[axis]["score"] >= floor
+                for axis, floor in REVIEW_PASS_FLOORS.items())
+            verdict["reason"] = "；".join(
+                verdict[axis]["reason"] for axis in REVIEW_PASS_FLOORS
+                if verdict[axis]["reason"])[:200]
         row.update(verdict)
     return tag_rows
 
 
 def _build_messages(haystack: str, rows: list[dict]) -> list[dict]:
-    """评审消息：system = REVIEW_PROMPT（spec §6 逐字），user = 材料 + 清单。
+    """评审消息：system = REVIEW_PROMPT（rubric + 补充 + 协议），user = 材料 + 清单。
 
-    清单按批次位置重编 id（"t0".."tN"）并只投影五个评审字段——防名称
-    撞车与生成侧 reason 锚定。输出 JSON 形状说明附在清单之后（REVIEW_
-    PROMPT 原文不含形状；形状属协议细节，随消息装配给出）。
+    清单按批次位置重编 id（"t0".."tN"）并只投影评审字段——防名称撞车与
+    生成侧 reason 锚定；judge_reference（生产 judge 三维分与理由）仅在
+    行里有时附上，rubric 补充说明已把它定位为仅供参考。清单标题与 rubric
+    的「待评估标签」一致（Mock 质量分支也按这个标题切分材料）。
     """
-    listing = [{
-        "id": f"t{position}",
-        "name": row.get("name"),
-        "desc": row.get("desc"),
-        "level": row.get("level"),
-        "scenes": list(row.get("scenes") or []),
-    } for position, row in enumerate(rows)]
+    listing = []
+    for position, row in enumerate(rows):
+        entry = {
+            "id": f"t{position}",
+            "name": row.get("name"),
+            "desc": row.get("desc"),
+            "level": row.get("level"),
+            "scenes": list(row.get("scenes") or []),
+        }
+        if row.get("judge_reference") is not None:
+            entry["judge_reference"] = row["judge_reference"]
+        listing.append(entry)
     user_content = (
         haystack
-        + "\n\n## 待评审标签\n"
+        + "\n\n## 待评估标签\n"
         + json.dumps(listing, ensure_ascii=False)
-        + "\n"
-        + REVIEW_OUTPUT_FORMAT
     )
     return [
         {"role": "system", "content": REVIEW_PROMPT},
@@ -248,14 +274,13 @@ def _parse_with_retry(client, messages: list[dict], text: str, total: int,
 
 
 def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
-    """响应文本 → {批次内行序号: {"pass","reason","quote"}}。
+    """响应文本 → {批次内行序号: {relevance/semantics/value, quote}}。
 
-    畸形家族容错（Review Focus 1）：首尾整圈 ``` 围栏剥除（tag_quality
-    同款）、直读失败按首尾大括号抠对象（verify._loads 同款——模型爱在
-    JSON 前后垫说明文字）、reviews 为按 id 索引的单对象时展平、裸列表
-    容忍、pass/is_pass 别名键兼容。缺 pass / 非布尔 pass / id 出界 /
+    畸形家族容错：首尾整圈 ``` 围栏剥除（tag_quality 同款）、直读失败按
+    首尾大括号抠对象（verify._loads 同款）、reviews/tags 为按 id 索引的单
+    对象时展平、裸列表容忍。维度对象缺 score 键 / 非法分值 / id 出界 /
     重复 id（镜像 tag_quality：重复即不可靠）的条目按漏判处理——不进
-    结果，不抛错。
+    结果，不抛错。显式 null 分有效（无法判断），与漏判不同。
     """
     text = raw.strip()
     first, separator, rest = text.partition("\n")
@@ -268,6 +293,10 @@ def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
                  if isinstance(value, dict)]
     elif isinstance(data, dict) and isinstance(data.get("reviews"), list):
         items = [item for item in data["reviews"] if isinstance(item, dict)]
+    elif isinstance(data, dict) and isinstance(data.get("tags"), list):
+        # rubric 原输出形状（{"tags":[...]}）容忍：补充说明已要求 reviews，
+        # 但模型照 rubric 末尾形状回也能解析。
+        items = [item for item in data["tags"] if isinstance(item, dict)]
     elif isinstance(data, list):
         items = [item for item in data if isinstance(item, dict)]
     else:
@@ -280,17 +309,51 @@ def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
         if index in results:
             results.pop(index)
             continue
-        verdict = item["pass"] if "pass" in item else item.get("is_pass")
-        if not isinstance(verdict, bool):
+        dimensions: dict[str, dict] = {}
+        for axis in REVIEW_PASS_FLOORS:
+            if axis not in item:  # 缺维度键 = 未完成（显式 null 才是无法判断）
+                break
+            score, reason = _clean_dimension(item[axis])
+            if score is _MISSING:
+                break
+            dimensions[axis] = {"score": score, "reason": reason}
+        if len(dimensions) != len(REVIEW_PASS_FLOORS):
             continue
-        reason = item.get("reason")
         quote = item.get("quote")
         results[index] = {
-            "pass": verdict,
-            "reason": reason.strip() if isinstance(reason, str) else "",
+            **dimensions,
             "quote": quote if isinstance(quote, str) else None,
         }
     return results
+
+
+# 维度形状非法的哨兵（与有效 null 分区分：null 是"无法判断"，非法是漏判）
+_MISSING = object()
+
+
+def _clean_dimension(value) -> tuple:
+    """维度值 → (score, reason)；形状非法返回 (_MISSING, "")（整行按漏判）。
+
+    容忍 {"score","reason"} 对象与裸分值两种形状；score 只认 0-4 的整数
+    （含整数值浮点）或显式 null，布尔/越界/缺 score 键都算未完成。
+    """
+    if isinstance(value, dict):
+        if "score" not in value:
+            return _MISSING, ""
+        score = value["score"]
+        reason = value.get("reason")
+        reason = reason.strip() if isinstance(reason, str) else ""
+    else:
+        score, reason = value, ""
+    if score is None:
+        return None, reason
+    if isinstance(score, bool):
+        return _MISSING, ""
+    if isinstance(score, float) and score.is_integer():
+        score = int(score)
+    if isinstance(score, int) and 0 <= score <= 4:
+        return score, reason
+    return _MISSING, ""
 
 
 def _loads_with_prose_fallback(text: str):

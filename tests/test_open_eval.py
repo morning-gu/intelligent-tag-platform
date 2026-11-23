@@ -260,7 +260,7 @@ class FakeOpenProducer:
 
 
 class _ReviewOkStub:
-    """评审替身：恒回全 pass（quote 取夹具场景原文，过摘录核验）。
+    """评审替身：恒回过线三维分 4/3/3（quote 取夹具场景原文，过摘录核验）。
 
     返回纯文本（open_review._unwrap 对 str 按成功处理）；多出的 id（超出
     实际行数）由 open_review 按批内 index 出界忽略。`delay` 供取消用例
@@ -276,7 +276,10 @@ class _ReviewOkStub:
         if self._delay:
             time.sleep(self._delay)
         self.calls.append(run_id)
-        reviews = [{"id": f"t{i}", "pass": True, "reason": "场景有据",
+        reviews = [{"id": f"t{i}",
+                    "relevance": {"score": 4, "reason": "场景有据"},
+                    "semantics": {"score": 3, "reason": "名称清晰"},
+                    "value": {"score": 3, "reason": "有区分度"},
                     "quote": _QUOTE} for i in range(self._total)]
         return json.dumps({"reviews": reviews}, ensure_ascii=False)
 
@@ -490,7 +493,9 @@ def test_run_completes_writes_all_artifacts(open_setup):
     h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
     assert set(h1) == {"tag_id", "tag_name", "gt", "review"}
     assert h1["gt"] == 0.9
-    assert h1["review"] == {"pass": True, "reason": "场景有据", "quote": _QUOTE}
+    assert h1["review"]["pass"] is True
+    assert h1["review"]["quote"] == _QUOTE
+    assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")
     assert hx["gt"] is None and hx["review"]["pass"] is True
     nw = row1["new_words"][0]
