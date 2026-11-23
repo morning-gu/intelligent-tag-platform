@@ -33,7 +33,7 @@ def _review(passed=True, r=4, s=3, v=3, quote="原文摘录"):
             "relevance": {"score": r, "reason": "相关理由"},
             "semantics": {"score": s, "reason": "语义理由"},
             "value": {"score": v, "reason": "价值理由"},
-            "reason": "相关理由；语义理由；价值理由", "quote": quote}
+            "reason": "相关理由；语义理由；价值理由", "evaluated": True, "evidence_scene_ids": ["scene_1", "scene_2"]}
 
 
 def _missed():
@@ -41,7 +41,7 @@ def _missed():
             "relevance": {"score": None, "reason": "评审未返回该条判定"},
             "semantics": {"score": None, "reason": "评审未返回该条判定"},
             "value": {"score": None, "reason": "评审未返回该条判定"},
-            "reason": "评审未返回该条判定", "quote": None}
+            "reason": "评审未返回该条判定", "evaluated": False, "evidence_scene_ids": []}
 
 
 _DEFAULT = object()  # 区分"缺省给过线评审"与"显式 None（评审失败占位）"
@@ -98,7 +98,7 @@ def test_assemble_summary_micro_rates_and_metrics():
         "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
     summary = report["summary"]
     assert summary["total_tags"] == 5
-    assert summary["reviewed_tags"] == 5
+    assert summary["reviewed_tags"] == 4
     assert summary["new_words"] == 2 and summary["hits"] == 3
     assert summary["new_ratio"] == pytest.approx(2 / 5)
     # 漏判（pass=None）排除出通过率分母：3 过 / 4 有判定
@@ -107,11 +107,12 @@ def test_assemble_summary_micro_rates_and_metrics():
     assert summary["hit_pass"] == pytest.approx(2 / 3)
     assert summary["review_missing"] == 1
     metrics = summary["metrics"]
-    assert metrics["evaluated_tags"] == 5
-    assert metrics["undetermined_tags"] == 1
+    assert metrics["evaluated_tags"] == 4
+    assert metrics["coverage"] == 4 / 5
+    assert metrics["undetermined_tags"] == 0
     assert metrics["relevance"]["average"] == pytest.approx((4 + 2 + 4 + 3) / 4)
     assert metrics["relevance"]["distribution"] == [0, 0, 1, 1, 2]
-    assert metrics["relevance"]["undetermined"] == 1
+    assert metrics["relevance"]["undetermined"] == 0
     # 三维满分率：仅新词甲 4/4/4，分母 = 三维均有分的 4 行
     assert metrics["three_dimension_high_rate"] == pytest.approx(1 / 4)
 
@@ -131,7 +132,7 @@ def test_review_failed_movie_excluded_but_output_kept():
     assert report["review_failed_movies"] == [
         {"tt": "ttB", "review_error": "ReviewRequestError: 评审端点宕机"}]
     movie_b = next(m for m in report["movies"] if m["tt"] == "ttB")
-    assert movie_b["pass_rate"] is None and movie_b["metrics"] is None
+    assert movie_b["pass_rate"] is None and movie_b["metrics"]["coverage"] == 0
     assert movie_b["new_words"][0]["name"] == "保留新词"
 
 
@@ -175,7 +176,7 @@ def test_banner_same_model():
         _meta(done=1, total=1, review={"model": "gen-model",
                                        "same_model": True,
                                        "prompt_version": "open-review-v2"}))
-    assert any("同模型" in b for b in report["banner"])
+    assert any("共享判断偏差" in b for b in report["banner"])
 
 
 def test_banner_small_sample():

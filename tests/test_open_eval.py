@@ -88,22 +88,19 @@ _UPSTREAM_TEMPLATE = """{{
           {{"dialogue_id": "d1", "speak_id": "character_001", "text": "你好。",
              "start_ms": 1000, "end_ms": 2000}}
         ]
-      }}
+      }},
+      {{"scene_id": "scene_002", "start_ms": 60000, "end_ms": 90000,
+        "description": "两人再次相遇并解释冲突起因。"}}
     ]
   }}
 }}
 """
-
-# 评审替身的固定摘录：夹具场景描述原文（≥8 字连续重合，过 _quote_ok 核验）
-_QUOTE = "两名人物在开场场景中发生激烈争执"
-
 
 def _write_dataset(root: Path, *, six: bool = False) -> None:
     """内置夹具：迷你 MovieTags 数据集（gt 两份 + 影片内容 JSON）。
 
     形制与 tests/test_closed_eval.py 同款（gt/emotion.csv 三片 × 4 标签 +
     畸形 bad.csv + data/<tt>/content.json；six=True 扩到 6 片）。场景描述
-    加长是为了给评审替身一段可摘录的原文（_quote_ok 需 ≥8 字连续重合）。
     """
     gt = root / "gt"
     gt.mkdir(parents=True)
@@ -259,7 +256,9 @@ class FakeOpenProducer:
 
 
 class _ReviewOkStub:
-    """评审替身：恒回过线三维分 4/3/3（quote 取夹具场景原文，过摘录核验）。
+    model = "mock-1"
+
+    """评审替身：回三维分 4/3/3，并引用两处夹具场景。
 
     返回纯文本（open_review._unwrap 对 str 按成功处理）；多出的 id（超出
     实际行数）由 open_review 按批内 index 出界忽略。`delay` 供取消用例
@@ -279,7 +278,7 @@ class _ReviewOkStub:
                     "relevance": {"score": 4, "reason": "场景有据"},
                     "semantics": {"score": 3, "reason": "名称清晰"},
                     "value": {"score": 3, "reason": "有区分度"},
-                    "quote": _QUOTE} for i in range(self._total)]
+                    "evidence_scene_ids": ["scene_001", "scene_002"]} for i in range(self._total)]
         return json.dumps({"reviews": reviews}, ensure_ascii=False)
 
 
@@ -463,8 +462,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert report["sample_accounting"] == {
         "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
     # 全量成功、无失败核算超 10%，但夹具未配独立评审端点 → 仅同模警示
-    assert report["banner"] == ["评审与生成同模型，通过率绝对值系统性偏高，"
-                                "趋势对比可用、绝对值需打折解读"]
+    assert any("共享判断偏差" in line for line in report["banner"])
     # 替身审计（{"task_id","stub":True}）无 merged/accepted → judge 空聚合
     assert report["judge"]["self_filter"] is None
     assert report["judge"]["scores"]["relevance"]["n"] == 0
@@ -487,13 +485,14 @@ def test_run_completes_writes_all_artifacts(open_setup):
     # 产出二分：命中行 / 新词行（judge_reference 替身审计无判决 → None）
     assert len(row1["hits"]) == 2 and len(row1["new_words"]) == 1
     h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
-    assert set(h1) == {"tag_id", "tag_name", "level", "judge_reference", "review"}
+    assert h1["desc"] == "评测夹具标签"
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
-    assert h1["review"]["quote"] is None  # mock 审计无 judge 判决 → 无摘录
+    assert h1["review"]["evidence_scene_ids"] == ["scene_001", "scene_002"]
     assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")
-    assert hx["review"]["pass"] is True
+    assert hx["review"]["pass"] is None
+    assert hx["review"]["semantics"]["score"] is None
     nw = row1["new_words"][0]
     assert set(nw) == {"name", "desc", "level", "judge_reference", "review"}
     assert nw["name"] == "新词甲" and nw["review"]["pass"] is True
@@ -506,8 +505,9 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert all(e["review"] == "ok" and e["ok"] for e in entries)
 
     # 评审按片发起：run_id 带 :tt 后缀（LLM 调用标签口径）
-    assert sorted({c.rsplit(":t", 1)[0] for c in stub.calls}) == [
-        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 逐条 run_id 带 :t 后缀
+    assert len(stub.calls) == 2
+    assert sorted(c.rsplit(":t", 1)[0] for c in stub.calls) == [
+        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 批次范围后缀
 
     # meta 口径快照
     meta = _read_meta(svc, run_id)
@@ -567,8 +567,9 @@ def test_review_failure_preserves_output(open_setup):
     entries = _progress_entries(svc, run_id)
     assert all(e["review"] == "failed" and e["ok"] for e in entries)
     # 评审每片一次（产出行 3 条 < 切分阈值，单片单批）
-    assert sorted({c.rsplit(":t", 1)[0] for c in stub.calls}) == [
-        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 逐条 run_id 带 :t 后缀
+    assert len(stub.calls) == 2
+    assert sorted(c.rsplit(":t", 1)[0] for c in stub.calls) == [
+        f"{run_id}:tt0000001", f"{run_id}:tt0000002"]  # 批次范围后缀
     # Task 5 接线：报告侧按评审失败契约核算（两类片分开，不进 produce 失败）
     report = json.loads((_run_dir(svc, run_id) / "report.json")
                         .read_text(encoding="utf-8"))
@@ -705,7 +706,7 @@ def test_library_without_gt_overlap_proceeds(open_setup):
                         .read_text(encoding="utf-8"))
     assert report["sample_accounting"] == {
         "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
-    assert report["summary"]["hit_pass"] == pytest.approx(1.0)
+    assert report["summary"]["hit_pass"] == None
 
 
 def test_review_calibre_in_meta(open_setup):
@@ -714,17 +715,19 @@ def test_review_calibre_in_meta(open_setup):
     svc._review_client = _ReviewOkStub()
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
     meta = _read_meta(svc, run_id)
-    # 未配独立评审端点 → 同模评审：model 取 settings.llm_model（非替身名）
-    assert meta["review"] == {"model": svc.settings.llm_model,
-                              "same_model": True,
-                              "prompt_version": REVIEW_PROMPT_VERSION}
+    assert meta["review"]["model"] == "mock-1"
+    assert meta["review"]["same_model"] is True
+    assert meta["review"]["prompt_version"] == REVIEW_PROMPT_VERSION
+    assert meta["review"]["batch_mode"] == "movie"
+    assert meta["review"]["max_concurrent_requests"] == 4
 
     svc2, _ = open_setup(settings_kwargs={
         "use_mock_llm": True, "open_eval_review_model": "review-x"})
     run_id2 = svc2.start("emotion", {"mode": "all"}, wait=True)
     meta2 = _read_meta(svc2, run_id2)
-    assert meta2["review"] == {"model": "review-x", "same_model": False,
-                               "prompt_version": REVIEW_PROMPT_VERSION}
+    assert meta2["review"]["model"] == "mock-1"
+    assert meta2["review"]["same_model"] is True
+    assert meta2["review"]["prompt_version"] == REVIEW_PROMPT_VERSION
 
 
 # ---------------------------------------------------------------- 生命周期
@@ -770,12 +773,17 @@ def test_cancel_keeps_completed_results(open_setup, root6):
     assert all(r["ok"] for r in rows)
     meta = _read_meta(svc, run_id)
     assert meta["status"] == "cancelled" and meta["done"] < meta["total"]
+    child = svc.rereview(run_id)["run_id"]
+    child_meta = _read_meta(svc, child)
+    assert {key: child_meta[key] for key in ("status", "done", "total", "failed")} == {
+        key: meta[key] for key in ("status", "done", "total", "failed")}
+    assert len(_raw_rows(svc, child)) == len(rows)
 
 
 # ---------------------------------------------------------------- 历史扫描
 
 def test_live_report_published(open_setup):
-    """运行落 live.json（实时报告）；评审逐条回填触发增量发布。"""
+    """运行落 live.json，整片评审完成后统一回填。"""
     svc, _ = open_setup()
     svc._review_client = _ReviewOkStub()
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
@@ -786,8 +794,8 @@ def test_live_report_published(open_setup):
     assert live["summary"]["total_tags"] == 5
 
 
-def test_review_produced_publishes_per_tag(open_setup):
-    """_review_produced 带 result/publish：初始 + 逐条回调，行回填评审。"""
+def test_review_produced_publishes_whole_batch(open_setup):
+    """_review_produced 带 result/publish：整批完成后一起回填。"""
     svc, _ = open_setup()
     svc._review_client = _ReviewOkStub()
     content = open_service.load_movie_content(svc.effective_root, "tt0000001")
@@ -799,7 +807,7 @@ def test_review_produced_publishes_per_tag(open_setup):
     calls = []
     svc._review_produced("tt0000001", snapshot, content, "run-x",
                          result=result, publish=lambda: calls.append(1))
-    assert len(calls) >= 2  # 初始一次 + 逐条至少一次
+    assert len(calls) == 2  # 产出待评、整片已评
     assert result.new_words[0]["review"]["pass"] is True
 
 
@@ -813,14 +821,32 @@ def test_rereview_reuses_snapshot_without_produce(open_setup):
     assert (d / "produced" / "tt0000001.json").exists()  # 产出快照落盘
     calls_before = len(fake.calls)
     # 换评审替身为失败 → rereview 后评审失败但产出保留，produce 不重跑
+    before = (d / "report.json").read_bytes()
+    # 重评读取原材料快照。当前根目录切换也不影响。
+    svc.settings.eval_dataset_root = str(d / "missing-dataset")
     svc._review_client = _ReviewFailStub()
+    svc._review_client.model = "new-review-model"
     out = svc.rereview(run_id)
     assert out["reviewed"] == 2 and out["review_failed"] == 2
     assert len(fake.calls) == calls_before  # 没重跑生成
-    report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+    assert (d / "report.json").read_bytes() == before
+    child = _run_dir(svc, out["run_id"])
+    report = json.loads((child / "report.json").read_text(encoding="utf-8"))
+    assert report["source_run_id"] == run_id
+    assert report["calibre"]["review_model"] == "new-review-model"
     assert report["sample_accounting"]["review_failed"] == 2
     assert report["summary"]["total_tags"] == 5  # 产出不作废
     assert report["summary"]["pass_rate"] is None  # 评审失败排除出分母
+
+
+def test_rereview_preserves_zero_output_and_original_produce_failure(open_setup):
+    svc, _ = open_setup(producer=FakeOpenProducer(canned={}, fail_tts={"tt0000002"}))
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    out = svc.rereview(run_id)
+    assert out["reviewed"] == 0
+    assert _raw_rows(svc, out["run_id"]) == _raw_rows(svc, run_id)
+    meta = _read_meta(svc, out["run_id"])
+    assert (meta["done"], meta["failed"]) == (2, 1)
 
 
 def test_rereview_rejects_active_run(open_setup):
@@ -828,9 +854,8 @@ def test_rereview_rejects_active_run(open_setup):
     svc._review_client = _ReviewOkStub()
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
     # 终态后注册表已清；手动塞回活跃态模拟在跑
-    from tagplatform.services.eval.open_service import RunActiveError, RunState
-    svc._runs[run_id] = RunState(run_id=run_id, status="running", done=0,
-                                 total=2, failed=0, started_at="t")
+    from tagplatform.services.eval.open_service import RunActiveError
+    svc._active_run_id = run_id
     with pytest.raises(RunActiveError):
         svc.rereview(run_id)
 

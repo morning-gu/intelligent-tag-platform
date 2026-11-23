@@ -6,6 +6,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -223,7 +224,7 @@ class Settings(BaseSettings):
     # 评审模型三件套（spec §6）：独立评审端点。回落链：三键全空 = 回落主
     # LLM 设置（llm_model + llm_base_url_env/llm_api_key_env，当前即同模
     # 评审——同模时报告头固定渲染警示）；model 配了而两个 env 名空时，
-    # env 名逐键回落主 LLM 的对应项（make_review_client 消费）。
+    # 模型与 env 名逐键回落主端点，评审参数始终单独生效。
     open_eval_review_model: str = ""
     open_eval_review_base_url_env: str = ""
     open_eval_review_api_key_env: str = ""
@@ -231,6 +232,8 @@ class Settings(BaseSettings):
     # 默认推理量极大会撞 max_tokens 截断致漏判，low 档推理几百 token 即完整
     # 输出。空串 = 不携带（模型不支持该字段时设空）。
     open_eval_review_reasoning_effort: str = "low"
+    open_eval_review_max_tokens: int = Field(default=8192, gt=0)
+    open_eval_review_concurrency: int = Field(default=4, gt=0)
 
 
 @lru_cache

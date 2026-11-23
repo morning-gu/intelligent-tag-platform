@@ -323,7 +323,7 @@ def open_rereview_run(
     _admin: UserAccount = Depends(require_admin),
     service=Depends(get_open_eval),
 ) -> dict:
-    """复用产出快照重新评审（不重跑生成）：换评审模型/阈值后重评审。"""
+    """复用产出和材料快照，创建独立的重评报告。"""
     return eval_orch.rereview_open_run(service, run_id)
 
 

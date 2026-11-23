@@ -81,10 +81,11 @@ def test_registry_mtg_items_match_constants(client):
 def test_registry_open_review_content(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     items = {i["name"]: i["text"] for i in groups["open_review"]["items"]}
-    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v5"
-    assert "## 评审任务补充说明" in items["REVIEW_PROMPT"]
+    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v6"
+    assert "## 开放评测补充规则" in items["REVIEW_PROMPT"]
     assert "## 标签质量评估" in items["REVIEW_PROMPT"]  # canonical rubric 复用
-    assert "judge_reference.quote" in items["REVIEW_PROMPT"]  # 摘录复用 judge
+    assert "evidence_scene_ids" in items["REVIEW_PROMPT"]
+    assert "judge_reference" not in items["REVIEW_PROMPT"]
     assert "reviews" in items["REVIEW_OUTPUT_FORMAT"]
     assert "reviews" in items["REVIEW_RETRY_HINT"]
 

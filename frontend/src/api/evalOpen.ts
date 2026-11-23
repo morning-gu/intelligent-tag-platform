@@ -68,7 +68,8 @@ export interface TagReview {
   semantics: DimensionScore
   value: DimensionScore
   reason: string
-  quote: string | null
+  evaluated: boolean
+  evidence_scene_ids: string[]
 }
 
 /** 生产 judge 三维参考分（审计缺失时整条 null）：仅供参考，评审独立判断。 */
@@ -77,12 +78,14 @@ export interface JudgeReference {
   semantics: number | null
   value: number | null
   reason: string
+  quote?: string | null
 }
 
 /** 库内命中行（tag_id 非空的产出）。 */
 export interface OpenHitRow {
   tag_id: string
   tag_name: string
+  desc: string | null
   level: string | null
   judge_reference: JudgeReference | null
   review: TagReview | null
@@ -147,6 +150,7 @@ export interface OpenMovieRow {
   new_pass: number | null
   hit_pass: number | null
   review_missing: number
+  review_pending: number
   metrics: QualityMetrics | null
 }
 
@@ -157,6 +161,9 @@ export interface OpenMovieRow {
  * 原文，展示时恒不可省。汇总微口径：通过率分母只计有判定行，评审失败片
  * 整体排除（None≠0）。 */
 export interface OpenEvalReport {
+  schema_version: number
+  status: string
+  source_run_id: string | null
   banner: string[]
   sample_accounting: {
     total: number
@@ -167,6 +174,9 @@ export interface OpenEvalReport {
   summary: {
     total_tags: number
     reviewed_tags: number
+    passed_tags: number
+    judged_tags: number
+    review_pending: number
     hits: number
     new_words: number
     new_ratio: number | null
@@ -195,6 +205,12 @@ export interface OpenEvalReport {
     review_model: string | null
     review_same_model: boolean | null
     review_prompt_version: string | null
+    review_config?: {
+      reasoning_effort?: string | null
+      max_tokens?: number | null
+      max_concurrent_requests?: number
+      pass_floors?: Record<string, number>
+    }
     library_version: string | null
     dataset_id: string | null
     modalities: string[] | null

@@ -99,6 +99,7 @@ interface LabelRow {
   level: string | null
   judge_reference: JudgeReference | null
   review: TagReview | null
+  reviewFailed: boolean
 }
 
 function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
@@ -107,10 +108,10 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       key: `${movie.tt}-hit-${index}`,
       group: '命中' as const,
       name: hit.tag_name,
-      desc: null,
+      desc: hit.desc,
       level: hit.level,
       judge_reference: hit.judge_reference,
-      review: hit.review,
+      review: hit.review, reviewFailed: !!movie.review_error,
     })),
     ...movie.new_words.map((word, index) => ({
       key: `${movie.tt}-new-${index}`,
@@ -119,14 +120,14 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       desc: word.desc,
       level: word.level,
       judge_reference: word.judge_reference,
-      review: word.review,
+      review: word.review, reviewFailed: !!movie.review_error,
     })),
   ]
 }
 
-function passTag(review: TagReview | null) {
-  if (review === null) return <Tag>未评审</Tag>
-  if (review.pass === null) return <Tag color="default">漏判</Tag>
+function passTag({ review, reviewFailed }: LabelRow) {
+  if (review === null) return <Tag>{reviewFailed ? '评审失败' : '待评'}</Tag>
+  if (review.pass === null) return <Tag>{review.evaluated ? '无法判断' : '漏判'}</Tag>
   return review.pass ? <Tag color="green">通过</Tag> : <Tag color="red">未通过</Tag>
 }
 
@@ -155,7 +156,7 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
   { title: '内容相关性', render: (_, row) => <ScoreCell rating={row.review?.relevance} /> },
   { title: '语义准确性', render: (_, row) => <ScoreCell rating={row.review?.semantics} /> },
   { title: '标签价值', render: (_, row) => <ScoreCell rating={row.review?.value} /> },
-  { title: '评审', render: (_, row) => passTag(row.review) },
+  { title: '评审', render: (_, row) => passTag(row) },
 ]
 
 /** 展开行：评审理由 / 摘录核验 / judge 参考（仅供参考，评审独立判断）。 */
@@ -164,7 +165,8 @@ function labelDetail(row: LabelRow) {
   return (
     <Descriptions size="small" column={1} items={[
       { key: 'reason', label: '评审理由', children: row.review?.reason || '—' },
-      { key: 'quote', label: '原文摘录', children: row.review?.quote || '—' },
+      { key: 'evidence', label: '评审引用场景', children: row.review?.evidence_scene_ids?.join('、') || '—' },
+      { key: 'quote', label: '生产 judge 摘录', children: reference?.quote || '—' },
       {
         key: 'judge',
         label: 'judge 参考',
@@ -215,10 +217,10 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
       <section aria-label="汇总">
         <Typography.Title level={5}>汇总</Typography.Title>
         <Descriptions size="small" column={3} items={[
-          { key: 'movies', label: '影片', children: `${acc.ok} 成功 / ${acc.failed} produce 失败 / ${acc.review_failed} 评审失败（共 ${acc.total}）` },
+          { key: 'movies', label: '影片', children: `${acc.ok} 产出成功（其中 ${acc.review_failed} 部评审失败） / ${acc.failed} 产出失败（共 ${acc.total}）` },
           { key: 'tags', label: '产出标签', children: `${summary.total_tags}（新词 ${summary.new_words} / 命中 ${summary.hits}）` },
-          { key: 'reviewed', label: '已评审', children: `${summary.reviewed_tags}（漏判 ${summary.review_missing}）` },
-          { key: 'pass', label: '评审通过率', children: percent(summary.pass_rate) },
+          { key: 'reviewed', label: '已评审', children: `${summary.reviewed_tags} / ${summary.total_tags}（漏判或失败 ${summary.review_missing}，待评 ${summary.review_pending}）` },
+          { key: 'pass', label: '评审通过率', children: `${percent(summary.pass_rate)}（${summary.passed_tags}/${summary.judged_tags}）` },
           { key: 'new_pass', label: '新词通过率', children: percent(summary.new_pass) },
           { key: 'hit_pass', label: '命中通过率', children: percent(summary.hit_pass) },
           { key: 'new_ratio', label: '新词占比', children: percent(summary.new_ratio) },
@@ -354,6 +356,12 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
         （{calibre.prompt_version ?? NA}） · 评审 {calibre.review_model ?? NA}
         （{calibre.review_prompt_version ?? NA}
         {calibre.review_same_model ? '，与生成同模——通过率绝对值需打折解读' : ''}）
+        {calibre.review_config && (
+          <> · 推理强度 {calibre.review_config.reasoning_effort ?? '模型默认'}
+            {' '}· 输出上限 {calibre.review_config.max_tokens ?? NA}
+            {' '}· 同时评审上限 {calibre.review_config.max_concurrent_requests ?? NA}</>
+        )}
+        {report.source_run_id && <> · 原运行 {report.source_run_id}</>}
         · 嵌入 {calibre.embedding_model || NA} · 库版本 {calibre.library_version ?? NA}
         · 模态 {(calibre.modalities ?? []).join(' + ') || NA}
       </Typography.Text>

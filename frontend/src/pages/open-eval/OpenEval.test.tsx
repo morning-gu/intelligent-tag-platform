@@ -214,11 +214,12 @@ const CLOSED_RUNNING_SUMMARY: RunSummary = {
 
 /** getOpenReport 成功夹具（与后端 assemble_open_report 键逐一镜像）。 */
 const REPORT: OpenEvalReport = {
+  schema_version: 2, status: 'succeeded', source_run_id: null,
   banner: ['部分运行：cancelled/aborted/failed 或 done<total 的 run 不可与全量横比'],
   sample_accounting: { total: 30, ok: 28, failed: 2, review_failed: 1 },
   summary: {
     total_tags: 120,
-    reviewed_tags: 110,
+    reviewed_tags: 110, passed_tags: 96, judged_tags: 110, review_pending: 0,
     hits: 80,
     new_words: 40,
     new_ratio: 0.33,
@@ -284,6 +285,7 @@ const REPORT: OpenEvalReport = {
         {
           tag_id: 't1',
           tag_name: '悬疑',
+          desc: '悬念驱动的叙事',
           level: 'film',
           judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据' },
           review: {
@@ -292,7 +294,7 @@ const REPORT: OpenEvalReport = {
             semantics: { score: 3, reason: '名称清晰' },
             value: { score: 3, reason: '有区分度' },
             reason: '场景有据；名称清晰；有区分度',
-            quote: '原文摘录',
+            evaluated: true, evidence_scene_ids: ['scene_1'],
           },
         },
       ],
@@ -308,14 +310,14 @@ const REPORT: OpenEvalReport = {
             semantics: { score: 3, reason: '名称清晰' },
             value: { score: 2, reason: '普通类目' },
             reason: '限定缺失；名称清晰；普通类目',
-            quote: null,
+            evaluated: true, evidence_scene_ids: [],
           },
         },
       ],
       pass_rate: 0.5,
       new_pass: 0,
       hit_pass: 1,
-      review_missing: 0,
+      review_missing: 0, review_pending: 0,
       metrics: null,
     },
   ],
@@ -529,7 +531,7 @@ describe('OpenEval 开放评测页', () => {
 
   it('open 活跃：实时报告按钮取 live 报告并标注评审进行中', async () => {
     mockActiveRunApis()
-    mockedGetOpenReport.mockResolvedValue(REPORT)
+    mockedGetOpenReport.mockResolvedValue({ ...REPORT, status: 'running' })
     render(<OpenEval />)
     expect(await screen.findByText(/已完成\s*8\s*\/\s*30/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '实时报告' }))

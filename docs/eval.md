@@ -252,66 +252,40 @@ value≥2，与生产 judge 保留阈值对齐），模型只给分不回 pass/f
   异常）时**产出不作废**——hits/new_words 行原样保留（review=null）、
   review_error 落 raw，该片仍计 ok；通过率/三维指标整体排除出分母
   （None≠0：不是评审 0 分），计入 `sample_accounting.review_failed`；
-- 条目级 pass=null = 评审漏判：排除出通过率分母，计 `review_missing`；
-  显式 null 分（无法判断）是有效评分，pass=False 且计 undetermined，
-  与漏判不同。
+- 评审回复缺少条目或调用失败，计入漏判或失败。有效回复中的 null 分表示无法判断。
+  若任一已知维度低于阈值，整条判为未通过；若已知维度均过线且仍有 null，整条无法判断。
+  通过率分母只含可判定标签，评分覆盖率分母为全部产出标签。
 
-### 五条必须写明的口径
+### 整片评审口径
 
-**通过率语义**。通过率 = 评审通过条数 / 有判定条数（微口径），「通过」
-= 三维分同时过阈值（relevance≥3 / semantics≥3 / value≥2）——衡量「独立
-评审认为达到生产保留标准的标签占比」。新词/命中分开报；产出规模
-（produced_stats 的 min/中位/max）必须同读。
+使用起跑时选择的模态、最终标签名称、通用释义、用途层级和来源场景整片盲评。
+库内标签取起跑时词库中的正式释义。评审高相关分须给出有效场景 ID，场景级须命中
+标签的来源场景，全片级至少两处。生产 judge 的分数、理由和摘录只在报告审计中展示。
+同一用途且传达同一信息的标签组保留最准确具体的一条，其余标签的价值至多 1 分。
 
-**judge 参考不是评审结论**。评审清单附生产 judge 的三维分与理由
-（judge_reference），提示词明确定位为仅供参考——评审必须独立核对材料，
-可同意可推翻。judge 审计段（自滤保留率 / 三维分聚合 / 淘汰原因 / 库内
-分档）单独呈现生产侧行为，不与评审通过率混算。
+终评的暂定阈值为 relevance≥3、semantics≥3、value≥2。通过率覆盖经过生产筛选
+后的产出。比较生成策略时一起查看每片产出量、自滤保留率、评分覆盖率和通过条数。
+生产 judge 的语义分评名称清晰度，终评的语义分评名称与释义的一致性。
 
-**None ≠ 0**。无产出、评审失败片、漏判条目——一律 null（算不出/排除），
-不是 0 分；计数类（review_missing / 各核算数）如实记 0。
+默认每片一次请求。输出截断时按标签二分，保留其他标签作为重复判断的上下文。
+如果完整影片材料超出上下文窗口，报告记录评审失败原因。评审客户端默认 `reasoning_effort=low`、`max_tokens=8192`，
+同一开放评测服务最多 4 条评审请求并行。对应环境变量为
+`TAGPLT_OPEN_EVAL_REVIEW_REASONING_EFFORT`、`TAGPLT_OPEN_EVAL_REVIEW_MAX_TOKENS`、
+`TAGPLT_OPEN_EVAL_REVIEW_CONCURRENCY`。端点不支持推理强度时设空串。
+评审模型、网关环境变量名和密钥环境变量名可单独指定。空项沿用主客户端配置，
+评审参数仍生效。运行元数据记录实际客户端配置和通过阈值。
 
-**摘录复用 judge（必核）**。摘录本就在生成 judge 阶段随标签产出并核验
-（审计 `verdicts[].quote`），评审**直接复用**这条已核验摘录（经
-`judge_reference.quote` 传入），评审模型只打三维分、不自行提取摘录。
-relevance≥3 时仍归一化核验一次（8 字连续窗口，同材料同模态应通过），
-核不中降档到 1。能到评审的标签都过了 judge 摘录核验，摘录必然存在——
-既守住证据锚定，又不让评审模型费推理重摘（低推理强度模型不爱摘摘录，
-曾因此大批误杀）。judge_reference 缺失（如 mock）无从核验则不降档。
+### 产物与重评
 
-**同模评审警示**。评审与生成同模型时（`review_same_model`）报告头
-banner 明写：通过率绝对值系统性偏高，趋势对比可用、绝对值需打折解读。
-评审端点经 `open_eval_review_model/_base_url_env/_api_key_env` 三键
-独立配置，全空回落主 LLM（同模）。
+`produced/<tt>.json` 保存最终标签与当时的材料。重评接口
+`POST /runs/{id}/rereview` 从原运行的完成影片和快照另存一份报告，
+返回新 `run_id` 和 `source_run_id`。原报告和生成样本状态保留。缺少材料快照的
+旧运行需要重新起跑。报告接口只提供当前格式的报告。
 
-### 产物与历史
-
-每个 run 落 `<run_id>/` 六件 + audit/ + produced/：meta.json（口径快照）、
-progress.jsonl（增量落盘）、raw_results.json（逐片留痕，含三维评审与
-judge 参考）、produced/<tt>.json（产出快照，供重评审复用）、report.json（前端契约结构）、report.md（人读版）、
-metrics.csv（长表 `metric,value,n`：通过率族 + 三维均分/满分率 +
-新词占比），`audit/<tt>.json` 为 mtg 管线自落的评审官审计（报告 judge
-段跨片聚合读它）。报告头 banner 聚合三档警示：部分运行（status 未全量
-成功完成——取消/中止/失败/缩量都不可与全量横比）、同模评审、小样本
-（failed/review_failed 任一占比 >10%）。历史列表只扫磁盘：
-meta.status=running 且无进程内注册表项 → `interrupted`；摘要五键
-（pass_rate / new_pass / hit_pass / new_ratio / three_high）直读
-report.json 的 summary，缺失或截断 → null（宁缺勿假）。**与闭环评测
-独立口径组不横比**；同片集下只做定性对照。
-
-**重评审（rereview）**：`POST /runs/{id}/rereview` 复用 produced/ 快照
-重新评审、重写报告，**不重跑生成**——换评审模型或阈值后想看新口径效果
-时用。评审客户端设 `max_tokens=8192` 上限（镜像质量评估）；并携带
-`reasoning_effort=low`（`TAGPLT_OPEN_EVAL_REVIEW_REASONING_EFFORT`，默认
-low）——glm-5.3-flash 始终思考、默认推理量极大（实测单条 8000+ token 全
-耗在推理、正文未输出即截断致漏判），low 档推理几百 token 即完整输出，
-单条约 30s。模型不支持该字段时设空串。
-
-**逐条并发评审 + 实时报告**：评审逐条进行（每条一个请求，并发 4 路），
-每条携带「该片全部标签」兄弟清单作上下文保留跨标签视野（相对价值/语义
-重复），只评目标一条——批量评审遇推理模型会反复超限切分，逐条避免。
-评审逐条完成时增量发布 `live.json`（部分报告）；报告端点运行中回落读
-它，前端「实时报告」每 2s 轮询，标签逐条出现，终态拉终版 report.json。
+`live.json` 在影片产出和整片评审完成时更新。前端轮询直到取得最终报告。
+最终产物包括 `meta.json`、`raw_results.json`、`report.json`、
+`report.md`、`metrics.csv` 和生产 `audit/`。CSV 中每个比例的 `n`
+对应其实际分母。报告提示部分运行、共享模型可能带来的偏差和样本不足。
 
 ---
 

@@ -213,30 +213,35 @@ export default function OpenEval() {
 
   // —— 报告取数位（Task 8 的 OpenEvalReport 组件消费 report.data） ——
   const [report, setReport] = useState<{ runId: string; data: OpenEvalReport } | null>(null)
-  // 实时报告：正在查看的 run 仍在跑 → 每 2s 轮询 live.json（评审逐条出现）；
-  // run 终态后拉一次终版 report.json（live.json 是部分报告）。
-  const reportIsLive = report !== null && activeRun?.run_id === report.runId
-  const prevActiveRunRef = useRef<string | null>(null)
+  const reportRunId = report?.runId
+  const reportStatus = report?.data.status
+  const reportIsLive = reportStatus === 'running'
+  const reportRunIsActive = !!reportRunId && activeRun?.run_id === reportRunId
   useEffect(() => {
-    if (!reportIsLive || report === null) return
-    const runId = report.runId
-    const timer = setInterval(() => {
-      getOpenReport(runId)
-        .then((data) => setReport((prev) => (prev?.runId === runId ? { runId, data } : prev)))
-        .catch(() => { /* 瞬时错误忽略，下轮再试 */ })
-    }, 2000)
-    return () => clearInterval(timer)
-  }, [reportIsLive, report?.runId])
-  useEffect(() => {
-    const prev = prevActiveRunRef.current
-    const cur = activeRun?.run_id ?? null
-    prevActiveRunRef.current = cur
-    if (prev && prev !== cur && report?.runId === prev) {
-      getOpenReport(prev)
-        .then((data) => setReport({ runId: prev, data }))
-        .catch(() => { /* 终态落盘窗口忽略 */ })
+    if (!reportRunId || !reportIsLive) return
+    let stopped = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout>
+    async function refresh(runId: string) {
+      try {
+        const data = await getOpenReport(runId)
+        if (stopped) return
+        setReport((current) => current?.runId === runId && current.data.status === 'running'
+          ? { runId, data } : current)
+        if (data.status !== 'running') return
+      } catch {
+        if (stopped) return
+      }
+      if (reportRunIsActive || ++attempts < 15) {
+        timer = setTimeout(() => void refresh(runId), 2000)
+      }
     }
-  }, [activeRun?.run_id, report?.runId])
+    timer = setTimeout(() => void refresh(reportRunId), reportRunIsActive ? 2000 : 0)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
+  }, [reportRunId, reportIsLive, reportRunIsActive])
   // —— 数据集根（页面级切换：输入值 / 服务端生效值 / 应用中） ——
   const [rootInput, setRootInput] = useState('')
   const [effectiveRoot, setEffectiveRoot] = useState<string | null>(null)

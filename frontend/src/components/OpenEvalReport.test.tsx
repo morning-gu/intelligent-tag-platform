@@ -44,7 +44,7 @@ function review(pass: boolean | null, r = 4, s = 3, v = 3): TagReview {
     semantics: { score: s, reason: '语义理由' },
     value: { score: v, reason: '价值理由' },
     reason: '相关理由；语义理由；价值理由',
-    quote: '原文摘录',
+    evaluated: pass !== null, evidence_scene_ids: ['scene_1'],
   }
 }
 
@@ -53,15 +53,15 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
     tt: 'tt0000001', title: '铁道游击队', ok: true, error: null,
     review_error: null, elapsed_ms: 1000, n_hits: 1, n_new_words: 1,
     hits: [{
-      tag_id: 't1', tag_name: '悬疑', level: 'film',
-      judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据' },
+      tag_id: 't1', tag_name: '悬疑', desc: null, level: 'film',
+      judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据', quote: '原文摘录' },
       review: review(true),
     }],
     new_words: [{
       name: '新词甲', desc: '通用释义', level: 'film',
       judge_reference: null, review: review(false, 2),
     }],
-    pass_rate: 0.5, new_pass: 0, hit_pass: 1, review_missing: 0,
+    pass_rate: 0.5, new_pass: 0, hit_pass: 1, review_missing: 0, review_pending: 0,
     metrics: metrics(),
     ...over,
   }
@@ -69,12 +69,13 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
 
 function baseReport(over: Partial<OpenEvalReportData> = {}): OpenEvalReportData {
   return {
+    schema_version: 2, status: 'cancelled', source_run_id: null,
     banner: ['部分运行：指标仅覆盖完成影片，与全量口径不可直接横比'],
     sample_accounting: { total: 3, ok: 2, failed: 1, review_failed: 0 },
     summary: {
-      total_tags: 4, reviewed_tags: 4, hits: 2, new_words: 2,
+      total_tags: 4, reviewed_tags: 4, passed_tags: 3, judged_tags: 4, hits: 2, new_words: 2,
       new_ratio: 0.5, pass_rate: 0.75, new_pass: 0.5, hit_pass: 1,
-      review_missing: 0, metrics: metrics(),
+      review_missing: 0, review_pending: 0, metrics: metrics(),
     },
     produced_stats: {
       counts: [{ tt: 'tt0000001', hits: 1, new_words: 1 }],
@@ -116,11 +117,11 @@ describe('OpenEvalReport 报告视图', () => {
 
   it('汇总卡：通过率族 + 新词占比 + 三维满分率，样本核算三类分开', () => {
     render(<OpenEvalReport report={baseReport()} runId={RUN_ID} />)
-    expect(screen.getByText('75.0%')).toBeInTheDocument() // 评审通过率
+    expect(screen.getByText('75.0%（3/4）')).toBeInTheDocument() // 评审通过率
     expect(screen.getAllByText('50.0%').length).toBeGreaterThanOrEqual(2) // 新词通过率/新词占比同值
     expect(screen.getByText('100.0%')).toBeInTheDocument() // 命中通过率
     expect(screen.getByText('25.0%')).toBeInTheDocument() // 三维同时满分
-    expect(screen.getByText(/2 成功 \/ 1 produce 失败 \/ 0 评审失败（共 3）/)).toBeInTheDocument()
+    expect(screen.getByText(/2 产出成功（其中 0 部评审失败） \/ 1 产出失败（共 3）/)).toBeInTheDocument()
     expect(screen.getByText(/4（新词 2 \/ 命中 2）/)).toBeInTheDocument()
   })
 
@@ -181,7 +182,7 @@ describe('OpenEvalReport 报告视图', () => {
     const reviewed = movie({
       tt: 'tt0000002', title: '评审失败片',
       review_error: 'ReviewRequestError: 评审端点超时',
-      hits: [{ tag_id: 't2', tag_name: '保留标签', level: 'film', judge_reference: null, review: null }],
+      hits: [{ tag_id: 't2', tag_name: '保留标签', desc: null, level: 'film', judge_reference: null, review: null }],
       new_words: [], n_hits: 1, n_new_words: 0,
       pass_rate: null, new_pass: null, hit_pass: null, metrics: null,
     })
@@ -189,7 +190,7 @@ describe('OpenEvalReport 报告视图', () => {
     const section = screen.getByRole('region', { name: '逐片明细' })
     fireEvent.click(within(section).getByText('评审失败片'))
     expect(await within(section).findByText(/评审失败（产出保留，不计入通过率）/)).toBeInTheDocument()
-    expect(within(section).getByText('未评审')).toBeInTheDocument()
+    expect(within(section).getByText('评审失败', { exact: true })).toBeInTheDocument()
     expect(within(section).getByText(/通过率 暂无/)).toBeInTheDocument()
   })
 
@@ -222,9 +223,9 @@ describe('OpenEvalReport 报告视图', () => {
     const thin = baseReport({
       banner: [], warnings: [],
       summary: {
-        total_tags: 0, reviewed_tags: 0, hits: 0, new_words: 0,
+        total_tags: 0, reviewed_tags: 0, passed_tags: 0, judged_tags: 0, hits: 0, new_words: 0,
         new_ratio: null, pass_rate: null, new_pass: null, hit_pass: null,
-        review_missing: 0, metrics: null,
+        review_missing: 0, review_pending: 0, metrics: null,
       },
       judge: {
         self_filter: null,

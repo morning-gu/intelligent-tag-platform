@@ -18,7 +18,7 @@ run 语义契约（本模块的三个核心语义，改动前先读）
 ================================================
 
 **评审失败契约**：produce 成功后对该片全部产出标签（命中 + 新词）做
-一次三维独立评审（judge 三维分仅作参考附在清单里）；评审失败
+一次三维独立评审（judge 三维分仅在报告中展示）；评审失败
 （ReviewRequestError 或任何异常）时**产出不作废**——hits/new_words 行
 原样保留（review=None 占位）、review_error 记录进结果与 raw_results，
 该片仍计 ok（failed 只统计 produce 失败）。通过率/三维指标按「该片
@@ -68,14 +68,16 @@ import logging
 import os
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tagplatform.schemas import ContentJSON
 from tagplatform.capabilities.prompts.open_review import REVIEW_PROMPT_VERSION
 from tagplatform.services.eval.dataset import (
     load_movie_content,
@@ -219,9 +221,10 @@ class _OpenJob:
     dataset_root: str
     context: AssemblyContext
     run_settings: Settings
-    # 实时报告状态：tt → OpenMovieResult（评审逐条回填，_publish_live 增量
+    # 实时报告状态：tt → OpenMovieResult（整片评审完成后回填，_publish_live 增量
     # 落 live.json）。受 service._lock 保护；仅运行期使用，终态以 report.json 为准。
     live: dict = field(default_factory=dict)
+    live_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
@@ -304,6 +307,8 @@ class OpenEvalService:
         self._active_run_id: str | None = None
         # 评审客户端（构造时建立一次；测试经属性替换注入替身）
         self._review_client = make_review_client(settings, llm)
+        self._review_slots = threading.BoundedSemaphore(settings.open_eval_review_concurrency)
+        self._rereview_source: str | None = None
         self.dataset_root_owner = dataset_root_owner
         # 对端活跃 run 无锁探针（app 装配层互挂；默认 None = 单服务部署）
         self.busy_probe = busy_probe
@@ -380,7 +385,7 @@ class OpenEvalService:
                         "n_tags": len(library.tags())},
             "prompt": {"mode": "open",
                        "version": context.producer.prompt_version},
-            "review": {**review_calibre(self.settings, self._llm),
+            "review": {**review_calibre(self.settings, self._llm, self._review_client),
                        "prompt_version": REVIEW_PROMPT_VERSION},
             "llm_model": getattr(self._llm, "model", ""),
             "embedding_model": getattr(self._embedder, "name", ""),
@@ -496,15 +501,15 @@ class OpenEvalService:
             return False  # "."（→根本身）/嵌套段：同按不存在，防 rmtree 根
         run_dir = (root / run_id).resolve()
         with self._lock:
-            if self._active_run_id == run_id:
+            if run_id in (self._active_run_id, self._rereview_source):
                 raise RunActiveError(
                     f"运行中的 run 不可删除（先取消或等收尾）：{run_id}")
             state = self._runs.get(run_id)
             existed = state is not None or run_dir.exists()
             self._runs.pop(run_id, None)
             self._cancel_events.pop(run_id, None)
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
         return existed
 
     def active_run_id(self) -> str | None:
@@ -654,6 +659,7 @@ class OpenEvalService:
                     result = future.result()
                     results.append(result)
                     self._record_result(job.run_id, result)
+                    self._publish_live(job)
                     if aborted or event.is_set():
                         continue
                     if not result.ok:
@@ -730,59 +736,55 @@ class OpenEvalService:
                                  review_error=review_error, elapsed_ms=0)
         with self._lock:
             job.live[tt] = result
-        if error is None and produced:
-            # judge 三维分从 run 审计关联到最终标签名，作评审参考（缺失 →
-            # None，不影响评审）；产出落快照，供 rereview 复用（不重跑生成）
+        if error is None:
+            # 生产 judge 的分数和摘录仅供报告展示，快照另外保存供重评。
             references = _judge_references(job.run_settings, tt)
+            library = job.context.library
             snapshot = [{
                 "tag_id": tag.tag_id, "name": tag.tag_name,
-                "desc": tag.candidate_description, "level": tag.level,
-                "scenes": [ev.scene_id for ev in (tag.evidence or [])],
+                "desc": (definition.description if (definition := library.tag(tag.tag_id))
+                         else tag.candidate_description), "level": tag.level,
+                "scene_ids": [ev.scene_id for ev in (tag.evidence or [])],
                 "judge_reference": references.get(tag.tag_name),
             } for tag in produced]
-            self._save_snapshot(job.run_id, tt, snapshot)
-            # 评审逐条回填 result 并增量发布 live.json（实时报告）
+            try:
+                self._save_snapshot(job.run_id, tt, snapshot, content)
+            except OSError:
+                logger.exception("无法保存重评快照 %s/%s", job.run_id, tt)
+            # 发布待评产出，整片评审完成后更新报告。
             self._review_produced(tt, snapshot, content, job.run_id,
-                                  result=result, publish=lambda: self._publish_live(job))
-        result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-        self._publish_live(job)
+                                  result=result, publish=lambda: self._publish_live(job),
+                                  modalities=job.meta["modalities"])
+        with self._lock:
+            result.elapsed_ms = int((time.perf_counter() - started) * 1000)
         return result
 
-    def _save_snapshot(self, run_id: str, tt: str, snapshot: list[dict]) -> None:
-        """产出快照落盘 `produced/<tt>.json`（rereview 复用，不重跑生成）。"""
+    def _save_snapshot(self, run_id: str, tt: str, labels: list[dict], content: ContentJSON) -> None:
+        """保存标签和原始评审材料，避免重评时数据集漂移。"""
         path = Path(self.settings.open_eval_output_root) / run_id / "produced" / f"{tt}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        _dump_json(path, snapshot)
+        _dump_json(path, {"labels": labels, "content": content.model_dump(mode="json")})
 
     def _publish_live(self, job: _OpenJob) -> None:
-        """增量发布实时报告 live.json（评审逐条完成时调用）。
-
-        从 job.live 快照当前已开始的影片结果（deepcopy 防并发回填竞态），
-        组装部分报告落 live.json。运行中报告端点回落读它；终态以
-        report.json 为准。发布失败只告警，不影响评审主流程。
-        """
         run_dir = Path(self.settings.open_eval_output_root) / job.run_id
         try:
-            with self._lock:
-                results = [copy.deepcopy(job.live[tt])
-                           for tt in job.movies if tt in job.live]
-                meta = {**job.meta, "status": "running",
-                        "done": len(results), "total": len(job.movies),
-                        "failed": sum(1 for r in results if not r.ok)}
-            report = assemble_open_report(results, meta, audit_dir=run_dir / "audit")
-            _dump_json(run_dir / "live.json", report)
-        except Exception as exc:  # noqa: BLE001 —— 实时发布失败不拖累评审
-            logger.warning("实时报告发布失败 %s：%s", job.run_id, exc)
+            with job.live_lock:
+                with self._lock:
+                    results = [copy.deepcopy(job.live[tt]) for tt in job.movies if tt in job.live]
+                    state = self._runs[job.run_id]
+                    meta = {**job.meta, "status": "running", "done": state.done,
+                            "total": state.total, "failed": state.failed}
+                report = assemble_open_report(results, meta, audit_dir=run_dir / "audit")
+                temporary = run_dir / "live.json.tmp"
+                _dump_json(temporary, report)
+                temporary.replace(run_dir / "live.json")
+        except Exception:
+            logger.exception("实时报告发布失败 %s", job.run_id)
 
-    def _review_produced(self, tt: str, snapshot: list[dict], content,
-                         run_id: str, *, result=None,
-                         publish=None) -> tuple[list, list, str | None]:
-        """产出快照 → (hits, new_words, review_error)：二分 + 独立评审。
-
-        _run_movie 与 rereview 共用：快照行 {tag_id,name,desc,level,scenes,
-        judge_reference}，tag_id 非空 = 命中行否则新词行；评审失败产出不
-        作废（review_error 记录，行 review=None）。
-        """
+    def _review_produced(self, tt: str, snapshot: list[dict], content: ContentJSON,
+                         run_id: str, *, result: OpenMovieResult, publish=None,
+                         modalities=("script", "dialogue")) -> None:
+        """按产出划分命中和新词，整片盲评后原子回填结果。"""
         hits: list[dict] = []
         new_words: list[dict] = []
         review_rows: list[dict] = []
@@ -791,7 +793,7 @@ class OpenEvalService:
             reference = item.get("judge_reference")
             if item.get("tag_id") is not None:
                 row = {"tag_id": item["tag_id"], "tag_name": item["name"],
-                       "level": item.get("level"),
+                       "level": item.get("level"), "desc": item.get("desc"),
                        "judge_reference": reference, "review": None}
                 hits.append(row)
             else:
@@ -800,92 +802,99 @@ class OpenEvalService:
                        "judge_reference": reference, "review": None}
                 new_words.append(row)
             review_rows.append({
-                "id": f"t{len(review_rows)}",
                 "name": item["name"], "desc": item.get("desc"),
                 "level": item.get("level"),
-                "scenes": list(item.get("scenes") or []),
-                "judge_reference": reference,
+                "scene_ids": list(item.get("scene_ids") or []),
             })
             owners.append(row)
-        if result is not None:
+        with self._lock:
             result.hits, result.new_words = hits, new_words
         if publish is not None:
             publish()
 
-        def relay(index, reviewed_row):
-            owners[index]["review"] = {
-                k: reviewed_row[k] for k in
-                ("pass", "relevance", "semantics", "value", "reason", "quote")}
-            if publish is not None:
-                publish()
-
+        reviews = []
         review_error = None
-        if review_rows:
-            try:
-                review_movie_tags(
-                    self._review_client, content, review_rows,
-                    run_id=f"{run_id}:{tt}", on_result=relay)
-            except Exception as exc:  # noqa: BLE001 —— 评审失败：产出不作废
-                review_error = f"{type(exc).__name__}: {exc}"
-                # 整片评审失败（全部漏判/调用失败）：行 review 复位 None
-                # （逐条 relay 可能已写入占位 dict），契约 review=None。
-                for row in owners:
-                    row["review"] = None
-        if result is not None:
+        try:
+            if review_rows:
+                reviewed = review_movie_tags(
+                    self._review_client, content, review_rows, modalities=modalities,
+                    run_id=f"{run_id}:{tt}", request_slot=self._review_slots)
+                fields = ("pass", "relevance", "semantics", "value", "reason",
+                          "evidence_scene_ids", "evaluated")
+                reviews = [{key: row[key] for key in fields} for row in reviewed]
+        except Exception as exc:  # noqa: BLE001 —— 评审失败时保留生成产出
+            review_error = f"{type(exc).__name__}: {exc}"
+        with self._lock:
+            for owner, review in zip(owners, reviews):
+                owner["review"] = review
             result.review_error = review_error
-        return hits, new_words, review_error
+        if publish is not None:
+            publish()
 
     def rereview(self, run_id: str) -> dict:
-        """对终态 run 复用产出快照重新评审（不重跑生成），重写 raw/report/meta。
-
-        换评审模型/阈值后想看新口径效果时用：读 `produced/<tt>.json` 快照
-        + 数据集材料 → 独立评审 → 重组报告。原 produce 失败片（无快照）
-        保留失败核算。活跃 run 拒绝（RunActiveError）；非终态拒绝。
-        """
+        """使用原 run 的材料和产出快照，另存一份重评报告。"""
+        root = Path(self.settings.open_eval_output_root).resolve()
+        source = (root / run_id).resolve()
+        if source.parent != root or source.name != run_id:
+            raise EvalValidationError(f"无效的 run_id：{run_id}")
         with self._lock:
-            state = self._runs.get(run_id)
-            if state is not None and state.status == "running":
-                raise RunActiveError(f"run 仍在进行中，无法重评审：{run_id}")
-        run_dir = Path(self.settings.open_eval_output_root) / run_id
+            if self._active_run_id is not None or (self.busy_probe and self.busy_probe()):
+                raise RunActiveError("已有评测运行，无法启动重评审")
+            child_id = self._new_run_id()
+            self._active_run_id = child_id
+            self._rereview_source = run_id
         try:
-            meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise EvalValidationError(f"run 不存在或 meta 不可读：{run_id}") from exc
-        if meta.get("status") == "running":
-            raise EvalValidationError(f"run 非终态，无法重评审：{run_id}")
-        results: list[OpenMovieResult] = []
-        for tt in (meta.get("movies") or {}).get("ids") or []:
-            snap_path = run_dir / "produced" / f"{tt}.json"
-            if not snap_path.is_file():
-                results.append(OpenMovieResult(
-                    tt=tt, title=tt, ok=False,
-                    error="产出快照缺失（原 produce 失败或未落快照）",
-                    hits=[], new_words=[], review_error=None, elapsed_ms=0))
-                continue
-            snapshot = json.loads(snap_path.read_text(encoding="utf-8"))
-            content = load_movie_content(self.effective_root, tt)
-            hits, new_words, review_error = self._review_produced(
-                tt, snapshot, content, run_id)
-            results.append(OpenMovieResult(
-                tt=tt, title=content.asset.title, ok=True, error=None,
-                hits=hits, new_words=new_words, review_error=review_error,
-                elapsed_ms=0))
-        meta.update({
-            "status": "succeeded", "done": len(results), "total": len(results),
-            "failed": sum(1 for r in results if not r.ok),
-            "finished_at": _now_iso(), "error": None,
-        })
-        meta.pop("warning", None)
-        rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
-                 "hits": r.hits, "new_words": r.new_words,
-                 "review_error": r.review_error, "elapsed_ms": r.elapsed_ms}
-                for r in results]
-        report = assemble_open_report(results, meta, audit_dir=run_dir / "audit")
-        _dump_json(run_dir / "meta.json", meta)
-        _dump_json(run_dir / "raw_results.json", rows)
-        write_open_report(run_dir, report)
-        return {"run_id": run_id, "reviewed": len(results),
-                "review_failed": sum(1 for r in results if r.review_error)}
+            try:
+                meta = json.loads((source / "meta.json").read_text(encoding="utf-8"))
+                original = json.loads((source / "raw_results.json").read_text(encoding="utf-8"))
+                if meta["status"] == "running":
+                    raise EvalValidationError(f"run 非终态，无法重评审：{run_id}")
+                modalities = self._validate_modalities(meta["modalities"])
+                results = [OpenMovieResult(**row) for row in original]
+                snapshots = {}
+                for result in results:
+                    if result.ok and (result.hits or result.new_words):
+                        snapshot = json.loads((source / "produced" / f"{result.tt}.json")
+                                              .read_text(encoding="utf-8"))
+                        snapshots[result.tt] = (snapshot["labels"],
+                                                ContentJSON.model_validate(snapshot["content"]))
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                raise EvalValidationError(f"原评测缺少完整材料快照或结果不可读：{run_id}") from exc
+
+            started_at = _now_iso()
+            for result in results:
+                if result.tt in snapshots:
+                    labels, content = snapshots[result.tt]
+                    started = time.perf_counter()
+                    self._review_produced(result.tt, labels, content, child_id,
+                                          result=result, modalities=modalities)
+                    result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+            meta.update({
+                "run_id": child_id, "source_run_id": run_id,
+                "started_at": started_at, "finished_at": _now_iso(),
+                "review": {**review_calibre(self.settings, self._llm, self._review_client),
+                           "prompt_version": REVIEW_PROMPT_VERSION},
+                "review_concurrency": 1,
+            })
+            with tempfile.TemporaryDirectory(prefix=".rereview-", dir=root) as stage:
+                staged = Path(stage) / child_id
+                staged.mkdir()
+                for name in ("produced", "audit"):
+                    if (source / name).is_dir():
+                        shutil.copytree(source / name, staged / name)
+                report = assemble_open_report(results, meta, audit_dir=staged / "audit")
+                _dump_json(staged / "raw_results.json", [asdict(result) for result in results])
+                write_open_report(staged, report)
+                _dump_json(staged / "meta.json", meta)
+                staged.rename(root / child_id)
+
+            return {"run_id": child_id, "source_run_id": run_id, "reviewed": len(snapshots),
+                    "review_failed": sum(r.review_error is not None for r in results)}
+        finally:
+            with self._lock:
+                self._active_run_id = None
+                self._rereview_source = None
 
     def _record_result(self, run_id: str, result: OpenMovieResult) -> None:
         """锁内更新注册表并追加 progress.jsonl 一行（增量落盘）。
@@ -936,12 +945,8 @@ class OpenEvalService:
         })
         if error is not None:
             meta["error"] = error
-        rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
-                 "hits": r.hits, "new_words": r.new_words,
-                 "review_error": r.review_error, "elapsed_ms": r.elapsed_ms}
-                for r in results]
         _dump_json(run_dir / "meta.json", meta)
-        _dump_json(run_dir / "raw_results.json", rows)
+        _dump_json(run_dir / "raw_results.json", [asdict(result) for result in results])
         # 报告三件套（report.json / report.md / metrics.csv）：
         # assemble_open_report → write_open_report（镜像闭环 _write_artifacts
         # 的写序）；judge 段读 run 目录的 audit/<tt>.json

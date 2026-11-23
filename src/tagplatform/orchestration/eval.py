@@ -50,6 +50,7 @@ from pydantic import BaseModel
 from tagplatform.services.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.services.eval.dataset import movie_entries, scan_datasets
 from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
+from tagplatform.services.eval.open_report import OPEN_REPORT_SCHEMA_VERSION
 from tagplatform.services.eval.open_service import (
     DEFAULT_CONCURRENCY as OPEN_DEFAULT_CONCURRENCY,
     EvalValidationError as OpenEvalValidationError,
@@ -625,7 +626,7 @@ def cancel_open_run(service, run_id: str) -> dict:
 
 
 def rereview_open_run(service, run_id: str) -> dict:
-    """复用产出快照重新评审（不重跑生成）→ {run_id, reviewed, review_failed}。
+    """复用产出与材料快照，另存重评结果。
 
     错误映射：活跃 run → 409；非终态/不存在 → 400。换评审模型或阈值后
     想看新口径效果时用，DB 零写入红线不变。"""
@@ -668,6 +669,8 @@ def get_open_run_report(settings: Settings, run_id: str) -> dict:
             except (OSError, ValueError):
                 report = None
             if isinstance(report, dict):
+                if report.get("schema_version") != OPEN_REPORT_SCHEMA_VERSION:
+                    raise HTTPException(status_code=410, detail="旧版开放评测报告已停用")
                 return report
     raise HTTPException(status_code=404,
                         detail=f"该 run 无报告：{run_id!r}")

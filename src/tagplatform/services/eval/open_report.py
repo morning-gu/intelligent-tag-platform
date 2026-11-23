@@ -7,7 +7,7 @@ gt 排序任务。报告改为分支式内容组织：汇总卡（通过率 + �
 参考）→ 异常表 → judge 审计聚合。
 
 输入是 OpenMovieResult 列表（干跑运行器的原子产出）：hits/new_words
-行带 review = {"pass","relevance","semantics","value","reason","quote"}
+行带 review = {"pass","relevance","semantics","value","reason","evidence_scene_ids","evaluated"}
 （三维各 {"score","reason"}，pass 由评审层按阈值推导）或 None（该片
 评审失败，产出不作废）。三维汇总复用 services/eval/tag_quality 的
 quality_metrics（与生产批次汇总同一套指标机制）。
@@ -34,14 +34,16 @@ from tagplatform.services.eval.tag_quality import MAX_SCORE, quality_metrics
 if TYPE_CHECKING:
     from tagplatform.services.eval.open_service import OpenMovieResult
 
+OPEN_REPORT_SCHEMA_VERSION = 2
+
 __all__ = [
     "assemble_open_report",
     "render_open_report_md",
     "write_open_report",
 ]
 
-# 同模评审警示：评审与生成同模型 → 通过率绝对值系统性偏高
-BANNER_SAME_MODEL = ("评审与生成同模型，通过率绝对值系统性偏高，趋势对比可用、"
+# 评审和生成共享模型时提示可能的判断偏差。
+BANNER_SAME_MODEL = ("评审与生成复用同一模型，可能共享判断偏差，"
                      "绝对值需打折解读")
 # 小样本警示（失败核算三类分开点名）
 _BANNER_SMALL_SAMPLE = ("小样本警示：{detail}，占比超 10%——成功样本少，"
@@ -71,15 +73,19 @@ def _group_stats(rows: list[dict]) -> dict:
     排除出分母）。metrics 用 quality_metrics（max_score=4），输入直接是
     review dict（其 relevance/semantics/value 即 {"score","reason"}）。
     """
-    reviews = [row["review"] for row in rows if row.get("review") is not None]
-    passed = sum(1 for r in reviews if r.get("pass") is True)
-    failed = sum(1 for r in reviews if r.get("pass") is False)
-    missing = sum(1 for r in reviews if r.get("pass") is None)
+    reviews = [row["review"] for row in rows
+               if row.get("review") is not None and row["review"].get("evaluated") is True]
+    passed = sum(review["pass"] is True for review in reviews)
+    judged = sum(review["pass"] is not None for review in reviews)
+    missing = sum(row.get("review") is not None and not row["review"].get("evaluated")
+                  for row in rows)
+    pending = sum(row.get("review") is None for row in rows)
     return {
-        "pass_rate": _rate(passed, passed + failed),
-        "review_missing": missing,
-        "metrics": (quality_metrics(len(reviews), reviews, MAX_SCORE).model_dump()
-                    if reviews else None),
+        "pass_rate": _rate(passed, judged), "passed": passed, "judged": judged,
+        "review_missing": missing, "pending": pending,
+        "three_judged": sum(all(review[axis]["score"] is not None for axis in _SCORE_AXES)
+                            for review in reviews),
+        "metrics": quality_metrics(len(rows), reviews, MAX_SCORE).model_dump() if rows else None,
     }
 
 
@@ -103,7 +109,8 @@ def _movie_row(result: "OpenMovieResult") -> dict:
         "pass_rate": stats["pass_rate"],
         "new_pass": _group_stats(new_words)["pass_rate"],
         "hit_pass": _group_stats(hits)["pass_rate"],
-        "review_missing": stats["review_missing"],
+        "review_missing": stats["review_missing"] + (stats["pending"] if result.review_error else 0),
+        "review_pending": stats["pending"] if not result.review_error else 0,
         "metrics": stats["metrics"],
     }
 
@@ -210,7 +217,7 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
     """干跑结果 → report.json 结构（分支式内容组织，report.md 同数据）。
 
     汇总口径：全部 ok 片产出计 total_tags / new_ratio；评审成功片的产出
-    计通过率与三维指标（评审失败片产出不作废但不进分母，None≠0）。
+    计通过率与三维指标。覆盖率的分母包括评审失败片的产出。
     `audit_dir` = run 目录的 audit/ 子目录（None = 无审计，judge 空段 +
     警示）。行序按 tt 稳定排序——运行器 results 是线程池完成序，报告
     落盘要可跨 run 对比，不随并发调度漂移。
@@ -222,7 +229,7 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
     n_failed = 0
     n_review_failed = 0
     all_rows: list[dict] = []
-    reviewed_rows: list[dict] = []
+    review_failed_tags = 0
     new_total = hit_total = 0
     for result in results:
         if result.ok:
@@ -233,10 +240,9 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
             all_rows.extend(rows)
             new_total += len(result.new_words)
             hit_total += len(result.hits)
-            if result.review_error is None:
-                reviewed_rows.extend(rows)
-            else:
+            if result.review_error is not None:
                 n_review_failed += 1
+                review_failed_tags += sum(row.get("review") is None for row in rows)
         else:
             n_failed += 1
         movies.append(_movie_row(result))
@@ -251,12 +257,15 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
     if meta.get("warning"):
         warnings.append(str(meta["warning"]))
 
-    overall = _group_stats(reviewed_rows)
-    new_stats = _group_stats([r for r in reviewed_rows if "name" in r])
-    hit_stats = _group_stats([r for r in reviewed_rows if "tag_id" in r])
+    overall = _group_stats(all_rows)
+    new_stats = _group_stats([r for r in all_rows if "name" in r])
+    hit_stats = _group_stats([r for r in all_rows if "tag_id" in r])
     totals = [c["hits"] + c["new_words"] for c in counts]
     metrics = overall["metrics"]
     return {
+        "schema_version": OPEN_REPORT_SCHEMA_VERSION,
+        "status": meta.get("status"),
+        "source_run_id": meta.get("source_run_id"),
         "banner": _banner(meta, total, done, n_failed, n_review_failed),
         "sample_accounting": {
             "total": total,
@@ -266,14 +275,20 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
         },
         "summary": {
             "total_tags": len(all_rows),
-            "reviewed_tags": len(reviewed_rows),
+            "reviewed_tags": metrics["evaluated_tags"] if metrics else 0,
+            "passed_tags": overall["passed"],
+            "judged_tags": overall["judged"],
+            "new_judged_tags": new_stats["judged"],
+            "hit_judged_tags": hit_stats["judged"],
+            "three_judged_tags": overall["three_judged"],
+            "review_pending": overall["pending"] - review_failed_tags,
             "hits": hit_total,
             "new_words": new_total,
             "new_ratio": (new_total / len(all_rows)) if all_rows else None,
             "pass_rate": overall["pass_rate"],
             "new_pass": new_stats["pass_rate"],
             "hit_pass": hit_stats["pass_rate"],
-            "review_missing": overall["review_missing"],
+            "review_missing": overall["review_missing"] + review_failed_tags,
             "metrics": metrics,
         },
         "produced_stats": {
@@ -289,6 +304,7 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
             "prompt_version": (meta.get("prompt") or {}).get("version"),
             "review_model": (meta.get("review") or {}).get("model"),
             "review_same_model": (meta.get("review") or {}).get("same_model"),
+            "review_config": meta.get("review") or {},
             "review_prompt_version": (meta.get("review") or {}).get(
                 "prompt_version"),
             "library_version": (meta.get("library") or {}).get("version"),
@@ -408,9 +424,12 @@ def render_open_report_md(report: dict) -> str:
                 review = row.get("review")
                 name = row.get("tag_name") or row.get("name")
                 level = {"scene": "场景", "film": "全片"}.get(row.get("level"), "—")
-                passed = ("—" if review is None else
-                          ("是" if review.get("pass") else
-                           ("漏判" if review.get("pass") is None else "否")))
+                if review is None:
+                    passed = "评审失败" if movie.get("review_error") else "待评"
+                elif review["pass"] is None:
+                    passed = "无法判断" if review["evaluated"] else "漏判"
+                else:
+                    passed = "是" if review["pass"] else "否"
                 reason = (review or {}).get("reason") or ""
                 lines.append(f"| {row['_group']} | {name} | {level} "
                              f"| {_score_cell(review, 'relevance')} "
@@ -463,9 +482,9 @@ def write_open_report(run_dir: Path, report: dict) -> None:
         writer.writerow(_CSV_HEADER)
         for metric, value, n in (
                 ("pass_rate", summary.get("pass_rate"),
-                 summary.get("reviewed_tags")),
-                ("new_pass", summary.get("new_pass"), summary.get("new_words")),
-                ("hit_pass", summary.get("hit_pass"), summary.get("hits")),
+                 summary.get("judged_tags")),
+                ("new_pass", summary.get("new_pass"), summary.get("new_judged_tags")),
+                ("hit_pass", summary.get("hit_pass"), summary.get("hit_judged_tags")),
                 ("new_ratio", summary.get("new_ratio"),
                  summary.get("total_tags"))):
             writer.writerow([metric, value if value is not None else "", n])
@@ -473,14 +492,14 @@ def write_open_report(run_dir: Path, report: dict) -> None:
             dim = metrics.get(axis) or {}
             writer.writerow([f"{axis}_average",
                              dim.get("average") if dim.get("average") is not None else "",
-                             dim.get("evaluated_tags")])
+                             sum(dim.get("distribution") or [])])
             writer.writerow([f"{axis}_high_rate",
                              dim.get("high_rate") if dim.get("high_rate") is not None else "",
-                             dim.get("evaluated_tags")])
+                             sum(dim.get("distribution") or [])])
         writer.writerow(["three_dimension_high_rate",
                          metrics.get("three_dimension_high_rate")
                          if metrics.get("three_dimension_high_rate") is not None else "",
-                         metrics.get("evaluated_tags")])
+                         summary.get("three_judged_tags")])
 
 
 # ---------------------------------------------------------------- 历史摘要
@@ -499,7 +518,7 @@ def _read_open_summary(run_dir: Path) -> dict:
                             .read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return summary
-    if not isinstance(report, dict):
+    if not isinstance(report, dict) or report.get("schema_version") != OPEN_REPORT_SCHEMA_VERSION:
         return summary
 
     def _numeric(value):
