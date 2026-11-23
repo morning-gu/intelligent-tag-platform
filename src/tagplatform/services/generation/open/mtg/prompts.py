@@ -24,7 +24,7 @@ from pathlib import Path
 from tagplatform.schemas import ContentJSON
 from tagplatform.schemas.content import Character, Scene
 from tagplatform.capabilities.prompts.mtg import (
-    DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
+    CATALOG_ONLY_HINT_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
     FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
     JUDGE_CRITERIA, JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT,
     SCENE_GOAL_TEXT,
@@ -205,14 +205,17 @@ def _dir_hint_block(dirs: list[dict]) -> str:
     lines = []
     for entry in dirs:
         label = _scope_label(entry.get("scope"))
-        lines.append(f"- {entry['dir_id']}｜{entry['path']}｜{label}")
+        description = " ".join((entry.get("description") or "").split())
+        line = f"- {entry['dir_id']}｜{entry['path']}｜{label}"
+        lines.append(f"{line}｜{description}" if description else line)
     # 头尾说明文案为中央常量（capabilities.prompts.mtg），listing 行就地渲染
     return DIR_HINT_HEAD_TEXT + "\n".join(lines) + "\n" + DIR_HINT_TAIL_TEXT
 
 
 def build_scene_generation_messages(scene: Scene, frames: tuple[Path, ...], *,
                                     content: ContentJSON, max_tags: int, dir_hint: list[dict],
-                                    modalities=None) -> list[dict]:
+                                    modalities=None,
+                                    catalog_choices: list[str] | None = None) -> list[dict]:
     active = _active(modalities)
     body = render_scene(scene, active)
     if "script" in active:
@@ -222,7 +225,8 @@ def build_scene_generation_messages(scene: Scene, frames: tuple[Path, ...], *,
     return _generation_messages(
         body,
         _scene_frame_parts(scene, frames) if "video" in active else [],
-        None, dir_hint, scope="scene", max_tags=max_tags,
+        catalog_choices, None if catalog_choices else dir_hint, scope="scene", max_tags=max_tags,
+        catalog_only=bool(catalog_choices),
     )
 
 
@@ -232,7 +236,7 @@ def build_generation_messages(content: ContentJSON,
                               scene_tags: dict[str, list[dict]] | None = None,
                               library_hint: list[str] | None = None,
                               dir_hint: list[dict] | None = None,
-                              modalities=None) -> list[dict]:
+                              modalities=None, catalog_only: bool = False) -> list[dict]:
     """影片级生成请求，给出按片序排列的每场候选（包括无候选的场景）。"""
     active = _active(modalities)
     scene_tags = scene_tags or {}
@@ -248,8 +252,9 @@ def build_generation_messages(content: ContentJSON,
             frame_parts.extend(_scene_frame_parts(scene, frames_by_scene.get(scene.scene_id, ())))
     body = render_content(content, active, full_cast=True)
     body += "\n\n## 第一轮逐场候选\n" + json.dumps(per_scene, ensure_ascii=False, indent=2)
-    return _generation_messages(body, frame_parts, library_hint, dir_hint,
-                                scope="film", max_tags=max_tags)
+    return _generation_messages(body, frame_parts, library_hint,
+                                None if catalog_only and library_hint else dir_hint,
+                                scope="film", max_tags=max_tags, catalog_only=catalog_only)
 
 
 def _scene_frame_parts(scene: Scene, frames: tuple[Path, ...]) -> list[dict]:
@@ -271,14 +276,14 @@ def keyframe_parts(scene_id: str, order: int | str, total: int | str,
 def _generation_messages(body: str, frame_parts: list[dict],
                          library_hint: list[str] | None,
                          dir_hint: list[dict] | None, *, scope: str,
-                         max_tags: int | str) -> list[dict]:
+                         max_tags: int | str, catalog_only: bool = False) -> list[dict]:
     parts: list[dict] = [{
         "type": "text",
         "text": (f"{GENERATION_MARKER}\n"
                  f"{GENERATION_ROLE_TEXT}" + body),
     }, *frame_parts]
     if library_hint:
-        parts.append({"type": "text", "text": _library_hint_block(library_hint)})
+        parts.append({"type": "text", "text": _library_hint_block(library_hint, catalog_only=catalog_only)})
     if dir_hint:
         parts.append({"type": "text", "text": _dir_hint_block(dir_hint)})
     parts.append({"type": "text",
@@ -301,7 +306,7 @@ def build_generation_template(scope: str) -> dict:
     frames = keyframe_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
                           "{{关键帧的完整 data URL}}")
     dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
-             "scope": "{{目录适用粒度}}"}]
+             "scope": "{{目录适用粒度}}", "description": "{{目录定义}}"}]
     budget = "{{本次请求候选上限}}"
     return {
         "messages": _generation_messages(body, frames, hints, dirs, scope=scope, max_tags=budget),
@@ -309,14 +314,15 @@ def build_generation_template(scope: str) -> dict:
     }
 
 
-def _library_hint_block(names: list[str]) -> str:
+def _library_hint_block(names: list[str], *, catalog_only: bool = False) -> str:
     """库内已有标签的提示块（只给名字，不给定义）。
 
     措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
     "悬疑解谜"这类更细的候选，只是不该原样复述。
     """
     listing = "\n".join(f"- {name}" for name in names)
-    return LIBRARY_HINT_HEAD_TEXT + f"{listing}"
+    heading = CATALOG_ONLY_HINT_TEXT if catalog_only else LIBRARY_HINT_HEAD_TEXT
+    return heading + listing
 
 
 def build_judge_messages(content: ContentJSON, candidates: list[dict], *,

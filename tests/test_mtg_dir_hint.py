@@ -86,6 +86,8 @@ def test_dir_hint_lists_only_expandable_dirs_with_full_path(content_fixture):
     theme = next(entry for entry in entries if entry["dir_id"] == "dir_theme")
     assert theme["path"] == "内容特征标签/细分题材"
     assert theme["scope"] == "content"
+    assert theme["description"]
+    assert theme["description"] in _prompt(content_fixture, entries)
 
 
 def test_dir_hint_includes_asset_dirs(content_fixture):
@@ -195,6 +197,41 @@ def _report(tmp_path, run_id):
 
 _ITEM = {"tag": "命运羁绊", "dimension": "主题", "scope": "film",
          "scenes": ["scene_001", "scene_002"], "reason": "两条场景都指向同一困境"}
+
+
+@pytest.mark.parametrize("dir_raw", [None, "dir_scene", "dir_ghost", "dir_theme"])
+def test_scoped_open_generation_requires_a_valid_model_directory(
+        session, content_fixture, dir_settings, tmp_path, dir_raw):
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "scoped", GenerationPolicy(dir_ids=["dir_theme"]))
+    out = OpenTagProducer().produce(
+        spec, session, _GenLLM([{**_ITEM, "dir": dir_raw}]), MOCK_EMBEDDER)
+    if dir_raw == "dir_theme":
+        assert [tag.dir_id for tag in out] == ["dir_theme"]
+    else:
+        assert out == []
+        assert _report(tmp_path, "scoped")["dropped"]
+
+
+def test_static_scope_both_rounds_use_existing_labels(
+        session, content_fixture, dir_settings):
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "static", GenerationPolicy(dir_ids=["dir_genre"]))
+    messages_by_run = {}
+
+    class RecordingLLM(_GenLLM):
+        def complete(self, messages, run_id):
+            messages_by_run[run_id] = messages
+            return super().complete(messages, run_id)
+
+    assert OpenTagProducer().produce(
+        spec, session, RecordingLLM([]), MOCK_EMBEDDER) == []
+    assert len(messages_by_run) == 3
+    for messages in messages_by_run.values():
+        prompt = "".join(part["text"] for part in messages[0]["content"] if part["type"] == "text")
+        assert "目标目录内的已有标签" in prompt
+        assert "动作" in prompt
+        assert "可以放新标签的目录" not in prompt
 
 
 def test_model_chosen_dir_is_used(session, content_fixture, dir_settings, tmp_path):

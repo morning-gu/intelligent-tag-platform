@@ -173,6 +173,9 @@ function mockApis(options: MockOptions = {}) {
       return options.detail ?? DETAIL
     }
     if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) return ASSETS
+    if (path.startsWith('/api/v1/tags?')) return {
+      items: [{ id: 'dir_mood', name: '情绪基调', parent_id: null }], total: 1,
+    }
     throw new Error(`未预期的请求：${method} ${path}`)
   })
 }
@@ -357,6 +360,8 @@ describe('GenerationTasks 生产任务页', () => {
     // 模式切为开放、最大标签数填 20（最低置信度留空走后端默认）
     fireEvent.click(screen.getByRole('radio', { name: '开放' }))
     fireEvent.change(screen.getByPlaceholderText('默认 30'), { target: { value: '20' } })
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: '标签目录' }))
+    fireEvent.click(await screen.findByTitle('情绪基调'))
     const modelInput = screen.getByRole('textbox', { name: '评估模型 ID' })
     expect(modelInput).toHaveValue('deepseek-v4.1-flash')
     fireEvent.change(modelInput, { target: { value: 'another-model' } })
@@ -369,7 +374,7 @@ describe('GenerationTasks 生产任务页', () => {
       asset_ids: ['a-movie', 'a-scene'],
       mode: 'open',
       quality_model: 'another-model',
-      policy: { max_tags: 20 },
+      policy: { max_tags: 20, dir_ids: ['dir_mood'] },
     })
     expect(await screen.findByText('已创建 1 个任务')).toBeInTheDocument()
     // 成功后关弹窗并刷新列表
@@ -421,6 +426,7 @@ describe('GenerationTasks 生产任务页', () => {
       }
       if (path.startsWith('/api/v1/generation/tasks')) return TASKS
       if (path === '/api/v1/assets' || path.startsWith('/api/v1/assets?')) return ASSETS
+      if (path.startsWith('/api/v1/tags?')) return { items: [], total: 0 }
       throw new Error(`未预期的请求：${init?.method ?? 'GET'} ${path}`)
     })
     renderGenerationTasks()
@@ -525,6 +531,7 @@ describe('GenerationTasks 生产任务页', () => {
       if (path === '/api/v1/generation/tasks/task-1') {
         return {
           ...DETAIL,
+          mode: 'open',
           quality_evaluation: retryAccepted
             ? {
               ...report,

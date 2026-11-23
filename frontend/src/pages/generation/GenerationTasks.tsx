@@ -33,6 +33,7 @@ import {
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 import { fetchAssets, type AssetSummary } from '../../api/assets'
+import { fetchTagCatalog, type TagNode } from '../../api/catalog'
 import {
   createGenerationTasks,
   DEFAULT_QUALITY_MODEL,
@@ -68,7 +69,8 @@ const TASK_STATUS_COLORS: Record<string, string> = {
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
-  quality_model: string
+  quality_model?: string
+  dir_ids?: string[]
   max_tags?: number
   min_confidence?: number
 }
@@ -113,7 +115,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
         if (cancelled) return
         setDetail(next)
         setLoadError(null)
-        const status = next.quality_evaluation?.status
+        const status = next.mode === 'open' ? next.quality_evaluation?.status : undefined
         polling = status === 'queued' || status === 'running'
       } catch (err) {
         if (cancelled) return
@@ -135,7 +137,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
     return <Typography.Text type="secondary">详情加载中…</Typography.Text>
   }
 
-  const report = detail.quality_evaluation
+  const report = detail.mode === 'open' ? detail.quality_evaluation : null
   const film = report?.films.find((item) => item.task_id === detail.task_id)
   const tags = <TaskTagResults assetId={detail.asset_id} results={detail.results} labels={film?.labels}
     maxScore={film?.metrics?.max_score ?? 2} />
@@ -173,6 +175,8 @@ export default function GenerationTasks() {
   const [createOpen, setCreateOpen] = useState(false)
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [assetsLoading, setAssetsLoading] = useState(false)
+  const [directoryChoices, setDirectoryChoices] = useState<{ value: string; label: string }[]>([])
+  const [directoriesLoading, setDirectoriesLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   // 资产多选下拉的开合由我们接管：antd 多选默认选中后不收起，弹层会一直挂在
   // 弹窗上挡住下面的字段，这里每选一次就收起（再点输入框可继续加选）。
@@ -224,6 +228,37 @@ export default function GenerationTasks() {
       .catch((err) => message.error(err instanceof Error ? err.message : '资产列表加载失败'))
       .finally(() => setAssetsLoading(false))
     setCreateOpen(true)
+    void loadDirectories()
+  }
+
+  async function loadDirectories() {
+    setDirectoryChoices([])
+    setDirectoriesLoading(true)
+    try {
+      const items: TagNode[] = []
+      const limit = 100
+      for (let offset = 0; ; offset += limit) {
+        const page = await fetchTagCatalog({ kind: 'dir', limit, offset })
+        items.push(...page.items)
+        if (!page.items.length || items.length >= page.total) break
+      }
+      const byId = new Map(items.map((node) => [node.id, node]))
+      setDirectoryChoices(items.map((directory) => {
+        const path: string[] = []
+        const seen = new Set<string>()
+        let node: TagNode | undefined = directory
+        while (node && !seen.has(node.id)) {
+          path.unshift(node.name)
+          seen.add(node.id)
+          node = node.parent_id ? byId.get(node.parent_id) : undefined
+        }
+        return { value: directory.id, label: path.join(' / ') }
+      }))
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '标签目录加载失败')
+    } finally {
+      setDirectoriesLoading(false)
+    }
   }
 
   async function handleCreateSubmit() {
@@ -237,12 +272,14 @@ export default function GenerationTasks() {
     const policy: GenerationPolicyPayload = {}
     if (values.max_tags !== undefined) policy.max_tags = values.max_tags
     if (values.min_confidence !== undefined) policy.min_confidence = values.min_confidence
+    if (values.dir_ids?.length) policy.dir_ids = values.dir_ids
     setCreating(true)
     try {
       const res = await createGenerationTasks({
         asset_ids: values.asset_ids,
         mode: values.mode,
-        quality_model: values.quality_model.trim(),
+        ...(values.mode === 'open' && values.quality_model
+          ? { quality_model: values.quality_model.trim() } : {}),
         ...(Object.keys(policy).length > 0 ? { policy } : {}),
       })
       message.success(`已创建 ${res.tasks.length} 个任务`)
@@ -389,13 +426,23 @@ export default function GenerationTasks() {
               ]}
             />
           </Form.Item>
-          <Form.Item
-            name="quality_model"
-            label="评估模型 ID"
-            initialValue={DEFAULT_QUALITY_MODEL}
-            rules={[{ required: true, whitespace: true, message: '请输入评估模型 ID' }]}
-          >
-            <Input maxLength={200} />
+          <Form.Item name="dir_ids" label="标签目录">
+            <Select mode="multiple" allowClear loading={directoriesLoading}
+              showSearch={{ optionFilterProp: 'label' }}
+              options={directoryChoices}
+              placeholder="默认全库，选择目录时包含其子目录" />
+          </Form.Item>
+          <Form.Item noStyle dependencies={['mode']}>
+            {({ getFieldValue }) => getFieldValue('mode') === 'open' && (
+              <Form.Item
+                name="quality_model"
+                label="评估模型 ID"
+                initialValue={DEFAULT_QUALITY_MODEL}
+                rules={[{ required: true, whitespace: true, message: '请输入评估模型 ID' }]}
+              >
+                <Input maxLength={200} />
+              </Form.Item>
+            )}
           </Form.Item>
           <Form.Item name="max_tags" label="最大标签数">
             <InputNumber min={1} placeholder="默认 30" style={{ width: '100%' }} />

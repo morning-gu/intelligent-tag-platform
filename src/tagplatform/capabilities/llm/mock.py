@@ -153,9 +153,11 @@ def _open_output(text: str, run_id: str) -> list[dict]:
     if scope == "film" and not scene_ids:
         scene_ids = re.findall(r'"scene_id": "([^"]+)"', text)
     evidence = scene_ids[:2] if scope == "film" else scene_ids[:1]
+    directories = re.findall(r"^- ([^｜\n]+)｜[^\n]+$", text, re.MULTILINE)
+    target = {"dir": directories[0]} if len(directories) == 1 else {}
     return [
         {"tag": name, "dimension": dimension, "scenes": evidence, "scope": scope,
-         "desc": desc, "reason": f"模拟依据 #{index + 1}"}
+         "desc": desc, "reason": f"模拟依据 #{index + 1}", **target}
         for index, (name, dimension, desc) in enumerate(_OPEN_SEEDS)
     ]
 

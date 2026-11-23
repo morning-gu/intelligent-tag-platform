@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
 # v6 = judge 改三维结果导向评分（relevance/semantics/value 0-4/null），
 #      按分数阈值筛选标签，value 分取代 importance 参与排序。
-MTG_VERSION = "mtg-v6-graded-judge"
+MTG_VERSION = "mtg-v7-directory-focus"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -192,7 +192,8 @@ def _dir_hint_entries(tag_library, spec: GenerationSpec,
     for directory in tag_library.new_tag_dirs(spec.policy.dir_ids):
         path = "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name
         entries.append({"dir_id": directory.dir_id, "path": path,
-                        "scope": tag_library.scope_of(directory.dir_id)})
+                        "scope": tag_library.scope_of(directory.dir_id),
+                        "description": directory.description})
     entries.sort(key=lambda item: (item["path"], item["dir_id"]))
     return entries[:limit]
 
@@ -366,7 +367,8 @@ def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
 def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
                            contents, frames, modalities, usage: dict,
                            hints: list[str], dir_hint: list[dict],
-                           limits: _GenerationLimits
+                           limits: _GenerationLimits,
+                           *, catalog_only: bool = False,
                            ) -> tuple[list[dict], list[dict], list[dict]]:
     """小节 1：逐场生成 → 全片综合（两轮 LLM 调用，产出 runs 审计与两级候选）。"""
     scenes = contents.content.scenes
@@ -383,7 +385,8 @@ def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
     for index, scene in enumerate(scenes):
         messages = build_scene_generation_messages(
             scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
-            dir_hint=dir_hint, modalities=modalities)
+            dir_hint=dir_hint, modalities=modalities,
+            catalog_choices=hints if catalog_only else None)
         per_scene[scene.scene_id], parsed_calls = _generate_items(
             scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
             "scene", scene_id=scene.scene_id, spec=spec, usage=usage,
@@ -403,7 +406,8 @@ def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
     if film_request_limit:
         messages = build_generation_messages(
             contents, frames, max_tags=film_request_limit, scene_tags=per_scene,
-            library_hint=hints, dir_hint=dir_hint, modalities=modalities)
+            library_hint=hints, dir_hint=dir_hint, modalities=modalities,
+            catalog_only=catalog_only)
         film_usage = usage.copy()
         film_entries, parsed_calls = _generate_items(
             film_client, messages, "film", film_request_limit, "film",
@@ -619,14 +623,15 @@ def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
 
 
 def _assign_tag_dirs(spec: GenerationSpec, contents, embedder, library: list,
-                     tag_library, accepted: list, plans: dict, dropped: list[dict]
+                     tag_library, accepted: list, plans: dict, dropped: list[dict],
+                     *, require_model_dir: bool
                      ) -> tuple[list[ProducedTag], list[dict], list[dict]]:
     """小节 5 尾段：落库归属——库内替换生成 ProducedTag，新词按模型指定目录/向量回退归类。"""
     tags: list[ProducedTag] = []
     tag_rows: list[dict] = []
     # 新词要落到"可扩展目录"里：先批量嵌入候选名，再逐个按目录描述相似度归属
     new_names = [candidate.tag for candidate, _, _ in accepted
-                 if not plans.get(candidate.tag, (None, False))[1]]
+                 if not require_model_dir and not plans.get(candidate.tag, (None, False))[1]]
     new_vectors = (embedder.embed(new_names, role="query")
                    if new_names else [])
     vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
@@ -706,7 +711,7 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, embedder, library: list,
                 reasons.append(why)
                 assignment = mount = None
         # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
-        if assignment is None:
+        if assignment is None and not require_model_dir:
             for option in rank_dir_assignments(tag_library, embedder,
                                                vector_by_name.get(candidate.tag),
                                                spec.policy.dir_ids):
@@ -920,9 +925,13 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     limits = _plan_generation_limits(settings, spec, contents)
     if limits is None:
         return []
+    expandable_dirs = tag_library.new_tag_dirs(spec.policy.dir_ids) if tag_library else []
+    catalog_only = tag_library is not None and (
+        not spec.policy.allow_new_tags or not expandable_dirs
+    )
     runs, scene_entries, film_entries = _run_generation_rounds(
         settings, spec, llm, contents, frames, modalities, usage, hints,
-        dir_hint, limits)
+        dir_hint, limits, catalog_only=catalog_only)
 
     # ---- 2. 两级候选合并 ----
     merged = _merge_two_level_candidates(settings, embedder, film_entries,
@@ -944,8 +953,15 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         settings, spec, llm, embedder, library, accepted)
     accepted, truncated, plans = _rank_and_truncate(settings, alignment,
                                                     accepted, limits)
+    # 单分支或显式选择目录时，向量排序只会从受限列表硬选一个目录，
+    # 无法判断新词是否属于该主题。此时只接收有效的模型目录。
+    single_branch = (len(dir_hint) == len(expandable_dirs)
+                     and len({entry["path"].split("/", 1)[0] for entry in dir_hint}) == 1)
+    require_model_dir = bool(dir_hint) and (bool(spec.policy.dir_ids) or single_branch)
     tags, tag_rows, replacements = _assign_tag_dirs(
-        spec, contents, embedder, library, tag_library, accepted, plans, dropped)
+        spec, contents, embedder, library, tag_library, accepted, plans, dropped,
+        require_model_dir=require_model_dir,
+    )
 
     # ---- 5.5 描述通用化 ----
     # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"

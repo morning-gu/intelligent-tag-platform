@@ -47,7 +47,7 @@ export interface GenerationTaskResult {
 /** 任务详情：列表字段之上附该任务全部结果摘要行（按入库行序）。 */
 export interface GenerationTaskDetail extends GenerationTaskSummary {
   results: GenerationTaskResult[]
-  quality_evaluation?: QualityReport
+  quality_evaluation?: QualityReport | null
 }
 
 export const DEFAULT_QUALITY_MODEL = 'deepseek-v4.1-flash'
@@ -124,6 +124,7 @@ export interface QualityReport {
 export interface GenerationPolicyPayload {
   max_tags?: number
   min_confidence?: number
+  dir_ids?: string[]
 }
 
 /** 批量创建请求体：资产 id 非空列表 + mode + 可选策略。 */

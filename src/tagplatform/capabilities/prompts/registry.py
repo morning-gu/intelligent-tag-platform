@@ -16,7 +16,7 @@ from tagplatform.capabilities.prompts.assets import (
 )
 from tagplatform.capabilities.prompts.mtg import (
     DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT, DIR_FIELD_RULE_TEXT,
-    DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT, FILM_GOAL_TEXT,
+    CATALOG_ONLY_HINT_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT, FILM_GOAL_TEXT,
     GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT, JUDGE_CRITERIA,
     JUDGE_RETRY_HINT, JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT,
     SCENE_GOAL_TEXT, VERIFY_INSTRUCTIONS, VERIFY_OUTPUT_FORMAT,
@@ -58,6 +58,7 @@ def list_prompt_registry() -> list[dict]:
                 {"name": "HOW_TO_FILL_TEXT", "text": HOW_TO_FILL_TEXT},
                 {"name": "DIR_FIELD_RULE_TEXT", "text": DIR_FIELD_RULE_TEXT},
                 {"name": "DIR_HINT_HEAD_TEXT", "text": DIR_HINT_HEAD_TEXT},
+                {"name": "CATALOG_ONLY_HINT_TEXT", "text": CATALOG_ONLY_HINT_TEXT},
                 {"name": "DIR_HINT_TAIL_TEXT", "text": DIR_HINT_TAIL_TEXT},
                 {"name": "LIBRARY_HINT_HEAD_TEXT",
                  "text": LIBRARY_HINT_HEAD_TEXT},
