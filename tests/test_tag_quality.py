@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage import create_engine_for
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
-from tagplatform.services.eval.tag_quality import _parse_scores, evaluate
+from tagplatform.services.eval.tag_quality import _parse_scores, evaluate, evaluate_labels
 from tagplatform.services.generation.base import ProducedTag
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.services.generation.open.producer import OpenTagProducer
@@ -189,6 +189,27 @@ def test_production_snapshot_async_review_and_retry(client, monkeypatch, tmp_pat
     retry_example = json.loads((sample_dir / "quality_example.json").read_text(encoding="utf-8"))
     assert retry_example["run_id"] == f"{bad_id}:tag-quality"
     assert retry_example["model"] == "replacement"
+
+
+def test_evaluate_labels_scores_without_db_record(content_fixture):
+    """解耦入口：对干跑产出的标签直接评分，不需要 TagQualityEvaluation 记录。"""
+    scene_id = content_fixture.content.scenes[0].scene_id
+    labels = [{"id": 1, "name": "情感张力", "desc": "持续紧绷的情绪氛围",
+               "level": "scene", "target_type": "scene", "target_id": scene_id,
+               "scene_ids": [scene_id]}]
+    scores, error, note = evaluate_labels(
+        MockLLMClient(), content_fixture, labels, {}, "t-decoupled")
+    assert error is None and note is None
+    assert scores["1"]["relevance"]["score"] == 2
+    assert scores["1"]["semantics"]["score"] == 2
+    assert scores["1"]["value"]["score"] == 2
+
+
+def test_evaluate_labels_empty_labels_skip_call(content_fixture):
+    """无标签时不发请求，直接返回空结果。"""
+    scores, error, note = evaluate_labels(
+        MockLLMClient(), content_fixture, [], {}, "t-empty")
+    assert (scores, error, note) == ({}, None, None)
 
 
 def test_scene_evidence_is_limited_to_the_source_scene():
