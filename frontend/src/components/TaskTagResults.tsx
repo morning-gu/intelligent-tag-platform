@@ -82,7 +82,7 @@ function QualityDetails({ label, assetId, maxScore }: { label: QualityLabel; ass
   )
 }
 
-export default function TaskTagResults({ results, labels = [], assetId, maxScore = 2 }: {
+export default function TaskTagResults({ results, labels = [], assetId, maxScore = 4 }: {
   results: GenerationTaskResult[]
   labels?: QualityLabel[]
   assetId: string

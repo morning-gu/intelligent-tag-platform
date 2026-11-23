@@ -14,8 +14,6 @@ tagplatform.services。
 
 # rubric 版本标识（写进每次评估记录，供 run 级溯源）
 PROMPT_VERSION = "tag-quality-v5"
-# 历史五档量表版本：v4 起全片价值也用 0–4 分，聚合时按此区分旧三档记录
-FIVE_LEVEL_PROMPT_VERSIONS = frozenset({"tag-quality-v4", "tag-quality-v5"})
 
 _RUBRIC_CRITERIA = """## 标签质量评估
 你是影视标签评估员。只对「待评估标签」列表中的标签逐一评分，原样返回每个 id。

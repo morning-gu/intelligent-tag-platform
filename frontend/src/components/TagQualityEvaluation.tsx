@@ -46,10 +46,8 @@ function DimensionSummary({ dimension, maxScore }: { dimension: QualityDimension
 }
 
 function Metrics({ metrics }: { metrics: QualityMetrics }) {
-  const maxScore = metrics.max_score === undefined ? 2 : metrics.max_score
-  const scoreItems = maxScore === null ? [{
-    key: 'scale', label: '评分量表', children: '本批次使用了不同量表，分数统计见各影片。',
-  }] : [
+  const maxScore = metrics.max_score ?? 4
+  const scoreItems = [
     { key: 'relevance', label: '内容相关性', children: <DimensionSummary dimension={metrics.relevance} maxScore={maxScore} /> },
     { key: 'semantics', label: '语义准确性', children: <DimensionSummary dimension={metrics.semantics} maxScore={maxScore} /> },
     {
@@ -83,7 +81,7 @@ function Metrics({ metrics }: { metrics: QualityMetrics }) {
 }
 
 function MetricsSummary({ metrics }: { metrics: QualityMetrics }) {
-  const maxScore = metrics.max_score ?? 2
+  const maxScore = metrics.max_score ?? 4
   const average = (dimension: QualityDimension) =>
     dimension.average === null ? '—' : `${dimension.average.toFixed(2)} / ${maxScore}`
   const items = [
@@ -110,9 +108,7 @@ function FilmEvaluation({ film, onRetry, children }: {
         <Typography.Text strong>{film.title}</Typography.Text>
         <EvaluationStatus status={film.status} />
         {film.metrics && (
-          <Tag color={film.metrics.max_score === 4 ? 'blue' : 'default'}>
-            {film.metrics.max_score === 4 ? '五档 0–4' : '三档 0–2'}
-          </Tag>
+          <Tag color="blue">五档 0–4</Tag>
         )}
         {film.model && <Typography.Text type="secondary">
           评估模型 {film.model}{film.prompt_version && ` · ${film.prompt_version}`}
@@ -197,7 +193,7 @@ export default function TagQualityEvaluation({ report, taskId, onRetry, children
                   children: <FilmEvaluation film={film} onRetry={() => openRetry(film)}>
                     {film.labels.length > 0 && (
                       <TaskTagResults assetId={film.asset_id} labels={film.labels} results={[]}
-                        maxScore={film.metrics?.max_score ?? 2} />
+                        maxScore={film.metrics?.max_score ?? 4} />
                     )}
                   </FilmEvaluation>,
                 }))} />

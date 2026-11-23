@@ -340,7 +340,7 @@ class DimensionMetrics(BaseModel):
 class QualityMetrics(BaseModel):
     total_tags: int
     evaluated_tags: int
-    max_score: Literal[2, 4] | None
+    max_score: Literal[4]
     coverage: float | None
     joint_high_rate: float | None
     three_dimension_high_rate: float | None
@@ -355,46 +355,40 @@ def _ratio(count: int, total: int) -> float | None:
     return count / total if total else None
 
 
-def _dimension_metrics(values: list[int | None], max_score: int | None) -> DimensionMetrics:
-    distribution = ([values.count(value) for value in range(max_score + 1)]
-                    if max_score is not None else [])
+def _dimension_metrics(values: list[int | None]) -> DimensionMetrics:
+    distribution = [values.count(value) for value in range(MAX_SCORE + 1)]
     judged = sum(distribution)
     unknown = values.count(None)
     return DimensionMetrics(
         evaluated_tags=len(values),
         average=_ratio(sum(score * count for score, count in enumerate(distribution)), judged),
-        high_rate=_ratio(distribution[-1], judged) if distribution else None,
+        high_rate=_ratio(distribution[-1], judged),
         distribution=distribution,
         undetermined=unknown, undetermined_rate=_ratio(unknown, len(values)),
     )
 
 
-def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...],
-                     max_score: int | None) -> float | None:
-    if max_score is None:
-        return None
+def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...]) -> float | None:
     ratings = [tuple(row.get(axis) for axis in axes) for row in rows]
-    return _ratio(ratings.count((max_score,) * len(axes)),
+    return _ratio(ratings.count((MAX_SCORE,) * len(axes)),
                   sum(None not in rating for rating in ratings))
 
 
-def quality_metrics(total: int, scores: list[dict],
-                    max_score: Literal[2, 4] | None) -> QualityMetrics:
+def quality_metrics(total: int, scores: list[dict]) -> QualityMetrics:
     """逐维均分/满分率/分布 + 联合满分率 + 无法判断占比。
 
-    max_score 区分历史两档（2）与现行五档（4）评分；混合批次传 None，
-    只保留计数类指标，均分与满分率不混算。
+    统一五档 0–4 量表（tag-quality-v4 起）。
     """
-    # 历史评分缺少 value 对象；显式的 score=null 才计入无法判断。
+    # 个别记录缺少 value 对象（如评估中断）；显式的 score=null 才计入无法判断。
     rows = [{axis: result["score"] for axis in DIMENSIONS
              if (result := score.get(axis)) is not None} for score in scores]
     unknown = sum(None in row.values() for row in rows)
     return QualityMetrics(
         total_tags=total, evaluated_tags=len(rows), coverage=_ratio(len(rows), total),
-        max_score=max_score,
-        joint_high_rate=_joint_high_rate(rows, ("relevance", "semantics"), max_score),
-        three_dimension_high_rate=_joint_high_rate(rows, DIMENSIONS, max_score),
+        max_score=MAX_SCORE,
+        joint_high_rate=_joint_high_rate(rows, ("relevance", "semantics")),
+        three_dimension_high_rate=_joint_high_rate(rows, DIMENSIONS),
         undetermined_tags=unknown, undetermined_rate=_ratio(unknown, len(rows)),
-        **{axis: _dimension_metrics([row[axis] for row in rows if axis in row], max_score)
+        **{axis: _dimension_metrics([row[axis] for row in rows if axis in row])
            for axis in DIMENSIONS},
     )

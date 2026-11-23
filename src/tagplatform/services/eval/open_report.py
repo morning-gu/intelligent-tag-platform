@@ -70,7 +70,7 @@ def _group_stats(rows: list[dict]) -> dict:
     """一组产出行的评审统计：pass_rate / review_missing / metrics。
 
     rows 为 hits 或 new_words 行（review 可能 None = 该片评审失败，整组
-    排除出分母）。metrics 用 quality_metrics（max_score=4），输入直接是
+    排除出分母）。metrics 用 quality_metrics（固定五档），输入直接是
     review dict（其 relevance/semantics/value 即 {"score","reason"}）。
     """
     reviews = [row["review"] for row in rows
@@ -85,7 +85,7 @@ def _group_stats(rows: list[dict]) -> dict:
         "review_missing": missing, "pending": pending,
         "three_judged": sum(all(review[axis]["score"] is not None for axis in _SCORE_AXES)
                             for review in reviews),
-        "metrics": quality_metrics(len(rows), reviews, MAX_SCORE).model_dump() if rows else None,
+        "metrics": quality_metrics(len(rows), reviews).model_dump() if rows else None,
     }
 
 

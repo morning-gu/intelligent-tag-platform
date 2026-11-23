@@ -251,12 +251,12 @@ def test_high_relevance_requires_scoped_evidence():
     assert scores["1"]["semantics"]["score"] == 3
 
 
-def test_legacy_and_current_scores_have_separate_value_coverage(client):
+def test_missing_value_dimension_keeps_separate_coverage(client):
     historical = _item(1)
     del historical["value"]
     results = {
-        "legacy": ("tag-quality-v1", [historical]),
-        "current": ("tag-quality-v2", [
+        "legacy": ("tag-quality-v4", [historical]),
+        "current": ("tag-quality-v5", [
             _item(index, value=rating) for index, rating in enumerate([0, 1, 2, None], start=2)
         ]),
     }
@@ -277,12 +277,13 @@ def test_legacy_and_current_scores_have_separate_value_coverage(client):
 
     report = _wait_report(client, "legacy", "completed")
     assert report["metrics"]["evaluated_tags"] == 5
+    assert report["metrics"]["max_score"] == 4
     assert report["metrics"]["value"] == {
-        "evaluated_tags": 4, "average": 1.0, "high_rate": pytest.approx(1 / 3),
-        "distribution": [1, 1, 1], "undetermined": 1, "undetermined_rate": 0.25,
+        "evaluated_tags": 4, "average": 1.0, "high_rate": 0.0,
+        "distribution": [1, 1, 1, 0, 0], "undetermined": 1, "undetermined_rate": 0.25,
     }
-    assert report["metrics"]["joint_high_rate"] == 1
-    assert report["metrics"]["three_dimension_high_rate"] == pytest.approx(1 / 3)
+    assert report["metrics"]["joint_high_rate"] == 0
+    assert report["metrics"]["three_dimension_high_rate"] == 0
     assert report["metrics"]["undetermined_tags"] == 1
     legacy = next(film for film in report["films"] if film["task_id"] == "legacy")
     assert legacy["labels"][0]["score"]["value"] is None
@@ -290,9 +291,8 @@ def test_legacy_and_current_scores_have_separate_value_coverage(client):
     assert legacy["metrics"]["value"]["undetermined"] == 0
     assert legacy["metrics"]["three_dimension_high_rate"] is None
 
-
-def test_batch_keeps_three_and_five_level_scores_separate(client):
-    ratings = [("old", "tag-quality-v3", 2, 2), ("new", "tag-quality-v4", 4, 3)]
+def test_batch_aggregates_v4_and_v5_on_five_level_scale(client):
+    ratings = [("old", "tag-quality-v4", 4, 3), ("new", "tag-quality-v5", 4, 4)]
     with client.app.state.session_factory() as session:
         for task_id, version, relevance, value in ratings:
             session.add(MediaAsset(asset_id=task_id, asset_type="movie", title=task_id))
@@ -310,19 +310,19 @@ def test_batch_keeps_three_and_five_level_scores_separate(client):
 
     report = _wait_report(client, "new", "completed")
     assert report["metrics"]["coverage"] == 1
-    assert report["metrics"]["max_score"] is None
-    assert report["metrics"]["relevance"]["distribution"] == []
-    assert report["metrics"]["relevance"]["average"] is None
-    assert report["metrics"]["joint_high_rate"] is None
+    assert report["metrics"]["max_score"] == 4
+    assert report["metrics"]["relevance"]["distribution"] == [0, 0, 0, 0, 2]
+    assert report["metrics"]["relevance"]["average"] == 4
+    assert report["metrics"]["joint_high_rate"] == 1
+    assert report["metrics"]["value"]["average"] == 3.5
     films = {film["task_id"]: film["metrics"] for film in report["films"]}
-    assert films["old"]["max_score"] == 2
-    assert films["old"]["three_dimension_high_rate"] == 1
+    assert films["old"]["max_score"] == 4
+    assert films["old"]["three_dimension_high_rate"] == 0
     assert films["new"]["max_score"] == 4
     assert films["new"]["joint_high_rate"] == 1
-    assert films["new"]["three_dimension_high_rate"] == 0
-    assert films["new"]["value"]["distribution"] == [0, 0, 0, 1, 0]
-    assert films["new"]["value"]["average"] == 3
-
+    assert films["new"]["three_dimension_high_rate"] == 1
+    assert films["new"]["value"]["distribution"] == [0, 0, 0, 0, 1]
+    assert films["new"]["value"]["average"] == 4
 
 def test_migration_preserves_existing_production_results(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]

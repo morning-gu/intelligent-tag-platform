@@ -68,7 +68,7 @@ export interface QualityDimension {
 export interface QualityMetrics {
   total_tags: number
   evaluated_tags: number
-  max_score?: 2 | 4 | null
+  max_score?: 4
   coverage: number | null
   joint_high_rate: number | null
   three_dimension_high_rate: number | null

@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, undefer
 
-from tagplatform.capabilities.prompts.quality import FIVE_LEVEL_PROMPT_VERSIONS
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask, TagQualityEvaluation
 from tagplatform.services.eval.tag_quality import (
     MAX_SCORE, PROMPT_VERSION, DimensionMetrics, QualityMetrics, ScoreDetails,
@@ -163,7 +162,6 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
         .order_by(TagGenerationTask.task_id)
     ).all()
     films, scores = [], []
-    scored_scales: set[Literal[2, 4]] = set()
     total = 0
     counts = dict.fromkeys((
         "queued", "running", "completed", "partial", "failed", "not_needed",
@@ -180,16 +178,13 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
             status = evaluation.status
             labels = evaluation.labels
             film_scores = list(evaluation.scores.values())
-            film_max = MAX_SCORE if evaluation.prompt_version in FIVE_LEVEL_PROMPT_VERSIONS else 2
-            if film_scores:
-                scored_scales.add(film_max)
             total += len(labels)
             scores.extend(film_scores)
             films.append(FilmQuality(
                 task_id=film.task_id, asset_id=film.asset_id, title=title, status=status,
                 model=evaluation.model, prompt_version=evaluation.prompt_version,
                 error=evaluation.error, note=evaluation.note,
-                metrics=quality_metrics(len(labels), film_scores, film_max) if labels else None,
+                metrics=quality_metrics(len(labels), film_scores) if labels else None,
                 labels=[{**label, "score": evaluation.scores.get(str(label["id"]))}
                         for label in labels],
             ))
@@ -208,6 +203,5 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
         status = "failed"
     else:
         status = "unavailable"
-    max_score = next(iter(scored_scales), MAX_SCORE) if len(scored_scales) <= 1 else None
     return QualityReport(status=status, incomplete=incomplete, film_counts=counts,
-                         metrics=quality_metrics(total, scores, max_score), films=films)
+                         metrics=quality_metrics(total, scores), films=films)

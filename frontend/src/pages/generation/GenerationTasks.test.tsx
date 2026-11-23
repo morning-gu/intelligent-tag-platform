@@ -482,7 +482,8 @@ describe('GenerationTasks 生产任务页', () => {
     expect(within(closedRow).getByText('内容特征标签/主类型')).toBeInTheDocument()
   })
 
-  it.each([2, 4] as const)('按 %i 分满分显示评分、标准和单片重试', async (maxScore) => {
+  it('按五档满分显示评分、标准和单片重试', async () => {
+    const maxScore = 4 as const
     const dimension = {
       evaluated_tags: 1, average: maxScore, high_rate: 1,
       distribution: Array.from({ length: maxScore + 1 }, (_, score) => Number(score === maxScore)),
@@ -504,7 +505,7 @@ describe('GenerationTasks 生产任务页', () => {
       metrics,
       films: [{
         task_id: 'task-1', asset_id: 'a1', title: '评估影片', status: 'partial',
-        model: 'deepseek-v4.1-flash', prompt_version: maxScore === 4 ? 'tag-quality-v4' : 'tag-quality-v2',
+        model: 'deepseek-v4.1-flash', prompt_version: 'tag-quality-v5',
         error: '一个标签未返回评分', note: null, metrics,
         labels: [{
           id: 11, name: '快照标签', desc: '标签的通用释义', disposition: 'pending',
@@ -547,9 +548,9 @@ describe('GenerationTasks 生产任务页', () => {
     const taskRow = (await screen.findByText('task-1')).closest('tr')!
     fireEvent.click(taskRow.querySelector('.ant-table-row-expand-icon')!)
     expect(await screen.findByText('标签产出与评分')).toBeInTheDocument()
-    expect(screen.getByText(maxScore === 4 ? '五档 0–4' : '三档 0–2')).toBeInTheDocument()
+    expect(screen.getByText('五档 0–4')).toBeInTheDocument()
     expect(screen.getByText('评分统计')).toBeInTheDocument()
-    if (maxScore === 4) {
+    {
       fireEvent.click(screen.getByRole('button', { name: '评分标准' }))
       const standards = await screen.findByRole('dialog')
       expect(within(standards).getByText('五档标签评分标准')).toBeInTheDocument()
@@ -566,7 +567,7 @@ describe('GenerationTasks 生产任务页', () => {
     const labelRow = (await screen.findByText('主角争执')).closest('tr')!
     expect(within(labelRow).getByText('0 分')).toBeInTheDocument()
     expect(within(labelRow).getAllByText(`${maxScore} 分`)[0].closest('.ant-tag')).toHaveClass('ant-tag-success')
-    if (maxScore === 4) expect(within(labelRow).getByText('2 分').closest('.ant-tag')).toHaveClass('ant-tag-warning')
+    expect(within(labelRow).getByText('2 分').closest('.ant-tag')).toHaveClass('ant-tag-warning')
     expect(screen.queryByText('只描述局部事件')).not.toBeInTheDocument()
     fireEvent.click(within(labelRow).getByRole('button', { name: '查看主角争执详情' }))
     const drawer = await screen.findByRole('dialog')
