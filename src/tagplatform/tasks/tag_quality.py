@@ -33,13 +33,15 @@ class QualityExecutor:
     def resume_pending(self) -> None:
         """恢复进程中断前已落库的评估工作。"""
         with self._session_factory() as session:
+            open_tasks = select(TagGenerationTask.task_id).where(TagGenerationTask.mode == "open")
             session.execute(update(TagQualityEvaluation)
-                            .where(TagQualityEvaluation.status == "running")
+                            .where(TagQualityEvaluation.status == "running",
+                                   TagQualityEvaluation.task_id.in_(open_tasks))
                             .values(status="queued"))
             pending = session.execute(
                 select(TagQualityEvaluation.task_id, TagGenerationTask.batch_id)
                 .join(TagGenerationTask, TagGenerationTask.task_id == TagQualityEvaluation.task_id)
-                .where(TagQualityEvaluation.status == "queued")
+                .where(TagQualityEvaluation.status == "queued", TagGenerationTask.mode == "open")
             ).all()
             session.commit()
         samples_by_batch: dict[str, PromptSampleBatch] = {}
@@ -156,7 +158,7 @@ def quality_report(session: Session, task: TagGenerationTask) -> QualityReport:
         select(TagGenerationTask, MediaAsset.title, TagQualityEvaluation)
         .join(MediaAsset, MediaAsset.asset_id == TagGenerationTask.asset_id)
         .outerjoin(TagQualityEvaluation, TagQualityEvaluation.task_id == TagGenerationTask.task_id)
-        .where(same_batch)
+        .where(same_batch, TagGenerationTask.mode == "open")
         .order_by(TagGenerationTask.task_id)
     ).all()
     films, scores = [], []

@@ -61,7 +61,7 @@ class TaskExecutor:
         """同一批影片共享生成和质量评估的提示词采集状态。"""
         samples = (PromptSampleBatch(self._prompt_sample_dir)
                    if self._prompt_sample_dir
-                   and (mode == "open" or self._quality_executor is not None)
+                   and mode == "open"
                    else None)
         for task_id in task_ids:
             self.submit(task_id, prompt_samples=samples)
@@ -90,7 +90,8 @@ class TaskExecutor:
             with self._session_factory() as session:
                 task = run_generation_task(task_id, session, self._llm, self._embedder,
                                            prompt_samples=prompt_samples)
-                if task.status != "succeeded" or self._quality_executor is None:
+                if (task.status != "succeeded" or task.mode != "open"
+                        or self._quality_executor is None):
                     return
             self._quality_executor.submit(task_id, prompt_samples=prompt_samples)
         except Exception:

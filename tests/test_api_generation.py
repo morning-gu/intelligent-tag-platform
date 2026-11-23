@@ -119,6 +119,11 @@ def test_generation_e2e_closed_succeeded(client):
     assert detail["task_id"] == task_id
     assert detail["asset_id"] == "movie_001"
     assert detail["mode"] == "closed" and detail["status"] == "succeeded"
+    assert detail["quality_evaluation"] is None
+    from tagplatform.capabilities.storage.models import TagQualityEvaluation
+    with client.app.state.session_factory() as session:
+        assert session.get(TagQualityEvaluation, task_id) is None
+    assert client.post(f"/api/v1/generation/tasks/{task_id}/quality/retry").status_code == 409
     assert detail["model_version"] == "mock-1"
     # prompt_version 列为 TEXT：API 响应以字符串出现（T8 附注）
     assert detail["prompt_version"] == "1"

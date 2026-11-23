@@ -70,7 +70,7 @@ class GenerationTaskDetail(GenerationTaskOut):
     """任务详情：在列表字段之上附该任务全部结果摘要行。"""
 
     results: list[GenerationResultOut]
-    quality_evaluation: QualityReport
+    quality_evaluation: QualityReport | None
 
 
 class GenerationTaskRetryResponse(BaseModel):
@@ -172,7 +172,7 @@ def create_generation_tasks(
             asset_id=asset.asset_id,
             mode=mode,
             batch_id=batch_id,
-            quality_model=quality_model,
+            quality_model=quality_model if mode == "open" else None,
             policy_json=policy_json,
             status="queued",
             created_at=now,
@@ -255,7 +255,7 @@ def get_task_detail(session: Session, task_id: str) -> GenerationTaskDetail:
         created_at=task.created_at,
         finished_at=task.finished_at,
         results=[_result_out(row, info, library) for row in rows],
-        quality_evaluation=quality_report(session, task),
+        quality_evaluation=quality_report(session, task) if task.mode == "open" else None,
     )
 
 
@@ -266,8 +266,11 @@ def retry_quality_evaluation(
     model: str | None,
 ) -> GenerationTaskRetryResponse:
     """影片质量评估重跑：仅 failed/部分完成可重试（否则 409）；受理回 queued。"""
-    if session.get(TagGenerationTask, task_id) is None:
+    task = session.get(TagGenerationTask, task_id)
+    if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
+    if task.mode != "open":
+        raise HTTPException(status_code=409, detail="仅开放生成任务支持质量评估")
     if not queue_retry(session, task_id, model):
         raise HTTPException(status_code=409, detail="仅失败或部分完成的影片评估可重试")
     executor.submit(task_id)

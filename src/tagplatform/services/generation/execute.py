@@ -162,7 +162,8 @@ def run_generation_task(
 
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
         #    （标签库随 spec 携带，此处取 spec.library）
-        snapshot(session, task, spec, summary, asset.content_json, spec.library)
+        if task.mode == "open":
+            snapshot(session, task, spec, summary, asset.content_json, spec.library)
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致。口径版本
         # 由 producer 协议成员声明（Task 4：closed "1"、open MTG_VERSION，
