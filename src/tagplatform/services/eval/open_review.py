@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import nullcontext
 
 from tagplatform.capabilities.prompts.open_review import (
@@ -138,20 +139,36 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
             row.update({"pass": None, "reason": error, "evidence_scene_ids": [], "evaluated": False})
         else:
             label = labels[index]
-            cited = set(verdict["evidence_scene_ids"]) & scenes
+            allowed = scenes
             if label["level"] == "scene":
-                cited &= set(label["scene_ids"])
-            verdict["evidence_scene_ids"] = sorted(cited)
-            relevance = verdict["relevance"]["score"]
+                allowed = scenes.intersection(label["scene_ids"])
+            cited = allowed.intersection(verdict["evidence_scene_ids"])
+            relevance = verdict["relevance"]
             minimum = {"scene": 1, "film": 2}.get(label["level"], 1)
-            if isinstance(relevance, int) and relevance >= 3 and len(cited) < minimum:
-                verdict["relevance"] = {"score": None, "reason": "有效来源场景不足，无法核验所给相关性高分"}
+            if relevance["score"] in (3, 4) and len(cited) < minimum:
+                # Some responses cite the actual scene only in the written rationale.
+                rationale = f"{relevance['reason']}\n{verdict['reason']}"
+                cited.update(_scene_mentions(rationale, allowed))
+                if len(cited) < minimum:
+                    reason = "有效引用场景不足，无法核验所给相关性高分"
+                    if relevance["reason"]:
+                        reason += "。模型理由：" + relevance["reason"]
+                    verdict["relevance"] = {"score": None, "reason": reason}
+            verdict["evidence_scene_ids"] = sorted(cited)
             if not (label["desc"] or "").strip():
                 verdict["semantics"] = {"score": None, "reason": "缺少释义"}
             row.update(verdict, evaluated=True)
     if not results:
         raise ReviewRequestError("；".join(dict.fromkeys(errors.values())))
     return tag_rows
+
+
+def _scene_mentions(text: str, scene_ids: set[str]) -> set[str]:
+    """Find complete, known scene IDs in a rationale without matching substrings."""
+    if not scene_ids:
+        return set()
+    ids = "|".join(re.escape(scene_id) for scene_id in sorted(scene_ids, key=len, reverse=True))
+    return set(re.findall(rf"(?<![A-Za-z0-9_-])(?:{ids})(?![A-Za-z0-9_-])", text))
 
 
 def _parse_reviews(raw: str, total: int) -> dict[int, dict]:

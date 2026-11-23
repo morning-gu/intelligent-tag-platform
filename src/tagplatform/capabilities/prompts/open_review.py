@@ -1,7 +1,7 @@
 """开放评测整片盲评提示词。"""
 from tagplatform.capabilities.prompts import quality as quality_prompts
 
-REVIEW_PROMPT_VERSION = "open-review-v7"
+REVIEW_PROMPT_VERSION = "open-review-v8"
 REVIEW_PROTOCOL_NOTE = """
 ## 开放评测补充规则
 同时阅读整片产出的标签。只评「待评估标签」中的条目，保留各自的 id。
@@ -10,7 +10,8 @@ REVIEW_PROTOCOL_NOTE = """
 哪一条表达更准确具体，说明其余标签是否仍有独立保留价值。不同场景的片段定位用途可以独立成立。
 
 分别返回三维评分（0–4 或 null）和每个维度的理由。相关性达到 3 或 4 时，返回实际支撑结论的
-evidence_scene_ids。film 至少两处独立场景，scene 必须来自该标签的 scene_ids。
+evidence_scene_ids。每条都必须包含该字段，无引用时返回空列表。film 至少两处独立场景，
+scene 必须来自该标签的 scene_ids。引用时写完整 ID，例如 scene_001。
 缺少释义时 semantics 填 null 并说明原因。
 
 另外独立判断这个标签是否值得作为该片的最终标签保留。综合它是否准确反映影片、

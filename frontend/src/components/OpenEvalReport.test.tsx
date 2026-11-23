@@ -53,7 +53,7 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
     tt: 'tt0000001', title: '铁道游击队', ok: true, error: null,
     review_error: null, elapsed_ms: 1000, n_hits: 1, n_new_words: 1,
     hits: [{
-      tag_id: 't1', tag_name: '悬疑', desc: null, level: 'film',
+      tag_id: 't1', tag_name: '悬疑', desc: null, scene_ids: ['scene_025'], level: 'film',
       judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据', quote: '原文摘录' },
       review: review(true),
     }],
@@ -176,6 +176,9 @@ describe('OpenEvalReport 报告视图', () => {
     fireEvent.click(expandButtons[0])
     expect(await within(section).findByText('有独立检索价值，建议保留')).toBeInTheDocument()
     expect(within(section).getByText('评审理由')).toBeInTheDocument()
+    expect(within(section).getByText('生成来源场景')).toBeInTheDocument()
+    expect(within(section).getByText('scene_025')).toBeInTheDocument()
+    expect(within(section).getByText('评审引用场景')).toBeInTheDocument()
     expect(await within(section).findByText('judge 依据')).toBeInTheDocument()
     expect(within(section).getByText(/生产 judge，仅供参考/)).toBeInTheDocument()
     expect(within(section).getAllByText('原文摘录').length).toBeGreaterThan(0)

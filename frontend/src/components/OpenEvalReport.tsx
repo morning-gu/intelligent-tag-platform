@@ -95,6 +95,7 @@ interface LabelRow {
   key: string
   group: '命中' | '新词'
   name: string
+  sceneIds: string[]
   desc: string | null
   level: string | null
   judge_reference: JudgeReference | null
@@ -108,6 +109,7 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       key: `${movie.tt}-hit-${index}`,
       group: '命中' as const,
       name: hit.tag_name,
+      sceneIds: hit.scene_ids ?? [],
       desc: hit.desc,
       level: hit.level,
       judge_reference: hit.judge_reference,
@@ -117,6 +119,7 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       key: `${movie.tt}-new-${index}`,
       group: '新词' as const,
       name: word.name,
+      sceneIds: word.scene_ids ?? [],
       desc: word.desc,
       level: word.level,
       judge_reference: word.judge_reference,
@@ -165,6 +168,7 @@ function labelDetail(row: LabelRow, modelDecision: boolean) {
   return (
     <Descriptions size="small" column={1} items={[
       { key: 'reason', label: modelDecision ? '评审理由' : '评分理由汇总', children: row.review?.reason || '—' },
+      { key: 'source', label: '生成来源场景', children: row.sceneIds.join('、') || '—' },
       { key: 'evidence', label: '评审引用场景', children: row.review?.evidence_scene_ids?.join('、') || '—' },
       { key: 'quote', label: '生产 judge 摘录', children: reference?.quote || '—' },
       {

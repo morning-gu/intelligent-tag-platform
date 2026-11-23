@@ -489,6 +489,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert len(row1["hits"]) == 2 and len(row1["new_words"]) == 1
     h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
     assert h1["desc"] == "评测夹具标签"
+    assert h1["scene_ids"] == ["scene_001"]
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
     assert h1["review"]["reason"] == "场景检索有独立价值"
@@ -498,7 +499,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert hx["review"]["pass"] is None
     assert hx["review"]["semantics"]["score"] is None
     nw = row1["new_words"][0]
-    assert set(nw) == {"name", "desc", "level", "judge_reference", "review"}
+    assert set(nw) == {"name", "desc", "level", "scene_ids", "judge_reference", "review"}
     assert nw["name"] == "新词甲" and nw["review"]["pass"] is True
 
     # 增量进度：每片一行，review="ok"

@@ -170,6 +170,24 @@ def test_scene_evidence_must_be_in_target_scene_ids():
     assert result["evidence_scene_ids"] == []
 
 
+def test_rationale_supplies_full_valid_scene_ids_when_structured_field_is_incomplete():
+    client = StubClient(default=_v(
+        evidence=["scene_001"], reason="在scene_001确认起因", overall="scene_002体现结果，建议保留"))
+    result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")[0]
+    assert result["evidence_scene_ids"] == ["scene_001", "scene_002"]
+    assert result["relevance"]["score"] == 4
+
+
+def test_rationale_cannot_supply_wrong_scene_or_a_partial_id():
+    client = StubClient(default=_v(
+        evidence=[], reason="scene_002 和 scene_001_extra", overall="引用了另一场"))
+    result = review_movie_tags(client, _content(), [_rows()[1]], run_id="r1:m1")[0]
+    assert result["evidence_scene_ids"] == []
+    assert result["relevance"]["score"] is None
+    assert "scene_001_extra" in result["relevance"]["reason"]
+    assert result["pass"] is True
+
+
 def test_honors_modalities():
     client = StubClient(default=_v())
     result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1",

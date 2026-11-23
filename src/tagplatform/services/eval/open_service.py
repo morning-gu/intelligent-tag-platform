@@ -801,10 +801,11 @@ class OpenEvalService:
                        "level": item.get("level"),
                        "judge_reference": reference, "review": None}
                 new_words.append(row)
+            row["scene_ids"] = list(item.get("scene_ids") or [])
             review_rows.append({
                 "name": item["name"], "desc": item.get("desc"),
                 "level": item.get("level"),
-                "scene_ids": list(item.get("scene_ids") or []),
+                "scene_ids": row["scene_ids"],
             })
             owners.append(row)
         with self._lock:

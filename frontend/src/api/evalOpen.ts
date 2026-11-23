@@ -86,6 +86,7 @@ export interface OpenHitRow {
   tag_name: string
   desc: string | null
   level: string | null
+  scene_ids?: string[]
   judge_reference: JudgeReference | null
   review: TagReview | null
 }
@@ -95,6 +96,7 @@ export interface OpenNewWordRow {
   name: string
   desc: string | null
   level: string
+  scene_ids?: string[]
   judge_reference: JudgeReference | null
   review: TagReview | null
 }
