@@ -772,6 +772,38 @@ def test_cancel_keeps_completed_results(open_setup, root6):
 
 # ---------------------------------------------------------------- 历史扫描
 
+def test_rereview_reuses_snapshot_without_produce(open_setup):
+    """rereview 复用产出快照重评审：不重跑生成，换评审替身后报告更新。"""
+    svc, fake = open_setup()
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)
+    d = _run_dir(svc, run_id)
+    assert (d / "produced" / "tt0000001.json").exists()  # 产出快照落盘
+    calls_before = len(fake.calls)
+    # 换评审替身为失败 → rereview 后评审失败但产出保留，produce 不重跑
+    svc._review_client = _ReviewFailStub()
+    out = svc.rereview(run_id)
+    assert out["reviewed"] == 2 and out["review_failed"] == 2
+    assert len(fake.calls) == calls_before  # 没重跑生成
+    report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+    assert report["sample_accounting"]["review_failed"] == 2
+    assert report["summary"]["total_tags"] == 5  # 产出不作废
+    assert report["summary"]["pass_rate"] is None  # 评审失败排除出分母
+
+
+def test_rereview_rejects_active_run(open_setup):
+    svc, _ = open_setup()
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    # 终态后注册表已清；手动塞回活跃态模拟在跑
+    from tagplatform.services.eval.open_service import RunActiveError, RunState
+    svc._runs[run_id] = RunState(run_id=run_id, status="running", done=0,
+                                 total=2, failed=0, started_at="t")
+    with pytest.raises(RunActiveError):
+        svc.rereview(run_id)
+
+
 def test_history_summary_from_report(open_setup):
     """history 五摘要键由 _read_open_summary 读 report.json（Task 5 接线）；
     磁盘 running 残留不在注册表 → interrupted、无报告 → 五键 None。"""

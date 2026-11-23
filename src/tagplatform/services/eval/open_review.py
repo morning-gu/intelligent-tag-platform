@@ -94,6 +94,10 @@ def make_review_client(settings: Settings, llm):
         api_key_env=settings.open_eval_review_api_key_env or settings.llm_api_key_env,
         temperature=0.0,
         request_interval=settings.llm_request_interval,
+        # 评审输出上限（镜像 tag_quality 的 8192）：推理模型面对整片标签
+        # 会无上限地推理，不设上限会撞 SDK 超时再重试、整片评审卡死。
+        # 超限截断走既有二分切分，代价可控。
+        max_tokens=8192,
     )
 
 

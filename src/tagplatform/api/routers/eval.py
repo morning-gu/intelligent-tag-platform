@@ -317,6 +317,16 @@ def open_cancel_run(
     return eval_orch.cancel_open_run(service, run_id)
 
 
+@open_router.post("/runs/{run_id}/rereview")
+def open_rereview_run(
+    run_id: str,
+    _admin: UserAccount = Depends(require_admin),
+    service=Depends(get_open_eval),
+) -> dict:
+    """复用产出快照重新评审（不重跑生成）：换评审模型/阈值后重评审。"""
+    return eval_orch.rereview_open_run(service, run_id)
+
+
 @open_router.delete("/runs/{run_id}")
 def open_delete_run(
     run_id: str,

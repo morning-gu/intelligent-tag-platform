@@ -282,9 +282,9 @@ banner 明写：通过率绝对值系统性偏高，趋势对比可用、绝对�
 
 ### 产物与历史
 
-每个 run 落 `<run_id>/` 六件 + audit/：meta.json（口径快照）、
+每个 run 落 `<run_id>/` 六件 + audit/ + produced/：meta.json（口径快照）、
 progress.jsonl（增量落盘）、raw_results.json（逐片留痕，含三维评审与
-judge 参考）、report.json（前端契约结构）、report.md（人读版）、
+judge 参考）、produced/<tt>.json（产出快照，供重评审复用）、report.json（前端契约结构）、report.md（人读版）、
 metrics.csv（长表 `metric,value,n`：通过率族 + 三维均分/满分率 +
 新词占比），`audit/<tt>.json` 为 mtg 管线自落的评审官审计（报告 judge
 段跨片聚合读它）。报告头 banner 聚合三档警示：部分运行（status 未全量
@@ -294,6 +294,11 @@ meta.status=running 且无进程内注册表项 → `interrupted`；摘要五键
 （pass_rate / new_pass / hit_pass / new_ratio / three_high）直读
 report.json 的 summary，缺失或截断 → null（宁缺勿假）。**与闭环评测
 独立口径组不横比**；同片集下只做定性对照。
+
+**重评审（rereview）**：`POST /runs/{id}/rereview` 复用 produced/ 快照
+重新评审、重写报告，**不重跑生成**——换评审模型或阈值后想看新口径效果
+时用。评审客户端设 `max_tokens=8192` 上限（镜像质量评估），防推理模型
+无上限推理撞 SDK 超时；超限截断走既有二分切分。
 
 ---
 

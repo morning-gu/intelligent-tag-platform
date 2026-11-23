@@ -624,6 +624,19 @@ def cancel_open_run(service, run_id: str) -> dict:
     return {"ok": service.cancel(run_id)}
 
 
+def rereview_open_run(service, run_id: str) -> dict:
+    """复用产出快照重新评审（不重跑生成）→ {run_id, reviewed, review_failed}。
+
+    错误映射：活跃 run → 409；非终态/不存在 → 400。换评审模型或阈值后
+    想看新口径效果时用，DB 零写入红线不变。"""
+    try:
+        return service.rereview(run_id)
+    except OpenRunActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except OpenEvalValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def delete_open_run(service, run_id: str) -> dict:
     """删除终态 open run（磁盘产物 + 进程内注册表，镜像 delete_eval_run）。
 
