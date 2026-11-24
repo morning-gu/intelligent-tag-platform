@@ -330,9 +330,8 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
                          dirs: list[dict] | None = None) -> list[dict]:
     """构造 judge 请求：候选清单 + 内容证据，要求逐条判定。
 
-    candidates 每项：{tag, dimension, scope, reason, scenes, dir}
-    dirs 非空时追加目录契合段（候选行标出各自的目标目录 id），judge 必须
-    逐条给 in_dir——生成侧的目录约束只是提示词，这里才是硬闸。
+    candidates 每项：{tag, dimension, scope, reason, scenes, dir_ids}。
+    有目录的候选逐项判 dir_fits，无目录的候选只做评分。
     """
     lines = []
     for candidate in candidates:
@@ -341,8 +340,8 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
         if candidate.get("scope"):
             marks.append(candidate["scope"])
             marks.append("依据场景 " + "、".join(candidate["scenes"]))
-        if candidate.get("dir"):
-            marks.append(f"目录 {candidate['dir']}")
+        if candidate.get("dir_ids"):
+            marks.append("目录 " + "、".join(candidate["dir_ids"]))
         if marks:
             reason = f"〔{'｜'.join(marks)}〕{reason}"
         lines.append(candidate_line(candidate["tag"], candidate.get("dimension"), reason))

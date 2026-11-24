@@ -340,10 +340,11 @@ def test_dir_injection_can_be_disabled(session, content_fixture, tmp_path,
 
 
 class _DirFitJudge:
-    """三维给过线分、按标签名给 in_dir 的 judge 桩（记录请求原文）。"""
+    """三维给过线分，按标签或目录设置契合结果。"""
 
-    def __init__(self, unfit=()):
+    def __init__(self, unfit=(), *, fit_dirs=None):
         self.unfit = set(unfit)
+        self.fit_dirs = fit_dirs
         self.prompts: list[str] = []
 
     def complete(self, messages, run_id):
@@ -351,12 +352,18 @@ class _DirFitJudge:
         self.prompts.append(text)
         match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
         quote = match.group(1)[:12] if match else ""
-        items = [{
-            "tag": line[2:].split("｜")[0], "relevance": 4, "semantics": 3,
-            "value": 3, "confidence": 0.9, "scenes": [], "quote": quote,
-            "reason": "桩判定",
-            "in_dir": line[2:].split("｜")[0] not in self.unfit,
-        } for line in text.splitlines() if line.startswith("- ") and "｜" in line]
+        items = []
+        candidates = text.partition("## 候选标签\n")[2].partition("## 影片内容\n")[0]
+        for tag, meta in re.findall(r"^- (.+?)｜(.+)$", candidates, re.MULTILINE):
+            dirs = re.search(r"(?:〔|｜)目录 ([^〕]+)〕", meta)
+            verdict = {"tag": tag, "relevance": 4, "semantics": 3, "value": 3,
+                       "confidence": 0.9, "scenes": [], "quote": quote, "reason": "桩判定"}
+            if dirs:
+                verdict["dir_fits"] = {
+                    dir_id: tag not in self.unfit and (self.fit_dirs is None or dir_id in self.fit_dirs)
+                    for dir_id in dirs[1].split("、")
+                }
+            items.append(verdict)
         return LLMResponse(content=json.dumps(items, ensure_ascii=False),
                            usage={}, raw={}, ok=True)
 
@@ -405,7 +412,7 @@ def test_round_goal_yields_to_the_directory_definition(content_fixture):
 
 
 def test_mock_pipeline_round_trips_dir_fit(session, content_fixture, tmp_path, monkeypatch):
-    """唯一可扩展目录时，mock 全链路也走目录契合段（判决带 in_dir）。"""
+    """唯一可扩展目录时，mock 全链路也走目录契合段（判决带 dir_fits）。"""
     settings = Settings(
         use_mock_llm=True, mtg_judge_enabled=True,
         dataset_root=str(tmp_path / "movienet"),
@@ -419,4 +426,57 @@ def test_mock_pipeline_round_trips_dir_fit(session, content_fixture, tmp_path, m
 
     assert out and all(tag.dir_id == "dir_theme" for tag in out)
     verdicts = _report(tmp_path, "mockfit")["verdicts"]
-    assert verdicts and all(row["in_dir"] is True for row in verdicts)
+    assert verdicts and all(row["dir_fits"] == {"dir_theme": True} for row in verdicts)
+
+
+def test_catalog_match_survives_incompatible_model_directory(
+        session, content_fixture, dir_settings, monkeypatch):
+    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "catalog-mismatch")
+    judge = _DirFitJudge(unfit={"动作"})
+
+    out = OpenTagProducer().produce(
+        spec, session, _GenLLM([{**_ITEM, "tag": "动作", "dir": "dir_theme"}]),
+        MOCK_EMBEDDER, judge_client=judge)
+
+    assert [(tag.origin, tag.dir_id) for tag in out] == [("catalog", "dir_genre")]
+
+
+def test_fallback_only_uses_its_own_positive_directory_verdict(
+        session, content_fixture, dir_settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
+    # 把不契合的可挂载目录排在首位，验证回退不会借用另一目录的判决。
+    from tagplatform.services.tags.library import DirAssignment
+    monkeypatch.setattr(mtg_pipeline, "rank_dir_assignments", lambda *_: [
+        DirAssignment("dir_scene", "微观语义标签", "scene"),
+        DirAssignment("dir_theme", "细分题材", "content"),
+    ])
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "fallback-fit")
+    judge = _DirFitJudge(fit_dirs={"dir_theme"})
+
+    out = OpenTagProducer().produce(
+        spec, session, _GenLLM([{**_ITEM, "scope": "scene", "dir": None}]),
+        MOCK_EMBEDDER, judge_client=judge)
+
+    assert out and all(tag.dir_id == "dir_theme" for tag in out)
+    audit = _report(tmp_path, "fallback-fit")
+    assert audit["verdicts"][0]["dir_fits"] == {"dir_scene": False, "dir_theme": True}
+    assert audit["accepted"][0]["dir_source"] == "fallback"
+
+
+def test_model_directory_outside_generation_hint_is_still_checked(
+        session, content_fixture, dir_settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
+    monkeypatch.setattr(dir_settings, "open_dir_hint_max", 1)
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "out-of-hint")
+    out = OpenTagProducer().produce(
+        spec, session, _GenLLM([{**_ITEM, "dir": "dir_scene"}]), MOCK_EMBEDDER,
+        judge_client=_DirFitJudge(unfit={_ITEM["tag"]}))
+
+    audit = _report(tmp_path, "out-of-hint")
+    assert "dir_scene" not in audit["dir_hint"]
+    assert audit["verdicts"][0]["dir_fits"]["dir_scene"] is False
+    assert not out

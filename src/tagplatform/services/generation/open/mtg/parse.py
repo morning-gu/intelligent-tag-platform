@@ -213,21 +213,10 @@ def _clean_score(value):
     return _MISSING
 
 
-def parse_judge_items(text: str, *, require_dir_fit: bool = False) -> list[dict]:
-    """审核输出 → [{tag, relevance, semantics, value, in_dir, confidence,
-    scenes, quote, reason}]（三维分值 0-4 或 None）。
+def parse_judge_items(text: str) -> list[dict]:
+    """解析三维分和证据，目录结论由调用方按候选的目标目录校验。
 
-    `require_dir_fit`（judge 请求带了目标目录块时为真）要求每条给布尔
-    `in_dir`；漏字段或非布尔同样按协议错误处理。没要求时 in_dir 记 None
-    （未校验），过滤层不拿它淘汰候选。
-
-    文案与解析互为协议：judge 提示词（prompts.JUDGE_CRITERIA / JUDGE_ROLE_BRIEF）
-    与重试提示（JUDGE_RETRY_HINT）描述的输出形状就是本函数的输入契约——
-    分值范围、可空轴、quote/reason 截断上限与本函数硬编码一致；
-    改字段名、分值范围或 JSON 形状时提示与解析两侧必须同改。
-
-    条目违协议（漏字段 / 非法值 / value 填 null）时抛 MTGParseError，
-    `items` 带上同批已合格的判决供上层末轮兜底。
+    部分条目的分数或证据字段违协议时，异常仍携带同批可用判决。
     """
     items: list[dict] = []
     problems: list[str] = []
@@ -252,12 +241,6 @@ def parse_judge_items(text: str, *, require_dir_fit: bool = False) -> list[dict]
                 broken.append(f"{axis} 不接受 null")
             else:
                 scores[axis] = score
-        in_dir = entry.get("in_dir")
-        if not isinstance(in_dir, bool):
-            if require_dir_fit:
-                broken.append("in_dir 漏字段" if "in_dir" not in entry
-                              else f"in_dir 非法值 {in_dir!r}")
-            in_dir = None
         raw_scenes = entry.get("scenes")
         if raw_scenes is not None and (not isinstance(raw_scenes, list)
                                        or any(not isinstance(s, str) for s in raw_scenes)):
@@ -270,7 +253,7 @@ def parse_judge_items(text: str, *, require_dir_fit: bool = False) -> list[dict]
         items.append({
             "tag": tag,
             **scores,
-            "in_dir": in_dir,
+            "dir_fits": entry.get("dir_fits"),
             "confidence": _clamp_confidence(entry.get("confidence")),
             "scenes": scenes,
             "quote": str(entry.get("quote") or "").strip()[:60],

@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v10-judge-coverage`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v11-target-directory`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
@@ -77,7 +77,8 @@ class _JudgeClient:
     def complete(self, messages, run_id):
         self.calls += 1
         text = messages[0]["content"]
-        rows = [line[2:] for line in text.splitlines()
+        candidates = text.partition("## 候选标签\n")[2].partition("## 影片内容\n")[0]
+        rows = [line[2:] for line in candidates.splitlines()
                 if line.startswith("- ") and "｜" in line]
         match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
         quote = self.quote
@@ -88,7 +89,9 @@ class _JudgeClient:
             tag = row.split("｜")[0]
             if tag == self.omit:
                 continue
+            dirs = re.search(r"(?:〔|｜)目录 ([^〕]+)〕", row)
             items.append({
+                "dir_fits": dict.fromkeys(dirs[1].split("、"), True) if dirs else {},
                 "tag": row if self.echo_full else tag,
                 "relevance": self.relevance,
                 "semantics": self.semantics,
@@ -133,7 +136,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v10-judge-coverage"
+    assert producer.prompt_version == "mtg-v11-target-directory"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -151,7 +154,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v10-judge-coverage"
+    assert report["version"] == "mtg-v11-target-directory"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
@@ -254,14 +257,16 @@ def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
                                usage={"prompt_tokens": 10, "completion_tokens": 5},
                                raw={}, ok=True)
 
+    dir_fits = dict.fromkeys(["dir_theme", "dir_scene", "dir_char"], True)
+
     def verdict(tag):
         return {"tag": tag, "relevance": 4, "semantics": 3, "value": 3,
                 "confidence": 0.9, "scenes": ["scene_001"],
-                "quote": "两名人物在仓库中发生激烈争执", "reason": "桩"}
+                "quote": "两名人物在仓库中发生激烈争执", "reason": "桩", "dir_fits": dir_fits}
 
     keyed = {"relevance": 4, "semantics": 3, "value": 3,
              "confidence": 0.9, "scenes": ["scene_001"],
-             "quote": "两名人物在仓库中发生激烈争执"}
+             "quote": "两名人物在仓库中发生激烈争执", "dir_fits": dir_fits}
     for payload in ({"verdicts": [verdict("多线叙事"), verdict("情感张力"),
                                   verdict("视听风格")]},
                     {"多线叙事": dict(keyed), "情感张力": dict(keyed),

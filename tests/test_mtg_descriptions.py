@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 import json
-import re
 
 import pytest
-from conftest import MOCK_EMBEDDER
+from conftest import MOCK_EMBEDDER, MOCK_LLM
 
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
@@ -45,25 +44,6 @@ def _spec(content, run_id: str) -> GenerationSpec:
         policy=GenerationPolicy(), prompt_text="", run_id=run_id,
         library=try_load_library(),
     )
-
-
-class _Judge:
-    """全给过线三维分（4/3/3）的 judge 桩：引用首个场景行的原文。"""
-
-    def complete(self, messages, run_id):
-        text = messages[0]["content"]
-        match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
-        quote = match.group(1)[:12] if match else ""
-        items = []
-        for line in text.splitlines():
-            if line.startswith("- ") and "｜" in line:
-                items.append({"tag": line[2:].split("｜")[0],
-                              "relevance": 4, "semantics": 3, "value": 3,
-                              "confidence": 0.9,
-                              "scenes": [], "quote": quote, "reason": "桩"})
-        return LLMResponse(content=json.dumps(items, ensure_ascii=False),
-                           usage={"prompt_tokens": 10, "completion_tokens": 5},
-                           raw={}, ok=True)
 
 
 class _TwoStageLLM:
@@ -199,7 +179,7 @@ def test_pipeline_uses_model_desc_without_extra_call(session, content_fixture,
         descs=[("多线叙事", "不该被用到")])
     out = OpenTagProducer().produce(
         _spec(content_fixture, "d1"), session, llm, MOCK_EMBEDDER,
-        judge_client=_Judge())
+        judge_client=MOCK_LLM)
     assert len(out) == 1
     assert out[0].candidate_description == "以多条时间线并行推进的叙事结构"
     assert llm.desc_calls == 0  # 合规就不再补写
@@ -209,7 +189,7 @@ def test_pipeline_backfills_when_desc_missing(session, content_fixture, mtg_sett
     llm = _TwoStageLLM([_tag()], descs=[("多线叙事", "以多条时间线并行推进的叙事结构")])
     out = OpenTagProducer().produce(
         _spec(content_fixture, "d2"), session, llm, MOCK_EMBEDDER,
-        judge_client=_Judge())
+        judge_client=MOCK_LLM)
     assert out[0].candidate_description == "以多条时间线并行推进的叙事结构"
     assert llm.desc_calls == 1
 
@@ -222,5 +202,5 @@ def test_pipeline_drops_plot_style_desc_instead_of_storing_it(
                        descs=[("多线叙事", "示例电影的多线叙事")])  # 仍含片名
     out = OpenTagProducer().produce(
         _spec(content_fixture, "d3"), session, llm, MOCK_EMBEDDER,
-        judge_client=_Judge())
+        judge_client=MOCK_LLM)
     assert out[0].candidate_description is None

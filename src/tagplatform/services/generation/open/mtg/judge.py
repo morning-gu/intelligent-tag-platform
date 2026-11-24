@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 
 def build_judge_template() -> dict:
-    line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
+    line = candidate_line("{{候选标签}}", "{{维度}}",
+                          "〔目录 {{目录 ID}}〕{{生成侧的简短理由}}")
     dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
              "description": "{{目录定义}}"}]
     return {
@@ -85,17 +86,21 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
     usage 传入 dict 时累计本阶段的调用数与 tokens（审计报告用）；
     trace 传入 dict 时记录逐次原始响应（`raw`）、解析错误（`errors`）与
     末轮兜底保住的判决条数（`salvaged`）——审计据此还原异常形态。
-    dirs 非空时要求逐条判目录契合（in_dir），漏给按协议错误重试。
+    目录契合按候选及其目标目录校验。目录漏判时仍保留已有的三维评分。
     """
     if not candidates:
         return {}
     pending = {normalize_key(row["tag"]): row for row in candidates}
     verdicts: dict[str, dict] = {}
+    dir_index = {entry["dir_id"]: entry for entry in (dirs or [])}
     last_error = ""
     last_raw = ""
     for attempt in range(retries + 1):
+        dir_ids = dict.fromkeys(dir_id for row in pending.values()
+                                for dir_id in row.get("dir_ids", []))
         request = build_judge_messages(
-            content, list(pending.values()), include_dialogue=include_dialogue, dirs=dirs)
+            content, list(pending.values()), include_dialogue=include_dialogue,
+            dirs=[dir_index[dir_id] for dir_id in dir_ids])
         if attempt:
             request[0]["content"] += JUDGE_RETRY_HINT
         response = client.complete(request, f"{run_id}:judge{'' if attempt == 0 else attempt}")
@@ -108,18 +113,33 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         problems = []
         if response.ok:
             try:
-                items = parse_judge_items(raw_text, require_dir_fit=bool(dirs))
+                items = parse_judge_items(raw_text)
             except MTGParseError as exc:
                 items = exc.items
                 problems.append(str(exc))
             for key, item in _map_items(items, candidates).items():
-                if key in pending:
-                    verdicts[key] = item
+                if key not in pending:
+                    continue
+                expected = pending[key].get("dir_ids", [])
+                reported = item.pop("dir_fits")
+                verdict = verdicts.setdefault(key, item)
+                fits = verdict.setdefault("dir_fits", {})
+                if isinstance(reported, dict):
+                    for dir_id in expected:
+                        decision = reported.get(dir_id)
+                        if isinstance(decision, bool):
+                            fits.setdefault(dir_id, decision)
+                missing_dirs = [dir_id for dir_id in expected if dir_id not in fits]
+                if missing_dirs:
+                    problems.append(f"{item['tag']}：缺少有效目录判决 " + "、".join(missing_dirs))
+                    pending[key] = {**pending[key], "dir_ids": missing_dirs}
+                else:
                     pending.pop(key)
         else:
             problems.append(f"judge 调用失败: {response.raw.get('error')}")
-        if pending:
-            problems.append("缺少有效判决：" + "、".join(row["tag"] for row in pending.values()))
+        missing_tags = [row["tag"] for key, row in pending.items() if key not in verdicts]
+        if missing_tags:
+            problems.append("缺少有效判决：" + "、".join(missing_tags))
         if problems:
             last_error = "；".join(problems)
             if trace is not None:
@@ -132,4 +152,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         if trace is not None:
             trace["salvaged"] = len(verdicts)
         logger.warning("judge 部分候选未判，保留 %d 条合格判决：%s", len(verdicts), last_error)
+    for verdict in verdicts.values():
+        if not verdict["dir_fits"]:
+            verdict.pop("dir_fits")
     return verdicts
