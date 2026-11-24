@@ -141,14 +141,16 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getByText('三维同时满分 25.0%')).toBeInTheDocument()
   })
 
-  it('judge 审计段：数量漏斗 + 三维聚合 + dropped 中文键 + bands', () => {
+  it('judge 审计段：漏斗图 + 三维聚合 + dropped 中文键 + bands', () => {
     render(<OpenEvalReport report={baseReport()} runId={RUN_ID} />)
     const section = screen.getByRole('region', { name: 'judge 审计' })
-    expect(within(section).getByText('Judge 通过（按合并候选）')).toBeInTheDocument()
-    expect(within(section).getByText('Judge 通过（按已评分候选）')).toBeInTheDocument()
-    // 保留/上游计数：passed/merged、passed/verdicts、final/merged 三处 2 / 4
-    expect(within(section).getAllByText('2 / 4')).toHaveLength(3)
-    expect(within(section).getAllByText('50.0%')).toHaveLength(4)
+    expect(within(section).getByRole('img', { name: /生产数量漏斗/ })).toBeInTheDocument()
+    expect(within(section).getByText('Judge 通过')).toBeInTheDocument()
+    // 保留/上游计数：Judge 通过 2/4；配额保留与最终生产保留同为 2/2
+    expect(within(section).getAllByText('2 / 4')).toHaveLength(1)
+    expect(within(section).getAllByText('2 / 2')).toHaveLength(2)
+    expect(within(section).getByText('50.0% · 按已评分候选')).toBeInTheDocument()
+    expect(within(section).getByText(/Judge 通过率（按合并候选）50\.0%/)).toBeInTheDocument()
     expect(within(section).getByText(/duplicate 3/)).toBeInTheDocument()
     expect(within(section).getByText(/judge 评分未过线（value=1 < 2） ×2/)).toBeInTheDocument()
     expect(within(section).getByText('3.50 / 4')).toBeInTheDocument() // judge relevance 均分
