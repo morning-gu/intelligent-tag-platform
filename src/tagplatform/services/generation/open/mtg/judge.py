@@ -3,9 +3,15 @@
 一次调用判完全部候选（控制成本），输出逐条三维分。语义边界：
 - 评标签的实际效果——内容支持多准确、名称是否清晰、对检索浏览有多大
   作用，不评标签好不好听；释义此时尚未补写，semantics 只评名称本身；
-- 拿不到证据就给低分或 null（保守），不自动给高分；
+- 拿不到证据就给低分（relevance/semantics 可填 null），不自动给高分；
+  value 只看名称本身，必须给 0-4 整数；
 - 解析失败重试一次（追加一句更强的格式要求），仍失败抛 JudgeError ——
-  由上层把任务置 failed，绝不"审核失败就当全过"。
+  由上层把任务置 failed，绝不"审核失败就当全过"；末轮若只是**部分**条目
+  违协议（漏字段/非法值/value 填 null），保住同批合格判决，违协议的候选
+  按未判淘汰，不让一条坏判决把整片打空。
+
+每次调用的原始响应都写进 `trace`（上层落审计 JSON）：整批归零时能分清
+到底是模型显式 null、漏字段，还是响应格式漂移。
 
 判决与候选的对齐是这里最容易出错的一环：真实调用里 judge 常把整行候选
 （`标签｜维度｜依据`）原样抄进 `tag` 字段。因此 `parse` 先按分隔符截断，
@@ -17,6 +23,8 @@ judge 客户端与生成客户端分离：生成用 qwen3.7-plus，judge 用
 """
 from __future__ import annotations
 
+import logging
+
 from tagplatform.capabilities.llm.usage import accumulate_usage
 from tagplatform.capabilities.prompts.mtg import JUDGE_RETRY_HINT
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
@@ -25,6 +33,9 @@ from tagplatform.services.generation.open.mtg.prompts import (
     build_judge_messages, candidate_line, render_judge_messages,
 )
 from tagplatform.schemas import ContentJSON
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_judge_template() -> dict:
@@ -66,10 +77,13 @@ def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
 def judge_candidates(client, content: ContentJSON, candidates: list[dict],
                      *, run_id: str, retries: int = 1,
                      include_dialogue: bool = True,
-                     usage: dict | None = None) -> dict[str, dict]:
+                     usage: dict | None = None,
+                     trace: dict | None = None) -> dict[str, dict]:
     """候选 → {归一化标签名: 判决 dict}（未返回的候选由上层按未判处理）。
 
-    usage 传入 dict 时累计本阶段的调用数与 tokens（审计报告用）。
+    usage 传入 dict 时累计本阶段的调用数与 tokens（审计报告用）；
+    trace 传入 dict 时记录逐次原始响应（`raw`）、解析错误（`errors`）与
+    末轮兜底保住的判决条数（`salvaged`）——审计据此还原异常形态。
     """
     if not candidates:
         return {}
@@ -83,13 +97,26 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         response = client.complete(request, f"{run_id}:judge{'' if attempt == 0 else attempt}")
         if usage is not None:
             accumulate_usage(usage, response.usage)
+        raw_text = response.content or ""
+        if trace is not None:
+            trace.setdefault("raw", []).append({"attempt": attempt, "content": raw_text})
         if not response.ok:
             raise JudgeError(f"judge 调用失败: {response.raw.get('error')}")
         try:
-            items = parse_judge_items(response.content)
+            items = parse_judge_items(raw_text)
         except MTGParseError as exc:
             last_error = exc
-            last_raw = (response.content or "")[:400]
+            last_raw = raw_text[:400]
+            if trace is not None:
+                trace.setdefault("errors", []).append(
+                    {"attempt": attempt, "error": str(exc)})
+            if attempt >= retries and exc.items:
+                # 末轮仍有违协议条目：合格判决照用，违协议候选按未判淘汰。
+                if trace is not None:
+                    trace["salvaged"] = len(exc.items)
+                logger.warning("judge 末轮部分判决违协议，保留 %d 条合格判决：%s",
+                               len(exc.items), exc)
+                return _map_items(exc.items, candidates)
             continue
         return _map_items(items, candidates)
     raise JudgeError(f"judge 输出无法解析: {last_error}；原始输出前 400 字: {last_raw!r}")

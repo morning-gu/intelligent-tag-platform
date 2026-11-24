@@ -83,7 +83,9 @@ logger = logging.getLogger(__name__)
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
 # v6 = judge 改三维结果导向评分（relevance/semantics/value 0-4/null），
 #      按分数阈值筛选标签，value 分取代 importance 参与排序。
-MTG_VERSION = "mtg-v7-directory-focus"
+# v8 = judge 评分协议收紧：value 必须给 0-4 整数（不再接受 null），漏字段与
+#      非法值按协议错误重试；judge 原始响应进审计（judge_trace）。
+MTG_VERSION = "mtg-v8-judge-protocol"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -456,9 +458,13 @@ def _merge_two_level_candidates(settings: Settings, embedder,
 
 def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              judge_client, contents, merged, modalities,
-                             usage: dict, frame_count: int, started: float
+                             usage: dict, frame_count: int, started: float,
+                             *, trace: dict | None = None,
                              ) -> tuple[dict[str, dict], dict]:
-    """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。"""
+    """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。
+
+    trace 收 judge 逐次原始响应与解析错误，成功/失败两条路径都落进审计。
+    """
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
@@ -470,7 +476,8 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
         try:
             verdicts = judge_candidates(client, contents, payload,
                                         run_id=spec.run_id, usage=judge_usage,
-                                        include_dialogue="dialogue" in modalities and "script" in modalities)
+                                        include_dialogue="dialogue" in modalities and "script" in modalities,
+                                        trace=trace)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,
@@ -481,6 +488,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                 "frames": frame_count,
                 "usage": usage,
                 "judge_usage": judge_usage,
+                "judge_trace": trace or {},
                 "candidates": [m.tag for m in merged],
                 "elapsed_s": round(time.monotonic() - started, 1),
             })
@@ -827,7 +835,8 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                   tag_rows: list[dict], alignment: dict[str, Alignment],
                   replacements: list[dict], verify_trace: dict,
                   verify_usage: dict, truncated: list,
-                  descriptions_summary: dict, dropped: list[dict]) -> dict:
+                  descriptions_summary: dict, dropped: list[dict],
+                  judge_trace: dict | None = None) -> dict:
     """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
     limit = limits.limit
     total_limit = limits.total_limit
@@ -869,6 +878,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
         "runs": runs,
         "usage": usage,
         "judge_usage": judge_usage,
+        "judge_trace": judge_trace or {},
         "merged": [{"tag": m.tag, "aliases": list(m.aliases),
                     "runs": m.runs, "dimension": m.dimension,
                     "scope": m.scope}
@@ -959,9 +969,10 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                                          scene_entries)
 
     # ---- 3. judge ----
+    judge_trace: dict = {}
     verdicts, judge_usage = _judge_merged_candidates(
         settings, spec, llm, judge_client, contents, merged, modalities,
-        usage, frame_count, started)
+        usage, frame_count, started, trace=judge_trace)
 
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
     accepted, dropped = _filter_candidates(settings, contents, verdicts,
@@ -998,7 +1009,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                            frame_count, runs, limits, library, hints, dir_hint,
                            usage, judge_usage, merged, verdicts, tag_rows,
                            alignment, replacements, verify_trace, verify_usage,
-                           truncated, descriptions_summary, dropped)
+                           truncated, descriptions_summary, dropped,
+                           judge_trace=judge_trace)
     _write_report(settings, spec.task_id, report)
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
                 len(runs), frame_count, len(merged), len(tags), elapsed)

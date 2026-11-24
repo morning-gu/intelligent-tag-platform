@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v7-directory-focus`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v8-judge-protocol`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
@@ -133,7 +133,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v7-directory-focus"
+    assert producer.prompt_version == "mtg-v8-judge-protocol"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -151,11 +151,14 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v7-directory-focus"
+    assert report["version"] == "mtg-v8-judge-protocol"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
     assert len(report["accepted"]) == 3
+    # judge 原始响应随审计落盘：整片归零时能分清 null / 漏字段 / 格式漂移。
+    assert [row["attempt"] for row in report["judge_trace"]["raw"]] == [0]
+    assert json.loads(report["judge_trace"]["raw"][0]["content"])
 
 
 def test_open_judge_rejected_dropped(session, content_fixture, mtg_settings):

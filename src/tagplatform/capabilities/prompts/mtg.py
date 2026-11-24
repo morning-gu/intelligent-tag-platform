@@ -98,8 +98,10 @@ JUDGE_ROLE_BRIEF = (
 )
 JUDGE_CRITERIA = (
     "## 评分标准\n"
-    "三个维度各从 0 到 4 评分，命中第一档即停；材料不足以区分相邻档时填 null，"
-    "并在 reason 里写明缺什么。\n"
+    "三个维度各从 0 到 4 评分，命中第一档即停。relevance 和 semantics 要核对影片"
+    "材料，材料不足以区分相邻档时可以填 null，并在 reason 里写明缺什么；"
+    "value 只看名称本身、不依赖影片材料，必须给 0-4 的整数，不得填 null。"
+    "三个键每条都要给全，不得省略。\n"
     "- relevance（内容支持）：内容对标签核心概念和每个会改变含义的限定的支持程度。"
     "0 内容直接反驳，或找不到相关对象、事件和属性；"
     "1 只有相关对象、场所或话题，核心动作或属性本身无依据；"
@@ -192,8 +194,10 @@ VERIFY_RETRY_HINT = (
 
 # ---- judge 解析重试提示 ----
 JUDGE_RETRY_HINT = (
-    "\n\n上一次输出无法解析：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
+    "\n\n上一次输出不合协议：顶层必须是 JSON 数组（以 [ 开头、以 ] 结尾），"
     '每个元素形如 {"tag":"标签","relevance":4,"semantics":3,"value":3,'
     '"confidence":0.9,"scenes":["scene_id"],"quote":"原文摘录","reason":"依据"}。'
+    "每条都要给全 relevance、semantics、value 三个键；value 必须是 0-4 的整数，"
+    "不能为 null——它只看名称本身，材料不足不是不打分的原因。"
     "不要用对象包装、不要任何解释文字或 Markdown 代码块。"
 )
