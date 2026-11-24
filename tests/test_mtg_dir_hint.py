@@ -6,15 +6,18 @@
 `dir_model_raw` 与 `dir_source`，审核页能看出这条是模型选的还是兜底算的。
 """
 import json
+import re
 
 import pytest
-from conftest import MOCK_EMBEDDER
+from conftest import MOCK_EMBEDDER, MOCK_LLM
 
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
 from tagplatform.services.generation.open.mtg.merge import merge_candidates
 from tagplatform.services.generation.open.mtg.parse import parse_generation_items
-from tagplatform.services.generation.open.mtg.prompts import build_generation_messages
+from tagplatform.services.generation.open.mtg.prompts import (
+    build_generation_messages, build_scene_generation_messages,
+)
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.tags.library import try_load_library
@@ -331,3 +334,89 @@ def test_dir_injection_can_be_disabled(session, content_fixture, tmp_path,
     assert len(out) == 1
     # 提示词里没有目录 → 模型自报的 dir 无人校验来源，仍按"模型给的"处理
     assert _report(tmp_path, "d5")["params"]["dir_hint_count"] == 0
+
+
+# ---- 目录契合硬闸：词不属于目标目录就淘汰 ----
+
+
+class _DirFitJudge:
+    """三维给过线分、按标签名给 in_dir 的 judge 桩（记录请求原文）。"""
+
+    def __init__(self, unfit=()):
+        self.unfit = set(unfit)
+        self.prompts: list[str] = []
+
+    def complete(self, messages, run_id):
+        text = messages[0]["content"]
+        self.prompts.append(text)
+        match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
+        quote = match.group(1)[:12] if match else ""
+        items = [{
+            "tag": line[2:].split("｜")[0], "relevance": 4, "semantics": 3,
+            "value": 3, "confidence": 0.9, "scenes": [], "quote": quote,
+            "reason": "桩判定",
+            "in_dir": line[2:].split("｜")[0] not in self.unfit,
+        } for line in text.splitlines() if line.startswith("- ") and "｜" in line]
+        return LLMResponse(content=json.dumps(items, ensure_ascii=False),
+                           usage={}, raw={}, ok=True)
+
+
+def test_words_outside_the_target_directory_are_dropped(
+        session, content_fixture, tmp_path, monkeypatch):
+    """情感氛围目录里塞动作词：内容再支持也淘汰，审计记明原因。"""
+    settings = Settings(
+        use_mock_llm=True, mtg_judge_enabled=True,
+        dataset_root=str(tmp_path / "movienet"),
+        mtg_report_dir=str(tmp_path / "audit"),
+    )
+    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
+    content = _two_scene_content(content_fixture)
+    judge = _DirFitJudge(unfit={"屋顶枪战追逐"})
+    spec = _spec(content, "fit", GenerationPolicy(dir_ids=["dir_theme"]))
+
+    out = OpenTagProducer().produce(
+        spec, session,
+        _GenLLM([{**_ITEM, "dir": "dir_theme"},
+                 {**_ITEM, "tag": "屋顶枪战追逐", "dir": "dir_theme"}]),
+        MOCK_EMBEDDER, judge_client=judge)
+
+    assert [tag.tag_name for tag in out] == ["命运羁绊"]
+    report = _report(tmp_path, "fit")
+    assert {"tag": "屋顶枪战追逐", "why": "标签含义不属于目标目录"} in report["dropped"]
+    assert "## 目标目录与目录契合" in judge.prompts[0]
+    assert "目录 dir_theme" in judge.prompts[0]
+
+
+def test_round_goal_yields_to_the_directory_definition(content_fixture):
+    """两轮目标文案都服从目录定义；具体场景词只是命名示例，不是特征类型。"""
+    library = try_load_library()
+    entries = mtg_pipeline._dir_hint_entries(library, _spec(content_fixture, "goal"), 60)
+    film_text = _prompt(content_fixture, entries)
+    assert "全片特征同样只能取自目录定义所指的那一类" in film_text
+    assert "核心含义不属于所选目录的标签" in film_text
+
+    scene_messages = build_scene_generation_messages(
+        content_fixture.content.scenes[0], (), content=content_fixture,
+        max_tags=1, dir_hint=entries)
+    scene_text = "".join(part["text"] for part in scene_messages[0]["content"]
+                         if part["type"] == "text")
+    assert "只是命名颗粒度的示例，不是本轮要找的特征类型" in scene_text
+    assert "先按目录定义确定本轮找哪一类特征" in scene_text
+
+
+def test_mock_pipeline_round_trips_dir_fit(session, content_fixture, tmp_path, monkeypatch):
+    """唯一可扩展目录时，mock 全链路也走目录契合段（判决带 in_dir）。"""
+    settings = Settings(
+        use_mock_llm=True, mtg_judge_enabled=True,
+        dataset_root=str(tmp_path / "movienet"),
+        mtg_report_dir=str(tmp_path / "audit"),
+    )
+    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
+    content = _two_scene_content(content_fixture)
+    spec = _spec(content, "mockfit", GenerationPolicy(dir_ids=["dir_theme"]))
+
+    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+
+    assert out and all(tag.dir_id == "dir_theme" for tag in out)
+    verdicts = _report(tmp_path, "mockfit")["verdicts"]
+    assert verdicts and all(row["in_dir"] is True for row in verdicts)

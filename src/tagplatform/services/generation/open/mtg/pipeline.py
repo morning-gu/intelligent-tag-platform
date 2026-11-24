@@ -85,7 +85,9 @@ logger = logging.getLogger(__name__)
 #      按分数阈值筛选标签，value 分取代 importance 参与排序。
 # v8 = judge 评分协议收紧：value 必须给 0-4 整数（不再接受 null），漏字段与
 #      非法值按协议错误重试；judge 原始响应进审计（judge_trace）。
-MTG_VERSION = "mtg-v8-judge-protocol"
+# v9 = 目录契合硬闸：judge 逐条判 in_dir（词的核心含义属不属于目标目录），
+#      不属于的候选直接淘汰；生成侧目标文案改为服从目录定义。
+MTG_VERSION = "mtg-v9-catalog-fit"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -105,6 +107,7 @@ _JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 # （open_report 的数量漏斗）据 is_filter_stage_drop 把"过滤段淘汰"与
 # "目录归属段淘汰"分开——改文案必须同步分类函数，否则漏斗推导失真。
 _DROP_NO_VERDICT = "judge 未返回判决"
+_DROP_DIR_MISMATCH = "标签含义不属于目标目录"
 _DROP_SCORE_BELOW = "judge 评分未过线"
 _DROP_CONFIDENCE_BELOW = "judge 判定把握"
 _DROP_NO_EVIDENCE = "无有效场景证据"
@@ -114,11 +117,13 @@ _DROP_SINGLE_SCENE = "全片级但只有单场支撑"
 def is_filter_stage_drop(why: str) -> bool:
     """审计 dropped.why 是否属于小节 4 过滤段（judge + 证据把关）。
 
-    评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余三类
-    是定值文案，精确匹配。目录归属段的淘汰原因（无可归属目录等）不在
-    此列——它们发生在排序配额之后，不影响 judge 通过数。
+    评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余四类
+    （未判 / 目录不符 / 无证据 / 单场支撑）是定值文案，精确匹配。目录归属段的
+    淘汰原因（无可归属目录等）不在此列——它们发生在排序配额之后，不影响
+    judge 通过数。
     """
-    return (why in (_DROP_NO_VERDICT, _DROP_NO_EVIDENCE, _DROP_SINGLE_SCENE)
+    return (why in (_DROP_NO_VERDICT, _DROP_DIR_MISMATCH, _DROP_NO_EVIDENCE,
+                    _DROP_SINGLE_SCENE)
             or why.startswith((_DROP_SCORE_BELOW, _DROP_CONFIDENCE_BELOW)))
 
 
@@ -460,6 +465,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              judge_client, contents, merged, modalities,
                              usage: dict, frame_count: int, started: float,
                              *, trace: dict | None = None,
+                             tag_library=None, dir_hint: list[dict] | None = None,
                              ) -> tuple[dict[str, dict], dict]:
     """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。
 
@@ -470,14 +476,22 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
     if settings.mtg_judge_enabled and merged:
         client = _sample_client(spec, judge_client or _make_judge_client(settings, llm),
                                 "judge", build_judge_template)
-        payload = [{"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
-                    "reason": m.reason, "scenes": list(m.scenes)}
-                   for m in merged]
+        # 目录契合只对"模型认领了本次可扩展目录"的候选核；没认领的由
+        # 小节 5 的目录归属校验处理，不在这里替它猜一个目标目录。
+        entries = {entry["dir_id"]: entry for entry in (dir_hint or [])}
+        payload = []
+        for m in merged:
+            dir_id = _resolve_dir_value(tag_library, m.dir_raw)
+            payload.append({"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
+                            "reason": m.reason, "scenes": list(m.scenes),
+                            "dir": dir_id if dir_id in entries else None})
+        used_dirs = [entries[dir_id] for dir_id in
+                     dict.fromkeys(item["dir"] for item in payload if item["dir"])]
         try:
             verdicts = judge_candidates(client, contents, payload,
                                         run_id=spec.run_id, usage=judge_usage,
                                         include_dialogue="dialogue" in modalities and "script" in modalities,
-                                        trace=trace)
+                                        trace=trace, dirs=used_dirs)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,
@@ -512,6 +526,11 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
         if settings.mtg_judge_enabled:
             if verdict is None:
                 dropped.append({"tag": candidate.tag, "why": _DROP_NO_VERDICT})
+                continue
+            # 目录契合先于评分：词本身不属于目标目录时，内容再支持也不该
+            # 落进这个目录（情感氛围目录里的"屋顶枪战追逐"就是这么来的）。
+            if verdict.get("in_dir") is False:
+                dropped.append({"tag": candidate.tag, "why": _DROP_DIR_MISMATCH})
                 continue
             below = [f"{axis}={'null' if verdict.get(axis) is None else verdict[axis]}"
                      f" < {floor}"
@@ -972,7 +991,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     judge_trace: dict = {}
     verdicts, judge_usage = _judge_merged_candidates(
         settings, spec, llm, judge_client, contents, merged, modalities,
-        usage, frame_count, started, trace=judge_trace)
+        usage, frame_count, started, trace=judge_trace,
+        tag_library=tag_library, dir_hint=dir_hint)
 
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
     accepted, dropped = _filter_candidates(settings, contents, verdicts,

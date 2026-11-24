@@ -26,8 +26,8 @@ from tagplatform.schemas.content import Character, Scene
 from tagplatform.capabilities.prompts.mtg import (
     CATALOG_ONLY_HINT_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
     FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
-    JUDGE_CRITERIA, JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT,
-    SCENE_GOAL_TEXT,
+    JUDGE_CRITERIA, JUDGE_DIR_BLOCK_HEAD_TEXT, JUDGE_DIR_FIT_TEXT,
+    JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT,
 )
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
@@ -326,29 +326,51 @@ def _library_hint_block(names: list[str], *, catalog_only: bool = False) -> str:
 
 
 def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
-                         include_dialogue: bool = True) -> list[dict]:
+                         include_dialogue: bool = True,
+                         dirs: list[dict] | None = None) -> list[dict]:
     """构造 judge 请求：候选清单 + 内容证据，要求逐条判定。
 
-    candidates 每项：{tag, dimension, scope, reason, scenes}
+    candidates 每项：{tag, dimension, scope, reason, scenes, dir}
+    dirs 非空时追加目录契合段（候选行标出各自的目标目录 id），judge 必须
+    逐条给 in_dir——生成侧的目录约束只是提示词，这里才是硬闸。
     """
     lines = []
     for candidate in candidates:
         reason = " ".join((candidate.get("reason") or "").splitlines())
+        marks: list[str] = []
         if candidate.get("scope"):
-            ids = "、".join(candidate["scenes"])
-            reason = f"〔{candidate['scope']}｜依据场景 {ids}〕{reason}"
+            marks.append(candidate["scope"])
+            marks.append("依据场景 " + "、".join(candidate["scenes"]))
+        if candidate.get("dir"):
+            marks.append(f"目录 {candidate['dir']}")
+        if marks:
+            reason = f"〔{'｜'.join(marks)}〕{reason}"
         lines.append(candidate_line(candidate["tag"], candidate.get("dimension"), reason))
     modalities = {"script", "dialogue"} if include_dialogue else {"script"}
-    return render_judge_messages(render_content(content, modalities), "\n".join(lines))
+    return render_judge_messages(render_content(content, modalities), "\n".join(lines),
+                                 dir_block=judge_dir_block(dirs or []))
 
 
-def render_judge_messages(body: str, candidate_lines: str) -> list[dict]:
+def judge_dir_block(dirs: list[dict]) -> str:
+    """judge 侧目录块：目录 id｜全路径｜定义 + 契合判定要求（空清单 → 空串）。"""
+    if not dirs:
+        return ""
+    lines = []
+    for entry in dirs:
+        description = " ".join((entry.get("description") or "").split())
+        line = f"- {entry['dir_id']}｜{entry['path']}"
+        lines.append(f"{line}｜{description}" if description else line)
+    return JUDGE_DIR_BLOCK_HEAD_TEXT + "\n".join(lines) + "\n" + JUDGE_DIR_FIT_TEXT
+
+
+def render_judge_messages(body: str, candidate_lines: str, *,
+                          dir_block: str = "") -> list[dict]:
     text = (
         f"{JUDGE_MARKER}\n"
         f"{JUDGE_ROLE_BRIEF}"
         "## 候选标签\n" + candidate_lines + "\n\n"
         "## 影片内容\n" + body + "\n\n"
-        f"{JUDGE_CRITERIA}"
+        f"{JUDGE_CRITERIA}" + dir_block
     )
     return [{"role": "user", "content": text}]
 

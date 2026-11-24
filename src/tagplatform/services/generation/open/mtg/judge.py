@@ -30,7 +30,7 @@ from tagplatform.capabilities.prompts.mtg import JUDGE_RETRY_HINT
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import MTGParseError, parse_judge_items
 from tagplatform.services.generation.open.mtg.prompts import (
-    build_judge_messages, candidate_line, render_judge_messages,
+    build_judge_messages, candidate_line, judge_dir_block, render_judge_messages,
 )
 from tagplatform.schemas import ContentJSON
 
@@ -40,8 +40,11 @@ logger = logging.getLogger(__name__)
 
 def build_judge_template() -> dict:
     line = candidate_line("{{候选标签}}", "{{维度}}", "{{生成侧的简短理由}}")
+    dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
+             "description": "{{目录定义}}"}]
     return {
-        "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line),
+        "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line,
+                                          dir_block=judge_dir_block(dirs)),
         "retry_suffix": JUDGE_RETRY_HINT,
     }
 
@@ -78,16 +81,19 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
                      *, run_id: str, retries: int = 1,
                      include_dialogue: bool = True,
                      usage: dict | None = None,
-                     trace: dict | None = None) -> dict[str, dict]:
+                     trace: dict | None = None,
+                     dirs: list[dict] | None = None) -> dict[str, dict]:
     """候选 → {归一化标签名: 判决 dict}（未返回的候选由上层按未判处理）。
 
     usage 传入 dict 时累计本阶段的调用数与 tokens（审计报告用）；
     trace 传入 dict 时记录逐次原始响应（`raw`）、解析错误（`errors`）与
     末轮兜底保住的判决条数（`salvaged`）——审计据此还原异常形态。
+    dirs 非空时要求逐条判目录契合（in_dir），漏给按协议错误重试。
     """
     if not candidates:
         return {}
-    messages = build_judge_messages(content, candidates, include_dialogue=include_dialogue)
+    messages = build_judge_messages(content, candidates,
+                                    include_dialogue=include_dialogue, dirs=dirs)
     last_error: Exception | None = None
     last_raw = ""
     for attempt in range(retries + 1):
@@ -103,7 +109,7 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         if not response.ok:
             raise JudgeError(f"judge 调用失败: {response.raw.get('error')}")
         try:
-            items = parse_judge_items(raw_text)
+            items = parse_judge_items(raw_text, require_dir_fit=bool(dirs))
         except MTGParseError as exc:
             last_error = exc
             last_raw = raw_text[:400]

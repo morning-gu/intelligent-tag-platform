@@ -44,6 +44,8 @@ _MTG_VERIFY_MARKER = "## 相似度复核"
 _MTG_DESC_MARKER = "## 通用释义"
 # 审核候选行格式：`- {tag}｜{dimension}｜{reason}`（全角竖线，与场景行互斥）
 _JUDGE_LINE_RE = re.compile(r"^- (.+?)｜(.+?)｜(.*)$", re.MULTILINE)
+# judge 请求里的目录契合段标志串：出现时每条判决必须再给布尔 in_dir
+_MTG_JUDGE_DIR_MARKER = "## 目标目录与目录契合"
 # 选中概率阈值（~40%）
 _SELECT_PROB = 0.4
 
@@ -200,7 +202,8 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     quote = scenes[0]["description"][:12] if scenes else ""
     items = []
     for tag, _dimension, reason in _JUDGE_LINE_RE.findall(text):
-        source = re.match(r"^〔(?:film|scene)｜依据场景 ([^〕]+)〕", reason)
+        source = re.match(r"^〔(?:film|scene)｜依据场景 ([^〕｜]+)(?:｜目录 [^〕]+)?〕",
+                          reason)
         evidence = source.group(1).split("、") if source else ([scene_id] if scene_id else [])
         cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
@@ -212,6 +215,7 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
             "scenes": evidence,
             "quote": cited["description"][:12] if cited else quote,
             "reason": "模拟判定：所引原文支撑标签",
+            **({"in_dir": True} if _MTG_JUDGE_DIR_MARKER in text else {}),
         })
     return items
 

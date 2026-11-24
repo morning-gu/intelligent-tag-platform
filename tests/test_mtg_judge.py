@@ -121,3 +121,47 @@ def test_two_bad_responses_still_raise(content_fixture):
     client = _ScriptedJudge("不是 JSON", "还不是 JSON")
     with pytest.raises(JudgeError):
         judge_candidates(client, content_fixture, [{"tag": "冷峻压抑"}], run_id="r")
+
+
+# ---- 目录契合：生成侧只是提示词，judge 侧才是硬闸 ----
+
+
+def test_dir_fit_is_required_when_the_prompt_lists_directories():
+    with pytest.raises(MTGParseError, match="in_dir"):
+        parse_judge_items(_text(_verdict()), require_dir_fit=True)
+    with pytest.raises(MTGParseError, match="in_dir"):
+        parse_judge_items(_text(_verdict(in_dir="true")), require_dir_fit=True)
+
+
+def test_dir_fit_false_is_a_verdict_not_a_protocol_error():
+    items = parse_judge_items(_text(_verdict(in_dir=False)), require_dir_fit=True)
+    assert items[0]["in_dir"] is False
+
+
+def test_dir_fit_absent_without_directories_means_unchecked():
+    assert parse_judge_items(_text(_verdict()))[0]["in_dir"] is None
+
+
+def test_judge_prompt_marks_each_candidate_with_its_target_directory(content_fixture):
+    from tagplatform.services.generation.open.mtg.prompts import build_judge_messages
+
+    dirs = [{"dir_id": "dir_mood", "path": "内容类标签/情感氛围",
+             "description": "描述内容传递给观众的整体情感基调和氛围。"}]
+    text = build_judge_messages(
+        content_fixture,
+        [{"tag": "屋顶枪战追逐", "scope": "scene", "scenes": ["scene_001"],
+          "dir": "dir_mood"}],
+        dirs=dirs)[0]["content"]
+
+    assert "## 目标目录与目录契合" in text
+    assert "- dir_mood｜内容类标签/情感氛围｜描述内容传递给观众的整体情感基调和氛围。" in text
+    assert "〔scene｜依据场景 scene_001｜目录 dir_mood〕" in text
+    assert '"in_dir":true' in text
+
+
+def test_judge_without_directories_keeps_the_old_contract(content_fixture):
+    from tagplatform.services.generation.open.mtg.prompts import build_judge_messages
+
+    text = build_judge_messages(content_fixture, [{"tag": "示例"}])[0]["content"]
+    assert "## 目标目录与目录契合" not in text
+    assert "in_dir" not in text
