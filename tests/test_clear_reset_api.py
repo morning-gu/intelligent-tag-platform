@@ -8,6 +8,8 @@
 
 from fastapi.testclient import TestClient
 
+import pytest
+
 from tagplatform.capabilities.storage.models import (
     AssetBuildTask,
     AssetTag,
@@ -282,3 +284,76 @@ def test_requires_login_401(client):
     for method, path in _ENDPOINTS:
         resp = getattr(anon, method)(path)
         assert resp.status_code == 401, f"{method} {path} → {resp.status_code}"
+
+
+# ---------- 终审 Important-1：同步导入的 processing 守卫锚点 ----------
+
+class _FakeParsed:
+    rows: list = []
+    errors: list = []
+
+
+class _FakeResult:
+    task_id = ""
+
+
+def _patch_sync_import(monkeypatch, run_governance_impl):
+    """桩掉同步导入的解析与治理：parse_upload 返回空批，run_governance 可控。"""
+    from tagplatform.orchestration import tags as tags_orch_mod
+
+    monkeypatch.setattr(tags_orch_mod, "parse_upload",
+                        lambda data, file_name: _FakeParsed())
+    monkeypatch.setattr(tags_orch_mod, "run_governance", run_governance_impl)
+
+
+def test_sync_import_writes_processing_row_during_governance(
+        client, monkeypatch):
+    """同步导入执行期间库内须有 processing 行——③ 清空标签库守卫的数据源。
+
+    终审 Important-1：原实现治理全程不落 task 行（收尾才 completed 一次
+    提交），③ 的 processing 守卫对同步导入在途窗口失效。
+    """
+    seen = {}
+
+    def fake_run(rows, session, embedder, *, task=None,
+                 file_name="governance", parse_errors=None):
+        seen["status_at_run"] = task.status
+        seen["task_id"] = task.task_id
+        # 治理执行期间的"③ 并发查"视角：跨会话读 processing 行
+        with _db(client) as other:
+            seen["processing_rows_during"] = other.query(
+                TagImportTask).filter_by(status="processing").count()
+        result = _FakeResult()
+        result.task_id = task.task_id
+        # 收尾模仿 _write_import_summary 的最小行为（ImportSummary 契约）
+        task.status = "completed"
+        task.result_summary = (
+            '{"total": 0, "inserted": 0, "skipped": 0, "issues": []}')
+        session.add(task)
+        session.commit()
+        return result
+
+    _patch_sync_import(monkeypatch, fake_run)
+    resp = client.post("/api/v1/tags/import",
+                       files={"file": ("tags.xlsx", b"stub", "application/octet-stream")})
+    assert resp.status_code == 200
+    assert seen["status_at_run"] == "processing"
+    assert seen["processing_rows_during"] == 1
+    assert resp.json()["task_id"] == seen["task_id"]
+
+
+def test_sync_import_failure_marks_task_failed(client, monkeypatch):
+    """治理中途异常：processing 行复位 failed（不留永久 processing 守卫死锁）。"""
+
+    def fake_run(rows, session, embedder, *, task=None,
+                 file_name="governance", parse_errors=None):
+        raise RuntimeError("治理崩溃")
+
+    _patch_sync_import(monkeypatch, fake_run)
+    with pytest.raises(RuntimeError):
+        client.post(
+            "/api/v1/tags/import",
+            files={"file": ("tags.xlsx", b"stub", "application/octet-stream")})
+    with _db(client) as s:
+        row = s.query(TagImportTask).one()
+        assert row.status == "failed"
