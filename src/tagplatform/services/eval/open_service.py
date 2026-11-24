@@ -795,8 +795,13 @@ class OpenEvalService:
 
     def _review_produced(self, tt: str, snapshot: list[dict], content: ContentJSON,
                          run_id: str, *, result: OpenMovieResult, publish=None,
-                         modalities=("script", "dialogue")) -> None:
-        """按产出划分命中和新词，整片盲评后原子回填结果。"""
+                         modalities=("script", "dialogue"),
+                         trace_dir: Path | None = None) -> None:
+        """按产出划分命中和新词，整片盲评后原子回填结果。
+
+        trace_dir 给出时原始响应写进该目录（重评审先写暂存目录，避免提前
+        建出终态 run 目录让最后的 rename 撞名）。
+        """
         hits: list[dict] = []
         new_words: list[dict] = []
         review_rows: list[dict] = []
@@ -827,11 +832,13 @@ class OpenEvalService:
 
         reviews = []
         review_error = None
+        review_trace: dict = {}
         try:
             if review_rows:
                 reviewed = review_movie_tags(
                     self._review_client, content, review_rows, modalities=modalities,
-                    run_id=f"{run_id}:{tt}", request_slot=self._review_slots)
+                    run_id=f"{run_id}:{tt}", request_slot=self._review_slots,
+                    trace=review_trace)
                 fields = ("pass", "relevance", "semantics", "value", "reason",
                           "evidence_scene_ids", "evaluated")
                 reviews = [{key: row[key] for key in fields} for row in reviewed]
@@ -841,8 +848,26 @@ class OpenEvalService:
             for owner, review in zip(owners, reviews):
                 owner["review"] = review
             result.review_error = review_error
+        if review_rows:
+            directory = trace_dir if trace_dir is not None else (
+                Path(self.settings.open_eval_output_root) / run_id)
+            self._save_review_trace(directory, tt, review_trace, review_error)
         if publish is not None:
             publish()
+
+    def _save_review_trace(self, directory: Path, tt: str, trace: dict,
+                           error: str | None) -> None:
+        """评审逐批原始响应与失败原因落盘（review/<tt>.json）。
+
+        评审失败时报告只留一句错误，无法还原是漏字段、id 错误还是顶层结构
+        漂移；原始响应留在盘上，诊断端点按片透出。写失败只告警，不影响结果。
+        """
+        path = directory / "review" / f"{tt}.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _dump_json(path, {"error": error, **trace})
+        except OSError:
+            logger.exception("无法保存评审原始响应 %s/%s", directory.name, tt)
 
     def rereview(self, run_id: str) -> dict:
         """使用原 run 的材料和产出快照，另存一份重评报告。"""
@@ -875,24 +900,25 @@ class OpenEvalService:
                 raise EvalValidationError(f"原评测缺少完整材料快照或结果不可读：{run_id}") from exc
 
             started_at = _now_iso()
-            for result in results:
-                if result.tt in snapshots:
-                    labels, content = snapshots[result.tt]
-                    started = time.perf_counter()
-                    self._review_produced(result.tt, labels, content, child_id,
-                                          result=result, modalities=modalities)
-                    result.elapsed_ms = int((time.perf_counter() - started) * 1000)
-
-            meta.update({
-                "run_id": child_id, "source_run_id": run_id,
-                "started_at": started_at, "finished_at": _now_iso(),
-                "review": {**review_calibre(self.settings, self._llm, self._review_client),
-                           "prompt_version": REVIEW_PROMPT_VERSION},
-                "review_concurrency": 1,
-            })
             with tempfile.TemporaryDirectory(prefix=".rereview-", dir=root) as stage:
                 staged = Path(stage) / child_id
                 staged.mkdir()
+                for result in results:
+                    if result.tt in snapshots:
+                        labels, content = snapshots[result.tt]
+                        started = time.perf_counter()
+                        self._review_produced(result.tt, labels, content, child_id,
+                                              result=result, modalities=modalities,
+                                              trace_dir=staged)
+                        result.elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+                meta.update({
+                    "run_id": child_id, "source_run_id": run_id,
+                    "started_at": started_at, "finished_at": _now_iso(),
+                    "review": {**review_calibre(self.settings, self._llm, self._review_client),
+                               "prompt_version": REVIEW_PROMPT_VERSION},
+                    "review_concurrency": 1,
+                })
                 for name in ("produced", "audit"):
                     if (source / name).is_dir():
                         shutil.copytree(source / name, staged / name)

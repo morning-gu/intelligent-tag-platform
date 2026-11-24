@@ -286,6 +286,67 @@ def test_format_retry_then_ok():
     assert state["n"] == 2  # 重试一次
 
 
+def test_structural_failure_splits_the_batch():
+    """JSON 能解析但判决不合协议：重试一次后拆批，而不是整片评审失败。"""
+
+    def handler(_i, messages):
+        targets = _targets(messages)
+        if len(targets) > 1:
+            return json.dumps({"reviews": [{"id": t["id"], "pass": True} for t in targets]})
+        return json.dumps({"reviews": [{"id": targets[0]["id"], **_v()}]})
+
+    client = StubClient(handler=handler)
+    result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert len(client.calls) == 4  # 整批两次 + 两个单条批各一次
+    assert [row["evaluated"] for row in result] == [True, True]
+
+
+def test_partial_verdicts_resend_only_the_missing_labels():
+    def handler(_i, messages):
+        targets = _targets(messages)
+        if len(targets) > 1:
+            return json.dumps({"reviews": [{"id": "t0", **_v()}, {"id": "t1", "pass": True}]})
+        assert [t["id"] for t in targets] == ["t1"]
+        return json.dumps({"reviews": [{"id": "t1", **_v()}]})
+
+    client = StubClient(handler=handler)
+    result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
+    assert len(client.calls) == 2
+    assert [row["evaluated"] for row in result] == [True, True]
+
+
+def test_transport_failure_never_splits():
+    client = StubClient(default=RuntimeError("端点宕机"))
+    with pytest.raises(ReviewRequestError):
+        review_movie_tags(client, _content(), _rows(4), run_id="r1:m1")
+    assert len(client.calls) == 1
+
+
+def test_call_budget_caps_runaway_splitting():
+    client = StubClient(handler=lambda *_: json.dumps({"reviews": [{"id": "t0"}]}))
+    with pytest.raises(ReviewRequestError):
+        review_movie_tags(client, _content(), _rows(4), run_id="r1:m1")
+    assert len(client.calls) <= 2 * 4 + 2
+
+
+def test_trace_keeps_raw_responses_and_failure_reasons():
+    trace: dict = {}
+    client = StubClient(handler=lambda *_: "不是 JSON")
+    with pytest.raises(ReviewRequestError):
+        review_movie_tags(client, _content(), _rows(1), run_id="r1:m1", trace=trace)
+    assert [row["raw"] for row in trace["batches"]] == ["不是 JSON", "不是 JSON"]
+    assert trace["errors"]["t0"].startswith("评审响应无法解析")
+
+
+def test_trace_records_successful_batches_too():
+    trace: dict = {}
+    review_movie_tags(StubClient(default=_v()), _content(), _rows(1),
+                      run_id="r1:m1", trace=trace)
+    assert len(trace["batches"]) == 1
+    assert json.loads(trace["batches"][0]["raw"])["reviews"]
+    assert "errors" not in trace
+
+
 # ---- 实时回调 ----
 
 

@@ -457,6 +457,8 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert (d / "raw_results.json").exists()
     assert (d / "audit" / "tt0000001.json").exists()
     assert (d / "audit" / "tt0000002.json").exists()
+    # 评审逐批原始响应随片落盘（成功片也留，供诊断端点复盘）
+    assert (d / "review" / "tt0000001.json").exists()
     # Task 5 接线：报告三件套落盘
     assert (d / "report.json").exists()
     assert (d / "report.md").exists()
@@ -586,6 +588,12 @@ def test_review_failure_preserves_output(open_setup):
         "tt0000001", "tt0000002"]
     assert all(m["hit_pass"] is None and m["new_pass"] is None
                for m in report["movies"])
+    # 失败现场：原始响应与失败原因按片落盘，报告之外还能还原具体形态
+    trace = json.loads((_run_dir(svc, run_id) / "review" / "tt0000001.json")
+                       .read_text(encoding="utf-8"))
+    assert "评审端点宕机" in trace["error"]
+    assert trace["batches"][0]["error"].startswith("评审调用失败")
+    assert trace["errors"]
 
 
 # ---------------------------------------------------------------- 双熔断

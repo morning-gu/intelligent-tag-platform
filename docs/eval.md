@@ -265,7 +265,10 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 生产 judge 的语义分评名称清晰度，终评的语义分评名称与释义的一致性。
 
 默认每片一次请求。输出截断时按标签二分，保留其他标签作为重复判断的上下文。
-如果完整影片材料超出上下文窗口，报告记录评审失败原因。评审客户端默认 `reasoning_effort=low`、`max_tokens=8192`，
+JSON 能解析但判决不合协议（漏字段、id 出界、重复 id）时先原批重试一次，仍不合格
+同样二分拆批；只有部分条目合格时，只把漏判的子批再送一次。传输失败不拆批——材料
+逐字相同，拆了也一样失败。整片评审总调用数封顶 `2×标签数+2`，响应持续畸形时不会
+把配额烧光。如果完整影片材料超出上下文窗口，报告记录评审失败原因。评审客户端默认 `reasoning_effort=low`、`max_tokens=8192`，
 同一开放评测服务最多 4 条评审请求并行。对应环境变量为
 `TAGPLT_OPEN_EVAL_REVIEW_REASONING_EFFORT`、`TAGPLT_OPEN_EVAL_REVIEW_MAX_TOKENS`、
 `TAGPLT_OPEN_EVAL_REVIEW_CONCURRENCY`。端点不支持推理强度时设空串。
@@ -274,14 +277,16 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 
 ### 产物与重评
 
-`produced/<tt>.json` 保存最终标签与当时的材料。重评接口
+`produced/<tt>.json` 保存最终标签与当时的材料，`review/<tt>.json` 保存该片逐批
+评审原始响应与失败原因（成功片同样保留）——报告里只有一句 `review_error` 时，
+据此还原是漏字段、id 错误还是顶层结构漂移。重评接口
 `POST /runs/{id}/rereview` 从原运行的完成影片和快照另存一份报告，
 返回新 `run_id` 和 `source_run_id`。原报告和生成样本状态保留。缺少材料快照的
 旧运行需要重新起跑。报告接口只提供当前格式的报告。
 
 `live.json` 在影片产出和整片评审完成时更新。前端轮询直到取得最终报告。
 最终产物包括 `meta.json`、`raw_results.json`、`report.json`、
-`report.md`、`metrics.csv` 和生产 `audit/`。CSV 中每个比例的 `n`
+`report.md`、`metrics.csv`、生产 `audit/` 和评审 `review/`。CSV 中每个比例的 `n`
 对应其实际分母。报告提示部分运行、共享模型可能带来的偏差和样本不足。
 
 ---

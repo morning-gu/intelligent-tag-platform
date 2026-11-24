@@ -72,8 +72,16 @@ def review_calibre(settings: Settings, llm, client=None) -> dict:
 
 def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                       run_id: str, modalities=("script", "dialogue"),
-                      request_slot=None) -> list[dict]:
-    """整片评审。输出截断时二分，拆批仍携带其他标签作为上下文。"""
+                      request_slot=None, trace: dict | None = None) -> list[dict]:
+    """整片评审。输出截断**或结构不合协议**时二分，拆批仍携带其他标签作为上下文。
+
+    格式恢复分三种：截断 → 二分；解析失败 → 原批重试一次；JSON 能解析但
+    判决不合协议（漏字段 / id 出界 / 重复 id）→ 重试一次后仍不合格就拆批，
+    部分合格时只把漏判的子批再送一次。传输失败不拆批——材料没变，拆了也
+    一样失败。总调用数封顶 `2*标签数+2`，持续畸形时不把整片配额烧光。
+
+    trace 传入 dict 时记录逐批原始响应与失败原因（上层落盘，供复盘）。
+    """
     if not tag_rows:
         return []
     haystack = render_content(content, modalities=modalities)
@@ -86,8 +94,11 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
     } for index, row in enumerate(tag_rows)]
     results: dict[int, dict] = {}
     errors: dict[int, str] = {}
+    # 拆批会放大调用数：给整片一个明确的调用预算，畸形响应也不至于失控。
+    budget = 2 * len(labels) + 2
 
     def batch(targets):
+        nonlocal budget
         context = ""
         if len(targets) < len(labels):
             other_labels = [label for label in labels if label not in targets]
@@ -96,16 +107,27 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         target_ids = {int(label["id"][1:]) for label in targets}
         batch_id = f"{run_id}:{targets[0]['id']}-{targets[-1]['id']}"
         error = "评审响应未包含有效判决"
+        # 结构/格式失败可以拆批救；传输失败拆了也没用（材料逐字相同）。
+        splittable = True
         for attempt in range(2):
+            if budget <= 0:
+                break
+            budget -= 1
             messages = [{"role": "system", "content": REVIEW_PROMPT},
                         {"role": "user", "content": user + (REVIEW_RETRY_HINT if attempt else "")}]
+            record = {"batch": batch_id, "attempt": attempt, "raw": ""}
+            if trace is not None:
+                trace.setdefault("batches", []).append(record)
             try:
                 with request_slot if request_slot is not None else nullcontext():
                     response = client.complete(messages, batch_id)
             except Exception as exc:  # noqa: BLE001
                 error = f"评审调用失败：{exc}"
+                record["error"] = error
+                splittable = False
                 break
             response_text, ok, transport_error = _unwrap(response)
+            record["raw"] = response_text
             if _truncated(response):
                 if len(targets) > 1:
                     middle = len(targets) // 2
@@ -113,24 +135,43 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                     batch(targets[middle:])
                     return
                 error = "评审输出超出长度限制"
+                record["error"] = error
+                splittable = False
                 break
             if not ok:
                 error = (f"影片评审材料超出模型上下文：{transport_error}"
                          if _input_limit(transport_error) else f"评审调用失败：{transport_error}")
+                record["error"] = error
+                splittable = False
                 break
             try:
                 parsed = _parse_reviews(response_text, len(labels))
             except ValueError as exc:
                 error = f"评审响应无法解析：{exc}"
+                record["error"] = error
                 continue
             accepted = {i: verdict for i, verdict in parsed.items() if i in target_ids}
             if accepted:
                 results.update(accepted)
                 break
-        for index in target_ids - results.keys():
-            errors[index] = error
+            error = f"评审响应未包含有效判决（解析出 {len(parsed)} 条，均不合协议）"
+            record["error"] = error
+        missing = [label for label in targets if int(label["id"][1:]) not in results]
+        if missing and splittable and budget > 0:
+            if len(missing) == len(targets) and len(targets) > 1:
+                middle = len(targets) // 2
+                batch(targets[:middle])
+                batch(targets[middle:])
+                return
+            if len(missing) < len(targets):
+                batch(missing)
+                return
+        for label in missing:
+            errors[int(label["id"][1:])] = error
 
     batch(labels)
+    if trace is not None and errors:
+        trace["errors"] = {f"t{index}": message for index, message in errors.items()}
     for index, row in enumerate(tag_rows):
         verdict = results.get(index)
         if verdict is None:
