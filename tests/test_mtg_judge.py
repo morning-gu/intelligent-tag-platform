@@ -199,3 +199,31 @@ def test_judge_without_directories_keeps_the_old_contract(content_fixture):
     text = build_judge_messages(content_fixture, [{"tag": "示例"}])[0]["content"]
     assert "## 目标目录与目录契合" not in text
     assert "dir_fits" not in text
+
+
+def test_candidate_ids_keep_same_name_verdicts_separate_across_batches(
+        content_fixture, monkeypatch):
+    from tagplatform.services.generation.open.mtg import judge
+
+    monkeypatch.setattr(judge, "_MAX_BATCH_SIZE", 2)
+    same_name = "宿命循环"
+    candidates = [
+        {"tag": same_name, "candidate_id": f"c{i}", "dir_ids": [f"d{i}"]}
+        for i in range(3)
+    ]
+    dirs = [{"dir_id": f"d{i}", "path": f"d{i}"} for i in range(3)]
+    client = _ScriptedJudge(
+        _text(_verdict(same_name, candidate_id="c1", value=4, dir_fits={"d1": True}),
+              _verdict(same_name, value=2, dir_fits={"d0": True})),
+        _text(_verdict(same_name, candidate_id="c0", value=3, dir_fits={"d0": False})),
+        _text(_verdict(same_name, candidate_id="c2", value=2, dir_fits={"d2": True})),
+    )
+    trace = {}
+    verdicts = judge_candidates(client, content_fixture, candidates,
+                                dirs=dirs, run_id="r", trace=trace)
+    assert {key: (row["value"], row["dir_fits"]) for key, row in verdicts.items()} == {
+        "c0": (3, {"d0": False}), "c1": (4, {"d1": True}), "c2": (2, {"d2": True}),
+    }
+    assert [row["attempt"] for row in trace["raw"]] == [0, 1, 2]
+    retry = client.messages[1][0]["content"]
+    assert "候选 ID c0" in retry and "候选 ID c1" not in retry

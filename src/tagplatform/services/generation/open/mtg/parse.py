@@ -250,8 +250,11 @@ def parse_judge_items(text: str) -> list[dict]:
             continue
         scenes = [s.strip() for s in raw_scenes or []
                   if isinstance(s, str) and s.strip()]
+        candidate_id = entry.get("candidate_id")
         items.append({
             "tag": tag,
+            **({"candidate_id": candidate_id.strip()} if isinstance(candidate_id, str)
+               and candidate_id.strip() else {}),
             **scores,
             "dir_fits": entry.get("dir_fits"),
             "confidence": _clamp_confidence(entry.get("confidence")),

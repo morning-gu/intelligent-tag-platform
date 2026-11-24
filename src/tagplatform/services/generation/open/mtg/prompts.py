@@ -27,7 +27,8 @@ from tagplatform.capabilities.prompts.mtg import (
     CATALOG_ONLY_HINT_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
     FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
     JUDGE_CRITERIA, JUDGE_DIR_BLOCK_HEAD_TEXT, JUDGE_DIR_FIT_TEXT,
-    JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT,
+    JUDGE_ROLE_BRIEF, JUDGE_CANDIDATE_ID_TEXT, JUDGE_EXCERPT_TEXT,
+    LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT,
 )
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
@@ -342,12 +343,18 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
             marks.append("依据场景 " + "、".join(candidate["scenes"]))
         if candidate.get("dir_ids"):
             marks.append("目录 " + "、".join(candidate["dir_ids"]))
+        if candidate.get("candidate_id"):
+            marks.append("候选 ID " + candidate["candidate_id"])
         if marks:
             reason = f"〔{'｜'.join(marks)}〕{reason}"
         lines.append(candidate_line(candidate["tag"], candidate.get("dimension"), reason))
     modalities = {"script", "dialogue"} if include_dialogue else {"script"}
-    return render_judge_messages(render_content(content, modalities), "\n".join(lines),
-                                 dir_block=judge_dir_block(dirs or []))
+    return render_judge_messages(
+        render_content(content, modalities), "\n".join(lines),
+        dir_block=judge_dir_block(dirs or []),
+        with_candidate_ids=any(candidate.get("candidate_id") for candidate in candidates),
+        with_excerpts=any(candidate.get("scope") == "excerpt" for candidate in candidates),
+    )
 
 
 def judge_dir_block(dirs: list[dict]) -> str:
@@ -363,13 +370,17 @@ def judge_dir_block(dirs: list[dict]) -> str:
 
 
 def render_judge_messages(body: str, candidate_lines: str, *,
-                          dir_block: str = "") -> list[dict]:
+                          dir_block: str = "", with_candidate_ids: bool = False,
+                          with_excerpts: bool = False) -> list[dict]:
     text = (
         f"{JUDGE_MARKER}\n"
         f"{JUDGE_ROLE_BRIEF}"
         "## 候选标签\n" + candidate_lines + "\n\n"
         "## 影片内容\n" + body + "\n\n"
-        f"{JUDGE_CRITERIA}" + dir_block
+        + JUDGE_CRITERIA
+        + (JUDGE_EXCERPT_TEXT if with_excerpts else "")
+        + (JUDGE_CANDIDATE_ID_TEXT if with_candidate_ids else "")
+        + dir_block
     )
     return [{"role": "user", "content": text}]
 

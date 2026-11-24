@@ -201,10 +201,11 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     items = []
     candidates = text.partition("## 候选标签\n")[2].partition("## 影片内容\n")[0]
     for tag, _dimension, reason in _JUDGE_LINE_RE.findall(candidates):
-        source = re.match(r"^〔(?:film|scene)｜依据场景 ([^〕｜]+)(?:｜目录 [^〕]+)?〕",
-                          reason)
+        marks = reason.partition("〕")[0] if reason.startswith("〔") else ""
+        source = re.search(r"｜依据场景 ([^｜]+)", marks)
         evidence = source.group(1).split("、") if source else ([scene_id] if scene_id else [])
-        dirs = re.search(r"(?:〔|｜)目录 ([^〕]+)〕", reason)
+        dirs = re.search(r"(?:〔|｜)目录 ([^｜]+)", marks)
+        candidate_id = re.search(r"(?:〔|｜)候选 ID ([^｜]+)", marks)
         cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
             "tag": tag.strip(),
@@ -215,6 +216,7 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
             "scenes": evidence,
             "quote": cited["description"][:12] if cited else quote,
             "reason": "模拟判定：所引原文支撑标签",
+            **({"candidate_id": candidate_id[1]} if candidate_id else {}),
             **({"dir_fits": dict.fromkeys(dirs[1].split("、"), True)} if dirs else {}),
         })
     return items
