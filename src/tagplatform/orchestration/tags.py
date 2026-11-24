@@ -39,10 +39,18 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
-from tagplatform.orchestration._shared import ImportSummary, _build_export_archive
+from tagplatform.orchestration._shared import (
+    ClearCountsOut,
+    ClearPreviewOut,
+    ClearResultOut,
+    ImportSummary,
+    _build_export_archive,
+)
 from tagplatform.services.content.ingest import recent_ingest
+from tagplatform.services.content.reset import active_task_counts
 from tagplatform.services.tags.governance import run_governance
 from tagplatform.services.tags.library import parse_aliases, try_load_library
+from tagplatform.services.tags.reset import clear_library
 from tagplatform.tasks.tag_import import TagImportFileError, parse_upload
 
 
@@ -499,6 +507,35 @@ def delete_tag(session: Session, tag_id: str) -> TagDeleteResponse:
         parent_id=redirect_target.dir_id if redirect_target is not None else None,
         parent_name=redirect_target.dir_name if redirect_target is not None else None,
     )
+
+
+# ---------- clear-reset（2026-11-24 spec §3.2：③ 清空标签库 + 预览） ----------
+
+def clear_tag_library(session: Session) -> ClearResultOut:
+    """③ 清空标签库：级联全部标签数据与任务历史；批次/日志幸存。
+
+    守卫（删除前）：running 生成/构建 + processing 导入 → 409
+    （spec §3.3——只有正在执行的写方挡路，queued 在删除半径内）。
+    """
+    active = active_task_counts(session, None)
+    running = active["running_generation"] + active["running_build"]
+    if running > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"有 {running} 个生成/构建任务正在执行，请先等待其完成")
+    if active["processing_import"] > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"有 {active['processing_import']} 个标签导入任务正在执行，"
+                   "请先等待其完成")
+    counts = clear_library(session)
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def library_clear_preview(session: Session) -> ClearPreviewOut:
+    """③ 计数预览（只读，dry_run 与实删同源计数）。"""
+    counts = clear_library(session, dry_run=True)
+    return ClearPreviewOut(scope="library", counts=ClearCountsOut(**counts))
 
 
 # ---------- 用例：标签库统计视图（原 api/routers/library.py）----------

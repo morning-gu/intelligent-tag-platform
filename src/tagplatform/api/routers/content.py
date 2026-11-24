@@ -17,7 +17,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_session
+from tagplatform.api.depends import require_admin
+from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.orchestration import content as content_orch
+from tagplatform.orchestration._shared import ClearPreviewOut, ClearResultOut
 from tagplatform.orchestration.content import (
     AssetDetail,
     AssetOut,
@@ -117,3 +120,54 @@ def import_movie_asset_dirs(
     """把选中的影片目录注册成资产（不经过上传视频；已存在的按 overwrite 处理）。"""
     return content_orch.import_movie_dirs(
         session, body.root, body.dir_names, body.overwrite)
+
+
+# ---------- clear-reset（2026-11-24 spec §3.1：①②④⑤ + 预览，admin 专属） ----------
+
+@router.delete("/assets/{asset_id}/tags", response_model=ClearResultOut)
+def clear_asset_tags(
+    asset_id: str,
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearResultOut:
+    """① 清空单内容标签数据（待审核/正式挂载/该资产任务历史，queued 一并删）。"""
+    return content_orch.clear_asset_tags(session, asset_id)
+
+
+@router.delete("/content/tags", response_model=ClearResultOut)
+def clear_all_content_tags(
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearResultOut:
+    """② 清空全部内容的标签数据（标签库与内容资产幸存）。"""
+    return content_orch.clear_all_content_tags(session)
+
+
+@router.delete("/assets/{asset_id}", response_model=ClearResultOut)
+def delete_asset(
+    asset_id: str,
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearResultOut:
+    """④ 删除单内容资产（含子场景与全部关联行；视频源文件不删除）。"""
+    return content_orch.delete_asset(session, asset_id)
+
+
+@router.delete("/assets", response_model=ClearResultOut)
+def delete_all_assets(
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearResultOut:
+    """⑤ 删除全部内容资产（含全部关联行；标签库幸存）。"""
+    return content_orch.delete_all_assets(session)
+
+
+@router.get("/content/clear-preview", response_model=ClearPreviewOut)
+def content_clear_preview(
+    scope: str = Query(..., pattern="^(asset-tags|all-tags|asset|all-assets)$"),
+    asset_id: str | None = Query(None),
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearPreviewOut:
+    """①②④⑤ 的计数预览（只读）：确认弹窗"将删除 N 行"的数据源。"""
+    return content_orch.clear_preview(session, scope, asset_id)
