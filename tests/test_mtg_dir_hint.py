@@ -1,224 +1,230 @@
-"""生成阶段就把目录交给模型：提示注入 + 归属校验 + 回退。
-
-口径（2026-11-09 确认）：把可扩展目录清单给 LLM，让它在生成时就决定
-"在某目录下新增某标签"；校验不过（目录不存在 / 静态目录 / 挂载点解析不出）
-才回退到"按目录描述向量归类"，并且**不静默改写**模型的原始选择——审计里保留
-`dir_model_raw` 与 `dir_source`，审核页能看出这条是模型选的还是兜底算的。
-"""
+"""逐目录开放生成的请求、滤除、聚类和挂载契约。"""
 import json
-import re
+from pathlib import Path
 
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
-from tagplatform.services.generation import GenerationPolicy, GenerationSpec
-from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
-from tagplatform.services.generation.open.mtg.merge import merge_candidates
-from tagplatform.services.generation.open.mtg.parse import parse_generation_items
-from tagplatform.services.generation.open.mtg.prompts import (
-    build_generation_messages, build_scene_generation_messages,
-)
-from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.services.generation import GenerationPolicy, GenerationSpec
+from tagplatform.services.generation.open.mtg import pipeline
+from tagplatform.services.generation.open.mtg.catalog_align import Alignment, BAND_NEW
+from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.services.tags.library import try_load_library
-from tagplatform.schemas import parse_content
 from tagplatform.settings import Settings
+from tests.library_fixture import add_dirs
 
 
-def _two_scene_content(content_fixture):
-    """复制成两个场景的资产（全片级标签要求 ≥2 场景支撑）。"""
-    data = json.loads(content_fixture.model_dump_json())
-    scene = json.loads(json.dumps(data["content"]["scenes"][0]))
-    scene["scene_id"] = "scene_002"
-    data["content"]["scenes"].append(scene)
-    return parse_content(data)
+def _scenes(content, count):
+    template = content.content.scenes[0]
+    scenes = [template.model_copy(update={
+        "scene_id": f"scene_{index:03d}",
+        "description": f"第{index}个场景的可核验原文描述",
+    }) for index in range(1, count + 1)]
+    return content.model_copy(update={"content": content.content.model_copy(update={"scenes": scenes})})
+
+
+def _spec(content, run_id, policy=None):
+    return GenerationSpec(
+        task_id=f"t-{run_id}", asset_id=content.asset.asset_id,
+        content=content, policy=policy or GenerationPolicy(), prompt_text="",
+        run_id=run_id, library=try_load_library(),
+    )
+
+
+def _report(settings, run):
+    return json.loads((Path(settings.mtg_report_dir) / f"t-{run}.json").read_text(encoding="utf-8"))
+
+
+def _text(messages):
+    return "\n".join(part["text"] for part in messages[0]["content"] if part["type"] == "text")
+
+
+def _result(items):
+    return LLMResponse(content=json.dumps(items, ensure_ascii=False), usage={}, raw={}, ok=True)
 
 
 class _GenLLM:
-    """固定返回一批候选（可带 dir 字段）的生成桩。"""
-
     def __init__(self, items):
         self.items = items
 
     def complete(self, messages, run_id):
-        return LLMResponse(content=json.dumps({"tags": self.items}, ensure_ascii=False),
-                           usage={"prompt_tokens": 100, "completion_tokens": 20},
-                           raw={}, ok=True)
+        return _result(self.items)
+
+
+class _GenerationScript:
+    def __init__(self, outputs):
+        self.outputs = outputs
+        self.generation_calls = []
+
+    def complete(self, messages, run_id):
+        if not isinstance(messages[0]["content"], list):
+            return MOCK_LLM.complete(messages, run_id)
+        key = run_id.rsplit(":", 1)[-1]
+        self.generation_calls.append((key, messages))
+        return _result(self.outputs(key, messages))
+
+
+def _items(names, *, scenes=()):
+    return [{"tag": name, "scenes": list(scenes), "reason": "生成理由"} for name in names]
 
 
 @pytest.fixture
 def dir_settings(tmp_path, monkeypatch):
-    """judge 关掉（本文件只测目录归属），报告落临时目录。"""
-    settings = Settings(
-        use_mock_llm=True,
-        mtg_judge_enabled=False,
-        dataset_root=str(tmp_path / "movienet"),
-        mtg_report_dir=str(tmp_path / "audit"),
-    )
-    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
+    settings = Settings(use_mock_llm=True, mtg_report_dir=str(tmp_path / "audit"),
+                        mtg_modalities="script,dialogue")
+    monkeypatch.setattr(pipeline, "get_settings", lambda: settings)
     return settings
 
 
-def _spec(content, run_id: str, policy=None) -> GenerationSpec:
-    return GenerationSpec(
-        task_id=f"t-{run_id}", asset_id=content.asset.asset_id,
-        content=content, policy=policy or GenerationPolicy(),
-        prompt_text="", run_id=run_id, library=try_load_library(),
-    )
+def test_directory_requests_and_film_context_before_clustering(
+        session, content_fixture, dir_settings):
+    add_dirs([{"dir_id": "dir_combined", "level": 1, "dir_name": "多范围试验目录",
+               "dir_type": "dir_asset", "applicable_scope": "content,scene",
+               "description": "多范围目录的定义"}])
+    dir_settings.open_dir_hint_max = 1
+    content = _scenes(content_fixture, 3)
+    ids = [scene.scene_id for scene in content.content.scenes]
+
+    def output(key, messages):
+        prompt = _text(messages)
+        assert prompt.count("## 目标目录") == 1
+        assert "主类型" not in prompt
+        if key.startswith("scene-"):
+            assert "最多 3 条" in prompt
+            assert "适用范围" not in prompt and '"scope"' not in prompt
+            assert "场景搜索" not in prompt and "全片级" not in prompt and "挂载粒度" not in prompt
+            return _items(("贯穿线索", "AI", "ai", "超过单次上限"))
+        assert "最多 5 条" in prompt
+        part = messages[0]["content"][0]["text"]
+        context = json.loads(part.partition("## 第一轮逐场候选\n")[2])
+        assert [row["scene_id"] for row in context] == ids
+        for row in context:
+            repeated = [tag["dir"] for tag in row["tags"] if tag["tag"] == "贯穿线索"]
+            assert set(repeated) == {"dir_combined", "dir_scene", "dir_theme", "dir_char"}
+            assert len(row["tags"]) == 12
+        assert all(scene.description in part for scene in content.content.scenes)
+        group = "甲组" if "多范围试验目录" in prompt else "乙组"
+        return _items([f"{group}全片词{i}" for i in range(6)], scenes=ids)
+
+    llm = _GenerationScript(output)
+    out = OpenTagProducer().produce(_spec(content, "directory"), session, llm, MOCK_EMBEDDER)
+    report = _report(dir_settings, "directory")
+    scene_run, film_run = report["runs"]
+    assert [(r["calls"], r["items"]) for r in report["runs"]] == [(12, 36), (2, 10)]
+    assert scene_run["after_exact_dedup"] == 12
+    assert {r["dir_id"] for r in film_run["requests"]} == {"dir_theme", "dir_combined"}
+    scene_rows = [row for row in report["merged"] if row["stage"] == 1]
+    repeated = [row for row in scene_rows if row["tag"] == "贯穿线索"]
+    assert len(repeated) == 4 and all(row["scenes"] == ids for row in repeated)
+    assert {row["tag"] for row in scene_rows} == {"贯穿线索", "AI", "ai"}
+    assert len({row["candidate_id"] for row in report["merged"]}) == 22
+    assert len(report["verdicts"]) == 22 and report["judge_usage"]["calls"] == 2
+    clustering = report["clustering"]
+    assert clustering["target"] == 4 and clustering["input"] == 12
+    # mock 对 AI 和 ai 编出相同向量，同名标签也跨目录进入同一个簇。
+    assert sorted(len(row["members"]) for row in clustering["clusters"]) == [4, 8]
+    assert sum(tag.level == "film" for tag in out) == 5
+    assert sum(tag.level == "scene" for tag in out) == 2
 
 
-def _prompt(content, entries) -> str:
-    messages = build_generation_messages(content, {}, dir_hint=entries)
-    return "".join(part["text"] for part in messages[0]["content"]
-                   if part["type"] == "text")
+def test_filter_rejects_out_of_directory_even_when_label_exists(
+        session, content_fixture, dir_settings):
+    class Judge:
+        def complete(self, messages, run_id):
+            rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
+            for row in rows:
+                if row["tag"] == "复仇":
+                    row["dir_fits"]["dir_theme"] = False
+            return _result(rows)
+
+    spec = _spec(content_fixture, "mismatch", GenerationPolicy(dir_ids=["dir_theme"]))
+    llm = _GenerationScript(lambda key, messages: _items(("复仇", "名字合格")))
+    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER, judge_client=Judge())
+    assert [(tag.tag_name, tag.dir_id) for tag in out] == [("名字合格", "dir_theme")]
+    report = _report(dir_settings, "mismatch")
+    assert report["clustering"]["input"] == 1
+    assert [row["tag"] for row in report["library"]["align"]] == ["名字合格"]
+    assert [(row["tag"], row["why"]) for row in report["dropped"]] == [
+        ("复仇", "标签含义不属于目标目录")]
+    assert report["accepted"][0]["dir_source"] == "request"
 
 
-# ---- 提示词内容 ----
+def test_film_priority_and_collision_backfill(session, content_fixture, dir_settings):
+    content = _scenes(content_fixture, 3)
+    ids = [scene.scene_id for scene in content.content.scenes]
+
+    def output(key, messages):
+        if key.startswith("film-"):
+            return _items(("共同标签", "全片主题"), scenes=ids)
+        if "细分题材" in _text(messages):
+            return _items(("共同标签", "逐场备选"))
+        return []
+
+    spec = _spec(content, "collision", GenerationPolicy(max_tags=3))
+    out = OpenTagProducer().produce(spec, session, _GenerationScript(output), MOCK_EMBEDDER)
+    assert {(tag.tag_name, tag.level) for tag in out} == {
+        ("共同标签", "film"), ("全片主题", "film"), ("逐场备选", "scene"),
+    }
+    report = _report(dir_settings, "collision")
+    assert len(report["clustering"]["clusters"]) == 2
+    drop = next(row for row in report["dropped"] if row["tag"] == "共同标签")
+    assert drop["stage"] == 1 and "同一挂载点" in drop["why"]
 
 
-def test_dir_hint_lists_only_expandable_dirs_with_full_path(content_fixture):
-    """只列可扩充目录（dir_dynamic/dir_asset）；路径给全层级，而不是末级名字。"""
-    library = try_load_library()
-    entries = mtg_pipeline._dir_hint_entries(
-        library, _spec(content_fixture, "h1"), 60)
+def test_second_stage_uses_value_then_minimum_similarity(
+        session, content_fixture, dir_settings, monkeypatch):
+    content = _scenes(content_fixture, 2)
+    names = ("高余弦高价值", "低余弦高价值", "最低余弦低价值")
+    ids = [scene.scene_id for scene in content.content.scenes]
+    llm = _GenerationScript(lambda key, messages: _items(names, scenes=ids)
+                            if key.startswith("film-") else [])
+    cosines = dict(zip(names, (0.72, 0.45, 0.21)))
 
-    ids = {entry["dir_id"] for entry in entries}
-    assert ids == {"dir_theme", "dir_scene", "dir_char"}
-    assert "dir_genre" not in ids  # 静态目录不允许新增，不该出现在提示词里
+    class Judge:
+        def complete(self, messages, run_id):
+            rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
+            for row in rows:
+                row["value"] = 2 if row["tag"] == names[2] else 4
+            return _result(rows)
 
-    theme = next(entry for entry in entries if entry["dir_id"] == "dir_theme")
-    assert theme["path"] == "内容特征标签/细分题材"
-    assert theme["scope"] == "content"
-    assert theme["description"]
-    assert theme["description"] in _prompt(content_fixture, entries)
-
-
-def test_dir_hint_includes_asset_dirs(content_fixture):
-    """dir_asset 同 dir_dynamic 进提示清单。"""
-    from tests.library_fixture import add_dirs
-    from tagplatform.services.tags.library import DIR_ASSET
-
-    add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
-               "dir_type": DIR_ASSET, "applicable_scope": "content",
-               "description": "联网搜索获取的标签", "aliases": []}])
-    library = try_load_library()
-    entries = mtg_pipeline._dir_hint_entries(
-        library, _spec(content_fixture, "h1b"), 60)
-
-    ids = {entry["dir_id"] for entry in entries}
-    assert "dir_kw" in ids
-    assert "dir_theme" in ids  # dir_dynamic 仍正常在列
+    monkeypatch.setattr(pipeline, "align_candidates", lambda library, embedder, names, **kwargs: {
+        name: Alignment(BAND_NEW, "测试相似度", cosine=cosines[name]) for name in names})
+    spec = _spec(content, "sort", GenerationPolicy(dir_ids=["dir_theme"], max_tags=2))
+    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER, judge_client=Judge())
+    assert [tag.tag_name for tag in out] == [names[1], names[0]]
+    assert _report(dir_settings, "sort")["library"]["truncated"][0]["tag"] == names[2]
 
 
-def test_dir_hint_follows_policy_range(content_fixture):
-    """策略限定目录范围时，清单只留范围内的可扩展目录。"""
-    library = try_load_library()
-    spec = _spec(content_fixture, "h2",
-                 GenerationPolicy(dir_ids=["dir_scene"]))
+def test_scene_quota_caps_at_ten(session, content_fixture, dir_settings):
+    content = _scenes(content_fixture, 12)
 
-    entries = mtg_pipeline._dir_hint_entries(library, spec, 60)
+    def output(key, messages):
+        if key.startswith("scene-") and "细分题材" in _text(messages):
+            return _items((f"现象{key.split('-')[1]}",))
+        return []
 
-    assert [entry["dir_id"] for entry in entries] == ["dir_scene"]
-
-
-def test_prompt_carries_dir_block_and_dir_field(content_fixture):
-    """有目录时：出现目录块 + 输出契约要求 dir 字段。"""
-    library = try_load_library()
-    entries = mtg_pipeline._dir_hint_entries(
-        library, _spec(content_fixture, "h3"), 60)
-
-    text = _prompt(content_fixture, entries)
-
-    assert "## 可以放新标签的目录" in text
-    assert "- dir_theme｜内容特征标签/细分题材｜整片" in text
-    assert '"dir":"目录 id"' in text
-    assert "选择语义和适用粒度匹配的一项，填写其目录 id" in text
+    out = OpenTagProducer().produce(_spec(content, "cap"), session,
+                                    _GenerationScript(output), MOCK_EMBEDDER)
+    assert len(out) == 10 and all(tag.level == "scene" for tag in out)
+    report = _report(dir_settings, "cap")
+    assert len(report["clustering"]["clusters"]) == 12
+    assert len(report["library"]["truncated"]) == 2
 
 
-def test_prompt_without_dirs_keeps_old_contract(content_fixture):
-    """没有可扩展目录时（或开关关掉）：不出现目录块，契约保持 v2 形状。"""
-    text = _prompt(content_fixture, [])
-
-    assert "## 可以放新标签的目录" not in text
-    assert '"dir"' not in text
-
-
-# ---- 解析 / 合并 ----
-
-
-def test_parse_reads_dir_field():
-    items = parse_generation_items(json.dumps({"tags": [
-        {"tag": "命运羁绊", "dir": "dir_theme", "scenes": ["scene_001"]},
-        {"tag": "光影运用", "dir_id": "dir_scene"},
-        {"tag": "无声留白"},
-    ]}, ensure_ascii=False))
-
-    assert [item["dir"] for item in items] == ["dir_theme", "dir_scene", None]
-
-
-def test_merge_takes_majority_dir():
-    """同名候选跨轮出现时按多数派取目录，并列时取字典序最小（稳定）。"""
-    merged = merge_candidates([
-        {"tag": "命运羁绊", "dir": "dir_theme", "run": 0},
-        {"tag": "命运羁绊", "dir": "dir_theme", "run": 1},
-        {"tag": "命运羁绊", "dir": "dir_scene", "run": 2},
-    ], MOCK_EMBEDDER, 0.75)
-
-    assert merged[0].dir_raw == "dir_theme"
-
-
-# ---- 目录解析 ----
-
-
-@pytest.mark.parametrize("raw,expected", [
-    ("dir_theme", "dir_theme"),                      # id
-    ("内容特征标签/细分题材", "dir_theme"),              # 全路径
-    ("细分题材", "dir_theme"),                         # 唯一目录名
-    ("dir_ghost", None),                             # 不存在
-    ("", None),
-])
-def test_resolve_dir_value(content_fixture, raw, expected):
-    library = try_load_library()
-    spec = _spec(content_fixture, "rsv")
-
-    assert mtg_pipeline._resolve_dir_value(library, raw) == expected
-    assert spec is not None
-
-
-# ---- 流水线：模型给的目录被采用 / 被校验打回 ----
-
-
-def _run(session, content, run_id, items, **settings_overrides):
-    spec = _spec(content, run_id)
-    out = OpenTagProducer().produce(spec, session, _GenLLM(items), MOCK_EMBEDDER)
-    return out
-
-
-def _report(tmp_path, run_id):
-    return json.loads((tmp_path / "audit" / f"t-{run_id}.json").read_text(encoding="utf-8"))
-
-
-_ITEM = {"tag": "命运羁绊", "dimension": "主题", "scope": "film",
-         "scenes": ["scene_001", "scene_002"], "reason": "两条场景都指向同一困境"}
-
-
-@pytest.mark.parametrize("dir_raw", [None, "dir_scene", "dir_ghost", "dir_theme"])
-def test_scoped_open_generation_requires_a_valid_model_directory(
-        session, content_fixture, dir_settings, tmp_path, dir_raw):
-    content = _two_scene_content(content_fixture)
-    spec = _spec(content, "scoped", GenerationPolicy(dir_ids=["dir_theme"]))
-    out = OpenTagProducer().produce(
-        spec, session, _GenLLM([{**_ITEM, "dir": dir_raw}]), MOCK_EMBEDDER)
-    if dir_raw == "dir_theme":
-        assert [tag.dir_id for tag in out] == ["dir_theme"]
-    else:
-        assert out == []
-        assert _report(tmp_path, "scoped")["dropped"]
+def test_scene_only_directory_has_no_film_request(session, content_fixture, dir_settings):
+    content = _scenes(content_fixture, 2)
+    spec = _spec(content, "scene-only", GenerationPolicy(dir_ids=["dir_scene"]))
+    llm = _GenerationScript(lambda key, messages: _items(("开场对峙",)))
+    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
+    assert len(out) == 1 and out[0].target_type == "scene"
+    assert len(llm.generation_calls) == 2
+    assert [run["scope"] for run in _report(dir_settings, "scene-only")["runs"]] == ["scene"]
 
 
 def test_static_scope_both_rounds_use_existing_labels(
         session, content_fixture, dir_settings):
-    content = _two_scene_content(content_fixture)
+    content = _scenes(content_fixture, 2)
     spec = _spec(content, "static", GenerationPolicy(dir_ids=["dir_genre"]))
     messages_by_run = {}
 
@@ -237,246 +243,53 @@ def test_static_scope_both_rounds_use_existing_labels(
         assert "可以放新标签的目录" not in prompt
 
 
-def test_model_chosen_dir_is_used(session, content_fixture, dir_settings, tmp_path):
-    """模型给了合法目录 → 直接用它，审计记 dir_source=model。"""
-    content = _two_scene_content(content_fixture)
+def test_cluster_representative_is_nearest_to_center():
+    import numpy as np
 
-    out = _run(session, content, "d1", [{**_ITEM, "dir": "dir_theme"}])
+    from tagplatform.services.generation.open.mtg.directory_candidates import cluster_scene_candidates
+    from tagplatform.services.generation.open.mtg.merge import MergedCandidate
 
-    assert [tag.dir_id for tag in out] == ["dir_theme"]
-    accepted = _report(tmp_path, "d1")["accepted"][0]
-    assert accepted["dir_source"] == "model"
-    assert accepted["dir_id"] == "dir_theme"
+    class Embedder:
+        def embed(self, names, *, role):
+            assert names == ["第一个", "最居中", "第三个"]
+            assert role == "query"
+            angles = np.radians([0, 15, 65])
+            return np.column_stack((np.cos(angles), np.sin(angles)))
 
-
-def test_generated_reason_reaches_output_intact(session, content_fixture, dir_settings):
-    content = _two_scene_content(content_fixture)
-    reason = ("第一次分别时两人约定在旧码头重逢，多年后他们各自回到码头并主动认出对方。"
-              "两场戏以同一地点和约定串起他们长期未断的情感联系。")
-
-    out = _run(session, content, "reason", [
-        {**_ITEM, "dir": "dir_theme", "reason": f"  {reason}  "},
-    ])
-
-    assert [tag.generation_reason for tag in out] == [reason]
-
-
-def test_model_chosen_asset_dir_is_used(session, content_fixture,
-                                        dir_settings, tmp_path):
-    """dir_asset 目录可扩充：模型选它 → 采纳，同 dir_dynamic。"""
-    from tests.library_fixture import add_dirs
-    from tagplatform.services.tags.library import DIR_ASSET
-
-    add_dirs([{"dir_id": "dir_kw", "level": 1, "dir_name": "搜索关键词",
-               "dir_type": DIR_ASSET, "applicable_scope": "content",
-               "description": "联网搜索获取的标签", "aliases": []}])
-    content = _two_scene_content(content_fixture)
-
-    out = _run(session, content, "d1b", [{**_ITEM, "dir": "dir_kw"}])
-
-    assert [tag.dir_id for tag in out] == ["dir_kw"]
-    accepted = _report(tmp_path, "d1b")["accepted"][0]
-    assert accepted["dir_source"] == "model"
+    names = ["第一个", "最居中", "第三个", "全片词"]
+    rows = [
+        (MergedCandidate(name, None, (), 1, (name,), "", scope="scene" if i < 3 else "film",
+                         candidate_id=str(i)), {"value": 2 if i == 1 else 4}, [])
+        for i, name in enumerate(names)
+    ]
+    kept, audit, _ = cluster_scene_candidates(rows, Embedder(), scene_count=2, directory_count=2)
+    assert [row[0].tag for row in kept] == ["最居中", "全片词"]
+    assert audit["clusters"] == [{"representative": "1", "members": ["0", "1", "2"]}]
 
 
-def test_static_dir_is_rejected_and_falls_back(session, content_fixture,
-                                               dir_settings, tmp_path):
-    """静态目录不允许新增 → 打回，回退向量归类；原始选择留在审计里。"""
-    content = _two_scene_content(content_fixture)
+def test_same_name_in_two_mounted_directories_gets_its_own_definition(
+        session, content_fixture, dir_settings):
+    add_dirs([{"dir_id": "dir_mixed", "level": 1, "dir_name": "兼容范围目录",
+               "dir_type": "dir_dynamic", "applicable_scope": "content,scene"}])
+    content = _scenes(content_fixture, 2)
+    scene_ids = [scene.scene_id for scene in content.content.scenes]
+    descriptions = {
+        "dir_theme": "以长久延宕的仇怨推动情节发展的叙事母题",
+        "dir_mixed": "以冷色光线和低饱和画面形成疏离感的视觉处理",
+    }
 
-    out = _run(session, content, "d2", [{**_ITEM, "dir": "dir_genre"}])
+    class LLM(_GenerationScript):
+        def complete(self, messages, run_id):
+            if run_id.endswith(":desc"):
+                text = messages[0]["content"]
+                directory = "dir_mixed" if "兼容范围目录" in text else "dir_theme"
+                return _result({"items": [{"tag": "边界感", "desc": descriptions[directory]}]})
+            return super().complete(messages, run_id)
 
-    assert len(out) == 1
-    assert out[0].dir_id != "dir_genre"
-    accepted = _report(tmp_path, "d2")["accepted"][0]
-    assert accepted["dir_source"] == "fallback"
-    assert accepted["dir_model_raw"] == "dir_genre"
-
-
-def test_unknown_dir_falls_back(session, content_fixture, dir_settings, tmp_path):
-    """模型编了一个不存在的目录 id → 回退，不写进 candidate_dir_id。"""
-    content = _two_scene_content(content_fixture)
-
-    out = _run(session, content, "d3", [{**_ITEM, "dir": "dir_ghost"}])
-
-    assert len(out) == 1
-    accepted = _report(tmp_path, "d3")["accepted"][0]
-    assert accepted["dir_source"] == "fallback"
-    assert accepted["dir_model_raw"] == "dir_ghost"
-    assert accepted["dir_id"] in {"dir_theme", "dir_scene", "dir_char"}
-
-
-def test_character_dir_without_unique_character_falls_back(
-        session, content_fixture, dir_settings, tmp_path):
-    """人物级目录挂不上（资产里没有唯一角色）→ 回退到能挂的目录。"""
-    content = _two_scene_content(content_fixture)  # characters 为空
-
-    out = _run(session, content, "d4", [{**_ITEM, "dir": "dir_char"}])
-
-    assert len(out) == 1
-    assert out[0].target_type != "character"
-    assert _report(tmp_path, "d4")["accepted"][0]["dir_source"] == "fallback"
-
-
-def test_dir_injection_can_be_disabled(session, content_fixture, tmp_path,
-                                       monkeypatch):
-    """open_dir_hint_max=0 → 不注入目录（回到"生成后再归类"），并仍能产出。"""
-    settings = Settings(
-        use_mock_llm=True, mtg_judge_enabled=False, open_dir_hint_max=0,
-        dataset_root=str(tmp_path / "movienet"),
-        mtg_report_dir=str(tmp_path / "audit"),
-    )
-    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
-    content = _two_scene_content(content_fixture)
-
-    out = _run(session, content, "d5", [{**_ITEM, "dir": "dir_theme"}])
-
-    assert len(out) == 1
-    # 提示词里没有目录 → 模型自报的 dir 无人校验来源，仍按"模型给的"处理
-    assert _report(tmp_path, "d5")["params"]["dir_hint_count"] == 0
-
-
-# ---- 目录契合硬闸：词不属于目标目录就淘汰 ----
-
-
-class _DirFitJudge:
-    """三维给过线分，按标签或目录设置契合结果。"""
-
-    def __init__(self, unfit=(), *, fit_dirs=None):
-        self.unfit = set(unfit)
-        self.fit_dirs = fit_dirs
-        self.prompts: list[str] = []
-
-    def complete(self, messages, run_id):
-        text = messages[0]["content"]
-        self.prompts.append(text)
-        match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
-        quote = match.group(1)[:12] if match else ""
-        items = []
-        candidates = text.partition("## 候选标签\n")[2].partition("## 影片内容\n")[0]
-        for tag, meta in re.findall(r"^- (.+?)｜(.+)$", candidates, re.MULTILINE):
-            dirs = re.search(r"(?:〔|｜)目录 ([^〕]+)〕", meta)
-            verdict = {"tag": tag, "relevance": 4, "semantics": 3, "value": 3,
-                       "confidence": 0.9, "scenes": [], "quote": quote, "reason": "桩判定"}
-            if dirs:
-                verdict["dir_fits"] = {
-                    dir_id: tag not in self.unfit and (self.fit_dirs is None or dir_id in self.fit_dirs)
-                    for dir_id in dirs[1].split("、")
-                }
-            items.append(verdict)
-        return LLMResponse(content=json.dumps(items, ensure_ascii=False),
-                           usage={}, raw={}, ok=True)
-
-
-def test_words_outside_the_target_directory_are_dropped(
-        session, content_fixture, tmp_path, monkeypatch):
-    """情感氛围目录里塞动作词：内容再支持也淘汰，审计记明原因。"""
-    settings = Settings(
-        use_mock_llm=True, mtg_judge_enabled=True,
-        dataset_root=str(tmp_path / "movienet"),
-        mtg_report_dir=str(tmp_path / "audit"),
-    )
-    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
-    content = _two_scene_content(content_fixture)
-    judge = _DirFitJudge(unfit={"屋顶枪战追逐"})
-    spec = _spec(content, "fit", GenerationPolicy(dir_ids=["dir_theme"]))
-
-    out = OpenTagProducer().produce(
-        spec, session,
-        _GenLLM([{**_ITEM, "dir": "dir_theme"},
-                 {**_ITEM, "tag": "屋顶枪战追逐", "dir": "dir_theme"}]),
-        MOCK_EMBEDDER, judge_client=judge)
-
-    assert [tag.tag_name for tag in out] == ["命运羁绊"]
-    report = _report(tmp_path, "fit")
-    assert {"tag": "屋顶枪战追逐", "why": "标签含义不属于目标目录"} in report["dropped"]
-    assert "## 目标目录与目录契合" in judge.prompts[0]
-    assert "目录 dir_theme" in judge.prompts[0]
-
-
-def test_round_goal_yields_to_the_directory_definition(content_fixture):
-    """两轮目标文案都服从目录定义；具体场景词只是命名示例，不是特征类型。"""
-    library = try_load_library()
-    entries = mtg_pipeline._dir_hint_entries(library, _spec(content_fixture, "goal"), 60)
-    film_text = _prompt(content_fixture, entries)
-    assert "全片特征同样只能取自目录定义所指的那一类" in film_text
-    assert "核心含义不属于所选目录的标签" in film_text
-
-    scene_messages = build_scene_generation_messages(
-        content_fixture.content.scenes[0], (), content=content_fixture,
-        max_tags=1, dir_hint=entries)
-    scene_text = "".join(part["text"] for part in scene_messages[0]["content"]
-                         if part["type"] == "text")
-    assert "只是命名颗粒度的示例，不是本轮要找的特征类型" in scene_text
-    assert "先按目录定义确定本轮找哪一类特征" in scene_text
-
-
-def test_mock_pipeline_round_trips_dir_fit(session, content_fixture, tmp_path, monkeypatch):
-    """唯一可扩展目录时，mock 全链路也走目录契合段（判决带 dir_fits）。"""
-    settings = Settings(
-        use_mock_llm=True, mtg_judge_enabled=True,
-        dataset_root=str(tmp_path / "movienet"),
-        mtg_report_dir=str(tmp_path / "audit"),
-    )
-    monkeypatch.setattr(mtg_pipeline, "get_settings", lambda: settings)
-    content = _two_scene_content(content_fixture)
-    spec = _spec(content, "mockfit", GenerationPolicy(dir_ids=["dir_theme"]))
-
-    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-
-    assert out and all(tag.dir_id == "dir_theme" for tag in out)
-    verdicts = _report(tmp_path, "mockfit")["verdicts"]
-    assert verdicts and all(row["dir_fits"] == {"dir_theme": True} for row in verdicts)
-
-
-def test_catalog_match_survives_incompatible_model_directory(
-        session, content_fixture, dir_settings, monkeypatch):
-    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
-    content = _two_scene_content(content_fixture)
-    spec = _spec(content, "catalog-mismatch")
-    judge = _DirFitJudge(unfit={"动作"})
-
-    out = OpenTagProducer().produce(
-        spec, session, _GenLLM([{**_ITEM, "tag": "动作", "dir": "dir_theme"}]),
-        MOCK_EMBEDDER, judge_client=judge)
-
-    assert [(tag.origin, tag.dir_id) for tag in out] == [("catalog", "dir_genre")]
-
-
-def test_fallback_only_uses_its_own_positive_directory_verdict(
-        session, content_fixture, dir_settings, tmp_path, monkeypatch):
-    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
-    # 把不契合的可挂载目录排在首位，验证回退不会借用另一目录的判决。
-    from tagplatform.services.tags.library import DirAssignment
-    monkeypatch.setattr(mtg_pipeline, "rank_dir_assignments", lambda *_: [
-        DirAssignment("dir_scene", "微观语义标签", "scene"),
-        DirAssignment("dir_theme", "细分题材", "content"),
-    ])
-    content = _two_scene_content(content_fixture)
-    spec = _spec(content, "fallback-fit")
-    judge = _DirFitJudge(fit_dirs={"dir_theme"})
-
-    out = OpenTagProducer().produce(
-        spec, session, _GenLLM([{**_ITEM, "scope": "scene", "dir": None}]),
-        MOCK_EMBEDDER, judge_client=judge)
-
-    assert out and all(tag.dir_id == "dir_theme" for tag in out)
-    audit = _report(tmp_path, "fallback-fit")
-    assert audit["verdicts"][0]["dir_fits"] == {"dir_scene": False, "dir_theme": True}
-    assert audit["accepted"][0]["dir_source"] == "fallback"
-
-
-def test_model_directory_outside_generation_hint_is_still_checked(
-        session, content_fixture, dir_settings, tmp_path, monkeypatch):
-    monkeypatch.setattr(dir_settings, "mtg_judge_enabled", True)
-    monkeypatch.setattr(dir_settings, "open_dir_hint_max", 1)
-    content = _two_scene_content(content_fixture)
-    spec = _spec(content, "out-of-hint")
-    out = OpenTagProducer().produce(
-        spec, session, _GenLLM([{**_ITEM, "dir": "dir_scene"}]), MOCK_EMBEDDER,
-        judge_client=_DirFitJudge(unfit={_ITEM["tag"]}))
-
-    audit = _report(tmp_path, "out-of-hint")
-    assert "dir_scene" not in audit["dir_hint"]
-    assert audit["verdicts"][0]["dir_fits"]["dir_scene"] is False
-    assert not out
+    llm = LLM(lambda key, messages: _items(("边界感",), scenes=scene_ids)
+              if key.startswith("film-") else [])
+    spec = _spec(content, "descriptions", GenerationPolicy(dir_ids=["dir_theme", "dir_mixed"]))
+    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
+    assert {tag.target_type for tag in out} == {"content", "scene"}
+    assert {tag.dir_id: tag.candidate_description for tag in out} == descriptions
+    assert _report(dir_settings, "descriptions")["descriptions"]["filled"] == 2

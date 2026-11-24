@@ -28,7 +28,7 @@ from tagplatform.settings import Settings
 
 
 class OpenTagProducer:
-    """开放式标签生成：多轮生成 + 语义合并 + judge 过滤（实现见 mtg 包）。"""
+    """开放标签生成，委托逐目录两阶段管线。"""
 
     mode = "open"
     builds_prompt = True

@@ -210,7 +210,7 @@ def test_timestamps_render_utc_with_z_suffix(client):
 
 
 def test_generation_e2e_open_generated_rows(client):
-    """open 模式：MockLLM 固定三候选，目录归一未命中 → 全部 generated 行。"""
+    """单场三目录生成后保留一个聚类代表，复核通过后才正式挂载。"""
     _import_catalog(client)
     _import_content(client)
     resp = client.post("/api/v1/generation/tasks", json={
@@ -223,9 +223,9 @@ def test_generation_e2e_open_generated_rows(client):
     detail = client.get(f"/api/v1/generation/tasks/{task_id}").json()
     assert detail["status"] == "succeeded"
     results = detail["results"]
-    assert len(results) == 3  # MockLLM open 固定返回 3 候选
+    assert len(results) == 1
     names = {r["tag_name"] for r in results}
-    assert names == {"多线叙事", "情感张力", "视听风格"}
+    assert names <= {"多线叙事", "情感张力", "视听风格"}
     for row in results:
         assert row["origin"] == "open"
         assert isinstance(row["id"], int) and row["id"] > 0  # 行主键（B3 暴露）
@@ -245,7 +245,7 @@ def test_generation_e2e_open_generated_rows(client):
         assert client.post(f"/api/v1/asset-tags/{row['id']}/review",
                            json={"action": "approve"}).status_code == 200
     tags = client.get("/api/v1/assets/movie_001/tags").json()
-    assert len(tags) == 3
+    assert len(tags) == len(results)
     for row in tags:
         assert set(row.keys()) == ASSET_TAG_KEYS
         # 新词入库拿到自己的 tag_id（asset_tag 存的是库内 id，不是候选名）
@@ -294,7 +294,7 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
 
     def record(self, messages, run_id):
         response = original(self, messages, run_id)
-        if run_id.endswith(":film"):
+        if run_id.endswith(":film-dir-001"):
             # 缺一条释义，确保本批走到补写模型调用。
             candidates = json.loads(response.content)
             candidates[-1]["desc"] = ""
@@ -313,8 +313,10 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
         assert response.status_code == 200, response.text
         tasks = response.json()["tasks"]
         assert all(task["status"] == "succeeded" for task in tasks)
-        for stage, suffix in {"generation_scene": ":scene-001", "generation_film": ":film",
-                              "judge": ":judge", "verify": ":verify", "description": ":desc"}.items():
+        initial_requests = {"generation_scene": ":scene-001-dir-001",
+                            "generation_film": ":film-dir-001", "judge": ":judge",
+                            "verify": ":verify", "description": ":desc"}
+        for stage, suffix in initial_requests.items():
             phase_calls = [call for call in calls if call[0].endswith(suffix)]
             assert len(phase_calls) == len(asset_ids), (stage, [call[0] for call in calls])
             run_id, messages, result = phase_calls[0]
@@ -330,7 +332,7 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
                 frame_part = {"type": "image_url",
                               "image_url": {"url": f"data:image/png;base64,{image}"}}
                 assert frame_part in messages[0]["content"]
-        assert len(calls) == 6 * len(asset_ids)
+        assert len(calls) == 10 * len(asset_ids)
         assert len([path for path in sample_dir.iterdir() if path.is_file()]) == 15
 
     submit_and_check(["movie_001", "movie_002"])
@@ -496,7 +498,7 @@ def test_task_list_filters_and_pagination(client):
     assert all(set(row.keys()) == TASK_KEYS for row in listing)
     # created_at 降序：后创建的 open 任务在前
     assert [row["task_id"] for row in listing] == [second["task_id"], first["task_id"]]
-    assert listing[0]["prompt_version"] == "mtg-v11-target-directory"  # open 自拼 prompt 的口径版本
+    assert listing[0]["prompt_version"] == "mtg-v12-directory-rounds"  # open 自拼 prompt 的口径版本
     assert listing[0]["asset_id"] == "movie_001"
 
     # status / mode / asset_id 过滤

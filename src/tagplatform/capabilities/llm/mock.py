@@ -147,7 +147,8 @@ def _closed_output(text: str, run_id: str) -> list[dict]:
 def _open_output(text: str, run_id: str) -> list[dict]:
     """模拟单场或全片候选，使用对应数量的场景证据。"""
     scene_ids = [scene["scene_id"] for scene in _parse_scenes(text)]
-    scope = "film" if run_id.endswith(":film") else "scene"
+    round_id = run_id.rsplit(":", 1)[-1]
+    scope = "film" if round_id == "film" or round_id.startswith("film-dir-") else "scene"
     if not scene_ids:
         scene_ids = re.findall(r"^场景 ID：(.+)$", text, re.MULTILINE)
     if scope == "film" and not scene_ids:

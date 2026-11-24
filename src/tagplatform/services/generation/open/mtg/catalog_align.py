@@ -16,8 +16,7 @@
 - ``duplicate``：名字归一后完全相同；
 - ``suspect``：库内某个名字（≥2 字）被候选包含、或与最像那条的字符重合
   ≥ ``name_overlap``、或与最像那条的余弦 ≥ ``suspect_cosine``
-  （默认 0.74——suspect 只影响复核与排序，复核不通过回退 new，不直接
-  改写产出；历史标定 0.87 的出处见 settings 注释）；
+  （默认 0.75，复核不通过回退 new）；
 - ``new``：其余。
 
 余弦只在"候选（query）× 库标签（passage）"之间比较。库内两条标签互比的
@@ -149,6 +148,7 @@ def _contained_library_name(name: str, names: list[str]) -> str | None:
 
 def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
                      suspect_cosine: float, name_overlap: float,
+                     candidate_vectors: dict[str, np.ndarray] | None = None,
                      ) -> dict[str, Alignment]:
     """候选名 → 分档结论。库为空或无候选时返回空字典。
 
@@ -163,7 +163,10 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
         by_key.setdefault(normalize_key(tag.name), []).append(tag)
     library_names = [tag.name for tag in index]
     matrix = np.stack([tag.vector for tag in index])
-    queries = embedder.embed(names, role="query")
+    queries = dict(candidate_vectors or {})
+    missing = [name for name in dict.fromkeys(names) if name not in queries]
+    if missing:
+        queries.update(zip(missing, embedder.embed(missing, role="query"), strict=True))
 
     def _pick(candidates: list[LibraryTag]) -> tuple[LibraryTag, str]:
         """同名多条时按 tag_id 取稳定的一条，并把歧义写进 reason。
@@ -176,8 +179,8 @@ def align_candidates(index: list[LibraryTag], embedder, names: list[str], *,
         return chosen, note
 
     result: dict[str, Alignment] = {}
-    for name, vector in zip(names, queries):
-        sims = matrix @ np.asarray(vector, dtype=np.float32)
+    for name in names:
+        sims = matrix @ np.asarray(queries[name], dtype=np.float32)
         top = int(np.argmax(sims))
         cosine = float(sims[top])
         nearest = index[top]

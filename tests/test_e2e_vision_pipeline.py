@@ -74,9 +74,7 @@ def test_upstream_to_pending_tags(session):
     assert session.get(MediaAsset, "movie_e2e_001") is not None
     assert session.get(MediaAsset, "movie_e2e_001").content_json is not None
 
-    # 2. 建任务并执行（mock 模式 B：固定三候选；min_confidence 降到 0.5
-    #    使三条全部过线——mock 的 confidence 落在 [0.5,1)，默认 0.7 会随机丢）
-    #    v2：任务直绑资产，内容来自 media_asset.content_json
+    # 2. 逐目录运行两阶段 mock 生成，任务内容来自 media_asset.content_json。
     task = TagGenerationTask(
         task_id="task_e2e_001", asset_id="movie_e2e_001", mode="open",
         policy_json='{"min_confidence": 0.5}',
@@ -87,7 +85,7 @@ def test_upstream_to_pending_tags(session):
     run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     session.refresh(task)
     assert task.status == "succeeded", task.error
-    assert task.prompt_version == "mtg-v11-target-directory"
+    assert task.prompt_version == "mtg-v12-directory-rounds"
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
     rows = session.query(PreAssetTag).filter(

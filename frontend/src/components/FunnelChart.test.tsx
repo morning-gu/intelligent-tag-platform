@@ -29,6 +29,15 @@ describe('FunnelChart 生产漏斗图', () => {
     expect(screen.getByText(/Judge 通过率（按合并候选）85\.6% · 最终生产保留率 0\.0%（0\/327）/)).toBeInTheDocument()
   })
 
+  it('以聚类后的候选数计算配额保留率', () => {
+    const funnel = { ...FUNNEL, cluster_kept: 140, cluster_keep_rate: 0.5, rank_keep_rate: 0.4 }
+    render(<FunnelChart funnel={funnel} />)
+    expect(screen.getByText('聚类后保留')).toBeInTheDocument()
+    expect(screen.getByText('140 / 280')).toBeInTheDocument()
+    expect(screen.getByText('56 / 140')).toBeInTheDocument()
+    expect(screen.getByText('40.0% · 配额保留率')).toBeInTheDocument()
+  })
+
   it('全零漏斗：比率「暂无」，不出现 NaN', () => {
     const zero: JudgeFunnel = {
       raw: 0, merged: 0, verdicts: 0, judge_passed: 0, rank_kept: 0, final: 0,

@@ -49,8 +49,9 @@ def test_open_rerun_replaces_pending_rows(session):
     assert "旧候选甲" not in rows and "旧候选乙" not in rows
     assert "已定稿丙" in rows and rows["已定稿丙"].review_status == "approved"
     assert "闭环候选丁" in rows
-    # 本次三候选已落库
-    assert {"多线叙事", "情感张力", "视听风格"} <= set(rows)
+    fresh, = [row for row in rows.values() if row.task_id == task.task_id]
+    assert fresh.candidate_name in {"多线叙事", "情感张力", "视听风格"}
+    assert fresh.review_status == "pending"
 
 
 def test_closed_rerun_replaces_only_its_own_pending(session):

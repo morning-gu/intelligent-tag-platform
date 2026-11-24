@@ -225,65 +225,46 @@ def mtg_settings(tmp_path, monkeypatch):
     return settings
 
 
+def _two_scenes(content):
+    original = content.content.scenes[0]
+    second = original.model_copy(update={"scene_id": "scene_002"})
+    return content.model_copy(update={"content": content.content.model_copy(
+        update={"scenes": [original, second]})})
+
+
 def test_pipeline_marks_duplicate_and_keeps_generated(
         session, content_fixture, mtg_settings):
-    """库里有同名标签 → 该条 origin=catalog；其余仍 generated，审计带分档。"""
     _seed_json("tag_cat_1", "多线叙事")
+    content = _two_scenes(content_fixture)
+    spec = _build_spec(content, run_id="align1",
+                       policy=GenerationPolicy(dir_ids=["dir_theme"]))
 
-    spec = _build_spec(content_fixture, run_id="align1")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-
-    by_name = {t.tag_name: t for t in out}
+    by_name = {tag.tag_name: tag for tag in out}
     assert by_name["多线叙事"].origin == "catalog"
     assert by_name["多线叙事"].tag_id == "tag_cat_1"
-    others = [t for t in out if t.tag_name != "多线叙事"]
-    assert others and all(t.origin == "generated" for t in others)
-
-    report = json.loads(
-        (pathlib.Path(mtg_settings.mtg_report_dir, "t-align1.json")
-         .read_text(encoding="utf-8")))
+    assert any(tag.origin == "generated" for tag in out)
+    report = json.loads(pathlib.Path(mtg_settings.mtg_report_dir, "t-align1.json")
+                        .read_text(encoding="utf-8"))
     assert report["library"]["bands"][BAND_DUPLICATE] == 1
-    assert report["library"]["size"] == 8  # 默认库 7 条 + 本用例 1 条
-    bands = {row["tag"]: row["band"] for row in report["library"]["align"]}
-    assert bands["多线叙事"] == BAND_DUPLICATE
-    assert len(report["library"]["hints"]) >= 1
+    assert report["library"]["size"] == 3
+    assert report["library"]["hints"]
 
 
-def test_pipeline_ranking_prefers_new_over_duplicate(
+def test_pipeline_ranks_library_and_generated_items_under_same_stage_quota(
         session, content_fixture, mtg_settings):
-    """同一任务内每个来源各有一个名额，结果仍先排新词。"""
     _seed_json("tag_cat_1", "多线叙事")
+    content = _two_scenes(content_fixture)
+    spec = _build_spec(content, run_id="align2",
+                       policy=GenerationPolicy(max_tags=2, dir_ids=["dir_theme"]))
 
-    mtg_settings.mtg_max_final_tags = 1
-    spec = _build_spec(content_fixture, run_id="align2",
-                       policy=GenerationPolicy(max_tags=2))
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-
-    # 各来源 1 条，合计满足任务总预算。
     assert len(out) == 2
-    assert out[0].origin == "generated" and out[0].tag_name != "多线叙事"
-    assert out[1].origin == "catalog" and out[1].tag_name == "多线叙事"
-
-
-def test_replaced_tags_do_not_consume_quota(
-        session, content_fixture, mtg_settings):
-    """总预算充足时，库内命中走独立的来源配额。"""
-    for index in range(3):
-        _seed_json(f"tag_fill_{index}", f"占位{index}")
-    _seed_json("tag_cat_1", "多线叙事")
-
-    mtg_settings.mtg_max_final_tags = 2
-    spec = _build_spec(content_fixture, run_id="align7",
-                       policy=GenerationPolicy(max_tags=3))
-    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-
-    generated = [t for t in out if t.origin == "generated"]
-    replaced = [t for t in out if t.origin == "catalog"]
-    assert len(generated) == 2          # mock 三候选、去掉同名那条后剩两条
-    assert len(replaced) == 1
-    report = json.loads(pathlib.Path(
-        mtg_settings.mtg_report_dir, "t-align7.json").read_text(encoding="utf-8"))
-    assert report["accepted"][0]["origin"] == "generated"
+    assert all(tag.origin == "generated" and tag.level == "film" for tag in out)
+    report = json.loads(pathlib.Path(mtg_settings.mtg_report_dir, "t-align2.json")
+                        .read_text(encoding="utf-8"))
+    assert any(row["tag"] == "多线叙事" and row["band"] == BAND_DUPLICATE and row["stage"] == 2
+               for row in report["library"]["truncated"])
 
 
 def _seed_library(session, tag_id: str, name: str) -> None:
@@ -359,11 +340,11 @@ def test_pipeline_replaces_suspect_when_verified(
     assert replaced[0].tag_id == "tag_cat_1"
     report = json.loads(pathlib.Path(
         mtg_settings.mtg_report_dir, "t-align4.json").read_text(encoding="utf-8"))
-    assert report["library"]["replacements"] == [{
-        "generated": "多线叙事", "library": "多线", "tag_id": "tag_cat_1",
-        "cosine": report["library"]["replacements"][0]["cosine"],
-        "reason": report["library"]["replacements"][0]["reason"],
-    }]
+    replacement, = report["library"]["replacements"]
+    assert replacement["generated"] == "多线叙事"
+    assert replacement["library"] == "多线"
+    assert replacement["tag_id"] == "tag_cat_1"
+    assert replacement["candidate_id"] == report["accepted"][0]["candidate_id"]
 
 
 def test_pipeline_keeps_candidate_when_verify_says_different(

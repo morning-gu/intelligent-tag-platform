@@ -14,6 +14,7 @@ dependencies = [
     "alembic",
     "numpy",
     "sentence-transformers",
+    "scikit-learn",
     "openpyxl",
     # OpenAI 兼容 LLM SDK（懒导入：mock/测试路径不触发 import）
     "openai",

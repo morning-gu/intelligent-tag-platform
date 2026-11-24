@@ -25,10 +25,10 @@ from tagplatform.schemas import ContentJSON
 from tagplatform.schemas.content import Character, Scene
 from tagplatform.capabilities.prompts.mtg import (
     CATALOG_ONLY_HINT_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT,
-    FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
+    EXCERPT_DIR_GOAL_TEXT, FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
     JUDGE_CRITERIA, JUDGE_DIR_BLOCK_HEAD_TEXT, JUDGE_DIR_FIT_TEXT,
     JUDGE_ROLE_BRIEF, JUDGE_CANDIDATE_ID_TEXT, JUDGE_EXCERPT_TEXT,
-    LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT,
+    LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT, TARGET_DIR_RULE_TEXT,
 )
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
@@ -246,8 +246,10 @@ def build_generation_messages(content: ContentJSON,
     for scene in content.content.scenes:
         per_scene.append({
             "scene_id": scene.scene_id,
-            "tags": [{key: item[key] for key in ("tag", "reason", "desc")}
-                     for item in scene_tags.get(scene.scene_id, [])],
+            "tags": [
+                {key: item[key] for key in ("tag", "dir", "reason", "desc") if key in item}
+                for item in scene_tags.get(scene.scene_id, [])
+            ],
         })
         if "video" in active:
             frame_parts.extend(_scene_frame_parts(scene, frames_by_scene.get(scene.scene_id, ())))
@@ -292,7 +294,36 @@ def _generation_messages(body: str, frame_parts: list[dict],
     return [{"role": "user", "content": parts}]
 
 
-def build_generation_template(scope: str) -> dict:
+def target_generation_directory(messages: list[dict], directory: dict, *,
+                                scope: str, max_tags: int | str) -> list[dict]:
+    """绑定单目录，复用已经渲染好的影片材料、关键帧和库内提示。"""
+    path = directory["path"]
+    definition = " ".join((directory.get("description") or "").split())
+    target = f"## 目标目录\n路径：{path}\n"
+    if scope == "film" and directory.get("scope"):
+        target += f"适用范围：{_scope_label(directory['scope'])}\n"
+    if definition:
+        target += f"定义：{definition}\n"
+    if scope == "scene":
+        instructions = (
+            f"## 要求\n{EXCERPT_DIR_GOAL_TEXT}\n"
+            f"最多 {max_tags} 条，按价值和证据强度降序排列。证据不足可以少给或返回空 tags。\n"
+            "一个概念只保留一个说法。desc 填可跨影片复用的释义，"
+            "reason 说明材料中可核对的依据。\n"
+            '直接返回 JSON：{"tags":[{"tag":"简洁的中文词组",'
+            '"desc":"10-32 字通用释义","reason":"具体依据"}]}'
+        )
+    else:
+        instructions = _generation_instructions(scope, max_tags)
+    message = messages[0]
+    return [{**message, "content": [
+        *message["content"][:-1],
+        {"type": "text", "text": target + TARGET_DIR_RULE_TEXT},
+        {"type": "text", "text": instructions},
+    ]}]
+
+
+def build_generation_template(scope: str, *, single_directory: bool = False) -> dict:
     if scope == "scene":
         body = ("### 影片背景（用于理解人物和剧情）\n"
                 "{{影片标题、摘要及当前场景相关人物介绍}}\n\n"
@@ -302,13 +333,17 @@ def build_generation_template(scope: str) -> dict:
     else:
         body = ("{{影片标题、摘要、完整人物表和按片序排列的场景文本及台词}}\n\n"
                 "## 第一轮逐场候选\n"
-                "{{每场的 scene_id 和 tags，候选含 tag、reason、desc}}")
+                "{{每场的 scene_id 和 tags，候选含 tag、dir、reason、desc}}")
         hints = ["{{召回的库内标签名，每个词一行}}"]
     frames = keyframe_parts("{{场景 ID}}", "{{帧序号}}", "{{该场景帧数}}",
                           "{{关键帧的完整 data URL}}")
     dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
              "scope": "{{目录适用粒度}}", "description": "{{目录定义}}"}]
     budget = "{{本次请求候选上限}}"
+    if single_directory:
+        messages = _generation_messages(body, frames, hints, None, scope=scope, max_tags=budget)
+        return {"messages": target_generation_directory(
+            messages, dirs[0], scope=scope, max_tags=budget)}
     return {
         "messages": _generation_messages(body, frames, hints, dirs, scope=scope, max_tags=budget),
         "instructions_without_directory_hint": _generation_instructions(scope, budget),

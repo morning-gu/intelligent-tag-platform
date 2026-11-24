@@ -189,11 +189,8 @@ class Settings(BaseSettings):
     # 生成前注入的库内标签个数（只给名字）
     open_library_hint_enabled: bool = True
     open_library_hint_count: int = 30
-    # 分档阈值：余弦 ≥ 该值判"疑似重复"。历史标定 0.87（候选×库随机配对的
-    # 99.9% 分位，实测 0.866）；现行默认 0.74 更宽——suspect 档只决定"进 LLM
-    # 复核 + 排序降级"，复核不通过回退 new，不直接改写产出，口子可以放宽。
-    # 运行口径以 docs/open-tag-generation.md §5.1 分档表（0.74）为准。
-    open_library_suspect_cosine: float = 0.74
+    # 候选与库内最近标签的余弦达到阈值时交给 LLM 复核是否为同一概念。
+    open_library_suspect_cosine: float = 0.75
     # 名字字符重合度（Jaccard）≥ 该值判"疑似重复"
     open_library_name_overlap: float = 0.40
     # 疑似对子交给 LLM 复核"是不是同一个概念"（一批一次调用）；
@@ -204,8 +201,7 @@ class Settings(BaseSettings):
     open_library_verify_max_tokens: int = 8192
     # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
     open_library_replace_enabled: bool = True
-    # 提示词里最多列多少个可扩展目录（按全路径排序后截断，控制 token）。
-    # 0 = 不注入目录，回到"生成后再按向量归类"的老路径。
+    # 兼容旧的多目录提示入口。逐目录开放生成按任务范围遍历全部可扩展目录。
     open_dir_hint_max: int = 60
 
     # ---------- 阶段 8：闭环评测（2026-11） ----------

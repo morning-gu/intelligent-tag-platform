@@ -50,22 +50,30 @@ def test_open_allow_new_tags_false_drops_new_words(content_fixture):
     assert not out  # 默认库没有同名标签 → 全部按新词丢弃
 
 
+def _with_two_scenes(content):
+    original = content.content.scenes[0]
+    second = original.model_copy(update={"scene_id": "scene_002"})
+    return content.model_copy(update={"content": content.content.model_copy(
+        update={"scenes": [original, second]})})
+
+
 def test_open_max_tags_per_dir_caps_output(content_fixture):
     add_tags([{"tag_id": "tag_extra", "dir_id": "dir_theme",
                "tag_name": "多线叙事", "tag_type": "val_fixed",
                "description": "多线叙事", "status": "active"}])
-    spec = _spec(content_fixture, "p3",
-                 GenerationPolicy(min_confidence=0.5, max_tags_per_dir=1))
+    spec = _spec(_with_two_scenes(content_fixture), "p3",
+                 GenerationPolicy(max_tags_per_dir=1, dir_ids=["dir_theme"]))
     out = OpenTagProducer().produce(spec, None, MOCK_LLM, MOCK_EMBEDDER)
-    dirs = [t.dir_id for t in out if t.origin == "generated"]
-    assert len(dirs) == len(set(dirs))  # 每个目录最多 1 条
+    assert [t.dir_id for t in out if t.origin == "generated"] == ["dir_theme"]
+    assert [t.tag_id for t in out if t.origin == "catalog"] == ["tag_extra"]
 
 
 def test_open_library_hit_is_catalog_and_new_kept(content_fixture):
     add_tags([{"tag_id": "tag_extra", "dir_id": "dir_theme",
                "tag_name": "多线叙事", "tag_type": "val_fixed",
                "description": "多线叙事", "status": "active"}])
-    spec = _spec(content_fixture, "p4", GenerationPolicy(min_confidence=0.5))
+    spec = _spec(_with_two_scenes(content_fixture), "p4",
+                 GenerationPolicy(dir_ids=["dir_theme"]))
     out = OpenTagProducer().produce(spec, None, MOCK_LLM, MOCK_EMBEDDER)
     hit = [t for t in out if t.origin == "catalog"]
     assert hit and hit[0].tag_id == "tag_extra" and hit[0].dir_id == "dir_theme"

@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v11-target-directory`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v12-directory-rounds`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
@@ -80,17 +80,19 @@ class _JudgeClient:
         candidates = text.partition("## 候选标签\n")[2].partition("## 影片内容\n")[0]
         rows = [line[2:] for line in candidates.splitlines()
                 if line.startswith("- ") and "｜" in line]
-        match = re.search(r"^- \S+ \[\d+-\d+\] (.+)$", text, re.MULTILINE)
-        quote = self.quote
-        if quote == "":  # 未显式指定 → 从首个场景行截原文
-            quote = match.group(1)[:12] if match else ""
+        excerpts = dict(re.findall(r"^- (\S+) \[\d+-\d+\] (.+)$", text, re.MULTILINE))
         items = []
         for row in rows:
             tag = row.split("｜")[0]
             if tag == self.omit:
                 continue
-            dirs = re.search(r"(?:〔|｜)目录 ([^〕]+)〕", row)
+            dirs = re.search(r"(?:〔|｜)目录 ([^〕｜]+)", row)
+            identifier = re.search(r"｜候选 ID ([^〕｜]+)", row)
+            source = re.search(r"｜依据场景 ([^〕｜]+)", row)
+            scene_id = source[1].split("、")[0] if source else next(iter(excerpts), "")
+            quote = excerpts.get(scene_id, "")[:12] if self.quote == "" else self.quote
             items.append({
+                **({"candidate_id": identifier[1]} if identifier else {}),
                 "dir_fits": dict.fromkeys(dirs[1].split("、"), True) if dirs else {},
                 "tag": row if self.echo_full else tag,
                 "relevance": self.relevance,
@@ -124,7 +126,8 @@ class _FixedGenLLM:
         self.items = items
 
     def complete(self, messages, run_id):
-        return LLMResponse(content=json.dumps(self.items, ensure_ascii=False),
+        items = self.items(run_id) if callable(self.items) else self.items
+        return LLMResponse(content=json.dumps(items, ensure_ascii=False),
                            usage={"prompt_tokens": 100, "completion_tokens": 20},
                            raw={}, ok=True)
 
@@ -136,7 +139,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v11-target-directory"
+    assert producer.prompt_version == "mtg-v12-directory-rounds"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -144,7 +147,8 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
     spec = _build_spec(session, content_fixture, run_id="r1")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
-    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert len(out) == 1
+    assert out[0].tag_name in {"多线叙事", "情感张力", "视听风格"}
     assert all(t.origin == "generated" and t.tag_id is None for t in out)
     assert all(t.confidence == 0.9 for t in out)
     assert all(t.candidate_type and t.candidate_description for t in out)
@@ -154,11 +158,13 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v11-target-directory"
+    assert report["version"] == "mtg-v12-directory-rounds"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
-    assert len(report["accepted"]) == 3
+    assert len(report["accepted"]) == 1
+    assert report["clustering"]["input"] == 9
+    assert len(report["clustering"]["clusters"]) == 1
     # judge 原始响应随审计落盘：整片归零时能分清 null / 漏字段 / 格式漂移。
     assert [row["attempt"] for row in report["judge_trace"]["raw"]] == [0]
     assert json.loads(report["judge_trace"]["raw"][0]["content"])
@@ -193,7 +199,7 @@ def test_open_judge_semantics_floor(session, content_fixture, mtg_settings):
         _build_spec(session, content_fixture, run_id="r2d"),
         session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(semantics=3))
-    assert len(kept) == 3
+    assert len(kept) == 1
 
 
 def test_open_judge_value_floor(session, content_fixture, mtg_settings):
@@ -207,7 +213,7 @@ def test_open_judge_value_floor(session, content_fixture, mtg_settings):
         _build_spec(session, content_fixture, run_id="r2f"),
         session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(value=2))
-    assert len(kept) == 3
+    assert len(kept) == 1
 
 
 def test_open_judge_low_confidence_dropped(session, content_fixture, mtg_settings):
@@ -222,7 +228,7 @@ def test_open_judge_low_confidence_dropped(session, content_fixture, mtg_setting
         _build_spec(session, content_fixture, run_id="r3b"),
         session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(confidence=0.6))
-    assert len(kept) == 3
+    assert len(kept) == 1
     assert {t.confidence for t in kept} == {0.6}
 
 
@@ -232,7 +238,7 @@ def test_open_missing_verdict_dropped(session, content_fixture, mtg_settings):
     out = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(omit="情感张力"))
-    assert [t.tag_name for t in out] == ["多线叙事", "视听风格"]
+    assert len(out) == 1 and out[0].tag_name in {"多线叙事", "视听风格"}
 
 
 def test_open_judge_echoing_full_line_still_matches(session, content_fixture,
@@ -242,52 +248,40 @@ def test_open_judge_echoing_full_line_still_matches(session, content_fixture,
     out = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(echo_full=True))
-    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert len(out) == 1
+    assert out[0].tag_name in {"多线叙事", "情感张力", "视听风格"}
 
 
 def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
                                                        mtg_settings):
     """judge 把判决包成对象（{"verdicts":[...]} / 以标签为键）→ 仍能解析。"""
-    class _WrappedJudge:
-        def __init__(self, payload):
-            self.payload = payload
+    class WrappedJudge(_JudgeClient):
+        def __init__(self, keyed):
+            super().__init__()
+            self.keyed = keyed
 
         def complete(self, messages, run_id):
-            return LLMResponse(content=json.dumps(self.payload, ensure_ascii=False),
-                               usage={"prompt_tokens": 10, "completion_tokens": 5},
+            response = super().complete(messages, run_id)
+            verdicts = json.loads(response.content)
+            payload = ({"verdicts": verdicts} if not self.keyed
+                       else {row["candidate_id"]: row for row in verdicts})
+            return LLMResponse(content=json.dumps(payload), usage=response.usage,
                                raw={}, ok=True)
 
-    dir_fits = dict.fromkeys(["dir_theme", "dir_scene", "dir_char"], True)
-
-    def verdict(tag):
-        return {"tag": tag, "relevance": 4, "semantics": 3, "value": 3,
-                "confidence": 0.9, "scenes": ["scene_001"],
-                "quote": "两名人物在仓库中发生激烈争执", "reason": "桩", "dir_fits": dir_fits}
-
-    keyed = {"relevance": 4, "semantics": 3, "value": 3,
-             "confidence": 0.9, "scenes": ["scene_001"],
-             "quote": "两名人物在仓库中发生激烈争执", "dir_fits": dir_fits}
-    for payload in ({"verdicts": [verdict("多线叙事"), verdict("情感张力"),
-                                  verdict("视听风格")]},
-                    {"多线叙事": dict(keyed), "情感张力": dict(keyed),
-                     "视听风格": dict(keyed)}):
+    for keyed in (False, True):
         spec = _build_spec(session, content_fixture, run_id="r11")
         out = OpenTagProducer().produce(
-            spec, session, MOCK_LLM, MOCK_EMBEDDER,
-            judge_client=_WrappedJudge(payload))
-        assert len(out) == 3
+            spec, session, MOCK_LLM, MOCK_EMBEDDER, judge_client=WrappedJudge(keyed))
+        assert len(out) == 1
 
 
 def test_open_scene_evidence_stays_with_source(session, content_fixture, mtg_settings):
     """场景级标签只挂原候选的证据场景。"""
     content = _scene_content(content_fixture, "tt0000003", 2)
-    generated = _FixedGenLLM([{
-        "tag": "多线叙事", "dimension": "叙事",
-        "scenes": ["tt0000003_story_000"], "reason": "生成侧"}])
-    spec = GenerationSpec(task_id="t-r12", asset_id=content.asset.asset_id,
-                          content=content, policy=GenerationPolicy(),
-                          prompt_text="", run_id="r12",
-                          library=try_load_library())
+    item = {"tag": "多线叙事", "dimension": "叙事",
+            "scenes": ["tt0000003_story_001"], "reason": "生成侧"}
+    generated = _FixedGenLLM(lambda run: [item] if ":scene-001-" in run else [])
+    spec = _build_spec(session, content, "r12", GenerationPolicy(dir_ids=["dir_scene"]))
     out = OpenTagProducer().produce(
         spec, session, generated, MOCK_EMBEDDER,
         judge_client=_JudgeClient(scenes=["tt0000003_story_001"]))
@@ -295,15 +289,16 @@ def test_open_scene_evidence_stays_with_source(session, content_fixture, mtg_set
     assert [e.scene_id for e in out[0].evidence] == ["tt0000003_story_000"]
 
 
-def test_open_without_valid_evidence_dropped(session, content_fixture, mtg_settings):
-    """生成与 judge 都给不出真实 scene_id → 无证据锚点，淘汰。"""
-    garbage = _FixedGenLLM([{"tag": "空中楼阁", "dimension": "主题",
-                             "scenes": ["不存在_scene"], "reason": "编的"}])
-    spec = _build_spec(session, content_fixture, run_id="r5")
-    out = OpenTagProducer().produce(
-        spec, session, garbage, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(scenes=[]))
-    assert out == []
+def test_open_film_without_valid_evidence_dropped(session, content_fixture, mtg_settings):
+    """全片生成无法引用两个真实场景，输出在进入 Judge 前淘汰。"""
+    content = _scene_content(content_fixture, "tt0000005", 2)
+    items = [{"tag": "空中楼阁", "dimension": "主题", "scenes": ["不存在_scene"]}]
+    garbage = _FixedGenLLM(lambda run: items if ":film-dir-" in run else [])
+    spec = _build_spec(session, content, "r5", GenerationPolicy(dir_ids=["dir_theme"]))
+    judge = _JudgeClient()
+    assert OpenTagProducer().produce(
+        spec, session, garbage, MOCK_EMBEDDER, judge_client=judge) == []
+    assert judge.calls == 0
 
 
 def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_settings):
@@ -318,11 +313,10 @@ def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_se
     assert hits[0].tag_id == "tag_cat_1"
     assert hits[0].relevance_score == pytest.approx(1.0)
     assert hits[0].candidate_type is None and hits[0].candidate_description is None
-    assert [t.tag_name for t in out if t.origin == "generated"] == ["情感张力", "视听风格"]
 
 
 def test_open_respects_max_final_tags(session, content_fixture, mtg_settings):
-    """policy.max_tags 与 mtg_max_final_tags 取小者截断。"""
+    """任务显式填写的总上限生效。"""
     spec = _build_spec(session, content_fixture, run_id="r7",
                        policy=GenerationPolicy(max_tags=1))
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
@@ -336,22 +330,20 @@ def test_open_film_scope_needs_two_scenes(session, content_fixture, mtg_settings
     """全片级但只有单场支撑 → 淘汰；场景级单场支撑 → 保留，且层级随
     产出带出（film/scene 落库到 asset_tag.level）。"""
     content = _scene_content(content_fixture, "tt0000009", 2)
-    spec = _build_spec(session, content, run_id="rf")
-    llm = _FixedGenLLM([
-        {"tag": "道德堕落", "scope": "film", "dimension": "主题",
-         "scenes": ["tt0000009_story_000"], "reason": "只引一场"},
-        {"tag": "开场旁白", "scope": "scene", "dimension": "叙事",
-         "scenes": ["tt0000009_story_000"], "reason": "局部手法"},
-        {"tag": "家族权力更迭", "scope": "film", "dimension": "主题",
-         "scenes": ["tt0000009_story_000", "tt0000009_story_001"],
-         "reason": "两场共同支撑"},
+    spec = _build_spec(session, content, "rf", GenerationPolicy(dir_ids=["dir_theme"]))
+    scenes = [s.scene_id for s in content.content.scenes]
+    film_items = [
+        {"tag": "道德堕落", "scenes": scenes[:1]},
+        {"tag": "家族权力更迭", "scenes": scenes, "reason": "两场共同支撑"},
+    ]
+    llm = _FixedGenLLM(lambda run: film_items if ":film-dir-" in run else [
+        {"tag": "开场旁白", "scope": "film", "reason": "局部手法"},
     ])
     out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER,
                                     judge_client=_JudgeClient())
-    names = {tag.tag_name for tag in out}
-    assert names == {"开场旁白", "家族权力更迭"}
-    levels = {tag.tag_name: tag.level for tag in out}
-    assert levels == {"开场旁白": "scene", "家族权力更迭": "film"}
+    assert {tag.tag_name: tag.level for tag in out} == {
+        "开场旁白": "scene", "家族权力更迭": "film",
+    }
 
 
 def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
@@ -364,7 +356,7 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
     frame.write_bytes(b"test frame")
     monkeypatch.setattr(keyframes_mod, "plan_scene_frames",
                         lambda *args, **kwargs: {scenes[0].scene_id: (frame,)})
-    spec = _build_spec(session, content, "two-rounds", GenerationPolicy(max_tags=3))
+    spec = _build_spec(session, content, "two-rounds", GenerationPolicy(max_tags=3, dir_ids=["dir_theme"]))
     calls = []
 
     class TwoRoundLLM:
@@ -372,7 +364,7 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
             parts = messages[0]["content"]
             text = parts[0]["text"]
             calls.append(run_id)
-            if run_id.endswith(":film"):
+            if ":film-dir-" in run_id:
                 assert content.asset.title in text
                 assert all(scene.description in text for scene in scenes)
                 context = json.loads(text.split("## 第一轮逐场候选\n")[1])
@@ -380,23 +372,22 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
                 assert [len(item["tags"]) for item in context] == [1, 1, 0]
                 assert context[0]["tags"][0]["tag"] == "开场冲突"
                 assert context[0]["tags"][0]["reason"] == "场景理由"
-                assert "最多 2 条" in parts[-1]["text"]
+                assert "最多 5 条" in parts[-1]["text"]
                 items = [
                     {"tag": "伪跨场", "scope": "film", "scenes": [scenes[0].scene_id, "ghost"]},
                     *[{"tag": tag, "scope": "film", "scenes": [s.scene_id for s in scenes]}
                       for tag in ("秩序崩解", "人物蜕变", "超出预算")],
                 ]
             elif ":scene-" in run_id:
-                index = int(run_id.rsplit("-", 1)[1]) - 1
+                index = int(run_id.split(":scene-", 1)[1].split("-dir-", 1)[0]) - 1
                 assert scenes[index].description in text
                 assert content.asset.title in text
                 assert content.content.summary in text
                 assert all(s.description not in text for s in scenes if s != scenes[index])
                 assert sum(p["type"] == "image_url" for p in parts) == (1 if index == 0 else 0)
-                assert "最多 1 条" in parts[-1]["text"]
+                assert "最多 3 条" in parts[-1]["text"]
                 tags = ["开场冲突", "孤立处境"]
-                items = ([{"tag": "错场景", "scope": "scene", "scenes": ["ghost"]},
-                          {"tag": tags[index], "scope": "scene",
+                items = ([{"tag": tags[index], "scope": "scene",
                            "scenes": [scenes[index].scene_id], "reason": "场景理由"}]
                          if index < 2 else [])
             else:
@@ -406,12 +397,12 @@ def test_open_two_rounds_use_isolated_scenes_and_share_final_budget(
     out = OpenTagProducer().produce(spec, session, TwoRoundLLM(), MOCK_EMBEDDER,
                                     judge_client=_JudgeClient())
     assert [call.rsplit(":", 1)[1] for call in calls[:4]] == [
-        "scene-001", "scene-002", "scene-003", "film"]
-    assert [(tag.tag_name, tag.level) for tag in out] == [
-        ("秩序崩解", "film"), ("人物蜕变", "film"), ("开场冲突", "scene")]
+        "scene-001-dir-001", "scene-002-dir-001", "scene-003-dir-001", "film-dir-001"]
+    assert {(tag.tag_name, tag.level) for tag in out} == {
+        ("秩序崩解", "film"), ("人物蜕变", "film"), ("超出预算", "film")}
     report = json.loads((tmp_path / "audit" / "t-two-rounds.json").read_text(encoding="utf-8"))
     assert [(run["scope"], run["calls"], run["items"]) for run in report["runs"]] == [
-        ("scene", 3, 2), ("film", 1, 2)]
+        ("scene", 3, 2), ("film", 1, 3)]
 
 
 # ---- 队列治理：judge 引用原文 + value 排序 ----
@@ -429,17 +420,15 @@ def test_open_judge_without_quote_downgraded(session, content_fixture,
 
 def test_open_value_orders_queue(session, content_fixture, mtg_settings):
     """队列先按 judge value 分排：4 分排在 2 分前（同把握同轮数时）。"""
-    spec = _build_spec(session, content_fixture, run_id="rq2")
-    llm = _FixedGenLLM([
-        {"tag": "次要标签", "dimension": "情绪", "scenes": ["scene_001"],
-         "reason": "次要"},
-        {"tag": "核心标签", "dimension": "主题", "scenes": ["scene_001"],
-         "reason": "核心"},
-    ])
+    content = _scene_content(content_fixture, "tt0000030", 2)
+    spec = _build_spec(session, content, "rq2", GenerationPolicy(dir_ids=["dir_theme"]))
+    scenes = [s.scene_id for s in content.content.scenes]
+    items = [{"tag": tag, "scenes": scenes} for tag in ("次要标签", "核心标签")]
+    llm = _FixedGenLLM(lambda run: items if ":film-dir-" in run else [])
     out = OpenTagProducer().produce(
         spec, session, llm, MOCK_EMBEDDER,
         judge_client=_JudgeClient(value_map={"核心标签": 4, "次要标签": 2}))
-    assert [tag.tag_name for tag in out][0] == "核心标签"
+    assert [tag.tag_name for tag in out] == ["核心标签", "次要标签"]
 
 
 # ---- 失败语义 ----
@@ -591,7 +580,8 @@ def test_run_open_generation_honors_explicit_settings(session, content_fixture,
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER,
                                     settings=run_settings)
 
-    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert len(out) == 1
+    assert out[0].tag_name in {"多线叙事", "情感张力", "视听风格"}
     # 1) 审计恰一份，落在重定向目录（task_id 命名）。
     audits = list(tmp_path.glob("*.json"))
     assert [p.name for p in audits] == ["t-r-explicit.json"]
@@ -616,5 +606,6 @@ def test_run_open_generation_settings_none_falls_back(session, content_fixture,
     out = mtg_pipeline.run_open_generation(spec, session, MOCK_LLM,
                                            MOCK_EMBEDDER, settings=None)
 
-    assert [t.tag_name for t in out] == ["多线叙事", "情感张力", "视听风格"]
+    assert len(out) == 1
+    assert out[0].tag_name in {"多线叙事", "情感张力", "视听风格"}
     assert (tmp_path / "audit" / "t-r-fallback.json").exists()

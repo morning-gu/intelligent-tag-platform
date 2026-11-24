@@ -141,8 +141,8 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
     - `funnel`：生产数量漏斗——逐片求和后整 run 算比率（None≠0）：
       raw（原始生成 Σruns.items）→ merged（两级合并保留）→ verdicts
       （judge 返回判决）→ judge_passed（过小节 4 过滤：merged − 过滤段
-      淘汰，按 is_filter_stage_drop 区分过滤段与目录归属段）→ rank_kept
-      （排序配额保留：judge_passed − library.truncated）→ final（目录
+      淘汰，按 is_filter_stage_drop 区分过滤段与目录归属段）→ cluster_kept
+      （一阶段聚类代表及二阶段通过项）→ rank_kept（配额保留）→ final（目录
       归属成功 Σaccepted）。比率七项：合并保留率 / judge 返回覆盖率 /
       judge 通过率（按合并候选与按已评分候选两个分母）/ 排序配额保留率 /
       目录挂载成功率 / 最终生产保留率。审计无漏斗键（替身/旧管线）→
@@ -154,8 +154,9 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
     读不到 → 空段 + warnings 追加警示。
     """
     totals = dict.fromkeys(("raw", "merged", "verdicts", "judge_passed",
-                            "rank_kept", "final"), 0)
+                            "cluster_kept", "rank_kept", "final"), 0)
     funnel_contributed = contributed = 0
+    has_clustering = False
     verdict_rows: list[dict] = []
     dropped: dict[str, int] = {}
     bands = {key: 0 for key in _BAND_KEYS}
@@ -191,6 +192,13 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
                     if is_filter_stage_drop(reason):
                         filter_dropped += 1
             judge_passed = max(0, merged_n - filter_dropped)
+            cluster_kept = judge_passed
+            clustering = audit.get("clustering")
+            if (isinstance(clustering, dict) and isinstance(clustering.get("input"), int)
+                    and isinstance(clustering.get("clusters"), list)):
+                has_clustering = True
+                pruned = max(0, clustering["input"] - len(clustering["clusters"]))
+                cluster_kept = max(0, judge_passed - pruned)
             library = audit.get("library")
             align = library.get("align") if isinstance(library, dict) else None
             truncated = (library.get("truncated")
@@ -200,7 +208,8 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
             totals["merged"] += merged_n
             totals["verdicts"] += verdicts_n
             totals["judge_passed"] += judge_passed
-            totals["rank_kept"] += max(0, judge_passed - truncated_n)
+            totals["cluster_kept"] += cluster_kept
+            totals["rank_kept"] += max(0, cluster_kept - truncated_n)
             totals["final"] += accepted_n
             for row in verdicts or []:
                 if isinstance(row, dict):
@@ -220,10 +229,14 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
             "judge_pass_rate": _rate(totals["judge_passed"], totals["merged"]),
             "judge_pass_rate_scored": _rate(totals["judge_passed"],
                                             totals["verdicts"]),
-            "rank_keep_rate": _rate(totals["rank_kept"], totals["judge_passed"]),
+            "rank_keep_rate": _rate(totals["rank_kept"], totals["cluster_kept"]),
             "dir_mount_rate": _rate(totals["final"], totals["rank_kept"]),
             "final_keep_rate": _rate(totals["final"], totals["merged"]),
         }
+        if has_clustering:
+            funnel["cluster_keep_rate"] = _rate(totals["cluster_kept"], totals["judge_passed"])
+        else:
+            funnel.pop("cluster_kept")
     return {
         "funnel": funnel,
         "scores": _judge_score_summary(verdict_rows),
@@ -436,6 +449,7 @@ def render_open_report_md(report: dict) -> str:
     lines += ["", "## judge 审计与生产漏斗", ""]
     funnel = judge.get("funnel")
     if funnel:
+        rank_input = funnel.get("cluster_kept", funnel["judge_passed"])
         lines += [
             f"- 原始生成 → 合并保留：{funnel['merged']}/{funnel['raw']}"
             f"（{_pct(funnel.get('merge_keep_rate'))}）",
@@ -445,7 +459,9 @@ def render_open_report_md(report: dict) -> str:
             f"（{_pct(funnel.get('judge_pass_rate'))}）/ 按已评分候选"
             f" {funnel['judge_passed']}/{funnel['verdicts']}"
             f"（{_pct(funnel.get('judge_pass_rate_scored'))}）",
-            f"- 排序配额保留率：{funnel['rank_kept']}/{funnel['judge_passed']}"
+            *([f"- 聚类后保留率：{rank_input}/{funnel['judge_passed']}"
+               f"（{_pct(funnel.get('cluster_keep_rate'))}）"] if "cluster_kept" in funnel else []),
+            f"- 排序配额保留率：{funnel['rank_kept']}/{rank_input}"
             f"（{_pct(funnel.get('rank_keep_rate'))}）",
             f"- 目录挂载成功率：{funnel['final']}/{funnel['rank_kept']}"
             f"（{_pct(funnel.get('dir_mount_rate'))}）",
@@ -565,11 +581,15 @@ def write_open_report(run_dir: Path, report: dict) -> None:
                          summary.get("three_judged_tags")])
         # judge 数量漏斗七率（n = 对应分母；审计缺失 → 空值）
         funnel = (report.get("judge") or {}).get("funnel") or {}
+        rank_denominator = "cluster_kept" if "cluster_kept" in funnel else "judge_passed"
+        if "cluster_kept" in funnel:
+            writer.writerow(["cluster_keep_rate", funnel.get("cluster_keep_rate"),
+                             funnel.get("judge_passed")])
         for metric, denominator in (("merge_keep_rate", "raw"),
                                     ("judge_coverage", "merged"),
                                     ("judge_pass_rate", "merged"),
                                     ("judge_pass_rate_scored", "verdicts"),
-                                    ("rank_keep_rate", "judge_passed"),
+                                    ("rank_keep_rate", rank_denominator),
                                     ("dir_mount_rate", "rank_kept"),
                                     ("final_keep_rate", "merged")):
             value = funnel.get(metric)
