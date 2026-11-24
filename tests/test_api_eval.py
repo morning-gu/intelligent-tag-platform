@@ -1043,6 +1043,42 @@ def test_open_run_dir_guard(client):
     assert r3.status_code == 404 and "无报告" in r3.json()["detail"]
 
 
+def test_open_movie_diagnostics_exposes_audit_and_review(client):
+    """整片 0 条产出也要看得到候选去向：诊断端点透出生产审计 + 评审现场。"""
+    _seed_dataset_and_library(client)
+    d = Path(client.app.state.settings.open_eval_output_root) / "run-diag"
+    (d / "audit").mkdir(parents=True)
+    (d / "review").mkdir(parents=True)
+    (d / "audit" / "tt0067116.json").write_text(json.dumps({
+        "version": "mtg-v9-catalog-fit",
+        "merged": [{"tag": "粗粝写实", "scope": "film"}],
+        "verdicts": [{"tag": "粗粝写实", "relevance": 3, "semantics": 3,
+                      "value": None, "in_dir": True}],
+        "dropped": [{"tag": "粗粝写实", "why": "judge 评分未过线（value=null < 2）"}],
+        "accepted": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (d / "review" / "tt0067116.json").write_text(json.dumps({
+        "error": "ReviewRequestError: 评审响应未包含有效判决",
+        "batches": [{"batch": "t0-t10", "attempt": 0, "raw": "{}",
+                     "error": "评审响应未包含有效判决"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    (d / "review" / "tt0047396.json").write_text('{"error": null, "batches": []}',
+                                                 encoding="utf-8")
+
+    body = client.get(f"{_OPEN}/runs/run-diag/movies/tt0067116/diagnostics").json()
+    assert body["tt"] == "tt0067116"
+    assert body["audit"]["dropped"][0]["why"].startswith("judge 评分未过线")
+    assert body["review"]["batches"][0]["raw"] == "{}"
+    # 只有评审现场（produce 失败没有审计）同样可读
+    only_review = client.get(f"{_OPEN}/runs/run-diag/movies/tt0047396/diagnostics").json()
+    assert only_review["audit"] is None and only_review["review"] is not None
+    # 两份都没有 / run 不存在 / tt 形态非法 → 404
+    assert client.get(f"{_OPEN}/runs/run-diag/movies/tt0000000/diagnostics").status_code == 404
+    assert client.get(f"{_OPEN}/runs/run-none/movies/tt0067116/diagnostics").status_code == 404
+    guard = client.get(f"{_OPEN}/runs/run-diag/movies/..%5Cescape/diagnostics")
+    assert guard.status_code == 404 and "不存在" in guard.json()["detail"]
+
+
 def test_open_cancel_and_delete(client):
     """cancel：受理 {ok:true} → cancelled 终态、重复取消 ok=false；运行中
     删除 → 409「不可删除」、运行中报告未落盘 → 404；终态删除 {ok:true} →

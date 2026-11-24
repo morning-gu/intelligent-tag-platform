@@ -31,6 +31,7 @@ tagplatform.services.eval.open_service.OpenEvalService（数据集扫描/
 - `delete_open_run`      删除终态 run（活跃 409 / 不存在 404）
 - `get_open_run_report`  开放评测报告 JSON（缺失/截断 404，不 500）
 - `get_open_run_file`    开放评测产物下载（白名单五件套）
+- `get_open_movie_diagnostics` 单片诊断（生产审计 + 评审原始响应）
 
 run_id 守卫（`_run_dir` / `_open_run_dir` 路径越界防拼接）、读侧容错
 （非原子写序窗口不 500）随逻辑下沉本层原样保留；数据集三别名
@@ -40,6 +41,7 @@ Depends(get_closed_eval) 直读，一处写入两端可见。
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Sequence
 
@@ -683,6 +685,38 @@ def get_open_run_report(settings: Settings, run_id: str) -> dict:
                 return report
     raise HTTPException(status_code=404,
                         detail=f"该 run 无报告：{run_id!r}")
+
+
+# 影片号形态守卫：诊断端点按 tt 拼文件名，只认 IMDb 号（防路径拼接越界）
+_TT_RE = re.compile(r"tt\d+")
+
+
+def _read_json_object(path: Path) -> dict | None:
+    """读一份 JSON 对象产物；缺失/截断/非对象一律 None（读侧容错，不 500）。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_open_movie_diagnostics(settings: Settings, run_id: str, tt: str) -> dict:
+    """单片诊断：生产审计（audit/<tt>.json）+ 评审原始响应（review/<tt>.json）。
+
+    整片产出为 0 时报告里没有任何标签行，用户看不到"候选为什么全被淘汰"；
+    本用例把两份现场原样透出，前端据此渲染候选去向。tt 形态非法、run 越界
+    或两份都没有 → 404。
+    """
+    run_dir = _open_run_dir(settings, run_id)
+    if run_dir is None or not _TT_RE.fullmatch(tt):
+        raise HTTPException(status_code=404,
+                            detail=f"评测影片不存在：{run_id!r}/{tt!r}")
+    audit = _read_json_object(run_dir / "audit" / f"{tt}.json")
+    review = _read_json_object(run_dir / "review" / f"{tt}.json")
+    if audit is None and review is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该影片无诊断产物：{run_id!r}/{tt!r}")
+    return {"tt": tt, "audit": audit, "review": review}
 
 
 def get_open_run_file(settings: Settings, run_id: str, name: str) -> FileResponse:

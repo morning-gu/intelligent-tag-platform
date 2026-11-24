@@ -347,6 +347,17 @@ def open_get_run_report(
     return eval_orch.get_open_run_report(settings, run_id)
 
 
+@open_router.get("/runs/{run_id}/movies/{tt}/diagnostics")
+def open_get_movie_diagnostics(
+    run_id: str,
+    tt: str,
+    _admin: UserAccount = Depends(require_admin),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """单片诊断（展开时懒加载）：生产审计 + 评审原始响应；都没有 → 404。"""
+    return eval_orch.get_open_movie_diagnostics(settings, run_id, tt)
+
+
 @open_router.get("/runs/{run_id}/files/{name}")
 def open_get_run_file(
     run_id: str,

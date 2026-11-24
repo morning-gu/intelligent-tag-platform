@@ -242,6 +242,50 @@ export interface OpenEvalReport {
   note: string
 }
 
+/** 生产 judge 的一条判决（审计 verdicts 行，键与 parse_judge_items 一致）：
+ * 三维分 0-4 或 null；in_dir 为目录契合（null = 本次未校验）。 */
+export interface JudgeVerdictRow {
+  tag: string
+  relevance: number | null
+  semantics: number | null
+  value: number | null
+  in_dir?: boolean | null
+  confidence?: number
+  scenes?: string[]
+  quote?: string | null
+  reason?: string
+}
+
+/** 生产审计（audit/<tt>.json 的诊断子集）：候选、判决、淘汰原因、最终保留。 */
+export interface OpenMovieAudit {
+  version?: string
+  error?: string
+  merged?: { tag: string; aliases?: string[]; dimension?: string | null; scope?: string | null }[]
+  verdicts?: JudgeVerdictRow[]
+  dropped?: { tag: string; why: string }[]
+  accepted?: { tag: string; candidate?: string; dir_id?: string | null }[]
+  library?: { truncated?: { tag: string; band?: string | null }[] }
+  judge_trace?: {
+    raw?: { attempt: number; content: string }[]
+    errors?: { attempt: number; error: string }[]
+    salvaged?: number
+  }
+}
+
+/** 评审现场（review/<tt>.json）：逐批原始响应与失败原因。 */
+export interface OpenMovieReviewTrace {
+  error: string | null
+  batches?: { batch: string; attempt: number; raw: string; error?: string }[]
+  errors?: Record<string, string>
+}
+
+/** 单片诊断：两份现场都可能缺（produce 失败无审计 / 未评审无 review）。 */
+export interface OpenMovieDiagnostics {
+  tt: string
+  audit: OpenMovieAudit | null
+  review: OpenMovieReviewTrace | null
+}
+
 /** 产物文件名（后端 files 端点白名单五件套；report.json 有专用 /report
  * 端点、不在白名单——结构化读走 getOpenReport，文件端点只供下载原始产物）。 */
 export type OpenFileName =
@@ -321,6 +365,12 @@ export function deleteOpenRun(runId: string): Promise<{ ok: boolean }> {
  * 写序的非原子窗口，读侧容错不抛 500）。 */
 export function getOpenReport(runId: string): Promise<OpenEvalReport> {
   return apiFetch<OpenEvalReport>(`/api/v1/eval/open/runs/${runId}/report`)
+}
+
+/** 单片诊断（逐片明细展开时懒加载）：生产审计 + 评审原始响应。整片产出
+ * 为 0 时报告没有任何标签行，候选去向只能从这里看。两份都没有 → 404。 */
+export function getOpenMovieDiagnostics(runId: string, tt: string): Promise<OpenMovieDiagnostics> {
+  return apiFetch<OpenMovieDiagnostics>(`/api/v1/eval/open/runs/${runId}/movies/${tt}/diagnostics`)
 }
 
 /** 产物下载路径（白名单五件套）：纯路径拼接供 <a href>/window.open 使用，
