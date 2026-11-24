@@ -98,6 +98,14 @@ def client(tmp_path, request):
     db_path = tmp_path / "tagplatform.db"
     settings = Settings(database_path=str(db_path), use_mock_embedder=True,
                         use_mock_llm=True, generation_workers=0,
+                        # 模型视图字段钉死默认值：.env / 进程环境可能覆盖
+                        # （如 TAGPLT_OPEN_EVAL_REVIEW_MODEL），契约测试
+                        # 要确定性断言
+                        mtg_judge_model="deepseek-v4.1-flash",
+                        mtg_judge_enabled=True,
+                        embedding_backend="local",
+                        embedding_model="BAAI/bge-m3",
+                        open_eval_review_model="",
                         mtg_prompt_sample_dir=str(tmp_path / "prompt-samples"),
                         # 数据集根指向空目录：上传不会误命中真实 MovieNet，
                         # 也避免测试去扫 /cache/MovieNet

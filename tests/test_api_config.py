@@ -1,6 +1,6 @@
 """GET /api/v1/config（admin，只读运行配置）端点测试。
 
-契约：8 个字段齐且不多不少；机密不外泄（无 session_secret/admin_password
+契约：13 个字段齐且不多不少；机密不外泄（无 session_secret/admin_password
 键，序列化结果中无默认密钥值）；reviewer 403、未登录 401。
 （semantic_similar_threshold 随手动导入取消余弦相似控制退役。）
 """
@@ -9,8 +9,9 @@ import json
 
 # 契约字段集合（精确相等断言：既不缺字段，也不得多余键——多余键可能泄密）
 EXPECTED_KEYS = {
-    "llm_model", "llm_temperature", "recall_top_k_per_type",
-    "open_match_threshold",
+    "llm_model", "llm_temperature", "mtg_judge_model", "mtg_judge_enabled",
+    "embedding_backend", "embedding_model", "open_eval_review_model",
+    "recall_top_k_per_type", "open_match_threshold",
     "generation_workers", "use_mock_llm", "use_mock_embedder",
     "database_path",
 }
@@ -25,6 +26,12 @@ def test_config_returns_all_fields(client):
     # 默认值（fixture 只覆盖 mock 开关/workers/库路径）
     assert body["llm_model"] == "qwen3.7-plus"
     assert body["llm_temperature"] == 0.7
+    # 模型视图增补字段（夹具钉死默认值，见 conftest client fixture）
+    assert body["mtg_judge_model"] == "deepseek-v4.1-flash"
+    assert body["mtg_judge_enabled"] is True
+    assert body["embedding_backend"] == "local"
+    assert body["embedding_model"] == "BAAI/bge-m3"
+    assert body["open_eval_review_model"] == ""  # 空 = 回落主 LLM
     assert body["recall_top_k_per_type"] == 50
     assert body["open_match_threshold"] == 0.85
     assert body["generation_workers"] == 0  # fixture 钉死同步执行
