@@ -329,6 +329,40 @@ def test_call_budget_caps_runaway_splitting():
     assert len(client.calls) <= 2 * 4 + 2
 
 
+def test_every_singleton_gets_its_first_attempt_before_any_singleton_retry():
+    attempted = []
+
+    def handler(_index, messages):
+        targets = _targets(messages)
+        if len(targets) != 1:
+            return '{"reviews":[]}'
+        target_id = targets[0]["id"]
+        attempted.append(target_id)
+        if attempted.count(target_id) == 1:
+            return '{"reviews":[]}'
+        return json.dumps({"reviews": [{"id": target_id, **_v()}]})
+
+    trace = {}
+    client = StubClient(handler=handler)
+    rows = review_movie_tags(client, _content(), _rows(8), run_id="r1:m1", trace=trace)
+    assert len(client.calls) == 18
+    assert attempted[:8] == [f"t{i}" for i in range(8)]
+    assert sum(row["evaluated"] for row in rows) == 2
+    assert trace["errors"]["t7"] == "评审调用预算耗尽，未发出恢复请求"
+
+
+def test_all_singletons_can_recover_within_budget():
+    def handler(_index, messages):
+        targets = _targets(messages)
+        return json.dumps({"reviews": [{"id": target["id"], **_v()}
+                                       for target in targets if len(targets) == 1]})
+
+    client = StubClient(handler=handler)
+    rows = review_movie_tags(client, _content(), _rows(8), run_id="r1:m1")
+    assert all(row["evaluated"] for row in rows)
+    assert len(client.calls) <= 18
+
+
 def test_trace_keeps_raw_responses_and_failure_reasons():
     trace: dict = {}
     client = StubClient(handler=lambda *_: "不是 JSON")
