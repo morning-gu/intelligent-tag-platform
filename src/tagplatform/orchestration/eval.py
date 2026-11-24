@@ -50,7 +50,10 @@ from pydantic import BaseModel
 from tagplatform.services.eval.closed_ranking import DEFAULT_KS, DEFAULT_THETAS
 from tagplatform.services.eval.dataset import movie_entries, scan_datasets
 from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
-from tagplatform.services.eval.open_report import OPEN_REPORT_SCHEMA_VERSION
+from tagplatform.services.eval.open_report import (
+    OPEN_REPORT_SCHEMA_VERSION,
+    upgrade_open_report,
+)
 from tagplatform.services.eval.open_service import (
     DEFAULT_CONCURRENCY as OPEN_DEFAULT_CONCURRENCY,
     EvalValidationError as OpenEvalValidationError,
@@ -657,7 +660,10 @@ def delete_open_run(service, run_id: str) -> dict:
 
 def get_open_run_report(settings: Settings, run_id: str) -> dict:
     """开放评测报告 JSON（report.json 原样透出，镜像 get_run_report）：
-    无报告/截断 → 404（读侧容错，不把非原子写序窗口打成 500）。"""
+    无报告/截断 → 404（读侧容错，不把非原子写序窗口打成 500）。
+
+    旧 schema 报告先尝试按原始材料惰性升级（upgrade_open_report，含
+    judge 数量漏斗等新段）；升级失败才 410。"""
     run_dir = _open_run_dir(settings, run_id)
     if run_dir is not None:
         # 终态 report.json 优先；运行中回落 live.json（评审逐条增量发布），
@@ -670,6 +676,9 @@ def get_open_run_report(settings: Settings, run_id: str) -> dict:
                 report = None
             if isinstance(report, dict):
                 if report.get("schema_version") != OPEN_REPORT_SCHEMA_VERSION:
+                    upgraded = upgrade_open_report(run_dir)
+                    if upgraded is not None:
+                        return upgraded
                     raise HTTPException(status_code=410, detail="旧版开放评测报告已停用")
                 return report
     raise HTTPException(status_code=404,

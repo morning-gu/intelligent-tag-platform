@@ -99,6 +99,27 @@ _JUDGE_CONFIDENCE_FLOOR = 0.5
 # 依赖词在这里淘汰）。null 分按未过线处理，绝不猜分放行。
 _JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 
+# 小节 4 过滤段（judge 判决 + 证据把关）的淘汰原因常量：审计读侧
+# （open_report 的数量漏斗）据 is_filter_stage_drop 把"过滤段淘汰"与
+# "目录归属段淘汰"分开——改文案必须同步分类函数，否则漏斗推导失真。
+_DROP_NO_VERDICT = "judge 未返回判决"
+_DROP_SCORE_BELOW = "judge 评分未过线"
+_DROP_CONFIDENCE_BELOW = "judge 判定把握"
+_DROP_NO_EVIDENCE = "无有效场景证据"
+_DROP_SINGLE_SCENE = "全片级但只有单场支撑"
+
+
+def is_filter_stage_drop(why: str) -> bool:
+    """审计 dropped.why 是否属于小节 4 过滤段（judge + 证据把关）。
+
+    评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余三类
+    是定值文案，精确匹配。目录归属段的淘汰原因（无可归属目录等）不在
+    此列——它们发生在排序配额之后，不影响 judge 通过数。
+    """
+    return (why in (_DROP_NO_VERDICT, _DROP_NO_EVIDENCE, _DROP_SINGLE_SCENE)
+            or why.startswith((_DROP_SCORE_BELOW, _DROP_CONFIDENCE_BELOW)))
+
+
 # judge 必须引用原文：判决里给出 quote，与内容逐字对上（容忍标点/省略号差异）
 # 才采信。这条把"judge 复读生成侧理由"变成可检测的失败：没有原文锚点的
 # 高 relevance 分一律降档淘汰，而不是凭一句"内容有依据"放行。
@@ -482,7 +503,7 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
         verdict = verdicts.get(normalize_key(candidate.tag))
         if settings.mtg_judge_enabled:
             if verdict is None:
-                dropped.append({"tag": candidate.tag, "why": "judge 未返回判决"})
+                dropped.append({"tag": candidate.tag, "why": _DROP_NO_VERDICT})
                 continue
             below = [f"{axis}={'null' if verdict.get(axis) is None else verdict[axis]}"
                      f" < {floor}"
@@ -491,22 +512,22 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
                      or verdict[axis] < floor]
             if below:
                 dropped.append({"tag": candidate.tag,
-                                "why": "judge 评分未过线（" + "；".join(below) + "）"})
+                                "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
                 continue
             if verdict["confidence"] < _JUDGE_CONFIDENCE_FLOOR:
                 dropped.append({"tag": candidate.tag,
-                                "why": f"judge 判定把握 {verdict['confidence']:.2f} "
+                                "why": f"{_DROP_CONFIDENCE_BELOW} {verdict['confidence']:.2f} "
                                        f"< {_JUDGE_CONFIDENCE_FLOOR}"})
                 continue
         evidence = _evidence_for(candidate, verdict, scene_index)
         if not evidence:
-            dropped.append({"tag": candidate.tag, "why": "无有效场景证据"})
+            dropped.append({"tag": candidate.tag, "why": _DROP_NO_EVIDENCE})
             continue
         # 层级约束（只用于把关，不落库）：全片级必须有两个以上场景支撑，
         # 单场支撑的"全片级"标签一律不进队列——它本质是场景级措辞被写大了
         if candidate.scope == "film" and len(evidence) < 2:
             dropped.append({"tag": candidate.tag,
-                            "why": "全片级但只有单场支撑"})
+                            "why": _DROP_SINGLE_SCENE})
             continue
         accepted.append((candidate, verdict, evidence))
     return accepted, dropped

@@ -466,8 +466,8 @@ def test_run_completes_writes_all_artifacts(open_setup):
         "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
     # 全量成功、无失败核算超 10%，但夹具未配独立评审端点 → 仅同模警示
     assert any("共享判断偏差" in line for line in report["banner"])
-    # 替身审计（{"task_id","stub":True}）无 merged/accepted → judge 空聚合
-    assert report["judge"]["self_filter"] is None
+    # 替身审计（{"task_id","stub":True}）无漏斗键 → judge 空聚合
+    assert report["judge"]["funnel"] is None
     assert report["judge"]["scores"]["relevance"]["n"] == 0
     assert report["calibre"]["review_same_model"] is True
     # 汇总：5 条产出（3+2），新词 2 条；替身评审全过线 → 通过率 1.0

@@ -982,7 +982,7 @@ def test_open_report_falls_back_to_live(client):
         "run_id": "run-live-only", "status": "running", "done": 1,
         "total": 1, "dataset": {"id": "emotion"}}), encoding="utf-8")
     (d / "live.json").write_text(json.dumps({
-        "schema_version": 2, "status": "running", "summary": {"total_tags": 3}, "banner": []}), encoding="utf-8")
+        "schema_version": 3, "status": "running", "summary": {"total_tags": 3}, "banner": []}), encoding="utf-8")
     r = client.get(f"{_OPEN}/runs/run-live-only/report")
     assert r.status_code == 200
     assert r.json()["summary"]["total_tags"] == 3
@@ -1010,7 +1010,7 @@ def test_open_history_summary_five_keys(client):
         "finished_at": "2026-11-22T10:00:05+00:00",
         "dataset": {"id": "emotion"}}, ensure_ascii=False), encoding="utf-8")
     (d / "report.json").write_text(json.dumps({
-        "schema_version": 2, "summary": {"pass_rate": 0.6, "new_pass": 0.7, "hit_pass": 0.9,
+        "schema_version": 3, "summary": {"pass_rate": 0.6, "new_pass": 0.7, "hit_pass": 0.9,
                     "new_ratio": 0.3,
                     "metrics": {"three_dimension_high_rate": 0.25}},
     }, ensure_ascii=False), encoding="utf-8")

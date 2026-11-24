@@ -2,12 +2,13 @@
 // 渲染——① banner 警示（list[str] 逐条 Alert.warning：部分运行/同模评审/
 // 小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维均分/
 // 满分率 + 新词占比）③ 评分分布表（0-4 五档 + 无法判断 + 联合满分率）
-// ④ judge 审计段（生产侧自滤保留率 + 三维分聚合 + 淘汰原因 + 库内分档）
+// ④ judge 审计段（生产漏斗图 + 三维分聚合 + 淘汰原因 + 库内分档）
 // ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考）
 // ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
 // ⑧ 银标准 note 恒渲染 + calibre 口径小字。null 一律「暂无」（None≠0）。
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
+import FunnelChart from './FunnelChart'
 import {
   openFileUrl,
   type DimensionMetrics,
@@ -243,10 +244,15 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
       )}
 
       <section aria-label="judge 审计">
-        <Typography.Title level={5}>judge 审计（生产侧自滤）</Typography.Title>
+        <Typography.Title level={5}>judge 审计与生产漏斗</Typography.Title>
         <Space direction="vertical" style={{ display: 'flex' }}>
+          {judge.funnel ? (
+            <FunnelChart funnel={judge.funnel} />
+          ) : (
+            <Typography.Text>数量漏斗 {NA}</Typography.Text>
+          )}
           <Typography.Text>
-            自滤保留率 {percent(judge.self_filter)} · 库内分档：
+            库内分档：
             {Object.entries(judge.bands).map(([band, count]) => `${band} ${count}`).join(' / ') || NA}
           </Typography.Text>
           <Table
