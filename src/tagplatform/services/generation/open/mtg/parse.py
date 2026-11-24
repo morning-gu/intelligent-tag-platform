@@ -8,7 +8,7 @@
 - 生成项：tag 去空白后非空且 ≤20 字；dimension 归一成五维中文名（未知或无
   则 None，交给合并层统计）；scenes 只留字符串；reason 去首尾空白后完整保留。
 - 审核项：三维分值（relevance/semantics/value）只认 0-4 的整数；显式
-  null 是"模型申明无法判断"（relevance/semantics 合法，value 不合法），
+  null 是"模型申明无法判断"（仅 relevance 合法），
   漏字段与非法值是**协议错误**——两者不再混成同一个 null，协议错误抛
   MTGParseError 交上层重试，而不是让整批候选按未过线静默淘汰；
   confidence 夹到 [0,1]；scenes 只留字符串。
@@ -33,10 +33,8 @@ _DIMENSION_ALIASES: dict[str, str] = {
 
 # judge 三维评分轴（与提示词 JUDGE_CRITERIA、pipeline 的分数阈值互为协议）
 _JUDGE_SCORE_AXES = ("relevance", "semantics", "value")
-# 允许显式 null 的轴：这两维要核对影片材料，材料不足时"判不了"是合法结论。
-# value 只看名称本身（提示词同口径），不依赖材料，必须给 0-4 整数——
-# 实测整批 value=null 会让整片候选静默归零，根因就是这条口子。
-_NULLABLE_SCORE_AXES = ("relevance", "semantics")
+# 只有内容支持度可能因影片材料不足而无法判断。
+_NULLABLE_SCORE_AXES = ("relevance",)
 
 
 class MTGParseError(ValueError):
@@ -235,9 +233,11 @@ def parse_judge_items(text: str, *, require_dir_fit: bool = False) -> list[dict]
     problems: list[str] = []
     for entry in extract_json_array(text):
         if not isinstance(entry, dict):
+            problems.append("判决条目必须是对象")
             continue
         tag = _clean_tag(entry.get("tag") or entry.get("tag_name"))
         if not tag:
+            problems.append("判决缺少有效标签名")
             continue
         scores: dict[str, int | None] = {}
         broken: list[str] = []
@@ -258,10 +258,14 @@ def parse_judge_items(text: str, *, require_dir_fit: bool = False) -> list[dict]
                 broken.append("in_dir 漏字段" if "in_dir" not in entry
                               else f"in_dir 非法值 {in_dir!r}")
             in_dir = None
+        raw_scenes = entry.get("scenes")
+        if raw_scenes is not None and (not isinstance(raw_scenes, list)
+                                       or any(not isinstance(s, str) for s in raw_scenes)):
+            broken.append("scenes 必须是场景 ID 数组")
         if broken:
             problems.append(f"{tag}：" + "、".join(broken))
             continue
-        scenes = [s.strip() for s in entry.get("scenes") or []
+        scenes = [s.strip() for s in raw_scenes or []
                   if isinstance(s, str) and s.strip()]
         items.append({
             "tag": tag,

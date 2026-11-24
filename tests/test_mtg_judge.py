@@ -5,7 +5,7 @@
 null，过滤层按未过线淘汰 → 整片产出归零，且原始响应没落盘、无从复盘。
 
 契约：
-- relevance/semantics 允许显式 null（要核对材料，判不了是合法结论）；
+- 只有 relevance 允许显式 null（缺少影片材料）；
 - value 只看名称本身，必须给 0-4 整数；null / 漏字段 / 非法值都是协议错误；
 - 协议错误抛 MTGParseError（带同批合格判决），由 judge_candidates 重试；
 - 末轮仍部分违协议 → 保住合格判决，违协议候选按未判淘汰；全坏 → JudgeError；
@@ -39,20 +39,23 @@ class _ScriptedJudge:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls = 0
+        self.messages = []
 
     def complete(self, messages, run_id):
         index = min(self.calls, len(self.responses) - 1)
         self.calls += 1
+        self.messages.append(messages)
         return LLMResponse(content=self.responses[index], usage={}, raw={}, ok=True)
 
 
 # ---- 解析层：三种"没分"必须分开 ----
 
 
-def test_explicit_null_on_material_axes_stays_null():
-    items = parse_judge_items(_text(_verdict(relevance=None, semantics=None)))
+def test_explicit_null_is_allowed_only_for_relevance():
+    items = parse_judge_items(_text(_verdict(relevance=None)))
     assert items[0]["relevance"] is None
-    assert items[0]["semantics"] is None
+    with pytest.raises(MTGParseError, match="semantics 不接受 null"):
+        parse_judge_items(_text(_verdict(semantics=None)))
     assert items[0]["value"] == 2
 
 
@@ -121,6 +124,36 @@ def test_two_bad_responses_still_raise(content_fixture):
     client = _ScriptedJudge("不是 JSON", "还不是 JSON")
     with pytest.raises(JudgeError):
         judge_candidates(client, content_fixture, [{"tag": "冷峻压抑"}], run_id="r")
+
+
+def test_omitted_verdict_retries_only_missing_candidate(content_fixture):
+    client = _ScriptedJudge(_text(_verdict()), _text(_verdict("粗粝写实")))
+    trace = {}
+    verdicts = judge_candidates(client, content_fixture,
+                                [{"tag": "冷峻压抑"}, {"tag": "粗粝写实"}],
+                                run_id="r", trace=trace)
+    assert set(verdicts) == {"冷峻压抑", "粗粝写实"}
+    assert "粗粝写实" in trace["errors"][0]["error"]
+    retry = client.messages[1][0]["content"]
+    assert "- 粗粝写实｜" in retry
+    assert "- 冷峻压抑｜" not in retry
+
+
+def test_unmatched_responses_cannot_complete_the_task(content_fixture):
+    client = _ScriptedJudge(_text(_verdict("无关名")))
+    with pytest.raises(JudgeError, match="缺少有效判决：冷峻压抑"):
+        judge_candidates(client, content_fixture, [{"tag": "冷峻压抑"}], run_id="r")
+    assert client.calls == 2
+
+
+def test_bad_scene_field_retries_without_discarding_the_other_verdict(content_fixture):
+    client = _ScriptedJudge(
+        _text(_verdict(), _verdict("粗粝写实", scenes=1)),
+        _text(_verdict(value=None), _verdict("粗粝写实")),
+    )
+    verdicts = judge_candidates(client, content_fixture,
+                                [{"tag": "冷峻压抑"}, {"tag": "粗粝写实"}], run_id="r")
+    assert set(verdicts) == {"冷峻压抑", "粗粝写实"}
 
 
 # ---- 目录契合：生成侧只是提示词，judge 侧才是硬闸 ----

@@ -87,7 +87,8 @@ logger = logging.getLogger(__name__)
 #      非法值按协议错误重试；judge 原始响应进审计（judge_trace）。
 # v9 = 目录契合硬闸：judge 逐条判 in_dir（词的核心含义属不属于目标目录），
 #      不属于的候选直接淘汰；生成侧目标文案改为服从目录定义。
-MTG_VERSION = "mtg-v9-catalog-fit"
+# v10 = 按候选对齐重试漏判，并统一三维定义和重试格式。
+MTG_VERSION = "mtg-v10-judge-coverage"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3

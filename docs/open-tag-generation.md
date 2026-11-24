@@ -1,6 +1,6 @@
 # 开放标签生成算法详解
 
-当前 `mode=open` 使用 `mtg-v9-catalog-fit`。本文从 `run_open_generation()` 读取影片识别内容开始，讲到输出带证据、目录和挂载点的 `ProducedTag`。文中使用仓库默认值，`Settings` 中的参数可通过 `TAGPLT_` 环境变量覆盖，`policy` 随任务传入。 [算法入口](../src/tagplatform/generation/mtg/pipeline.py) · [默认配置](../src/tagplatform/settings.py)
+当前 `mode=open` 使用 `mtg-v10-judge-coverage`。本文从 `run_open_generation()` 读取影片识别内容开始，讲到输出带证据、目录和挂载点的 `ProducedTag`。文中使用仓库默认值，`Settings` 中的参数可通过 `TAGPLT_` 环境变量覆盖，`policy` 随任务传入。 [算法入口](../src/tagplatform/generation/mtg/pipeline.py) · [默认配置](../src/tagplatform/settings.py)
 
 ## 1. 算法总图
 
@@ -104,7 +104,7 @@ flowchart TD
 | `value` | 实际作用 0–4：0 脱离剧情无法解读；1 存在性/情节编号/泛泛评价；2 普通类目；3 场景级恰一项有效限定或影片级具体次要属性；4 场景级 ≥2 项独立限定或影片级表达主线/主冲突/主导风格。 |
 | `confidence` | Judge 对**自身评分**的把握，解析时限制在 0–1。非数值按 0。 |
 | `in_dir` | 目录契合，布尔值（mtg-v9 起）。候选行标出它认领的目录 ID，请求末尾给出这些目录的全路径与定义；Judge 只判断词的**核心含义**是否属于该目录，不看影片证据。有目录块时每条必须给，漏给或非布尔按协议错误处理；没有目录块时记 `null`（未校验）。 |
-| `quote`、`scenes`、`reason` | 要求摘录 10–25 字原文，给出有关场景 ID，并说明评分依据。`relevance`、`semantics` 要核对材料，允许显式 `null`（材料不足以区分相邻档）；`value` 只看名称本身，必须是 0–4 整数，不接受 `null`。 |
+| `quote`、`scenes`、`reason` | 要求摘录 10–25 字原文，给出有关场景 ID，并说明评分依据。`relevance` 核对影片材料，缺少必要证据时允许显式 `null`。`semantics` 和 `value` 按名称评分，均须返回 0–4 整数。 |
 
 评分先按归一名称精确匹配，剩余条目再尝试唯一前缀匹配，每个候选最多接收一条评分。候选漏判在单条层面淘汰。
 

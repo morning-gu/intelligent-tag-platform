@@ -3,12 +3,9 @@
 一次调用判完全部候选（控制成本），输出逐条三维分。语义边界：
 - 评标签的实际效果——内容支持多准确、名称是否清晰、对检索浏览有多大
   作用，不评标签好不好听；释义此时尚未补写，semantics 只评名称本身；
-- 拿不到证据就给低分（relevance/semantics 可填 null），不自动给高分；
-  value 只看名称本身，必须给 0-4 整数；
-- 解析失败重试一次（追加一句更强的格式要求），仍失败抛 JudgeError ——
-  由上层把任务置 failed，绝不"审核失败就当全过"；末轮若只是**部分**条目
-  违协议（漏字段/非法值/value 填 null），保住同批合格判决，违协议的候选
-  按未判淘汰，不让一条坏判决把整片打空。
+- 内容证据不足时 relevance 可填 null；semantics 和 value 评名称，给 0-4 整数。
+- 对齐候选后检查判决覆盖，重试未判候选。保留各轮已对齐的合法判决，全部
+  未判才抛 JudgeError。
 
 每次调用的原始响应都写进 `trace`（上层落审计 JSON）：整批归零时能分清
 到底是模型显式 null、漏字段，还是响应格式漂移。
@@ -61,8 +58,8 @@ def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
     leftovers: list[tuple[str, dict]] = []
     for item in items:
         key = normalize_key(item["tag"])
-        if key in tags_by_key and key not in mapped:
-            mapped[key] = item
+        if key in tags_by_key:
+            mapped.setdefault(key, item)
         else:
             leftovers.append((key, item))
     for key, item in leftovers:
@@ -92,37 +89,47 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
     """
     if not candidates:
         return {}
-    messages = build_judge_messages(content, candidates,
-                                    include_dialogue=include_dialogue, dirs=dirs)
-    last_error: Exception | None = None
+    pending = {normalize_key(row["tag"]): row for row in candidates}
+    verdicts: dict[str, dict] = {}
+    last_error = ""
     last_raw = ""
     for attempt in range(retries + 1):
-        request = messages if attempt == 0 else [
-            {"role": "user",
-             "content": messages[0]["content"] + JUDGE_RETRY_HINT}]
+        request = build_judge_messages(
+            content, list(pending.values()), include_dialogue=include_dialogue, dirs=dirs)
+        if attempt:
+            request[0]["content"] += JUDGE_RETRY_HINT
         response = client.complete(request, f"{run_id}:judge{'' if attempt == 0 else attempt}")
         if usage is not None:
             accumulate_usage(usage, response.usage)
         raw_text = response.content or ""
+        last_raw = raw_text[:400]
         if trace is not None:
             trace.setdefault("raw", []).append({"attempt": attempt, "content": raw_text})
-        if not response.ok:
-            raise JudgeError(f"judge 调用失败: {response.raw.get('error')}")
-        try:
-            items = parse_judge_items(raw_text, require_dir_fit=bool(dirs))
-        except MTGParseError as exc:
-            last_error = exc
-            last_raw = raw_text[:400]
+        problems = []
+        if response.ok:
+            try:
+                items = parse_judge_items(raw_text, require_dir_fit=bool(dirs))
+            except MTGParseError as exc:
+                items = exc.items
+                problems.append(str(exc))
+            for key, item in _map_items(items, candidates).items():
+                if key in pending:
+                    verdicts[key] = item
+                    pending.pop(key)
+        else:
+            problems.append(f"judge 调用失败: {response.raw.get('error')}")
+        if pending:
+            problems.append("缺少有效判决：" + "、".join(row["tag"] for row in pending.values()))
+        if problems:
+            last_error = "；".join(problems)
             if trace is not None:
-                trace.setdefault("errors", []).append(
-                    {"attempt": attempt, "error": str(exc)})
-            if attempt >= retries and exc.items:
-                # 末轮仍有违协议条目：合格判决照用，违协议候选按未判淘汰。
-                if trace is not None:
-                    trace["salvaged"] = len(exc.items)
-                logger.warning("judge 末轮部分判决违协议，保留 %d 条合格判决：%s",
-                               len(exc.items), exc)
-                return _map_items(exc.items, candidates)
-            continue
-        return _map_items(items, candidates)
-    raise JudgeError(f"judge 输出无法解析: {last_error}；原始输出前 400 字: {last_raw!r}")
+                trace.setdefault("errors", []).append({"attempt": attempt, "error": last_error})
+        if not pending or not response.ok:
+            break
+    if pending:
+        if not verdicts:
+            raise JudgeError(f"{last_error}；原始输出前 400 字: {last_raw!r}")
+        if trace is not None:
+            trace["salvaged"] = len(verdicts)
+        logger.warning("judge 部分候选未判，保留 %d 条合格判决：%s", len(verdicts), last_error)
+    return verdicts

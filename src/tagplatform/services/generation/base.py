@@ -126,7 +126,7 @@ class TagProducer(Protocol):
       传空串，装配不渲染模板；False = 装配统一取本地模板常量渲染）——
       producer 声明需求、装配统一响应，调度侧零 if-else/getattr 探测；
     - `prompt_version`：口径版本字符串（任务表 TEXT 列留痕，如 closed
-      的 "1"、open 的 "mtg-v9-catalog-fit"），换算法时能区分历史结果。
+      的 "1"、open 的 "mtg-v10-judge-coverage"），换算法时能区分历史结果。
 
     Task 4 起后两者为协议成员：实现类漏声明在 `register_producer` 注册
     时即抛 TypeError（非调用时）——动态扩展承诺的护栏，漏实现成员不允许
