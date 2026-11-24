@@ -668,6 +668,7 @@ def test_cancel_keeps_completed_results(eval_setup, root6):
     assert service.get(run_id).done >= 1
     assert service.cancel(run_id) is True
     state = _await_terminal(service, run_id)
+    _drain_active(service)  # 终态先进注册表后落盘——等写盘收尾再读产物
     assert state.status == "cancelled"
     rows = _raw_rows(service, run_id)
     assert len(rows) < state.total
