@@ -8,11 +8,10 @@
   场景资产归并上溯、逐资产建 queued 任务、executor 提交、重读真实状态）
 - `list_generation_tasks`    任务列表（status/mode/asset_id 过滤 + 分页）
 - `get_task_detail`          任务详情 + 结果摘要行（_shared._result_out 装配）
-- `retry_quality_evaluation` 影片质量评估重跑（queue_retry + 质量执行器提交）
 - `retry_generation_task`    失败任务重跑（状态回 queued、清错误、重新提交）
 
 薄路由契约：HTTP 错误映射随逻辑下沉本层原样保留（404 未知资产/任务、
-422 未知 mode/无识别内容/仅失败可重试、409 仅失败或部分完成评估可重试）；
+422 未知 mode/无识别内容/仅失败可重试）；
 接入层 router 只做 入参解析 → 调编排 → 返回。
 """
 
@@ -33,7 +32,6 @@ from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, Tag
 from tagplatform.services.generation import list_producers
 from tagplatform.services.tags.library import try_load_library
 from tagplatform.tasks import TaskExecutor
-from tagplatform.tasks.tag_quality import QualityExecutor, QualityReport, quality_report, queue_retry
 
 
 # ---------- 响应模型 ----------
@@ -70,7 +68,6 @@ class GenerationTaskDetail(GenerationTaskOut):
     """任务详情：在列表字段之上附该任务全部结果摘要行。"""
 
     results: list[GenerationResultOut]
-    quality_evaluation: QualityReport | None
 
 
 class GenerationTaskRetryResponse(BaseModel):
@@ -129,7 +126,6 @@ def create_generation_tasks(
     asset_ids: list[str],
     mode: str,
     policy_json: str | None,
-    quality_model: str,
 ) -> GenerationTaskCreateResponse:
     """批量创建生成任务并提交执行。
 
@@ -172,7 +168,6 @@ def create_generation_tasks(
             asset_id=asset.asset_id,
             mode=mode,
             batch_id=batch_id,
-            quality_model=quality_model if mode == "open" else None,
             policy_json=policy_json,
             status="queued",
             created_at=now,
@@ -255,26 +250,7 @@ def get_task_detail(session: Session, task_id: str) -> GenerationTaskDetail:
         created_at=task.created_at,
         finished_at=task.finished_at,
         results=[_result_out(row, info, library) for row in rows],
-        quality_evaluation=quality_report(session, task) if task.mode == "open" else None,
     )
-
-
-def retry_quality_evaluation(
-    session: Session,
-    executor: QualityExecutor,
-    task_id: str,
-    model: str | None,
-) -> GenerationTaskRetryResponse:
-    """影片质量评估重跑：仅 failed/部分完成可重试（否则 409）；受理回 queued。"""
-    task = session.get(TagGenerationTask, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
-    if task.mode != "open":
-        raise HTTPException(status_code=409, detail="仅开放生成任务支持质量评估")
-    if not queue_retry(session, task_id, model):
-        raise HTTPException(status_code=409, detail="仅失败或部分完成的影片评估可重试")
-    executor.submit(task_id)
-    return GenerationTaskRetryResponse(task_id=task_id, status="queued")
 
 
 def retry_generation_task(

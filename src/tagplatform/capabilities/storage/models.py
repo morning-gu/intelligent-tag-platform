@@ -192,11 +192,12 @@ class TagGenerationTask(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 历史字段：生产附带质量评估已移除，不再写入（旧行保留）
     quality_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TagQualityEvaluation(Base):
-    """一次影片生成分流的快照与独立评估结果。"""
+    """历史影片质量评估快照与结果（生产附带评估已移除，仅保留旧数据）。"""
 
     __tablename__ = "tag_quality_evaluation"
     __table_args__ = (

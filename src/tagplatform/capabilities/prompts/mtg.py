@@ -89,8 +89,8 @@ CATALOG_ONLY_HINT_TEXT = (
 # judge 输出的解析端是 parse.parse_judge_items（三维分值 0-4/null 清洗、
 # confidence 夹取、quote/reason 截断都在那里），JUDGE_RETRY_HINT 是同一输出
 # 协议的第三次出现——改字段名、分值范围或输出 JSON 形状时三处必须同改。
-# 三维口径与 capabilities/prompts/quality.py 的评估 rubric 同源但任务不同：
-# judge 在释义补写之前评审，semantics 只评名称本身；评估侧评名称↔释义。
+# 三维口径与 capabilities/prompts/open_review.py 的评审 rubric 同源但任务不同：
+# judge 在释义补写之前评审，semantics 只评名称本身；评审侧评名称↔释义。
 JUDGE_ROLE_BRIEF = (
     "你是严格的影视内容标签审核员。下面是候选标签和影片内容。"
     "请逐个评审候选标签的实际效果：它被内容支持得有多准确、名称是否清晰、"

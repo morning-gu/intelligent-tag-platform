@@ -34,7 +34,6 @@ from tagplatform.capabilities.storage.models import (
 )
 from tagplatform.services.generation.execute import run_generation_task
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
-from tagplatform.tasks.tag_quality import QualityExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +46,17 @@ class TaskExecutor:
     """
 
     def __init__(self, session_factory, llm, embedder, workers: int = 2, *,
-                 prompt_sample_dir: str = "", quality_executor: QualityExecutor | None = None):
+                 prompt_sample_dir: str = ""):
         self._session_factory = session_factory
         self._llm = llm
         self._embedder = embedder
         self._prompt_sample_dir = prompt_sample_dir
-        self._quality_executor = quality_executor
         self._pool = (None if workers <= 0 else
                       ThreadPoolExecutor(max_workers=workers,
                                          thread_name_prefix="generation"))
 
     def submit_batch(self, task_ids: list[str], *, mode: str) -> None:
-        """同一批影片共享生成和质量评估的提示词采集状态。"""
+        """同一批影片共享生成的提示词采集状态。"""
         samples = (PromptSampleBatch(self._prompt_sample_dir)
                    if self._prompt_sample_dir
                    and mode == "open"
@@ -88,12 +86,8 @@ class TaskExecutor:
         """
         try:
             with self._session_factory() as session:
-                task = run_generation_task(task_id, session, self._llm, self._embedder,
-                                           prompt_samples=prompt_samples)
-                if (task.status != "succeeded" or task.mode != "open"
-                        or self._quality_executor is None):
-                    return
-            self._quality_executor.submit(task_id, prompt_samples=prompt_samples)
+                run_generation_task(task_id, session, self._llm, self._embedder,
+                                    prompt_samples=prompt_samples)
         except Exception:
             logger.exception("生成任务线程执行异常 task_id=%s", task_id)
 

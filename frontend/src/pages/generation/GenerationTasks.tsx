@@ -2,7 +2,7 @@
 // - 任务 Table：状态 Tag 色映射（queued 蓝/running 橙/succeeded 绿/failed 红）、
 //   模式 Tag、错误列 Tooltip 展示、创建/完成时间；created_at 降序由后端保证，
 //   列表一次拉默认 100 条（前端分页仅做展示分页）。
-// - 行展开任务详情：标签产出、评分和证据在同一张表浏览，明细在侧栏查看。
+// - 行展开任务详情：标签产出和证据在同一张表浏览，明细在侧栏查看。
 // - failed 行"重试"：POST retry → 成功提示 + 刷新列表；422（非 failed）/
 //   404 透出后端 detail。
 // - 创建任务 Modal：资产多选（GET /assets，选完即收起下拉）+ mode 单选
@@ -18,7 +18,6 @@ import {
   Card,
   Descriptions,
   Form,
-  Input,
   InputNumber,
   Modal,
   Radio,
@@ -36,7 +35,6 @@ import { fetchAssets, type AssetSummary } from '../../api/assets'
 import { fetchTagCatalog, type TagNode } from '../../api/catalog'
 import {
   createGenerationTasks,
-  DEFAULT_QUALITY_MODEL,
   fetchGenerationTask,
   fetchGenerationTasks,
   retryGenerationTask,
@@ -46,7 +44,6 @@ import {
 } from '../../api/tasks'
 import { formatTime } from '../../api/time'
 import TaskTagResults from '../../components/TaskTagResults'
-import TagQualityEvaluation from '../../components/TagQualityEvaluation'
 import { ORIGIN_COLORS, ORIGIN_LABELS } from '../../shared/labels'
 
 /** 任务状态中文展示（键集与后端任务状态机一致）。 */
@@ -69,7 +66,6 @@ const TASK_STATUS_COLORS: Record<string, string> = {
 interface CreateFormValues {
   asset_ids: string[]
   mode: string
-  quality_model?: string
   dir_ids?: string[]
   max_tags?: number
   min_confidence?: number
@@ -103,32 +99,25 @@ function assetOptions(assets: AssetSummary[]) {
 function TaskDetailPanel({ taskId }: { taskId: string }) {
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
     let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let polling = false
     async function load() {
       try {
         const next = await fetchGenerationTask(taskId)
         if (cancelled) return
         setDetail(next)
         setLoadError(null)
-        const status = next.mode === 'open' ? next.quality_evaluation?.status : undefined
-        polling = status === 'queued' || status === 'running'
       } catch (err) {
         if (cancelled) return
         setLoadError(err instanceof Error ? err.message : '任务详情加载失败')
       }
-      if (polling) timer = setTimeout(() => void load(), 3000)
     }
     void load()
     return () => {
       cancelled = true
-      clearTimeout(timer)
     }
-  }, [taskId, refresh])
+  }, [taskId])
 
   if (loadError !== null && detail === null) {
     return <Alert type="error" showIcon message="任务详情加载失败" description={loadError} />
@@ -137,14 +126,8 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
     return <Typography.Text type="secondary">详情加载中…</Typography.Text>
   }
 
-  const report = detail.mode === 'open' ? detail.quality_evaluation : null
-  const film = report?.films.find((item) => item.task_id === detail.task_id)
-  const tags = <TaskTagResults assetId={detail.asset_id} results={detail.results} labels={film?.labels}
-    maxScore={film?.metrics?.max_score ?? 4} />
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
-      {loadError && <Alert type="warning" showIcon message="任务详情刷新失败" description={loadError} />}
       <Descriptions
         size="small"
         column={{ xs: 1, sm: 3 }}
@@ -154,11 +137,7 @@ function TaskDetailPanel({ taskId }: { taskId: string }) {
           { key: 'count', label: '当前结果', children: `${detail.results.length} 条` },
         ]}
       />
-      {report ? (
-        <TagQualityEvaluation report={report} taskId={detail.task_id} onRetry={() => setRefresh((value) => value + 1)}>
-          {tags}
-        </TagQualityEvaluation>
-      ) : tags}
+      <TaskTagResults assetId={detail.asset_id} results={detail.results} />
     </div>
   )
 }
@@ -278,8 +257,6 @@ export default function GenerationTasks() {
       const res = await createGenerationTasks({
         asset_ids: values.asset_ids,
         mode: values.mode,
-        ...(values.mode === 'open' && values.quality_model
-          ? { quality_model: values.quality_model.trim() } : {}),
         ...(Object.keys(policy).length > 0 ? { policy } : {}),
       })
       message.success(`已创建 ${res.tasks.length} 个任务`)
@@ -431,18 +408,6 @@ export default function GenerationTasks() {
               showSearch={{ optionFilterProp: 'label' }}
               options={directoryChoices}
               placeholder="默认全库，选择目录时包含其子目录" />
-          </Form.Item>
-          <Form.Item noStyle dependencies={['mode']}>
-            {({ getFieldValue }) => getFieldValue('mode') === 'open' && (
-              <Form.Item
-                name="quality_model"
-                label="评估模型 ID"
-                initialValue={DEFAULT_QUALITY_MODEL}
-                rules={[{ required: true, whitespace: true, message: '请输入评估模型 ID' }]}
-              >
-                <Input maxLength={200} />
-              </Form.Item>
-            )}
           </Form.Item>
           <Form.Item name="max_tags" label="最大标签数">
             <InputNumber min={1} placeholder="默认 30" style={{ width: '100%' }} />

@@ -32,7 +32,7 @@ export interface PromptRegistryItem {
 }
 
 /** 流水线文案清单组（与后端 RegistryGroupOut 一致）：按流水线分组
- * （closed/mtg/assets/quality），文案与 capabilities/prompts 各模块常量
+ * （closed/mtg/assets/open_review），文案与 capabilities/prompts 各模块常量
  * 单一来源逐字一致。 */
 export interface PromptRegistryGroup {
   module: string
