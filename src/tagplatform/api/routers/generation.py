@@ -1,11 +1,11 @@
 """`/api/v1/generation` 与 `/api/v1/assets/{asset_id}/tags` 薄路由。
 
-接入层只做协议转换：请求模型声明校验（policy/quality_model 形状）→
+接入层只做协议转换：请求模型声明校验（policy 形状）→
 Depends 注入（session/executor）→ 调编排 → 返回。业务规则、读路径 SQL
 与响应装配全部在编排层：
 
 - tagplatform.orchestration.tasks——生成任务生命周期（创建/列表/详情/
-  质量评估重跑/任务重跑）；
+  任务重跑）；
 - tagplatform.orchestration.generation——资产正式挂载视图；
 - tagplatform.orchestration._shared——AssetTagOut 行模型与装配三件套。
 
@@ -14,16 +14,14 @@ Depends 注入（session/executor）→ 调编排 → 返回。业务规则、�
 单步调试）创建响应即真实终态，异步模式回 queued/running 中间态；重试
 响应按契约恒回 queued（提交受理语义）；/assets/{id}/tags 只回正式挂载
 （asset_tag 审核通过复制行，评分/证据留在 pre 侧）。HTTP 错误映射
-（404/409/422）随逻辑在编排层原样保留。
+（404/422）随逻辑在编排层原样保留。
 """
 
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from tagplatform.api import get_executor, get_quality_executor, get_session
+from tagplatform.api import get_executor, get_session
 from tagplatform.orchestration import generation as generation_orch
 from tagplatform.orchestration import tasks as tasks_orch
 from tagplatform.orchestration._shared import AssetTagOut
@@ -33,14 +31,9 @@ from tagplatform.orchestration.tasks import (
     GenerationTaskOut,
     GenerationTaskRetryResponse,
 )
-from tagplatform.services.eval.tag_quality import DEFAULT_MODEL
 from tagplatform.tasks import TaskExecutor
-from tagplatform.tasks.tag_quality import QualityExecutor
 
 router = APIRouter(prefix="/api/v1")
-QualityModelId = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
-]
 
 
 # ---------- 请求模型 ----------
@@ -67,11 +60,6 @@ class GenerationTaskCreateRequest(BaseModel):
     asset_ids: list[str] = Field(min_length=1)
     mode: str
     policy: GenerationPolicyIn | None = None
-    quality_model: QualityModelId = DEFAULT_MODEL
-
-
-class QualityRetryRequest(BaseModel):
-    model: QualityModelId | None = None
 
 
 # ---------- 路由 ----------
@@ -85,8 +73,7 @@ def create_generation_tasks(
     """批量创建生成任务并提交执行（校验/归并/建任务/提交在编排层）。"""
     policy_json = body.policy.model_dump_json() if body.policy is not None else None
     return tasks_orch.create_generation_tasks(
-        session, executor, body.asset_ids, body.mode, policy_json,
-        body.quality_model)
+        session, executor, body.asset_ids, body.mode, policy_json)
 
 
 @router.get("/generation/tasks", response_model=list[GenerationTaskOut])
@@ -109,19 +96,6 @@ def get_generation_task(
 ) -> GenerationTaskDetail:
     """任务详情 + 结果摘要列表（tag_name 按 candidate_name/目录名解析）。"""
     return tasks_orch.get_task_detail(session, task_id)
-
-
-@router.post("/generation/tasks/{task_id}/quality/retry",
-             response_model=GenerationTaskRetryResponse)
-def retry_quality_evaluation(
-    task_id: str,
-    body: QualityRetryRequest | None = None,
-    session: Session = Depends(get_session),
-    executor: QualityExecutor = Depends(get_quality_executor),
-) -> GenerationTaskRetryResponse:
-    """影片质量评估重跑（仅失败或部分完成，否则 409）。"""
-    return tasks_orch.retry_quality_evaluation(
-        session, executor, task_id, body.model if body else None)
 
 
 @router.post("/generation/tasks/{task_id}/retry",

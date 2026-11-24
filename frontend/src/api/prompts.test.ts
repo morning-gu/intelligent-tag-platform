@@ -93,9 +93,9 @@ describe('fetchPromptRegistry 流水线文案清单', () => {
   it('GET /api/v1/prompts/registry 返回分组清单', async () => {
     const groups: PromptRegistryGroup[] = [
       {
-        module: 'quality',
-        title: '标签质量评估',
-        items: [{ name: 'PROMPT_VERSION', text: 'tag-quality-v4' }],
+        module: 'open_review',
+        title: '开放评审',
+        items: [{ name: 'REVIEW_PROMPT_VERSION', text: 'open-review-v8' }],
       },
     ]
     const fetchMock = stubFetch(async () => jsonResponse(200, groups))
@@ -104,7 +104,7 @@ describe('fetchPromptRegistry 流水线文案清单', () => {
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/prompts/registry')
     expect(rows).toEqual(groups)
-    expect(rows[0]?.items[0]?.text).toBe('tag-quality-v4')
+    expect(rows[0]?.items[0]?.text).toBe('open-review-v8')
   })
 })
 

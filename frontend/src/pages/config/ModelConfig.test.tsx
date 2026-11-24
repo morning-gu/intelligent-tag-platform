@@ -50,9 +50,9 @@ const CONFIG: RuntimeConfig = {
 /** 流水线文案 registry 夹具（与后端 RegistryGroupOut 契约同形）。 */
 const REGISTRY: PromptRegistryGroup[] = [
   {
-    module: 'quality',
-    title: '标签质量评估',
-    items: [{ name: 'PROMPT_VERSION', text: 'tag-quality-v4' }],
+    module: 'open_review',
+    title: '开放评审',
+    items: [{ name: 'REVIEW_PROMPT_VERSION', text: 'open-review-v8' }],
   },
 ]
 
@@ -222,9 +222,9 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     render(<ModelConfig />)
 
     expect(await screen.findByText('流水线文案')).toBeInTheDocument()
-    expect(screen.getByText('标签质量评估')).toBeInTheDocument()
-    expect(screen.getByText('PROMPT_VERSION')).toBeInTheDocument()
-    expect(screen.getByText('tag-quality-v4')).toBeInTheDocument()
+    expect(screen.getByText('开放评审')).toBeInTheDocument()
+    expect(screen.getByText('REVIEW_PROMPT_VERSION')).toBeInTheDocument()
+    expect(screen.getByText('open-review-v8')).toBeInTheDocument()
   })
 
   it('registry 加载失败：区内错误提示，Prompt 模板区不受影响', async () => {

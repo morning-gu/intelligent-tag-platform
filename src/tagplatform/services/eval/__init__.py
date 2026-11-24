@@ -8,7 +8,7 @@
   守护线程 + run 生命周期）、`report`（报告组装/渲染/三件套落盘）、
   `movie_breakdown`（单片 badcase 明细）；
 - **质量指标**：`metrics`（审核与生成数据的只读聚合）、`tag_quality`
-  （影片质量评估维度打分）。
+  （三维评分五档汇总指标，开放评测报告复用）。
 
 分层红线：本包不 import fastapi（设计文档 §9.4）；指标原语（ranking /
 closed_ranking）零平台依赖、纯标准库，脚本与测试都可独立复用。

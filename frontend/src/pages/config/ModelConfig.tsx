@@ -8,7 +8,7 @@
 // ②当前运行配置：Descriptions 只读卡（GET /config 八字段，布尔用是/否 Tag）
 //   + 说明文案——修改走环境变量 + 重启服务，页面不提供写配置入口。
 // ③流水线文案（2026-11-22 文案集中新增）：GET /prompts/registry 四组只读
-//   清单（closed/mtg/assets/quality），按流水线分组折叠展示常量名与文案
+//   清单（closed/mtg/assets/open_review），按流水线分组折叠展示常量名与文案
 //   本体——全部指令性 prompt 一处可看；独立错误态（失败不拖死 ①②）。
 import { Alert, Card, Collapse, Descriptions, Spin, Tag, Typography } from 'antd'
 import { useCallback, useEffect, useState } from 'react'

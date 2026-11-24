@@ -42,7 +42,6 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import MediaAsset, TagGenerationTask
 from tagplatform.services.content.content_io import load_content
-from tagplatform.services.eval.tag_quality import snapshot
 from tagplatform.services.content.ingest import record_alias
 from tagplatform.services.generation.assemble import (
     build_spec,
@@ -161,9 +160,6 @@ def run_generation_task(
                     logger.warning("别名预览写入失败：%s", exc)
 
         # 8. 终态回填与一次性提交：生成结果 + 任务终态同事务落库
-        #    （标签库随 spec 携带，此处取 spec.library）
-        if task.mode == "open":
-            snapshot(session, task, spec, summary, asset.content_json, spec.library)
         task.model_version = llm.model
         # prompt_version 列为 TEXT：写入侧即字符串，与读回一致。口径版本
         # 由 producer 协议成员声明（Task 4：closed "1"、open MTG_VERSION，
