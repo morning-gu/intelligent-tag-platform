@@ -1,7 +1,7 @@
 // 模型配置中心页测试（Task 14 只读化后）：mock apiFetch 按路径分发，覆盖：
 // Prompt 只读契约渲染（模板正文逐字展示、必需占位符/可用字段动态来自
 // GET /prompts——P0 #4 根治，页面零手写文案）、只读语义（无新建版本/
-// 激活/版本列/编辑入口）、config 卡八字段渲染（布尔是/否 Tag）与
+// 激活/版本列/编辑入口）、config 卡十三字段渲染（布尔是/否 Tag）与
 // Prompt/config 各自加载失败提示。
 // 写端点契约锁定（POST → 405 / activate → 404 / 无写函数导出）在
 // api/prompts.test.ts，本文件不重复。
@@ -39,6 +39,11 @@ const PROMPTS: PromptContractItem[] = [
 const CONFIG: RuntimeConfig = {
   llm_model: 'qwen-plus',
   llm_temperature: 0.2,
+  mtg_judge_model: 'judge-x',
+  mtg_judge_enabled: true,
+  embedding_backend: 'local',
+  embedding_model: 'BAAI/bge-m3',
+  open_eval_review_model: 'review-x',
   recall_top_k_per_type: 20,
   open_match_threshold: 0.55,
   generation_workers: 4,
@@ -166,13 +171,23 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('当前运行配置卡：八字段渲染，布尔以是/否 Tag 展示', async () => {
+  it('当前运行配置卡：十三字段渲染，布尔以是/否 Tag 展示', async () => {
     mockApis()
     render(<ModelConfig />)
 
     expect(await screen.findByText('qwen-plus')).toBeInTheDocument()
     expect(screen.getByText('LLM 模型')).toBeInTheDocument()
     expect(screen.getByText('LLM 温度')).toBeInTheDocument()
+    // 模型视图增补字段：judge / 嵌入 / 开放评测评审
+    expect(screen.getByText('Judge 模型')).toBeInTheDocument()
+    expect(screen.getByText('judge-x')).toBeInTheDocument()
+    expect(screen.getByText('Judge 启用')).toBeInTheDocument()
+    expect(screen.getByText('嵌入后端')).toBeInTheDocument()
+    expect(screen.getByText('local')).toBeInTheDocument()
+    expect(screen.getByText('嵌入模型')).toBeInTheDocument()
+    expect(screen.getByText('BAAI/bge-m3')).toBeInTheDocument()
+    expect(screen.getByText('开放评测评审模型')).toBeInTheDocument()
+    expect(screen.getByText('review-x')).toBeInTheDocument()
     expect(screen.getByText('每类型召回 Top-K')).toBeInTheDocument()
     expect(screen.getByText('开放匹配阈值')).toBeInTheDocument()
     expect(screen.getByText('生成并发数')).toBeInTheDocument()
@@ -180,11 +195,19 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(screen.getByText('Mock Embedder')).toBeInTheDocument()
     expect(screen.getByText('数据库路径')).toBeInTheDocument()
     expect(screen.getByText('/data/tagplatform/tagplatform.db')).toBeInTheDocument()
-    // 布尔字段：use_mock_llm=true → 是；use_mock_embedder=false → 否
-    expect(screen.getByText('是')).toBeInTheDocument()
-    expect(screen.getByText('否')).toBeInTheDocument()
+    // 布尔字段：use_mock_llm=true、mtg_judge_enabled=true → 两枚「是」；
+    // use_mock_embedder=false → 一枚「否」
+    expect(screen.getAllByText('是')).toHaveLength(2)
+    expect(screen.getAllByText('否')).toHaveLength(1)
     // 只读语义说明文案
     expect(screen.getByText(/修改运行配置：编辑环境变量后重启服务/)).toBeInTheDocument()
+  })
+
+  it('开放评测评审模型为空串：渲染「同生成模型（空值回落）」', async () => {
+    mockApis({ config: { ...CONFIG, open_eval_review_model: '' } })
+    render(<ModelConfig />)
+
+    expect(await screen.findByText('同生成模型（空值回落）')).toBeInTheDocument()
   })
 
   it('Prompt 契约加载失败：渲染错误提示（透出错误文案），不影响 config 卡', async () => {

@@ -5,7 +5,7 @@
 //   （P0 #4 根治：提示文案不再手写）。无新建版本/激活入口——写端点已删
 //   （POST /prompts → 405、/prompts/{id}/activate → 404，契约锁定见
 //   api/prompts.test.ts 与后端 test_api_prompts_admin）。
-// ②当前运行配置：Descriptions 只读卡（GET /config 八字段，布尔用是/否 Tag）
+// ②当前运行配置：Descriptions 只读卡（GET /config 十三字段，布尔用是/否 Tag）
 //   + 说明文案——修改走环境变量 + 重启服务，页面不提供写配置入口。
 // ③流水线文案（2026-11-22 文案集中新增）：GET /prompts/registry 四组只读
 //   清单（closed/mtg/assets/open_review），按流水线分组折叠展示常量名与文案
@@ -200,7 +200,7 @@ export default function ModelConfig() {
           <Typography.Text type="secondary">暂无流水线文案</Typography.Text>
         )}
         <Typography.Text type="secondary" style={{ display: 'block', marginTop: 16 }}>
-          全部指令性文案（生成 / judge / 释义 / 复核 / 资产构建 / 质量评估）集中于
+          全部指令性文案（生成 / judge / 释义 / 复核 / 资产构建 / 开放评审）集中于
           tagplatform/capabilities/prompts，与各解析端互为协议；修改随代码评审走 git。
         </Typography.Text>
       </Card>
@@ -218,6 +218,17 @@ export default function ModelConfig() {
           <Descriptions bordered column={1} size="small" labelStyle={{ width: 220 }}>
             <Descriptions.Item label="LLM 模型">{config.llm_model}</Descriptions.Item>
             <Descriptions.Item label="LLM 温度">{config.llm_temperature}</Descriptions.Item>
+            <Descriptions.Item label="Judge 模型">{config.mtg_judge_model}</Descriptions.Item>
+            <Descriptions.Item label="Judge 启用">
+              {renderBool(config.mtg_judge_enabled)}
+            </Descriptions.Item>
+            <Descriptions.Item label="嵌入后端">{config.embedding_backend}</Descriptions.Item>
+            <Descriptions.Item label="嵌入模型">{config.embedding_model}</Descriptions.Item>
+            <Descriptions.Item label="开放评测评审模型">
+              {config.open_eval_review_model === ''
+                ? '同生成模型（空值回落）'
+                : config.open_eval_review_model}
+            </Descriptions.Item>
             <Descriptions.Item label="每类型召回 Top-K">
               {config.recall_top_k_per_type}
             </Descriptions.Item>

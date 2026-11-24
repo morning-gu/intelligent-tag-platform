@@ -16,10 +16,20 @@ from tagplatform.settings import Settings
 
 
 class ConfigOut(BaseModel):
-    """运行配置只读视图：机密字段（session_secret / admin_password）绝不入列。"""
+    """运行配置只读视图：机密字段（session_secret / admin_password）绝不入列。
+
+    模型字段覆盖后端实际使用的各端点：生成 LLM、开放流水线 judge、
+    嵌入后端/模型、开放评测评审模型（空串 = 回落主 LLM，前端按此渲染）。
+    均为模型名/后端名/本地路径，非机密；API key 与 base URL 不入列。
+    """
 
     llm_model: str
     llm_temperature: float
+    mtg_judge_model: str
+    mtg_judge_enabled: bool
+    embedding_backend: str
+    embedding_model: str
+    open_eval_review_model: str
     recall_top_k_per_type: int
     open_match_threshold: float
     generation_workers: int
@@ -33,6 +43,11 @@ def get_config(settings: Settings) -> ConfigOut:
     return ConfigOut(
         llm_model=settings.llm_model,
         llm_temperature=settings.llm_temperature,
+        mtg_judge_model=settings.mtg_judge_model,
+        mtg_judge_enabled=settings.mtg_judge_enabled,
+        embedding_backend=settings.embedding_backend,
+        embedding_model=settings.embedding_model,
+        open_eval_review_model=settings.open_eval_review_model,
         recall_top_k_per_type=settings.recall_top_k_per_type,
         open_match_threshold=settings.open_match_threshold,
         generation_workers=settings.generation_workers,
