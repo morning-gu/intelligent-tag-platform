@@ -7,8 +7,11 @@
 清洗规则（与提示词契约对齐）：
 - 生成项：tag 去空白后非空且 ≤20 字；dimension 归一成五维中文名（未知或无
   则 None，交给合并层统计）；scenes 只留字符串；reason 去首尾空白后完整保留。
-- 审核项：三维分值（relevance/semantics/value）只认 0-4 的整数，其余按
-  null 处理（保守，不放行）；confidence 夹到 [0,1]；scenes 只留字符串。
+- 审核项：三维分值（relevance/semantics/value）只认 0-4 的整数；显式
+  null 是"模型申明无法判断"（仅 relevance 合法），
+  漏字段与非法值是**协议错误**——两者不再混成同一个 null，协议错误抛
+  MTGParseError 交上层重试，而不是让整批候选按未过线静默淘汰；
+  confidence 夹到 [0,1]；scenes 只留字符串。
 """
 from __future__ import annotations
 
@@ -30,10 +33,21 @@ _DIMENSION_ALIASES: dict[str, str] = {
 
 # judge 三维评分轴（与提示词 JUDGE_CRITERIA、pipeline 的分数阈值互为协议）
 _JUDGE_SCORE_AXES = ("relevance", "semantics", "value")
+# 只有内容支持度可能因影片材料不足而无法判断。
+_NULLABLE_SCORE_AXES = ("relevance",)
 
 
 class MTGParseError(ValueError):
-    """模型输出无法解析为约定数组（上层决定重试或失败）。"""
+    """模型输出无法解析为约定数组（上层决定重试或失败）。
+
+    `items` 携带同一次响应里**已经合格**的判决：末轮重试仍有条目违协议
+    时，上层可以保住这些判决，只把违协议的候选按未判淘汰——一条坏判决
+    不该让整片产出归零。
+    """
+
+    def __init__(self, message: str, *, items: list[dict] | None = None):
+        super().__init__(message)
+        self.items = items or []
 
 
 def _find_items(node, depth: int = 0):
@@ -178,47 +192,76 @@ def _clamp_confidence(value) -> float:
     return min(1.0, max(0.0, number))
 
 
-def _clean_score(value) -> int | None:
-    """三维分值清洗：只认 0-4 的整数（含整数值浮点）；其余按 null（保守）。
+# 协议错误哨兵：与"显式 null"（模型申明无法判断）严格区分。
+_MISSING = object()
 
-    布尔、越界、非数值都视为"模型没给出有效分"——null 在过滤层按未过线
-    淘汰，绝不猜一个分数放行。
+
+def _clean_score(value):
+    """三维分值清洗：0-4 整数（含整数值浮点）→ int；显式 null → None；
+    布尔/越界/非数值 → `_MISSING`（协议错误，交上层重试）。
+
+    绝不猜一个分数放行，也不把"模型没按协议给分"伪装成"模型判不了"。
     """
-    if isinstance(value, bool):
+    if value is None:
         return None
+    if isinstance(value, bool):
+        return _MISSING
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, int) and 0 <= value <= 4:
         return value
-    return None
+    return _MISSING
 
 
 def parse_judge_items(text: str) -> list[dict]:
-    """审核输出 → [{tag, relevance, semantics, value, confidence, scenes,
-    quote, reason}]（三维分值 0-4 或 None）。
+    """解析三维分和证据，目录结论由调用方按候选的目标目录校验。
 
-    文案与解析互为协议：judge 提示词（prompts.JUDGE_CRITERIA / JUDGE_ROLE_BRIEF）
-    与重试提示（JUDGE_RETRY_HINT）描述的输出形状就是本函数的输入契约——
-    分值范围、quote/reason 截断上限与本函数硬编码一致；
-    改字段名、分值范围或 JSON 形状时提示与解析两侧必须同改。
+    部分条目的分数或证据字段违协议时，异常仍携带同批可用判决。
     """
     items: list[dict] = []
+    problems: list[str] = []
     for entry in extract_json_array(text):
         if not isinstance(entry, dict):
+            problems.append("判决条目必须是对象")
             continue
         tag = _clean_tag(entry.get("tag") or entry.get("tag_name"))
         if not tag:
+            problems.append("判决缺少有效标签名")
             continue
-        scenes = [s.strip() for s in entry.get("scenes") or []
+        scores: dict[str, int | None] = {}
+        broken: list[str] = []
+        for axis in _JUDGE_SCORE_AXES:
+            if axis not in entry:
+                broken.append(f"{axis} 漏字段")
+                continue
+            score = _clean_score(entry[axis])
+            if score is _MISSING:
+                broken.append(f"{axis} 非法值 {entry[axis]!r}")
+            elif score is None and axis not in _NULLABLE_SCORE_AXES:
+                broken.append(f"{axis} 不接受 null")
+            else:
+                scores[axis] = score
+        raw_scenes = entry.get("scenes")
+        if raw_scenes is not None and (not isinstance(raw_scenes, list)
+                                       or any(not isinstance(s, str) for s in raw_scenes)):
+            broken.append("scenes 必须是场景 ID 数组")
+        if broken:
+            problems.append(f"{tag}：" + "、".join(broken))
+            continue
+        scenes = [s.strip() for s in raw_scenes or []
                   if isinstance(s, str) and s.strip()]
         items.append({
             "tag": tag,
-            **{axis: _clean_score(entry.get(axis)) for axis in _JUDGE_SCORE_AXES},
+            **scores,
+            "dir_fits": entry.get("dir_fits"),
             "confidence": _clamp_confidence(entry.get("confidence")),
             "scenes": scenes,
             "quote": str(entry.get("quote") or "").strip()[:60],
             "reason": str(entry.get("reason") or "").strip()[:40],
         })
+    if problems:
+        raise MTGParseError("判决不合协议（" + "；".join(problems[:5]) + "）",
+                            items=items)
     if not items:
         raise MTGParseError("审核输出为空数组")
     return items

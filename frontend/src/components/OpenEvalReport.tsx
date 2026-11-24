@@ -3,12 +3,14 @@
 // 小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维均分/
 // 满分率 + 新词占比）③ 评分分布表（0-4 五档 + 无法判断 + 联合满分率）
 // ④ judge 审计段（生产漏斗图 + 三维分聚合 + 淘汰原因 + 库内分档）
-// ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考）
+// ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考；
+//    内层「生产审计」再展开时懒加载候选去向，0 条产出的影片也有现场可看）
 // ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
 // ⑧ 银标准 note 恒渲染 + calibre 口径小字。null 一律「暂无」（None≠0）。
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import FunnelChart from './FunnelChart'
+import OpenEvalMovieAudit from './OpenEvalMovieAudit'
 import {
   openFileUrl,
   type DimensionMetrics,
@@ -316,6 +318,15 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
                     expandable={{ expandedRowRender: (row) => labelDetail(row, calibre.review_config?.pass_mode === 'model') }}
                   />
                 )}
+                {/* 产出为 0 的影片上面一张表都没有：候选去向只能从这里看 */}
+                <Collapse
+                  size="small"
+                  items={[{
+                    key: 'audit',
+                    label: '生产审计（候选去向与淘汰原因）',
+                    children: <OpenEvalMovieAudit runId={runId} tt={movie.tt} />,
+                  }]}
+                />
               </Space>
             ),
           }))} />

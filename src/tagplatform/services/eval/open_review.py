@@ -72,8 +72,12 @@ def review_calibre(settings: Settings, llm, client=None) -> dict:
 
 def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                       run_id: str, modalities=("script", "dialogue"),
-                      request_slot=None) -> list[dict]:
-    """整片评审。输出截断时二分，拆批仍携带其他标签作为上下文。"""
+                      request_slot=None, trace: dict | None = None) -> list[dict]:
+    """整片评审，结构错误或截断时拆批，保留同片其余标签作上下文。
+
+    整批格式失败可重试一次。拆分后的子批先各试一次，单条补试排在所有
+    子批之后。最多 2 * 标签数 + 2 次调用，传输失败直接记录。
+    """
     if not tag_rows:
         return []
     haystack = render_content(content, modalities=modalities)
@@ -86,8 +90,12 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
     } for index, row in enumerate(tag_rows)]
     results: dict[int, dict] = {}
     errors: dict[int, str] = {}
+    budget = 2 * len(labels) + 2
+    single_retries: list[dict] = []
+    budget_error = "评审调用预算耗尽，未发出恢复请求"
 
-    def batch(targets):
+    def batch(targets, *, attempt=0):
+        nonlocal budget
         context = ""
         if len(targets) < len(labels):
             other_labels = [label for label in labels if label not in targets]
@@ -95,42 +103,77 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         user = haystack + context + "\n\n## 待评估标签\n" + json.dumps(targets, ensure_ascii=False)
         target_ids = {int(label["id"][1:]) for label in targets}
         batch_id = f"{run_id}:{targets[0]['id']}-{targets[-1]['id']}"
-        error = "评审响应未包含有效判决"
-        for attempt in range(2):
-            messages = [{"role": "system", "content": REVIEW_PROMPT},
-                        {"role": "user", "content": user + (REVIEW_RETRY_HINT if attempt else "")}]
-            try:
-                with request_slot if request_slot is not None else nullcontext():
-                    response = client.complete(messages, batch_id)
-            except Exception as exc:  # noqa: BLE001
-                error = f"评审调用失败：{exc}"
-                break
+        if budget <= 0:
+            for index in target_ids:
+                errors[index] = budget_error
+            return
+
+        budget -= 1
+        # 恢复批次也带格式提醒，避免重复整批请求只为追加同一句话。
+        messages = [{"role": "system", "content": REVIEW_PROMPT},
+                    {"role": "user", "content": user + (
+                        REVIEW_RETRY_HINT if attempt or targets is not labels else "")}]
+        record = {"batch": batch_id, "attempt": attempt,
+                  "targets": [label["id"] for label in targets], "raw": ""}
+        if trace is not None:
+            trace.setdefault("batches", []).append(record)
+        accepted = {}
+        recovery = False
+        retry_format = False
+        try:
+            with request_slot if request_slot is not None else nullcontext():
+                response = client.complete(messages, batch_id)
+        except Exception as exc:  # noqa: BLE001
+            error = f"评审调用失败：{exc}"
+        else:
             response_text, ok, transport_error = _unwrap(response)
-            if _truncated(response):
-                if len(targets) > 1:
-                    middle = len(targets) // 2
-                    batch(targets[:middle])
-                    batch(targets[middle:])
-                    return
-                error = "评审输出超出长度限制"
-                break
+            record["raw"] = response_text
             if not ok:
                 error = (f"影片评审材料超出模型上下文：{transport_error}"
                          if _input_limit(transport_error) else f"评审调用失败：{transport_error}")
-                break
-            try:
-                parsed = _parse_reviews(response_text, len(labels))
-            except ValueError as exc:
-                error = f"评审响应无法解析：{exc}"
-                continue
-            accepted = {i: verdict for i, verdict in parsed.items() if i in target_ids}
+            elif _truncated(response):
+                error = "评审输出超出长度限制"
+                recovery = len(targets) > 1
+            else:
+                try:
+                    parsed = _parse_reviews(response_text, len(labels))
+                except ValueError as exc:
+                    error = f"评审响应无法解析：{exc}"
+                else:
+                    accepted = {i: verdict for i, verdict in parsed.items() if i in target_ids}
+                    if len(accepted) == len(targets):
+                        results.update(accepted)
+                        for index in accepted:
+                            errors.pop(index, None)
+                        return
+                    error = ("评审响应缺少目标判决" if accepted
+                             else "评审响应未包含有效判决")
+                recovery = retry_format = True
+        missing = [label for label in targets if int(label["id"][1:]) not in accepted]
+        record.update(error=error, missing=[label["id"] for label in missing])
+        results.update(accepted)
+        if recovery:
+            if not accepted and targets is labels and attempt == 0 and retry_format:
+                batch(targets, attempt=1)
+                return
             if accepted:
-                results.update(accepted)
-                break
-        for index in target_ids - results.keys():
-            errors[index] = error
+                batch(missing)
+                return
+            if len(missing) > 1:
+                middle = len(missing) // 2
+                batch(missing[:middle])
+                batch(missing[middle:])
+                return
+            if attempt == 0:
+                single_retries.append(missing[0])
+        for label in missing:
+            errors[int(label["id"][1:])] = error
 
     batch(labels)
+    for label in single_retries:
+        batch([label], attempt=1)
+    if trace is not None and errors:
+        trace["errors"] = {f"t{index}": message for index, message in errors.items()}
     for index, row in enumerate(tag_rows):
         verdict = results.get(index)
         if verdict is None:

@@ -83,7 +83,13 @@ logger = logging.getLogger(__name__)
 # v4 = 逐场提炼、全片综合，给场景级候选单独的产出配额。
 # v6 = judge 改三维结果导向评分（relevance/semantics/value 0-4/null），
 #      按分数阈值筛选标签，value 分取代 importance 参与排序。
-MTG_VERSION = "mtg-v7-directory-focus"
+# v8 = judge 评分协议收紧：value 必须给 0-4 整数（不再接受 null），漏字段与
+#      非法值按协议错误重试；judge 原始响应进审计（judge_trace）。
+# v9 = 目录契合硬闸：judge 逐条判 in_dir（词的核心含义属不属于目标目录），
+#      不属于的候选直接淘汰；生成侧目标文案改为服从目录定义。
+# v10 = 按候选对齐重试漏判，并统一三维定义和重试格式。
+# v11 = 目录判决绑定可实际采用的目录 ID，库内复用走既有目录。
+MTG_VERSION = "mtg-v11-target-directory"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -103,6 +109,8 @@ _JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 # （open_report 的数量漏斗）据 is_filter_stage_drop 把"过滤段淘汰"与
 # "目录归属段淘汰"分开——改文案必须同步分类函数，否则漏斗推导失真。
 _DROP_NO_VERDICT = "judge 未返回判决"
+_DROP_DIR_MISMATCH = "标签含义不属于目标目录"
+_DROP_DIR_UNJUDGED = "judge 缺少有效目录判决"
 _DROP_SCORE_BELOW = "judge 评分未过线"
 _DROP_CONFIDENCE_BELOW = "judge 判定把握"
 _DROP_NO_EVIDENCE = "无有效场景证据"
@@ -112,11 +120,13 @@ _DROP_SINGLE_SCENE = "全片级但只有单场支撑"
 def is_filter_stage_drop(why: str) -> bool:
     """审计 dropped.why 是否属于小节 4 过滤段（judge + 证据把关）。
 
-    评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余三类
-    是定值文案，精确匹配。目录归属段的淘汰原因（无可归属目录等）不在
-    此列——它们发生在排序配额之后，不影响 judge 通过数。
+    评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余定值原因
+    （未判 / 目录契合未通过 / 无证据 / 单场支撑）是定值文案，精确匹配。目录归属段的
+    淘汰原因（无可归属目录等）不在此列——它们发生在排序配额之后，不影响
+    judge 通过数。
     """
-    return (why in (_DROP_NO_VERDICT, _DROP_NO_EVIDENCE, _DROP_SINGLE_SCENE)
+    return (why in (_DROP_NO_VERDICT, _DROP_DIR_MISMATCH, _DROP_DIR_UNJUDGED, _DROP_NO_EVIDENCE,
+                    _DROP_SINGLE_SCENE)
             or why.startswith((_DROP_SCORE_BELOW, _DROP_CONFIDENCE_BELOW)))
 
 
@@ -209,14 +219,16 @@ def _dir_hint_entries(tag_library, spec: GenerationSpec,
     """
     if tag_library is None or limit <= 0:
         return []
-    entries: list[dict] = []
-    for directory in tag_library.new_tag_dirs(spec.policy.dir_ids):
-        path = "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name
-        entries.append({"dir_id": directory.dir_id, "path": path,
-                        "scope": tag_library.scope_of(directory.dir_id),
-                        "description": directory.description})
-    entries.sort(key=lambda item: (item["path"], item["dir_id"]))
-    return entries[:limit]
+    entries = _directory_entries(tag_library, tag_library.new_tag_dirs(spec.policy.dir_ids))
+    return sorted(entries, key=lambda item: (item["path"], item["dir_id"]))[:limit]
+
+
+def _directory_entries(tag_library, directories) -> list[dict]:
+    return [{"dir_id": directory.dir_id,
+             "path": "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name,
+             "scope": tag_library.scope_of(directory.dir_id),
+             "description": directory.description}
+            for directory in directories]
 
 
 def _resolve_dir_value(tag_library, raw: str | None) -> str | None:
@@ -232,6 +244,31 @@ def _resolve_dir_value(tag_library, raw: str | None) -> str | None:
         return by_path[text]
     by_name = [d.dir_id for d in tag_library.dirs() if d.dir_name == text]
     return by_name[0] if len(by_name) == 1 else None
+
+
+def _plan_directory_options(spec, tag_library, embedder, merged, directories, *, require_model_dir):
+    """准备模型选定目录和可能用到的向量备选，供同一批 judge 逐目录判定。"""
+    if not directories or not spec.policy.allow_new_tags:
+        return {}, {}
+    scopes = {entry["dir_id"]: entry["scope"] for entry in directories}
+    model_dirs = {candidate.tag: _resolve_dir_value(tag_library, candidate.dir_raw)
+                  for candidate in merged}
+    fallback_dirs = {}
+    if not require_model_dir:
+        # 无目录限额时，整片挂载一定可用，不必为它计算向量备选。
+        names = [candidate.tag for candidate in merged
+                 if scopes.get(model_dirs[candidate.tag]) != "content"
+                 or spec.policy.max_tags_per_dir]
+        vectors = embedder.embed(names, role="query") if names else []
+        fallback_dirs = {name: rank_dir_assignments(tag_library, embedder, vector, spec.policy.dir_ids)
+                         for name, vector in zip(names, vectors)}
+    targets = {}
+    for name, model_dir in model_dirs.items():
+        options = [model_dir] if model_dir in scopes else []
+        options.extend(option.dir_id for option in fallback_dirs.get(name, [])
+                       if option.dir_id in scopes)
+        targets[name] = list(dict.fromkeys(options))
+    return targets, fallback_dirs
 
 
 def _validate_model_dir(tag_library, dir_id: str | None, spec: GenerationSpec,
@@ -454,23 +491,36 @@ def _merge_two_level_candidates(settings: Settings, embedder,
     return merge_candidates(entries, embedder, settings.mtg_merge_threshold)
 
 
+def _merged_audit_rows(merged) -> list[dict]:
+    return [{"tag": item.tag, "aliases": list(item.aliases), "runs": item.runs,
+             "dimension": item.dimension, "scope": item.scope}
+            for item in merged]
+
+
 def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              judge_client, contents, merged, modalities,
-                             usage: dict, frame_count: int, started: float
+                             usage: dict, frame_count: int, started: float,
+                             *, trace: dict | None = None,
+                             directory_entries: list[dict], directory_targets: dict,
                              ) -> tuple[dict[str, dict], dict]:
-    """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。"""
+    """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。
+
+    trace 收 judge 逐次原始响应与解析错误，成功/失败两条路径都落进审计。
+    """
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
         client = _sample_client(spec, judge_client or _make_judge_client(settings, llm),
                                 "judge", build_judge_template)
         payload = [{"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
-                    "reason": m.reason, "scenes": list(m.scenes)}
+                    "reason": m.reason, "scenes": list(m.scenes),
+                    "dir_ids": directory_targets.get(m.tag, [])}
                    for m in merged]
         try:
             verdicts = judge_candidates(client, contents, payload,
                                         run_id=spec.run_id, usage=judge_usage,
-                                        include_dialogue="dialogue" in modalities and "script" in modalities)
+                                        include_dialogue="dialogue" in modalities and "script" in modalities,
+                                        trace=trace, dirs=directory_entries)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,
@@ -481,7 +531,9 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                 "frames": frame_count,
                 "usage": usage,
                 "judge_usage": judge_usage,
-                "candidates": [m.tag for m in merged],
+                "judge_trace": trace or {},
+                "merged": _merged_audit_rows(merged),
+                "directory_targets": directory_targets,
                 "elapsed_s": round(time.monotonic() - started, 1),
             })
             raise
@@ -613,6 +665,24 @@ def _plan(alignment: dict[str, Alignment], settings: Settings,
     return item, same_name or replace_suspect
 
 
+def _filter_directory_mismatches(settings, alignment, accepted, directory_targets, dropped):
+    """在消耗产出配额前筛掉没有任何合格目标目录的新词。"""
+    if not settings.mtg_judge_enabled:
+        return accepted
+    kept = []
+    for row in accepted:
+        candidate, verdict, _ = row
+        targets = directory_targets.get(candidate.tag, [])
+        fits = verdict.get("dir_fits", {})
+        if targets and not _plan(alignment, settings, candidate)[1] and not any(
+                fits.get(dir_id) is True for dir_id in targets):
+            why = _DROP_DIR_UNJUDGED if any(dir_id not in fits for dir_id in targets) else _DROP_DIR_MISMATCH
+            dropped.append({"tag": candidate.tag, "why": why})
+        else:
+            kept.append(row)
+    return kept
+
+
 def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
                        accepted: list, limits: _GenerationLimits
                        ) -> tuple[list, list[dict], dict]:
@@ -643,19 +713,13 @@ def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
     return accepted, truncated, plans
 
 
-def _assign_tag_dirs(spec: GenerationSpec, contents, embedder, library: list,
+def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
                      tag_library, accepted: list, plans: dict, dropped: list[dict],
-                     *, require_model_dir: bool
+                     *, fallback_dirs: dict, check_dir_fit: bool
                      ) -> tuple[list[ProducedTag], list[dict], list[dict]]:
     """小节 5 尾段：落库归属——库内替换生成 ProducedTag，新词按模型指定目录/向量回退归类。"""
     tags: list[ProducedTag] = []
     tag_rows: list[dict] = []
-    # 新词要落到"可扩展目录"里：先批量嵌入候选名，再逐个按目录描述相似度归属
-    new_names = [candidate.tag for candidate, _, _ in accepted
-                 if not require_model_dir and not plans.get(candidate.tag, (None, False))[1]]
-    new_vectors = (embedder.embed(new_names, role="query")
-                   if new_names else [])
-    vector_by_name = {name: vec for name, vec in zip(new_names, new_vectors)}
     per_dir_count: dict[str, int] = {}
     replacements: list[dict] = []
     for candidate, verdict, evidence in accepted:
@@ -723,32 +787,37 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, embedder, library: list,
         model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
         if candidate.dir_raw and model_dir is None:
             reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
+        fits = (verdict or {}).get("dir_fits", {})
         if model_dir:
             assignment, mount, why = _validate_model_dir(
                 tag_library, model_dir, spec, contents, evidence, per_dir_count)
+            if assignment is not None and check_dir_fit and fits.get(model_dir) is not True:
+                why = _DROP_DIR_MISMATCH if model_dir in fits else _DROP_DIR_UNJUDGED
+                assignment = mount = None
             if assignment is not None:
                 dir_source = "model"
             else:
                 reasons.append(why)
-                assignment = mount = None
-        # ② 回退：按与目录描述的向量相似度逐个试（模型没给/给错时的兜底）
-        if assignment is None and not require_model_dir:
-            for option in rank_dir_assignments(tag_library, embedder,
-                                               vector_by_name.get(candidate.tag),
-                                               spec.policy.dir_ids):
+        # ② 回退时逐个校验实际备选目录，禁止把一个目录的结论移用到另一个。
+        if assignment is None:
+            for option in fallback_dirs.get(candidate.tag, []):
                 if option.dir_id is None:
                     reasons.append(f"无可归属目录（{option.reason}）")
                     continue
                 if (spec.policy.max_tags_per_dir
-                        and per_dir_count.get(option.dir_id, 0)
-                        >= spec.policy.max_tags_per_dir):
+                        and per_dir_count.get(option.dir_id, 0) >= spec.policy.max_tags_per_dir):
                     reasons.append(f"目录「{option.dir_name}」已达产出上限")
                     continue
-                candidate_mount = resolve_mount(option.scope, spec.asset_id,
-                                                contents, evidence)
+                candidate_mount = resolve_mount(option.scope, spec.asset_id, contents, evidence)
                 if candidate_mount is None:
                     reasons.append(f"目录「{option.dir_name}」适用范围 "
                                    f"{option.scope} 解析不出唯一挂载点")
+                    continue
+                if check_dir_fit and fits.get(option.dir_id) is not True:
+                    why = _DROP_DIR_MISMATCH if option.dir_id in fits else _DROP_DIR_UNJUDGED
+                    detail = f"目录「{option.dir_name}」：{why}"
+                    if detail not in reasons:
+                        reasons.append(detail)
                     continue
                 assignment, mount = option, candidate_mount
                 dir_source = "fallback"
@@ -827,8 +896,18 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                   tag_rows: list[dict], alignment: dict[str, Alignment],
                   replacements: list[dict], verify_trace: dict,
                   verify_usage: dict, truncated: list,
-                  descriptions_summary: dict, dropped: list[dict]) -> dict:
+                  descriptions_summary: dict, dropped: list[dict],
+                  judge_trace: dict | None = None,
+                  directory_targets: dict | None = None) -> dict:
     """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
+    assigned_dirs = {row["tag"]: row["dir_id"] for row in tag_rows
+                     if row["origin"] == "generated"}
+    verdict_rows = []
+    for verdict in verdicts.values():
+        name = verdict["tag"]
+        targets = (directory_targets or {}).get(name, [])
+        display_dir = assigned_dirs.get(name) or (targets[0] if len(targets) == 1 else None)
+        verdict_rows.append({**verdict, "in_dir": verdict.get("dir_fits", {}).get(display_dir)})
     limit = limits.limit
     total_limit = limits.total_limit
     scene_limit = limits.scene_limit
@@ -869,11 +948,10 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
         "runs": runs,
         "usage": usage,
         "judge_usage": judge_usage,
-        "merged": [{"tag": m.tag, "aliases": list(m.aliases),
-                    "runs": m.runs, "dimension": m.dimension,
-                    "scope": m.scope}
-                   for m in merged],
-        "verdicts": list(verdicts.values()),
+        "judge_trace": judge_trace or {},
+        "merged": _merged_audit_rows(merged),
+        "verdicts": verdict_rows,
+        "directory_targets": directory_targets or {},
         "accepted": [{"tag": row["name"], "candidate": row["tag"],
                       "origin": row["origin"],
                       "dir_id": row.get("dir_id"),
@@ -958,10 +1036,20 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     merged = _merge_two_level_candidates(settings, embedder, film_entries,
                                          scene_entries)
 
+    # 显式目录范围或完整的单分支目录清单沿用模型指定目录规则。
+    single_branch = (len(dir_hint) == len(expandable_dirs)
+                     and len({entry["path"].split("/", 1)[0] for entry in dir_hint}) == 1)
+    require_model_dir = bool(dir_hint) and (bool(spec.policy.dir_ids) or single_branch)
+    directories = _directory_entries(tag_library, expandable_dirs)
+    directory_targets, fallback_dirs = _plan_directory_options(
+        spec, tag_library, embedder, merged, directories, require_model_dir=require_model_dir)
+
     # ---- 3. judge ----
+    judge_trace: dict = {}
     verdicts, judge_usage = _judge_merged_candidates(
         settings, spec, llm, judge_client, contents, merged, modalities,
-        usage, frame_count, started)
+        usage, frame_count, started, trace=judge_trace,
+        directory_entries=directories, directory_targets=directory_targets)
 
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
     accepted, dropped = _filter_candidates(settings, contents, verdicts,
@@ -972,16 +1060,11 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
     alignment, verify_usage, verify_trace = _align_and_verify_candidates(
         settings, spec, llm, embedder, library, accepted)
-    accepted, truncated, plans = _rank_and_truncate(settings, alignment,
-                                                    accepted, limits)
-    # 单分支或显式选择目录时，向量排序只会从受限列表硬选一个目录，
-    # 无法判断新词是否属于该主题。此时只接收有效的模型目录。
-    single_branch = (len(dir_hint) == len(expandable_dirs)
-                     and len({entry["path"].split("/", 1)[0] for entry in dir_hint}) == 1)
-    require_model_dir = bool(dir_hint) and (bool(spec.policy.dir_ids) or single_branch)
+    accepted = _filter_directory_mismatches(settings, alignment, accepted, directory_targets, dropped)
+    accepted, truncated, plans = _rank_and_truncate(settings, alignment, accepted, limits)
     tags, tag_rows, replacements = _assign_tag_dirs(
-        spec, contents, embedder, library, tag_library, accepted, plans, dropped,
-        require_model_dir=require_model_dir,
+        spec, contents, library, tag_library, accepted, plans, dropped,
+        fallback_dirs=fallback_dirs, check_dir_fit=settings.mtg_judge_enabled,
     )
 
     # ---- 5.5 描述通用化 ----
@@ -998,7 +1081,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                            frame_count, runs, limits, library, hints, dir_hint,
                            usage, judge_usage, merged, verdicts, tag_rows,
                            alignment, replacements, verify_trace, verify_usage,
-                           truncated, descriptions_summary, dropped)
+                           truncated, descriptions_summary, dropped,
+                           judge_trace=judge_trace, directory_targets=directory_targets)
     _write_report(settings, spec.task_id, report)
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
                 len(runs), frame_count, len(merged), len(tags), elapsed)
