@@ -491,6 +491,12 @@ def _merge_two_level_candidates(settings: Settings, embedder,
     return merge_candidates(entries, embedder, settings.mtg_merge_threshold)
 
 
+def _merged_audit_rows(merged) -> list[dict]:
+    return [{"tag": item.tag, "aliases": list(item.aliases), "runs": item.runs,
+             "dimension": item.dimension, "scope": item.scope}
+            for item in merged]
+
+
 def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              judge_client, contents, merged, modalities,
                              usage: dict, frame_count: int, started: float,
@@ -526,7 +532,8 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                 "usage": usage,
                 "judge_usage": judge_usage,
                 "judge_trace": trace or {},
-                "candidates": [m.tag for m in merged],
+                "merged": _merged_audit_rows(merged),
+                "directory_targets": directory_targets,
                 "elapsed_s": round(time.monotonic() - started, 1),
             })
             raise
@@ -942,10 +949,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
         "usage": usage,
         "judge_usage": judge_usage,
         "judge_trace": judge_trace or {},
-        "merged": [{"tag": m.tag, "aliases": list(m.aliases),
-                    "runs": m.runs, "dimension": m.dimension,
-                    "scope": m.scope}
-                   for m in merged],
+        "merged": _merged_audit_rows(merged),
         "verdicts": verdict_rows,
         "directory_targets": directory_targets or {},
         "accepted": [{"tag": row["name"], "candidate": row["tag"],

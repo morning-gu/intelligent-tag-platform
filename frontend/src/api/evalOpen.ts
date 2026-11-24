@@ -243,13 +243,14 @@ export interface OpenEvalReport {
 }
 
 /** 生产 judge 的一条判决（审计 verdicts 行，键与 parse_judge_items 一致）：
- * 三维分 0-4 或 null；in_dir 为目录契合（null = 本次未校验）。 */
+ * 三维分 0-4 或 null。目录契合按目录 ID 返回，in_dir 兼容单一目录的历史产物。 */
 export interface JudgeVerdictRow {
   tag: string
   relevance: number | null
   semantics: number | null
   value: number | null
   in_dir?: boolean | null
+  dir_fits?: Record<string, boolean>
   confidence?: number
   scenes?: string[]
   quote?: string | null
@@ -261,9 +262,11 @@ export interface OpenMovieAudit {
   version?: string
   error?: string
   merged?: { tag: string; aliases?: string[]; dimension?: string | null; scope?: string | null }[]
+  candidates?: string[]
+  directory_targets?: Record<string, string[]>
   verdicts?: JudgeVerdictRow[]
   dropped?: { tag: string; why: string }[]
-  accepted?: { tag: string; candidate?: string; dir_id?: string | null }[]
+  accepted?: { tag: string; candidate?: string; dir_id?: string | null; origin?: string }[]
   library?: { truncated?: { tag: string; band?: string | null }[] }
   judge_trace?: {
     raw?: { attempt: number; content: string }[]
@@ -275,7 +278,7 @@ export interface OpenMovieAudit {
 /** 评审现场（review/<tt>.json）：逐批原始响应与失败原因。 */
 export interface OpenMovieReviewTrace {
   error: string | null
-  batches?: { batch: string; attempt: number; raw: string; error?: string }[]
+  batches?: { batch: string; attempt: number; raw: string; error?: string; targets?: string[]; missing?: string[] }[]
   errors?: Record<string, string>
 }
 

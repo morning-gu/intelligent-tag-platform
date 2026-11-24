@@ -451,13 +451,18 @@ def test_open_llm_failure_raises(session, content_fixture, mtg_settings):
         OpenTagProducer().produce(spec, session, _FailingLLM(), MOCK_EMBEDDER)
 
 
-def test_open_judge_parse_failure_raises(session, content_fixture, mtg_settings):
+def test_open_judge_parse_failure_raises(session, content_fixture, mtg_settings, tmp_path):
     """judge 两次都解析失败 → JudgeError（任务应 failed，不放行）。"""
     from tagplatform.services.generation.open.mtg.judge import JudgeError
     spec = _build_spec(session, content_fixture, run_id="r9")
     with pytest.raises(JudgeError):
         OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER,
                                   judge_client=_GarbageJudge())
+
+    audit = json.loads((tmp_path / "audit" / "t-r9.json").read_text(encoding="utf-8"))
+    assert {row["tag"] for row in audit["merged"]} == {"多线叙事", "情感张力", "视听风格"}
+    assert all(row["scope"] == "scene" for row in audit["merged"])
+    assert len(audit["judge_trace"]["errors"]) == 2
 
 
 # ---- 合并 ----

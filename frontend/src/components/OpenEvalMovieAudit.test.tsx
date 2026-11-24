@@ -78,21 +78,56 @@ describe('OpenEvalMovieAudit 生产审计面板', () => {
     expect(screen.getByText('Let me bust him.')).toBeInTheDocument()
   })
 
-  it('judge 协议异常与评审失败批次各自透出', async () => {
+  it('零产出的 judge 失败保留旧候选并可展开每次响应', async () => {
     mockedFetch.mockResolvedValue(diagnostics({
       audit: {
-        ...diagnostics().audit!,
-        judge_trace: { errors: [{ attempt: 0, error: '判决不合协议（粗粝写实：value 不接受 null）' }] },
-      },
-      review: {
-        error: 'ReviewRequestError: 评审响应未包含有效判决',
-        batches: [{ batch: 't0-t10', attempt: 1, raw: '{}', error: '评审响应未包含有效判决' }],
+        error: 'JudgeError: 缺少有效判决',
+        candidates: ['粗粝写实', '冷峻压抑'],
+        judge_trace: {
+          errors: [{ attempt: 0, error: 'value 漏字段' }, { attempt: 1, error: '始终漏判' }],
+          raw: [{ attempt: 0, content: '{"verdicts":[]}' }, { attempt: 1, content: '[]' }],
+        },
       },
     }))
     render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
-    expect(await screen.findByText(/judge 响应曾不合协议/)).toBeInTheDocument()
-    expect(screen.getByText(/评审失败：ReviewRequestError/)).toBeInTheDocument()
-    expect(screen.getByText(/t0-t10#1 评审响应未包含有效判决/)).toBeInTheDocument()
+    expect(await screen.findByText('粗粝写实')).toBeInTheDocument()
+    expect(screen.getByText('合并候选 2 条 · judge 判决 0 条 · 最终保留 0 条')).toBeInTheDocument()
+    expect(screen.queryByText(/生成阶段就没有产出/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('judge 原始响应（2 次）'))
+    fireEvent.click(screen.getByText('judge 第 2 次 · 始终漏判'))
+    expect(screen.getByText('[]')).toBeVisible()
+  })
+
+  it('评审原始响应和预算耗尽的条目均可追查', async () => {
+    mockedFetch.mockResolvedValue(diagnostics({
+      review: {
+        error: 'ReviewRequestError: 评审响应未包含有效判决',
+        batches: [{ batch: 't0-t10', attempt: 1, raw: '{}', error: '评审响应未包含有效判决',
+                    targets: ['t0', 't10'], missing: ['t10'] }],
+        errors: { t10: '评审调用预算耗尽，未发出恢复请求' },
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    expect(await screen.findByText(/评审失败：ReviewRequestError/)).toBeInTheDocument()
+    expect(screen.getByText(/评审未完成：t10 评审调用预算耗尽/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('独立评审原始响应（1 次）'))
+    fireEvent.click(screen.getByText(/t0-t10#1.*缺少 t10/))
+    expect(screen.getByText('{}')).toBeVisible()
+  })
+
+  it('展开逐候选目录判决，区分不契合与漏判', async () => {
+    mockedFetch.mockResolvedValue(diagnostics({
+      audit: {
+        merged: [{ tag: '冷峻压抑' }],
+        directory_targets: { 冷峻压抑: ['dir_mood', 'dir_event', 'dir_missing'] },
+        verdicts: [{ tag: '冷峻压抑', relevance: 3, semantics: 3, value: 3,
+                     dir_fits: { dir_mood: true, dir_event: false } }],
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    await screen.findByText('冷峻压抑')
+    fireEvent.click(document.querySelectorAll('.ant-table-row-expand-icon')[0])
+    expect(await screen.findByText('dir_mood 属于 · dir_event 不属于 · dir_missing 未判')).toBeInTheDocument()
   })
 
   it('取数失败透出后端文案；无审计时给兜底说明', async () => {
