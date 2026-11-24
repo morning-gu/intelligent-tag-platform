@@ -214,7 +214,7 @@ const CLOSED_RUNNING_SUMMARY: RunSummary = {
 
 /** getOpenReport 成功夹具（与后端 assemble_open_report 键逐一镜像）。 */
 const REPORT: OpenEvalReport = {
-  schema_version: 2, status: 'succeeded', source_run_id: null,
+  schema_version: 3, status: 'succeeded', source_run_id: null,
   banner: ['部分运行：cancelled/aborted/failed 或 done<total 的 run 不可与全量横比'],
   sample_accounting: { total: 30, ok: 28, failed: 2, review_failed: 1 },
   summary: {
@@ -251,7 +251,12 @@ const REPORT: OpenEvalReport = {
     max: 30,
   },
   judge: {
-    self_filter: 0.15,
+    funnel: {
+      raw: 120, merged: 47, verdicts: 45, judge_passed: 40, rank_kept: 19, final: 7,
+      merge_keep_rate: 47 / 120, judge_coverage: 45 / 47, judge_pass_rate: 40 / 47,
+      judge_pass_rate_scored: 40 / 45, rank_keep_rate: 19 / 40, dir_mount_rate: 7 / 19,
+      final_keep_rate: 7 / 47,
+    },
     scores: {
       relevance: { n: 47, average: 3.4, distribution: [1, 3, 8, 15, 20], null: 2 },
       semantics: { n: 49, average: 3.1, distribution: [0, 2, 10, 20, 17], null: 0 },

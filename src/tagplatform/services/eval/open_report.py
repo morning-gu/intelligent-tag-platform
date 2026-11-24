@@ -4,7 +4,7 @@
 随机与先验基线 / 标定全部移除——那些是闭环检测的口径，开放生成没有
 gt 排序任务。报告改为分支式内容组织：汇总卡（通过率 + 三维均分/满分率
 + 新词占比）→ 评分分布 → 逐片明细（每标签三维分 + 理由 + 摘录 + judge
-参考）→ 异常表 → judge 审计聚合。
+参考）→ 异常表 → judge 审计与数量漏斗聚合。
 
 输入是 OpenMovieResult 列表（干跑运行器的原子产出）：hits/new_words
 行带 review = {"pass","relevance","semantics","value","reason","evidence_scene_ids","evaluated"}
@@ -30,15 +30,17 @@ from tagplatform.services.eval.report import (
     _dump_json,
 )
 from tagplatform.services.eval.tag_quality import MAX_SCORE, quality_metrics
+from tagplatform.services.generation.open.mtg.pipeline import is_filter_stage_drop
 
 if TYPE_CHECKING:
     from tagplatform.services.eval.open_service import OpenMovieResult
 
-OPEN_REPORT_SCHEMA_VERSION = 2
+OPEN_REPORT_SCHEMA_VERSION = 3
 
 __all__ = [
     "assemble_open_report",
     "render_open_report_md",
+    "upgrade_open_report",
     "write_open_report",
 ]
 
@@ -134,17 +136,26 @@ def _judge_score_summary(verdict_rows: list[dict]) -> dict:
 def _judge_section(audit_dir: Path | None, ok_films: list[str],
                    warnings: list[str]) -> dict:
     """评审官审计跨片聚合（微口径、整 run 汇总；audit/<tt>.json 键形见
-    mtg pipeline._write_report）。
+    mtg pipeline._build_report）。
 
-    - `self_filter` = Σaccepted / Σmerged（合并候选被 judge 自滤掉的比
-      例）；merged 全空 → None（None≠0）；
+    - `funnel`：生产数量漏斗——逐片求和后整 run 算比率（None≠0）：
+      raw（原始生成 Σruns.items）→ merged（两级合并保留）→ verdicts
+      （judge 返回判决）→ judge_passed（过小节 4 过滤：merged − 过滤段
+      淘汰，按 is_filter_stage_drop 区分过滤段与目录归属段）→ rank_kept
+      （排序配额保留：judge_passed − library.truncated）→ final（目录
+      归属成功 Σaccepted）。比率七项：合并保留率 / judge 返回覆盖率 /
+      judge 通过率（按合并候选与按已评分候选两个分母）/ 排序配额保留率 /
+      目录挂载成功率 / 最终生产保留率。审计无漏斗键（替身/旧管线）→
+      None；
     - `scores`：judge 三维分聚合（均分/分布/null）；
     - `dropped`：drop 原因（why 字段）计数；
     - `bands`：目录对齐分档计数（library.align 的 band 字段）。
     容错：文件缺失/损坏/非 dict → 跳过该片贡献；有 ok 片但一篇审计都
     读不到 → 空段 + warnings 追加警示。
     """
-    merged_total = accepted_total = contributed = 0
+    totals = dict.fromkeys(("raw", "merged", "verdicts", "judge_passed",
+                            "rank_kept", "final"), 0)
+    funnel_contributed = contributed = 0
     verdict_rows: list[dict] = []
     dropped: dict[str, int] = {}
     bands = {key: 0 for key in _BAND_KEYS}
@@ -160,28 +171,61 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
             contributed += 1
             merged = audit.get("merged")
             accepted = audit.get("accepted")
-            if isinstance(merged, list):
-                merged_total += len(merged)
-            if isinstance(accepted, list):
-                accepted_total += len(accepted)
-            for row in audit.get("verdicts") or []:
-                if isinstance(row, dict):
-                    verdict_rows.append(row)
+            verdicts = audit.get("verdicts")
+            runs = audit.get("runs")
+            merged_n = len(merged) if isinstance(merged, list) else 0
+            accepted_n = len(accepted) if isinstance(accepted, list) else 0
+            verdicts_n = len(verdicts) if isinstance(verdicts, list) else 0
+            raw_n = (sum(row["items"] for row in runs
+                         if isinstance(row, dict)
+                         and isinstance(row.get("items"), int))
+                     if isinstance(runs, list) else 0)
+            if any(isinstance(audit.get(key), list)
+                   for key in ("runs", "merged", "verdicts", "accepted")):
+                funnel_contributed += 1
+            filter_dropped = 0
             for row in audit.get("dropped") or []:
                 if isinstance(row, dict):
                     reason = str(row.get("why") or "未知")
                     dropped[reason] = dropped.get(reason, 0) + 1
+                    if is_filter_stage_drop(reason):
+                        filter_dropped += 1
+            judge_passed = max(0, merged_n - filter_dropped)
             library = audit.get("library")
             align = library.get("align") if isinstance(library, dict) else None
+            truncated = (library.get("truncated")
+                         if isinstance(library, dict) else None)
+            truncated_n = len(truncated) if isinstance(truncated, list) else 0
+            totals["raw"] += raw_n
+            totals["merged"] += merged_n
+            totals["verdicts"] += verdicts_n
+            totals["judge_passed"] += judge_passed
+            totals["rank_kept"] += max(0, judge_passed - truncated_n)
+            totals["final"] += accepted_n
+            for row in verdicts or []:
+                if isinstance(row, dict):
+                    verdict_rows.append(row)
             for row in align or []:
                 if isinstance(row, dict) and row.get("band") is not None:
                     band = str(row["band"])
                     bands[band] = bands.get(band, 0) + 1
     if ok_films and contributed == 0:
         warnings.append(_JUDGE_MISSING)
+    funnel = None
+    if funnel_contributed:
+        funnel = {
+            **totals,
+            "merge_keep_rate": _rate(totals["merged"], totals["raw"]),
+            "judge_coverage": _rate(totals["verdicts"], totals["merged"]),
+            "judge_pass_rate": _rate(totals["judge_passed"], totals["merged"]),
+            "judge_pass_rate_scored": _rate(totals["judge_passed"],
+                                            totals["verdicts"]),
+            "rank_keep_rate": _rate(totals["rank_kept"], totals["judge_passed"]),
+            "dir_mount_rate": _rate(totals["final"], totals["rank_kept"]),
+            "final_keep_rate": _rate(totals["final"], totals["merged"]),
+        }
     return {
-        "self_filter": (accepted_total / merged_total
-                        if merged_total else None),
+        "funnel": funnel,
         "scores": _judge_score_summary(verdict_rows),
         "dropped": dropped,
         "bands": bands,
@@ -389,9 +433,28 @@ def render_open_report_md(report: dict) -> str:
         lines.append(f"| {label} | " + " | ".join(str(d) for d in dist)
                      + f" | {dim.get('undetermined', 0)} | {_fmt(dim.get('average'))} |")
     judge = report.get("judge") or {}
-    lines += ["", "## judge 审计（生产侧自滤）", "",
-              f"- 自滤保留率：{_pct(judge.get('self_filter'))}",
-              f"- 分档：{judge.get('bands')}",
+    lines += ["", "## judge 审计与生产漏斗", ""]
+    funnel = judge.get("funnel")
+    if funnel:
+        lines += [
+            f"- 原始生成 → 合并保留：{funnel['merged']}/{funnel['raw']}"
+            f"（{_pct(funnel.get('merge_keep_rate'))}）",
+            f"- Judge 返回覆盖率：{funnel['verdicts']}/{funnel['merged']}"
+            f"（{_pct(funnel.get('judge_coverage'))}）",
+            f"- Judge 通过率：按合并候选 {funnel['judge_passed']}/{funnel['merged']}"
+            f"（{_pct(funnel.get('judge_pass_rate'))}）/ 按已评分候选"
+            f" {funnel['judge_passed']}/{funnel['verdicts']}"
+            f"（{_pct(funnel.get('judge_pass_rate_scored'))}）",
+            f"- 排序配额保留率：{funnel['rank_kept']}/{funnel['judge_passed']}"
+            f"（{_pct(funnel.get('rank_keep_rate'))}）",
+            f"- 目录挂载成功率：{funnel['final']}/{funnel['rank_kept']}"
+            f"（{_pct(funnel.get('dir_mount_rate'))}）",
+            f"- 最终生产保留率：{funnel['final']}/{funnel['merged']}"
+            f"（{_pct(funnel.get('final_keep_rate'))}）",
+        ]
+    else:
+        lines.append("- 数量漏斗：—（审计缺失）")
+    lines += [f"- 分档：{judge.get('bands')}",
               f"- 淘汰原因：{judge.get('dropped')}"]
     jscores = judge.get("scores") or {}
     for axis, label in (("relevance", "相关性"),
@@ -500,6 +563,47 @@ def write_open_report(run_dir: Path, report: dict) -> None:
                          metrics.get("three_dimension_high_rate")
                          if metrics.get("three_dimension_high_rate") is not None else "",
                          summary.get("three_judged_tags")])
+        # judge 数量漏斗七率（n = 对应分母；审计缺失 → 空值）
+        funnel = (report.get("judge") or {}).get("funnel") or {}
+        for metric, denominator in (("merge_keep_rate", "raw"),
+                                    ("judge_coverage", "merged"),
+                                    ("judge_pass_rate", "merged"),
+                                    ("judge_pass_rate_scored", "verdicts"),
+                                    ("rank_keep_rate", "judge_passed"),
+                                    ("dir_mount_rate", "rank_kept"),
+                                    ("final_keep_rate", "merged")):
+            value = funnel.get(metric)
+            writer.writerow([metric, value if value is not None else "",
+                             funnel.get(denominator, "")])
+
+
+def upgrade_open_report(run_dir: Path) -> dict | None:
+    """旧 schema 报告按原始材料重建并重写三件套（读侧惰性升级）。
+
+    report.json 读侧原样透出，schema 升级后旧 run 会被 410 整体拒收。
+    这里用与终态组装完全相同的输入（meta.json + raw_results.json +
+    audit/）重新 assemble：成功 → 重写三件套并返回新报告；材料缺失/
+    损坏/run 非终态 → None（调用方回落原错误语义）。升级幂等——重写后
+    schema 即匹配，不会再次触发。
+    """
+    from tagplatform.services.eval.open_service import OpenMovieResult  # 局部导入防循环
+
+    try:
+        meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+        rows = json.loads((run_dir / "raw_results.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict) or not isinstance(rows, list):
+        return None
+    if meta.get("status") == "running":
+        return None
+    try:
+        results = [OpenMovieResult(**row) for row in rows]
+    except TypeError:
+        return None
+    report = assemble_open_report(results, meta, audit_dir=run_dir / "audit")
+    write_open_report(run_dir, report)
+    return report
 
 
 # ---------------------------------------------------------------- 历史摘要
@@ -518,8 +622,13 @@ def _read_open_summary(run_dir: Path) -> dict:
                             .read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return summary
-    if not isinstance(report, dict) or report.get("schema_version") != OPEN_REPORT_SCHEMA_VERSION:
+    if not isinstance(report, dict):
         return summary
+    if report.get("schema_version") != OPEN_REPORT_SCHEMA_VERSION:
+        # 旧 schema：按原始材料惰性升级（与报告端点同源）；失败按无报告
+        report = upgrade_open_report(run_dir)
+        if report is None:
+            return summary
 
     def _numeric(value):
         return value if isinstance(value, (int, float)) and not isinstance(

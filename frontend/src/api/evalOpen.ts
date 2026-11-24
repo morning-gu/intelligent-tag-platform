@@ -126,6 +126,25 @@ export interface QualityMetrics {
   value: DimensionMetrics
 }
 
+/** judge 生产数量漏斗（审计跨片求和后整 run 算比率，None≠0）：
+ * raw 原始生成 → merged 合并保留 → verdicts judge 返回 → judge_passed
+ * 过滤段通过 → rank_kept 排序配额保留 → final 目录归属成功。 */
+export interface JudgeFunnel {
+  raw: number
+  merged: number
+  verdicts: number
+  judge_passed: number
+  rank_kept: number
+  final: number
+  merge_keep_rate: number | null
+  judge_coverage: number | null
+  judge_pass_rate: number | null
+  judge_pass_rate_scored: number | null
+  rank_keep_rate: number | null
+  dir_mount_rate: number | null
+  final_keep_rate: number | null
+}
+
 /** judge 三维分跨片聚合（审计 verdicts 行）：n 有效分条数、null 无法判断数。 */
 export interface JudgeScoreSummary {
   n: number
@@ -194,7 +213,7 @@ export interface OpenEvalReport {
     max: number | null
   }
   judge: {
-    self_filter: number | null
+    funnel: JudgeFunnel | null
     scores: Record<string, JudgeScoreSummary>
     dropped: Record<string, number>
     bands: Record<string, number>

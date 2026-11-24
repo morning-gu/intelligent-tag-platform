@@ -2,7 +2,7 @@
 // open_report.assemble_open_report 键逐一镜像的夹具驱动各块视图——
 // ① banner/warnings 逐条 Alert + 银标准 note 恒渲染 ② 汇总卡（通过率族
 // + 新词占比 + 三维满分率，null → 暂无）③ 评分分布表（0-4 五档 + 无法
-// 判断 + 联合满分率）④ judge 审计段（自滤率/三维聚合/dropped 中文键/
+// 判断 + 联合满分率）④ judge 审计段（数量漏斗/三维聚合/dropped 中文键/
 // bands）⑤ 逐片折叠明细（默认折叠；展开后失败片置顶、评审失败次之；
 // 标签三维分 + 理由，展开行看评审理由/摘录/judge 参考）⑥ 失败清单两块
 // 分开 ⑦ 下载五链接 href 字面量 ⑧ calibre 小字（同模标注）。
@@ -69,7 +69,7 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
 
 function baseReport(over: Partial<OpenEvalReportData> = {}): OpenEvalReportData {
   return {
-    schema_version: 2, status: 'cancelled', source_run_id: null,
+    schema_version: 3, status: 'cancelled', source_run_id: null,
     banner: ['部分运行：指标仅覆盖完成影片，与全量口径不可直接横比'],
     sample_accounting: { total: 3, ok: 2, failed: 1, review_failed: 0 },
     summary: {
@@ -82,7 +82,12 @@ function baseReport(over: Partial<OpenEvalReportData> = {}): OpenEvalReportData 
       min: 2, median: 2, max: 2,
     },
     judge: {
-      self_filter: 0.5,
+      funnel: {
+        raw: 8, merged: 4, verdicts: 4, judge_passed: 2, rank_kept: 2, final: 2,
+        merge_keep_rate: 0.5, judge_coverage: 1, judge_pass_rate: 0.5,
+        judge_pass_rate_scored: 0.5, rank_keep_rate: 1, dir_mount_rate: 1,
+        final_keep_rate: 0.5,
+      },
       scores: {
         relevance: { n: 4, average: 3.5, distribution: [0, 1, 0, 1, 2], null: 1 },
         semantics: { n: 5, average: 3.0, distribution: [0, 0, 1, 2, 2], null: 0 },
@@ -118,12 +123,13 @@ describe('OpenEvalReport 报告视图', () => {
 
   it('汇总卡：通过率族 + 新词占比 + 三维满分率，样本核算三类分开', () => {
     render(<OpenEvalReport report={baseReport()} runId={RUN_ID} />)
-    expect(screen.getByText('75.0%（3/4）')).toBeInTheDocument() // 评审通过率
-    expect(screen.getAllByText('50.0%').length).toBeGreaterThanOrEqual(2) // 新词通过率/新词占比同值
-    expect(screen.getByText('100.0%')).toBeInTheDocument() // 命中通过率
-    expect(screen.getByText('25.0%')).toBeInTheDocument() // 三维同时满分
-    expect(screen.getByText(/2 产出成功（其中 0 部评审失败） \/ 1 产出失败（共 3）/)).toBeInTheDocument()
-    expect(screen.getByText(/4（新词 2 \/ 命中 2）/)).toBeInTheDocument()
+    const section = screen.getByRole('region', { name: '汇总' })
+    expect(within(section).getByText('75.0%（3/4）')).toBeInTheDocument() // 评审通过率
+    expect(within(section).getAllByText('50.0%').length).toBeGreaterThanOrEqual(2) // 新词通过率/新词占比同值
+    expect(within(section).getByText('100.0%')).toBeInTheDocument() // 命中通过率
+    expect(within(section).getByText('25.0%')).toBeInTheDocument() // 三维同时满分
+    expect(within(section).getByText(/2 产出成功（其中 0 部评审失败） \/ 1 产出失败（共 3）/)).toBeInTheDocument()
+    expect(within(section).getByText(/4（新词 2 \/ 命中 2）/)).toBeInTheDocument()
   })
 
   it('评分分布表：逐维均分/满分率/0-4 分布/无法判断 + 联合满分率', () => {
@@ -135,10 +141,14 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getByText('三维同时满分 25.0%')).toBeInTheDocument()
   })
 
-  it('judge 审计段：自滤率 + 三维聚合 + dropped 中文键 + bands', () => {
+  it('judge 审计段：数量漏斗 + 三维聚合 + dropped 中文键 + bands', () => {
     render(<OpenEvalReport report={baseReport()} runId={RUN_ID} />)
     const section = screen.getByRole('region', { name: 'judge 审计' })
-    expect(within(section).getByText(/自滤保留率 50.0%/)).toBeInTheDocument()
+    expect(within(section).getByText('Judge 通过（按合并候选）')).toBeInTheDocument()
+    expect(within(section).getByText('Judge 通过（按已评分候选）')).toBeInTheDocument()
+    // 保留/上游计数：passed/merged、passed/verdicts、final/merged 三处 2 / 4
+    expect(within(section).getAllByText('2 / 4')).toHaveLength(3)
+    expect(within(section).getAllByText('50.0%')).toHaveLength(4)
     expect(within(section).getByText(/duplicate 3/)).toBeInTheDocument()
     expect(within(section).getByText(/judge 评分未过线（value=1 < 2） ×2/)).toBeInTheDocument()
     expect(within(section).getByText('3.50 / 4')).toBeInTheDocument() // judge relevance 均分
@@ -235,7 +245,7 @@ describe('OpenEvalReport 报告视图', () => {
         review_missing: 0, review_pending: 0, metrics: null,
       },
       judge: {
-        self_filter: null,
+        funnel: null,
         scores: {
           relevance: { n: 0, average: null, distribution: [], null: 0 },
           semantics: { n: 0, average: null, distribution: [], null: 0 },
@@ -249,7 +259,7 @@ describe('OpenEvalReport 报告视图', () => {
     expect(screen.queryByRole('region', { name: '评分分布' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '逐片明细' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'produce 失败影片' })).not.toBeInTheDocument()
-    expect(screen.getByText(/自滤保留率 暂无/)).toBeInTheDocument()
+    expect(screen.getByText(/数量漏斗 暂无/)).toBeInTheDocument()
     expect(screen.getByText('genome relevance 是模型输出非人工标注')).toBeInTheDocument()
   })
 })

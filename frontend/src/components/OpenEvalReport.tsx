@@ -2,7 +2,7 @@
 // 渲染——① banner 警示（list[str] 逐条 Alert.warning：部分运行/同模评审/
 // 小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维均分/
 // 满分率 + 新词占比）③ 评分分布表（0-4 五档 + 无法判断 + 联合满分率）
-// ④ judge 审计段（生产侧自滤保留率 + 三维分聚合 + 淘汰原因 + 库内分档）
+// ④ judge 审计段（生产数量漏斗 + 三维分聚合 + 淘汰原因 + 库内分档）
 // ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考）
 // ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
 // ⑧ 银标准 note 恒渲染 + calibre 口径小字。null 一律「暂无」（None≠0）。
@@ -12,6 +12,7 @@ import {
   openFileUrl,
   type DimensionMetrics,
   type DimensionScore,
+  type JudgeFunnel,
   type JudgeReference,
   type OpenEvalReport as OpenEvalReportData,
   type OpenFileName,
@@ -44,6 +45,21 @@ function percent(value: number | null | undefined): string {
 
 function average(value: number | null | undefined): string {
   return value === null || value === undefined ? NA : `${value.toFixed(2)} / 4`
+}
+
+/** 生产数量漏斗表行：环节 + 保留/上游计数 + 比率（原始生成无上游，
+ * rate 缺省渲染「—」；分母为 0 的比率 null 渲染「暂无」，None≠0）。 */
+function funnelRows(f: JudgeFunnel) {
+  return [
+    { key: 'raw', label: '原始生成', count: `${f.raw}` },
+    { key: 'merged', label: '合并保留', count: `${f.merged} / ${f.raw}`, rate: f.merge_keep_rate },
+    { key: 'coverage', label: 'Judge 返回覆盖', count: `${f.verdicts} / ${f.merged}`, rate: f.judge_coverage },
+    { key: 'pass_merged', label: 'Judge 通过（按合并候选）', count: `${f.judge_passed} / ${f.merged}`, rate: f.judge_pass_rate },
+    { key: 'pass_scored', label: 'Judge 通过（按已评分候选）', count: `${f.judge_passed} / ${f.verdicts}`, rate: f.judge_pass_rate_scored },
+    { key: 'rank', label: '排序配额保留', count: `${f.rank_kept} / ${f.judge_passed}`, rate: f.rank_keep_rate },
+    { key: 'mount', label: '目录挂载成功', count: `${f.final} / ${f.rank_kept}`, rate: f.dir_mount_rate },
+    { key: 'final', label: '最终生产保留', count: `${f.final} / ${f.merged}`, rate: f.final_keep_rate },
+  ]
 }
 
 /** 评分分布表（汇总与逐片共用）：逐维均分/满分率/0-4 分布/无法判断。 */
@@ -243,10 +259,25 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
       )}
 
       <section aria-label="judge 审计">
-        <Typography.Title level={5}>judge 审计（生产侧自滤）</Typography.Title>
+        <Typography.Title level={5}>judge 审计与生产漏斗</Typography.Title>
         <Space direction="vertical" style={{ display: 'flex' }}>
+          {judge.funnel ? (
+            <Table
+              rowKey="key"
+              size="small"
+              pagination={false}
+              dataSource={funnelRows(judge.funnel)}
+              columns={[
+                { title: '环节', dataIndex: 'label' },
+                { title: '保留 / 上游', dataIndex: 'count' },
+                { title: '比率', render: (_, row) => row.rate === undefined ? '—' : percent(row.rate) },
+              ]}
+            />
+          ) : (
+            <Typography.Text>数量漏斗 {NA}</Typography.Text>
+          )}
           <Typography.Text>
-            自滤保留率 {percent(judge.self_filter)} · 库内分档：
+            库内分档：
             {Object.entries(judge.bands).map(([band, count]) => `${band} ${count}`).join(' / ') || NA}
           </Typography.Text>
           <Table
