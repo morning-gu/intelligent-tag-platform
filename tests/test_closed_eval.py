@@ -918,6 +918,31 @@ def test_history_scans_disk_and_infers_interrupted(svc):  # Review Focus 4
     assert all(r["dataset_id"] == "emotion" for r in rows)
 
 
+def test_history_running_progress_uses_registry(eval_setup, root6):
+    """回归：运行中 history 行进度取注册表活值（meta.json 起跑/终态才
+    写盘，运行中 done 恒 0——列表「进度」列取 meta 会一路 0/N 到终态
+    才跳满）。终态后回落 meta 值。"""
+    service = eval_setup(_SlowLLM(), dataset_root=root6)
+    run_id = service.start("emotion", {"mode": "all"}, concurrency=1)
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and service.get(run_id).done < 1:
+        time.sleep(0.01)
+    state = service.get(run_id)
+    assert state.status == "running" and state.done >= 1
+    assert _read_meta(service, run_id)["done"] == 0  # 运行中 meta 不推进
+    row = next(r for r in service.history() if r["run_id"] == run_id)
+    assert row["status"] == "running"
+    assert 1 <= row["done"] < row["total"]
+    assert row["total"] == state.total
+    assert service.cancel(run_id) is True
+    _await_terminal(service, run_id)
+    _drain_active(service)  # 终态先进注册表后落盘——等写盘收尾再读 meta
+    meta = _read_meta(service, run_id)
+    row = next(r for r in service.history() if r["run_id"] == run_id)
+    assert (row["done"], row["total"], row["failed"]) == (
+        meta["done"], meta["total"], meta["failed"])
+
+
 def test_history_summary_theta_row_empty_falls_back_or_none(svc):  # Review Focus 2
     """统一取格的「有值格」判定：目标 θ 行的格值为 null（该 θ 无有效影片）
     → 不算有值，回退最近有值档；整档无值 → None（宁缺勿假）。"""

@@ -462,8 +462,10 @@ class ClosedEvalService:
     def history(self) -> list[dict]:
         """历史扫描：`eval_output_root/*/meta.json` → 摘要行（started_at 降序）。
 
-        磁盘是持久层、注册表是进程内存：meta.status=running 且不在注册表 →
-        进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
+        磁盘是持久层、注册表是进程内存：meta.status=running 且在注册表 →
+        status/done/total/failed 取注册表活值（meta.json 只在起跑/终态写盘，
+        运行中逐片进度不落 meta）；不在注册表 → 进程已死，标 `interrupted`
+        （与正常终态在磁盘上可区分，spec §6）。
         读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过；report.json 缺失或
         截断（meta→raw→report 写序的非原子窗口）→ 摘要四键为 None，不抛
         异常。摘要取格走统一约定（closed_ranking 常量）：p10/ndcg10 =
@@ -487,19 +489,29 @@ class ClosedEvalService:
                 continue
             run_id = meta.get("run_id") or name
             status = meta.get("status")
+            done, total, failed = (meta.get("done"), meta.get("total"),
+                                   meta.get("failed"))
             if status == "running":
                 with self._lock:
                     state = self._runs.get(run_id)
-                    # 在注册表 → 用注册表现值（终态落盘前的窄窗口）；
-                    # 不在 → 进程死亡残留，标 interrupted
-                    status = state.status if state is not None else "interrupted"
+                    # 在注册表 → status 与进度都用注册表活值：meta.json
+                    # 只在起跑/终态写盘，运行中 done 恒为起跑值 0，逐片
+                    # 进度只进注册表与 progress.jsonl（取 meta 会让列表
+                    # 「进度」列一路 0/N 到终态才跳满）；
+                    # 不在 → 进程死亡残留，标 interrupted（进度保留 meta 值）
+                    if state is not None:
+                        status = state.status
+                        done, total, failed = (state.done, state.total,
+                                               state.failed)
+                    else:
+                        status = "interrupted"
             rows.append({
                 "run_id": run_id,
                 "dataset_id": (meta.get("dataset") or {}).get("id"),
                 "status": status,
-                "done": meta.get("done"),
-                "total": meta.get("total"),
-                "failed": meta.get("failed"),
+                "done": done,
+                "total": total,
+                "failed": failed,
                 "started_at": meta.get("started_at"),
                 "finished_at": meta.get("finished_at"),
                 "error": meta.get("error"),
