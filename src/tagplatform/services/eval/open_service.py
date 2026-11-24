@@ -546,6 +546,10 @@ class OpenEvalService:
 
         磁盘是持久层、注册表是进程内存：meta.status=running 且不在注册表 →
         进程已死，标 `interrupted`（与正常终态在磁盘上可区分，spec §6）。
+        meta 标 running 且注册表命中 → status 与进度七字段（done/total/
+        failed/起止/错误）一律取注册表活值——meta 运行中不回写（起跑
+        done=0 与终态各写一次），列表端点是前端进行中卡片/历史表的唯一
+        数据源，只读 meta 会让运行全程冻结 0/total。
         读侧容错（宁缺勿崩）：meta 缺失/损坏的 run 跳过。五摘要键
         （accuracy40 / new_pass / hit_pass / agreement40 / new_ratio）由
         `_read_open_summary` 读该 run 的 report.json（取格规则见其
@@ -567,6 +571,7 @@ class OpenEvalService:
                 continue
             run_id = meta.get("run_id") or name
             status = meta.get("status")
+            state = None
             if status == "running":
                 with self._lock:
                     state = self._runs.get(run_id)
@@ -574,16 +579,25 @@ class OpenEvalService:
                     # 不在 → 进程死亡残留，标 interrupted
                     status = state.status if state is not None else "interrupted"
             summary = _read_open_summary(root / name)
+            # 进度七字段真相源：注册表活值优先（state 仅在 meta 标 running
+            # 且注册表命中时非 None——运行中与终态落盘前的窄窗口）。meta
+            # 运行中不回写（起跑 done=0 与终态各写一次），而列表端点是
+            # 前端进行中卡片与历史表的唯一数据源（开放页轮询每周期只调
+            # 列表、不调详情端点）——只读 meta 会让运行全程冻结 0/total。
+            # 注册表无此 run（interrupted 残留/纯历史行）→ meta 值兜底。
             rows.append({
                 "run_id": run_id,
                 "dataset_id": (meta.get("dataset") or {}).get("id"),
                 "status": status,
-                "done": meta.get("done"),
-                "total": meta.get("total"),
-                "failed": meta.get("failed"),
-                "started_at": meta.get("started_at"),
-                "finished_at": meta.get("finished_at"),
-                "error": meta.get("error"),
+                "done": state.done if state is not None else meta.get("done"),
+                "total": state.total if state is not None else meta.get("total"),
+                "failed": state.failed if state is not None
+                          else meta.get("failed"),
+                "started_at": state.started_at if state is not None
+                              else meta.get("started_at"),
+                "finished_at": state.finished_at if state is not None
+                               else meta.get("finished_at"),
+                "error": state.error if state is not None else meta.get("error"),
                 # 历史摘要五键（accuracy40/new_pass/hit_pass/agreement40/
                 # new_ratio）：_read_open_summary 读 report.json，缺失全 None
                 "accuracy40": summary["accuracy40"],

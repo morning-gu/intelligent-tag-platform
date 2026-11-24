@@ -813,6 +813,47 @@ def test_history_summary_from_report(open_setup):
     assert started == sorted(started, reverse=True)
 
 
+def test_history_running_row_live_progress(open_setup, root6):
+    """history() 运行行合并注册表活值（进度面，None≠0 纪律）。
+
+    meta.json 运行中不回写（起跑 done=0 与终态各写一次）——列表端点是
+    前端进行中卡片与历史表的唯一数据源（开放页轮询每周期只调列表，不调
+    详情端点），若只读 meta，进度会全程冻结 0/total（用户实测缺陷：起跑
+    后「已完成」不涨）。观察窗无竞态钉法：第 3 片 produce 阻在 Event 上
+    → done=2 恒 running。"""
+    gate = threading.Event()
+
+    class _GatedProducer(FakeOpenProducer):
+        def produce(self, spec, *args, **kwargs):
+            if spec.asset_id == "tt0000003":
+                assert gate.wait(10)
+            return super().produce(spec, *args, **kwargs)
+
+    svc, _ = open_setup(dataset_root=root6, producer=_GatedProducer())
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"}, concurrency=1)
+    deadline = time.monotonic() + 15.0
+    state = None
+    while time.monotonic() < deadline:
+        state = svc.get(run_id)
+        if state is not None and state.done == 2:
+            break
+        time.sleep(0.01)
+    assert state is not None and state.done == 2, "未在 15s 内推进到 done=2"
+    assert state.status == "running"  # 第 3 片阻塞 → 停在 done=2 恒 running
+    # 前置钉死：磁盘 meta 此刻仍是起跑快照（done=0）——即缺陷的直接成因
+    assert _read_meta(svc, run_id)["done"] == 0
+    row = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert row["status"] == "running"
+    assert row["done"] == state.done  # 注册表活值，而非 meta 冻结的 0
+    assert row["total"] == state.total
+    assert row["failed"] == 0
+    gate.set()
+    assert svc.cancel(run_id) is True
+    _await_terminal(svc, run_id)
+    _drain_active(svc)
+
+
 def test_history_empty_when_root_missing(tmp_path):
     """输出根不存在 → []（宁缺勿崩）。"""
     svc = OpenEvalService(MOCK_LLM, MOCK_EMBEDDER, Settings(
