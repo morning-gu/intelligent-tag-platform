@@ -120,7 +120,7 @@ describe('ClearConfirmModal 清空确认弹窗', () => {
 
   it('预览失败独立错误态：描述仍在、确认仍可继续', async () => {
     mockedPreview.mockRejectedValue(new ApiError(500, '预览加载失败'))
-    const utils = renderModal()
+    renderModal()
     await screen.findByText('预览加载失败')
     expect(screen.getByText(BASE_CONFIG.description)).toBeInTheDocument()
     typeConfirmWord()

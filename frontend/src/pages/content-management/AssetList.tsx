@@ -21,8 +21,17 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { fetchAssets, type AssetSummary } from '../../api/assets'
+import {
+  clearAllContentTags,
+  clearAssetTags,
+  deleteAllAssets,
+  deleteAsset,
+} from '../../api/clear'
+import ClearConfirmModal from '../../components/ClearConfirmModal'
+import type { ClearOpConfig } from '../../components/ClearConfirmModal'
+import type { AuthedOutlet } from '../Layout'
 import AssetDirImportModal from './AssetDirImportModal'
 import AssetUploadWizard from './AssetUploadWizard'
 import { formatTimestamp } from '../../api/review'
@@ -48,6 +57,10 @@ function truncate(text: string, max: number): string {
 
 export default function AssetList() {
   const navigate = useNavigate()
+  // 登录态经 Layout 的 Outlet context 下发；裸渲染（无 Router context）
+  // 时 undefined → 非 admin 不渲染危险按钮（既有测试兼容）
+  const outlet = useOutletContext<AuthedOutlet>() as AuthedOutlet | undefined
+  const isAdmin = outlet?.user?.role === 'admin'
   const [assets, setAssets] = useState<AssetSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -58,6 +71,9 @@ export default function AssetList() {
   // —— 两个 Modal 的开关（会话状态都在子组件内部） ——
   const [uploadOpen, setUploadOpen] = useState(false)
   const [dirOpen, setDirOpen] = useState(false)
+
+  // —— 清空/删除危险操作（clear-reset）：当前操作的弹窗配置 ——
+  const [clearOp, setClearOp] = useState<ClearOpConfig | null>(null)
 
   const loadAssets = useCallback(async () => {
     setLoading(true)
@@ -128,6 +144,58 @@ export default function AssetList() {
     },
   ]
 
+  // admin 才有操作列（clear-reset：场景行不渲染——标签数据全挂 content 级）
+  if (isAdmin) {
+    columns.push({
+      title: '操作',
+      key: 'clear-actions',
+      fixed: 'right',
+      render: (_, record) =>
+        record.asset_type === 'scene' ? null : (
+          <Space>
+            <Button
+              type="link"
+              size="small"
+              danger
+              onClick={(e) => {
+                e.stopPropagation() // 行 onClick 会导航详情
+                setClearOp({
+                  title: `清空“${record.title}”的标签`,
+                  description:
+                    '将删除该内容的待审核标签、正式挂载与生成任务历史（含排队中任务）。标签库与内容资产保留。',
+                  previewScope: 'asset-tags',
+                  assetId: record.asset_id,
+                  execute: () => clearAssetTags(record.asset_id),
+                  onDone: loadAssets,
+                })
+              }}
+            >
+              清空标签
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              danger
+              onClick={(e) => {
+                e.stopPropagation()
+                setClearOp({
+                  title: `删除“${record.title}”`,
+                  description:
+                    '将删除该内容及其全部场景，连同其标签数据与任务历史。视频源文件不删除，可随时重新导入。',
+                  previewScope: 'asset',
+                  assetId: record.asset_id,
+                  execute: () => deleteAsset(record.asset_id),
+                  onDone: loadAssets,
+                })
+              }}
+            >
+              删除
+            </Button>
+          </Space>
+        ),
+    })
+  }
+
   return (
     <Card
       title="内容资产"
@@ -140,6 +208,40 @@ export default function AssetList() {
             上传视频
           </Button>
           <Button onClick={() => setDirOpen(true)}>从目录导入</Button>
+          {isAdmin && (
+            <Button
+              danger
+              onClick={() =>
+                setClearOp({
+                  title: '清空全部内容的标签',
+                  description:
+                    '将删除全部内容的待审核标签、正式挂载与生成任务历史（含排队中任务）。标签库与内容资产保留。',
+                  previewScope: 'all-tags',
+                  execute: clearAllContentTags,
+                  onDone: loadAssets,
+                })
+              }
+            >
+              清空全部标签
+            </Button>
+          )}
+          {isAdmin && (
+            <Button
+              danger
+              onClick={() =>
+                setClearOp({
+                  title: '删除全部内容资产',
+                  description:
+                    '将删除全部内容资产及其场景，连同全部标签数据与任务历史。标签库保留。视频源文件不删除，可随时重新导入。',
+                  previewScope: 'all-assets',
+                  execute: deleteAllAssets,
+                  onDone: loadAssets,
+                })
+              }
+            >
+              删除全部资产
+            </Button>
+          )}
         </Space>
       }
     >
@@ -201,6 +303,11 @@ export default function AssetList() {
         open={dirOpen}
         onClose={() => setDirOpen(false)}
         refreshAssets={loadAssets}
+      />
+      <ClearConfirmModal
+        open={clearOp !== null}
+        onClose={() => setClearOp(null)}
+        config={clearOp}
       />
     </Card>
   )

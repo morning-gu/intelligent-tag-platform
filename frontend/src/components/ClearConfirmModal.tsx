@@ -93,7 +93,7 @@ export default function ClearConfirmModal({
   if (config === null || !open) return null
 
   async function handleOk() {
-    if (executing || confirmWord !== CONFIRM_WORD) return
+    if (executing || config === null || confirmWord !== CONFIRM_WORD) return
     setExecuting(true)
     setActionError(null)
     try {

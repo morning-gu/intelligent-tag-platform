@@ -6,16 +6,33 @@
 // - 422 失败透出后端 detail、413 按 ApiError.status 统一 2GB 上限提示，
 //   均不刷新列表（JSON detail 与 nginx HTML 两种 413 响应同口径）。
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { Modal } from 'antd'
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AssetList from './AssetList'
-import { apiFetch } from '../../api/client'
+import { ApiError, apiFetch } from '../../api/client'
+import type { UserBrief } from '../../api/client'
 import type { AssetSummary } from '../../api/assets'
+import { clearAllContentTags, clearAssetTags, fetchClearPreview } from '../../api/clear'
+import type { ClearPreview, ClearResult } from '../../api/clear'
 import type { BuildTask, MediaMatchResult, MediaUploadResult } from '../../api/media'
 
 vi.mock('../../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
+})
+
+vi.mock('../../api/clear', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/clear')>()
+  return {
+    ...actual,
+    fetchClearPreview: vi.fn(),
+    clearAssetTags: vi.fn(),
+    clearAllContentTags: vi.fn(),
+    clearTagLibrary: vi.fn(),
+    deleteAsset: vi.fn(),
+    deleteAllAssets: vi.fn(),
+  }
 })
 
 const mockedApiFetch = vi.mocked(apiFetch)
@@ -914,5 +931,138 @@ describe('从目录导入资产', () => {
     expect(
       await screen.findByText(/没有执行任何导入/),
     ).toBeInTheDocument()
+  })
+})
+
+// ---------- 清空/删除危险操作（clear-reset Task 4：admin 门控 + 共享弹窗） ----------
+
+const mockedClearAssetTags = vi.mocked(clearAssetTags)
+const mockedClearAllContentTags = vi.mocked(clearAllContentTags)
+const mockedPreview = vi.mocked(fetchClearPreview)
+
+const ADMIN: UserBrief = { user_id: 'u-admin', username: 'admin', role: 'admin' }
+const REVIEWER: UserBrief = { user_id: 'u-bob', username: 'bob', role: 'reviewer' }
+
+const CLEAR_PREVIEW: ClearPreview = {
+  scope: 'asset-tags',
+  counts: {
+    pre_asset_tag: 2, asset_tag: 1, generation_tasks: 3, quality_evaluations: 1,
+    asset_build_task: 0, media_assets: 0, scenes: 0, tag_define: 0,
+    tag_catalog: 0,
+  },
+}
+
+const CLEAR_RESULT: ClearResult = { ok: true, counts: CLEAR_PREVIEW.counts }
+
+/** 登录态上下文模板：模拟 Layout 的 Outlet context（user.role 门控源）。 */
+function UserOutlet({ user }: { user: UserBrief }) {
+  return <Outlet context={{ user }} />
+}
+
+/** 按登录角色渲染本页（admin 门控用例的装配入口）。 */
+function renderAssetListAs(user: UserBrief) {
+  return render(
+    <MemoryRouter initialEntries={['/assets']}>
+      <Routes>
+        <Route element={<UserOutlet user={user} />}>
+          <Route path="/assets" element={<AssetList />} />
+          <Route path="/assets/:assetId" element={<div>详情页占位</div>} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+/** 在确认弹窗里输入"清空"并点确认按钮。 */
+function confirmClear() {
+  fireEvent.change(screen.getByLabelText('清空确认输入'), {
+    target: { value: '清空' },
+  })
+  fireEvent.click(screen.getByRole('button', { name: '确认清空' }))
+}
+
+/** GET /assets 的调用次数（清空成功后 loadAssets 刷新的断言基础）。 */
+function assetsGetCalls(): number {
+  return assetsCallPaths().filter(
+    (p) => p === '/api/v1/assets' || p.startsWith('/api/v1/assets?')).length
+}
+
+describe('AssetList 清空/删除危险操作', () => {
+  beforeEach(() => {
+    mockedPreview.mockResolvedValue(CLEAR_PREVIEW)
+    mockedClearAssetTags.mockResolvedValue(CLEAR_RESULT)
+    mockedClearAllContentTags.mockResolvedValue(CLEAR_RESULT)
+  })
+
+  afterEach(() => {
+    // antd Modal portal 不随 RTL cleanup 卸载（jsdom 无离场动画），手动清
+    Modal.destroyAll()
+    Array.from(document.body.children).forEach((el) => {
+      if (el instanceof HTMLElement && el.querySelector('.ant-modal')) el.remove()
+    })
+  })
+
+  it('admin：movie 行渲染操作按钮、场景行不渲染', async () => {
+    renderAssetListAs(ADMIN)
+    await expandGroup('电影')
+    const movieRow = screen.getByText('星际穿越').closest('tr') as HTMLElement
+    expect(within(movieRow).getByText('清空标签')).toBeInTheDocument()
+    expect(within(movieRow).getByText('删除')).toBeInTheDocument()
+    await expandGroup('场景')
+    const sceneRow = screen.getByText(/The Dude/).closest('tr') as HTMLElement
+    expect(within(sceneRow).queryByText('清空标签')).toBeNull()
+    expect(within(sceneRow).queryByText('删除')).toBeNull()
+  })
+
+  it('非 admin：无操作列、无工具栏危险按钮', async () => {
+    renderAssetListAs(REVIEWER)
+    await screen.findByText('上传视频')
+    expect(screen.queryByText('清空标签')).toBeNull()
+    expect(screen.queryByText('删除全部资产')).toBeNull()
+    expect(screen.queryByText('清空全部标签')).toBeNull()
+  })
+
+  it('行内清空标签：确认后调 clearAssetTags 并刷新列表（不触发行导航）', async () => {
+    renderAssetListAs(ADMIN)
+    await expandGroup('电影')
+    const movieRow = screen.getByText('星际穿越').closest('tr') as HTMLElement
+    fireEvent.click(within(movieRow).getByText('清空标签'))
+    expect(screen.queryByText('详情页占位')).toBeNull() // stopPropagation 生效
+    await screen.findByText('清空“星际穿越”的标签')
+    confirmClear()
+    await waitFor(() =>
+      expect(mockedClearAssetTags).toHaveBeenCalledWith('a-movie'))
+    await waitFor(() => expect(assetsGetCalls()).toBeGreaterThanOrEqual(2))
+  })
+
+  it('工具栏清空全部标签：确认流调 clearAllContentTags', async () => {
+    renderAssetListAs(ADMIN)
+    fireEvent.click(screen.getByText('清空全部标签'))
+    await screen.findByLabelText('清空确认输入')
+    confirmClear()
+    await waitFor(() =>
+      expect(mockedClearAllContentTags).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(assetsGetCalls()).toBeGreaterThanOrEqual(2))
+  })
+
+  it('删除资产按钮：弹窗描述注明视频源文件不删除', async () => {
+    renderAssetListAs(ADMIN)
+    await expandGroup('电影')
+    const movieRow = screen.getByText('星际穿越').closest('tr') as HTMLElement
+    fireEvent.click(within(movieRow).getByText('删除'))
+    expect(await screen.findByText(/视频源文件不删除/)).toBeInTheDocument()
+  })
+
+  it('409 透出：守卫文案出现在弹窗内且弹窗不关', async () => {
+    mockedClearAssetTags.mockRejectedValueOnce(
+      new ApiError(409, '有 2 个生成/构建任务正在执行，请先等待其完成'))
+    renderAssetListAs(ADMIN)
+    await expandGroup('电影')
+    const movieRow = screen.getByText('星际穿越').closest('tr') as HTMLElement
+    fireEvent.click(within(movieRow).getByText('清空标签'))
+    await screen.findByLabelText('清空确认输入')
+    confirmClear()
+    await screen.findByText('有 2 个生成/构建任务正在执行，请先等待其完成')
+    expect(screen.getByText('清空“星际穿越”的标签')).toBeInTheDocument()
   })
 })
