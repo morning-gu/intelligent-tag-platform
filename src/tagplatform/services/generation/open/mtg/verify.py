@@ -6,7 +6,7 @@
 高得足以过线。实测在现行阈值下精确率只有 62%（人工标注 75 条），所以
 "要不要把候选替换成库里的标准名"不能只靠分数。
 
-成本控制：一批只调一次模型（一条 prompt 里放全部对子），temperature 与
+成本控制：每批最多 40 对，temperature 与
 judge 一致取 0。
 
 失败口径与 judge 相反：复核失败**不阻塞任务**，只当"没复核"处理（不替换），
@@ -90,8 +90,25 @@ def verify_pairs(client, pairs: list[tuple[str, str, float]], *,
 
     trace 传入 dict 时写入最后一次原始输出（截断），供审计核对判定理由。
     """
-    if not pairs:
-        return {}
+    results: dict[str, bool] = {}
+    for start in range(0, len(pairs), _MAX_PAIRS):
+        batch = pairs[start:start + _MAX_PAIRS]
+        batch_id = (run_id if len(pairs) <= _MAX_PAIRS
+                    else f"{run_id}:batch-{start // _MAX_PAIRS + 1:03d}")
+        batch_trace: dict | None = {} if trace is not None else None
+        batch_results = _verify_batch(client, batch, run_id=batch_id, usage=usage,
+                                      retries=retries, trace=batch_trace)
+        results.update({name: batch_results[name] for name, _, _ in batch
+                        if name in batch_results})
+        if trace is not None and batch_trace:
+            trace["raw"] = batch_trace["raw"]
+            if len(pairs) > _MAX_PAIRS:
+                trace.setdefault("batches", []).append(
+                    {"batch": start // _MAX_PAIRS + 1, **batch_trace})
+    return results
+
+
+def _verify_batch(client, pairs, *, run_id, usage, retries, trace) -> dict[str, bool]:
     messages = build_verify_messages(pairs)
     for attempt in range(retries + 1):
         request = messages if attempt == 0 else [
