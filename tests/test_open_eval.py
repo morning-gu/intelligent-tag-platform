@@ -865,6 +865,35 @@ def test_rereview_rejects_active_run(open_setup):
         svc.rereview(run_id)
 
 
+def test_history_running_progress_uses_registry(open_setup, root6):
+    """回归：运行中 history 行进度取注册表活值，而非 meta.json 起跑值。
+
+    meta.json 只在起跑/终态写盘（运行中 done 恒 0），前端进度条轮询
+    history 列表——取 meta 会一路 0% 到终态才跳 100%。运行中行的
+    done/total/failed 须与注册表一致；终态后回落 meta 值。
+    """
+    svc, _ = open_setup(dataset_root=root6)
+    svc._review_client = _ReviewOkStub(delay=0.3)  # 拉开片完成间隔，稳住运行中窗口
+    run_id = svc.start("emotion", {"mode": "all"}, concurrency=1)
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and svc.get(run_id).done < 1:
+        time.sleep(0.01)
+    state = svc.get(run_id)
+    assert state.status == "running" and state.done >= 1
+    assert _read_meta(svc, run_id)["done"] == 0  # 运行中 meta 不推进
+    row = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert row["status"] == "running"
+    assert 1 <= row["done"] < row["total"]
+    assert row["total"] == state.total
+    assert svc.cancel(run_id) is True
+    _await_terminal(svc, run_id)
+    _drain_active(svc)
+    meta = _read_meta(svc, run_id)
+    row = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert (row["done"], row["total"], row["failed"]) == (
+        meta["done"], meta["total"], meta["failed"])
+
+
 def test_history_summary_from_report(open_setup):
     """history 五摘要键由 _read_open_summary 读 report.json（Task 5 接线）；
     磁盘 running 残留不在注册表 → interrupted、无报告 → 五键 None。"""
