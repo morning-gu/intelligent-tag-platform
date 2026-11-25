@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import statistics
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,6 +41,7 @@ OPEN_REPORT_SCHEMA_VERSION = 3
 
 __all__ = [
     "assemble_open_report",
+    "fill_open_report_mounts",
     "render_open_report_md",
     "upgrade_open_report",
     "write_open_report",
@@ -61,6 +64,7 @@ _SCORE_AXES = ("relevance", "semantics", "value")
 
 # metrics.csv 长表列（Excel/后续分析消费；None → 空格）
 _CSV_HEADER = ("metric", "value", "n")
+OPEN_MOUNT_FIELDS = ("dir_id", "dir_name", "target_type")
 
 
 def _rate(passed: int, judged: int) -> float | None:
@@ -115,6 +119,46 @@ def _movie_row(result: "OpenMovieResult") -> dict:
         "review_pending": stats["pending"] if not result.review_error else 0,
         "metrics": stats["metrics"],
     }
+
+
+def fill_open_report_mounts(movies: list[dict], audit_dir: Path) -> None:
+    """用原运行审计补齐旧标签行的挂载字段，保留报告及目录历史口径。"""
+    groups = (("hits", "tag_name", "catalog"), ("new_words", "name", "generated"))
+    for movie in movies:
+        if not isinstance(movie, dict):
+            continue
+        tt = movie.get("tt")
+        if not isinstance(tt, str) or not re.fullmatch(r"tt[0-9]+", tt):
+            continue
+        if not any("dir_id" not in row or "target_type" not in row
+                   for key, _, _ in groups for row in movie.get(key, [])):
+            continue
+        try:
+            audit = json.loads((audit_dir / f"{tt}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        accepted = audit.get("accepted") if isinstance(audit, dict) else None
+        if not isinstance(accepted, list):
+            continue
+        mounts = defaultdict(list)
+        for row in accepted:
+            if (isinstance(row, dict) and row.get("origin") in ("catalog", "generated")
+                    and isinstance(row.get("tag"), str)):
+                mounts[row.get("origin"), row["tag"]].append(row)
+        for key, name_key, origin in groups:
+            rows = list(movie.get(key, []))
+            indexes = defaultdict(list)
+            for index, row in enumerate(rows):
+                indexes[row.get(name_key)].append(index)
+            for name, positions in indexes.items():
+                matches = mounts.get((origin, name), [])
+                # 产出与审计同序，报告只是按来源分组。缺行时避免猜测同名词归属。
+                if len(matches) != len(positions):
+                    continue
+                for index, match in zip(positions, matches, strict=True):
+                    rows[index] = {**{field: match[field] for field in OPEN_MOUNT_FIELDS
+                                      if field in match}, **rows[index]}
+            movie[key] = rows
 
 
 def _judge_score_summary(verdict_rows: list[dict]) -> dict:
@@ -303,6 +347,9 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
         else:
             n_failed += 1
         movies.append(_movie_row(result))
+
+    if audit_dir is not None:
+        fill_open_report_mounts(movies, audit_dir)
 
     total = meta.get("total")
     if not isinstance(total, int):

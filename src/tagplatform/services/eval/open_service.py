@@ -85,6 +85,7 @@ from tagplatform.services.eval.dataset import (
     select_movies,
 )
 from tagplatform.services.eval.open_report import (
+    OPEN_MOUNT_FIELDS,
     _read_open_summary,
     assemble_open_report,
     write_open_report,
@@ -755,6 +756,9 @@ class OpenEvalService:
                 "tag_id": tag.tag_id, "name": tag.tag_name,
                 "desc": (definition.description if (definition := library.tag(tag.tag_id))
                          else tag.candidate_description), "level": tag.level,
+                "dir_id": tag.dir_id,
+                "dir_name": (directory.dir_name if (directory := library.directory(tag.dir_id)) else None),
+                "target_type": tag.target_type,
                 "scene_ids": [ev.scene_id for ev in (tag.evidence or [])],
                 "judge_reference": references.get(
                     (tag.tag_name, tag.origin, tag.target_type, tag.target_id),
@@ -819,6 +823,7 @@ class OpenEvalService:
                        "level": item.get("level"),
                        "judge_reference": reference, "review": None}
                 new_words.append(row)
+            row.update({key: item[key] for key in OPEN_MOUNT_FIELDS if key in item})
             row["scene_ids"] = list(item.get("scene_ids") or [])
             review_rows.append({
                 "name": item["name"], "desc": item.get("desc"),

@@ -80,8 +80,15 @@ export interface JudgeReference {
   quote?: string | null
 }
 
+/** 历史评测可能缺少部分挂载字段。 */
+export interface OpenLabelMount {
+  dir_id?: string | null
+  dir_name?: string | null
+  target_type?: string | null
+}
+
 /** 库内命中行（tag_id 非空的产出）。 */
-export interface OpenHitRow {
+export interface OpenHitRow extends OpenLabelMount {
   tag_id: string
   tag_name: string
   desc: string | null
@@ -92,7 +99,7 @@ export interface OpenHitRow {
 }
 
 /** 新词行（tag_id 为空的产出）；desc 为生成侧通用释义。 */
-export interface OpenNewWordRow {
+export interface OpenNewWordRow extends OpenLabelMount {
   name: string
   desc: string | null
   level: string

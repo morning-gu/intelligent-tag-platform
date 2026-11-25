@@ -54,11 +54,13 @@ function movie(over: Partial<OpenMovieRow> = {}): OpenMovieRow {
     review_error: null, elapsed_ms: 1000, n_hits: 1, n_new_words: 1,
     hits: [{
       tag_id: 't1', tag_name: '悬疑', desc: null, scene_ids: ['scene_025'], level: 'film',
+      dir_id: 'dir_mood', dir_name: '情绪氛围', target_type: 'content',
       judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据', quote: '原文摘录' },
       review: review(true),
     }],
     new_words: [{
       name: '新词甲', desc: '通用释义', level: 'scene',
+      dir_id: 'dir_story', target_type: 'content',
       judge_reference: null, review: review(false, 2),
     }],
     pass_rate: 0.5, new_pass: 0, hit_pass: 1, review_missing: 0, review_pending: 0,
@@ -172,8 +174,16 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getAllByText('相关理由').length).toBeGreaterThan(0)
     expect(within(section).getByText('通过')).toBeInTheDocument()
     expect(within(section).getByText('未通过')).toBeInTheDocument()
-    expect(within(section).getByText('场景级')).toHaveClass('ant-tag-cyan')
-    expect(within(section).getByText('全片级')).not.toHaveClass('ant-tag-cyan')
+    expect(within(section).getByRole('columnheader', { name: '生成阶段' })).toBeInTheDocument()
+    expect(within(section).getByRole('columnheader', { name: '挂载目录' })).toBeInTheDocument()
+    expect(within(section).getByRole('columnheader', { name: '挂载层级' })).toBeInTheDocument()
+    const hit = within(section).getByRole('row', { name: /悬疑/ })
+    expect(within(hit).getByText('二阶段')).toBeInTheDocument()
+    expect(within(hit).getByText('情绪氛围')).toBeInTheDocument()
+    const word = within(section).getByRole('row', { name: /新词甲/ })
+    expect(within(word).getByText('一阶段')).toHaveClass('ant-tag-cyan')
+    expect(within(word).getByText('dir_story')).toBeInTheDocument()
+    expect(within(word).getByText('全片级')).toBeInTheDocument()
     // 失败片置顶：第一个折叠头是失败片
     const headers = within(section).getAllByText(/produce 失败|完成/)
     expect(headers[0]).toHaveTextContent('produce 失败')

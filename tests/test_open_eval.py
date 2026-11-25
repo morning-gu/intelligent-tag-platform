@@ -193,7 +193,7 @@ def _new_word(name: str, desc: str = "测试新词通用释义") -> ProducedTag:
         candidate_type="val_fixed", candidate_description=desc,
         relevance_score=0.7, confidence=0.6,
         evidence=[Evidence(scene_id="scene_001", start_ms=0, end_ms=60000,
-                           description="开场证据")], level="film")
+                           description="开场证据")], level="film", dir_id="dir_eval")
 
 
 class FakeOpenProducer:
@@ -501,7 +501,9 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert hx["review"]["pass"] is None
     assert hx["review"]["semantics"]["score"] is None
     nw = row1["new_words"][0]
-    assert set(nw) == {"name", "desc", "level", "scene_ids", "judge_reference", "review"}
+    assert set(nw) == {"name", "desc", "level", "scene_ids", "judge_reference", "review",
+                       "dir_id", "dir_name", "target_type"}
+    assert (nw["dir_id"], nw["dir_name"], nw["target_type"]) == ("dir_eval", "评测标签", "content")
     assert nw["name"] == "新词甲" and nw["review"]["pass"] is True
 
     # 增量进度：每片一行，review="ok"
@@ -831,7 +833,8 @@ def test_rereview_reuses_snapshot_without_produce(open_setup):
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
     _drain_active(svc)
     d = _run_dir(svc, run_id)
-    assert (d / "produced" / "tt0000001.json").exists()  # 产出快照落盘
+    snapshot = json.loads((d / "produced" / "tt0000001.json").read_text(encoding="utf-8"))
+    assert snapshot["labels"][0]["target_type"] == "content"
     calls_before = len(fake.calls)
     # 换评审替身为失败 → rereview 后评审失败但产出保留，produce 不重跑
     before = (d / "report.json").read_bytes()
@@ -850,6 +853,7 @@ def test_rereview_reuses_snapshot_without_produce(open_setup):
     assert report["sample_accounting"]["review_failed"] == 2
     assert report["summary"]["total_tags"] == 5  # 产出不作废
     assert report["summary"]["pass_rate"] is None  # 评审失败排除出分母
+    assert report["movies"][0]["hits"][0]["target_type"] == "content"
 
 
 def test_rereview_preserves_zero_output_and_original_produce_failure(open_setup):
