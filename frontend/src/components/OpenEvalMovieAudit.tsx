@@ -36,11 +36,16 @@ function auditRows(audit: NonNullable<OpenMovieDiagnostics['audit']>): AuditRow[
   const dropped = new Map((audit.dropped ?? []).map((row) => [row.candidate_id ?? row.tag, row.why]))
   const kept = new Map((audit.accepted ?? []).map((row) => [row.candidate_id ?? row.candidate ?? row.tag, row]))
   const truncated = new Set((audit.library?.truncated ?? []).map((row) => row.candidate_id ?? row.tag))
-  const clustered = new Set(audit.clustering?.clusters.flatMap(
-    ({ representative, members }) => members.filter((id) => id !== representative),
-  ))
   const merged: NonNullable<typeof audit.merged> =
     audit.merged ?? (audit.candidates ?? []).map((tag) => ({ tag, scope: null }))
+  const candidateNames = new Map(merged.map((row) => [row.candidate_id ?? row.tag, row.tag]))
+  const clusterOutcomes = new Map(audit.clustering?.clusters.flatMap(({ representative, members }) => {
+    const name = candidateNames.get(representative)
+    const outcome = name ? `聚类未选为代表（代表标签：${name}）` : '聚类未选为代表'
+    return members
+      .filter((id) => id !== representative)
+      .map((id) => [id, outcome] as const)
+  }))
   return merged.map((candidate, index) => {
     const id = candidate.candidate_id ?? candidate.tag
     const verdict = verdicts.get(id)
@@ -49,7 +54,7 @@ function auditRows(audit: NonNullable<OpenMovieDiagnostics['audit']>): AuditRow[
     const unassigned = audit.error ? '生产中断' : '未进入产出'
     const outcome = final
       ? (final.tag === candidate.tag ? '保留' : `保留（库内标准名：${final.tag}）`)
-      : why ?? (truncated.has(id) ? '超出队列配额' : clustered.has(id) ? '聚类未选为代表' : unassigned)
+      : why ?? (truncated.has(id) ? '超出队列配额' : clusterOutcomes.get(id) ?? unassigned)
     const fits = verdict?.dir_fits ?? {}
     const targets = audit.directory_targets?.[id] ?? Object.keys(fits)
     const checks = targets.map((id) => `${id} ${directoryFit(fits[id])}`).join(' · ')
