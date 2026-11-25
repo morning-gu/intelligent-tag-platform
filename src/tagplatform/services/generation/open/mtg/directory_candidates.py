@@ -63,7 +63,7 @@ def generate_directory_candidates(scene_client, film_client, contents, frames, m
         scene_id = scene.scene_id
         base = build_scene_generation_messages(
             scene, frames.get(scene_id, ()), content=contents,
-            max_tags=SCENE_REQUEST_LIMIT, dir_hint=[], modalities=modalities)
+            max_tags=SCENE_REQUEST_LIMIT, modalities=modalities)
         for index, directory in enumerate(directories, 1):
             dir_id = directory["dir_id"]
             messages = target_generation_directory(

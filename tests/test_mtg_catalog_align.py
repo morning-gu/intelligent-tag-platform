@@ -392,6 +392,7 @@ def test_pipeline_switch_off_disables_library(
     spec = _build_spec(content_fixture, run_id="align3")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
+    assert out
     assert all(t.origin == "generated" for t in out)
     report = json.loads(pathlib.Path(
         mtg_settings.mtg_report_dir, "t-align3.json").read_text(encoding="utf-8"))

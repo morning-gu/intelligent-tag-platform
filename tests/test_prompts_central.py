@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from tagplatform.capabilities.prompts.mtg import (
-    DIR_HINT_HEAD_TEXT, DIR_FIELD_RULE_TEXT, DESCRIPTION_INSTRUCTIONS,
-    DESCRIPTION_RETRY_HINT, FILM_GOAL_TEXT, GENERATION_ROLE_TEXT,
+    DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT,
+    EXCERPT_DIR_GOAL_TEXT, FILM_GOAL_TEXT, GENERATION_ROLE_TEXT,
     HOW_TO_FILL_TEXT, JUDGE_CRITERIA, JUDGE_RETRY_HINT, JUDGE_ROLE_BRIEF,
-    LIBRARY_HINT_HEAD_TEXT, SCENE_GOAL_TEXT, VERIFY_INSTRUCTIONS,
+    LIBRARY_HINT_HEAD_TEXT, TARGET_DIR_RULE_TEXT, VERIFY_INSTRUCTIONS,
     VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT,
 )
 from tagplatform.capabilities.prompts.templates import CLOSED_RETRY_HINT
@@ -46,8 +46,8 @@ def test_central_modules_layering(module):
     _layering_clean(module)
 
 
-@pytest.mark.parametrize("text", [GENERATION_ROLE_TEXT, SCENE_GOAL_TEXT,
-    HOW_TO_FILL_TEXT, DIR_FIELD_RULE_TEXT, DIR_HINT_HEAD_TEXT,
+@pytest.mark.parametrize("text", [GENERATION_ROLE_TEXT, EXCERPT_DIR_GOAL_TEXT,
+    FILM_GOAL_TEXT, HOW_TO_FILL_TEXT, TARGET_DIR_RULE_TEXT,
     LIBRARY_HINT_HEAD_TEXT, JUDGE_CRITERIA, JUDGE_ROLE_BRIEF,
     DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT, VERIFY_INSTRUCTIONS,
     VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT, JUDGE_RETRY_HINT,
@@ -57,17 +57,19 @@ def test_constants_non_empty(text):
 
 
 def test_generation_template_uses_central_copy():
-    template = build_generation_template("scene")
-    first_text = template["messages"][0]["content"][0]["text"]
-    assert GENERATION_ROLE_TEXT in first_text
-    assert SCENE_GOAL_TEXT in template["instructions_without_directory_hint"]
-    assert HOW_TO_FILL_TEXT in template["instructions_without_directory_hint"]
+    scene = build_generation_template("scene")
+    scene_text = "".join(p["text"] for p in scene["messages"][0]["content"]
+                         if p["type"] == "text")
+    assert GENERATION_ROLE_TEXT in scene_text
+    assert EXCERPT_DIR_GOAL_TEXT in scene_text
+    assert TARGET_DIR_RULE_TEXT in scene_text
     film = build_generation_template("film")
-    assert FILM_GOAL_TEXT in film["instructions_without_directory_hint"]
-    all_text = "".join(p["text"] for p in film["messages"][0]["content"]
-                       if p["type"] == "text")
-    assert LIBRARY_HINT_HEAD_TEXT in all_text
-    assert DIR_HINT_HEAD_TEXT in all_text
+    film_text = "".join(p["text"] for p in film["messages"][0]["content"]
+                        if p["type"] == "text")
+    assert FILM_GOAL_TEXT in film_text
+    assert HOW_TO_FILL_TEXT in film_text
+    assert LIBRARY_HINT_HEAD_TEXT in film_text
+    assert TARGET_DIR_RULE_TEXT in film_text
 
 
 def test_judge_messages_use_central_copy():

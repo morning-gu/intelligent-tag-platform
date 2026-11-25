@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 _MAX_BATCH_SIZE = 20
 
 
-def build_judge_template(*, with_candidate_ids: bool = False) -> dict:
+def build_judge_template(*, with_candidate_ids: bool = True) -> dict:
     marks = "目录 {{目录 ID}}"
     if with_candidate_ids:
         marks = "excerpt｜依据场景 {{来源场景 ID}}｜" + marks + "｜候选 ID {{候选 ID}}"

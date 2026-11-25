@@ -68,7 +68,7 @@ def test_registry_mtg_items_match_constants(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     by_name = {i["name"]: i["text"] for i in groups["mtg"]["items"]}
     assert by_name["JUDGE_CRITERIA"] == mtg_prompts.JUDGE_CRITERIA  # 单一来源钉死
-    assert by_name["SCENE_GOAL_TEXT"] == mtg_prompts.SCENE_GOAL_TEXT
+    assert by_name["EXCERPT_DIR_GOAL_TEXT"] == mtg_prompts.EXCERPT_DIR_GOAL_TEXT
 
 
 def test_registry_open_review_content(client):

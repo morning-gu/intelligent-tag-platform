@@ -22,7 +22,6 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
-from tagplatform.services.generation.open.mtg.merge import merge_candidates
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.tags.library import try_load_library
@@ -216,13 +215,14 @@ def test_open_judge_value_floor(session, content_fixture, mtg_settings):
     assert len(kept) == 1
 
 
-def test_open_judge_low_confidence_dropped(session, content_fixture, mtg_settings):
-    """judge 判定把握低于地板（0.5）→ 淘汰；不低于则保留并如实记置信度。"""
+def test_open_judge_low_confidence_not_dropped(session, content_fixture, mtg_settings):
+    """judge 只按三维分/摘录/目录契合过滤，低 confidence 不再触发淘汰。"""
     spec = _build_spec(session, content_fixture, run_id="r3")
-    dropped = OpenTagProducer().produce(
+    low = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(confidence=0.4))
-    assert dropped == []
+        judge_client=_JudgeClient(confidence=0.2))
+    assert len(low) == 1
+    assert {t.confidence for t in low} == {0.2}
 
     kept = OpenTagProducer().produce(
         _build_spec(session, content_fixture, run_id="r3b"),
@@ -452,46 +452,6 @@ def test_open_judge_parse_failure_raises(session, content_fixture, mtg_settings,
     assert {row["tag"] for row in audit["merged"]} == {"多线叙事", "情感张力", "视听风格"}
     assert all(row["scope"] == "scene" for row in audit["merged"])
     assert len(audit["judge_trace"]["errors"]) == 2
-
-
-# ---- 合并 ----
-
-
-def test_merge_dedups_identical_across_runs():
-    """同一标签三轮出现 → 单条候选，runs=3，别名去重。"""
-    entries = [{"tag": "多线叙事", "dimension": "叙事", "scenes": ["s1"],
-                "run": run, "reason": "r"} for run in range(3)]
-    entries.append({"tag": "多线 叙事", "dimension": "叙事", "scenes": ["s2"],
-                    "run": 0, "reason": "r"})
-    merged = merge_candidates(entries, MOCK_EMBEDDER, 0.9)
-    assert len(merged) == 1
-    assert merged[0].tag == "多线叙事"
-    assert merged[0].runs == 3
-    assert set(merged[0].scenes) == {"s1", "s2"}
-
-
-def test_merge_semantic_clusters_near_duplicates():
-    """语义相近（构造向量）的候选合并成一条，代表词取轮数多者。"""
-    import numpy as np
-
-    class _PairEmbedder:
-        name, dim = "pair", 2
-
-        def embed(self, texts, *, role):
-            # "甲" 与 "乙" 相似度 0.99，"丙" 与它们正交
-            table = {"甲": [1.0, 0.0], "乙": [0.99, 0.14], "丙": [0.0, 1.0]}
-            return np.array([table[t] for t in texts], dtype="float32")
-
-    entries = [
-        {"tag": "甲", "dimension": "主题", "scenes": ["s1"], "run": 0, "reason": ""},
-        {"tag": "甲", "dimension": "主题", "scenes": ["s1"], "run": 1, "reason": ""},
-        {"tag": "乙", "dimension": "主题", "scenes": ["s2"], "run": 1, "reason": ""},
-        {"tag": "丙", "dimension": "风格", "scenes": ["s3"], "run": 0, "reason": ""},
-    ]
-    merged = merge_candidates(entries, _PairEmbedder(), 0.9)
-    assert len(merged) == 2
-    first = next(m for m in merged if m.tag == "甲")
-    assert first.runs == 2 and set(first.aliases) == {"甲", "乙"}
 
 
 # ---- 关键帧装配 ----

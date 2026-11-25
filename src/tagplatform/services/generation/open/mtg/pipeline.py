@@ -21,7 +21,6 @@ from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
 from tagplatform.services.generation.open.mtg.catalog_align import (
     BAND_DUPLICATE,
     BAND_NEW,
-    BAND_RANK,
     BAND_SUSPECT,
     Alignment,
     align_candidates,
@@ -39,19 +38,13 @@ from tagplatform.services.generation.open.mtg.directory_candidates import (
     SCENE_REQUEST_LIMIT,
     cluster_scene_candidates,
     generate_directory_candidates,
-    request_generation_items,
 )
 from tagplatform.services.generation.open.mtg.judge import build_judge_template, judge_candidates
-from tagplatform.services.generation.open.mtg.merge import (
-    MergedCandidate,
-    merge_candidates,
-)
+from tagplatform.services.generation.open.mtg.merge import MergedCandidate
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.prompt_samples import SampledPromptClient
 from tagplatform.services.generation.open.mtg.prompts import (
-    build_generation_messages,
     build_generation_template,
-    build_scene_generation_messages,
     render_content,
     render_scene,
 )
@@ -82,12 +75,6 @@ MTG_VERSION = "mtg-v12-directory-rounds"
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
 
-# judge 置信度下限：只挡"模型自己都不确定"的判定，不拿它跟
-# policy.min_confidence 比——两者语义不同（一个是模型对标签的自评，一个是
-# 审核判定把握），硬套 0.7 会误杀事实正确的标签（实测把 Memento 的
-# "倒叙结构" 0.65 判死）。过线的判定本来就该交给人工复核。
-_JUDGE_CONFIDENCE_FLOOR = 0.5
-
 # judge 三维分数的保留阈值：relevance/semantics ≥3（内容支持可推导、名称
 # 清晰无歧义），value ≥2（至少能筛到一类内容——0/1 档的泛泛评价与情节
 # 依赖词在这里淘汰）。null 分按未过线处理，绝不猜分放行。
@@ -100,6 +87,7 @@ _DROP_NO_VERDICT = "judge 未返回判决"
 _DROP_DIR_MISMATCH = "标签含义不属于目标目录"
 _DROP_DIR_UNJUDGED = "judge 缺少有效目录判决"
 _DROP_SCORE_BELOW = "judge 评分未过线"
+# 历史审计兼容（旧版置信度硬过滤已移除，仅保留供漏斗统计读取历史审计）
 _DROP_CONFIDENCE_BELOW = "judge 判定把握"
 _DROP_NO_EVIDENCE = "无有效场景证据"
 _DROP_SINGLE_SCENE = "全片级但只有单场支撑"
@@ -246,10 +234,11 @@ def _sample_client(spec: GenerationSpec, client, stage, template):
 
 def _load_library_context(settings: Settings, spec: GenerationSpec, embedder,
                           contents) -> tuple[object | None, list, list[str]]:
-    """读取任务范围内的标签索引和生成提示。"""
-    tag_library = spec.library if settings.open_library_enabled else None
-    library = (library_index(tag_library, embedder, spec.policy.dir_ids)
-               if tag_library is not None else [])
+    """读取任务范围内的标签目录、已有标签索引和生成提示。"""
+    tag_library = spec.library
+    if not settings.open_library_enabled or tag_library is None:
+        return tag_library, [], []
+    library = library_index(tag_library, embedder, spec.policy.dir_ids)
     hints = (recall_library_hints(library, embedder, contents, settings.open_library_hint_count)
              if library and settings.open_library_hint_enabled else [])
     return tag_library, library, hints
@@ -257,132 +246,25 @@ def _load_library_context(settings: Settings, spec: GenerationSpec, embedder,
 
 @dataclass
 class _GenerationLimits:
-    """任务、阶段和单次请求的配额。已有标签补全沿用来源配额。"""
+    """任务、阶段和单次请求的配额。"""
     total_limit: int
     scene_limit: int
     film_limit: int
     scene_request_limit: int
     film_request_limit: int
-    origin_limit: int | None = None
 
 
-def _plan_generation_limits(settings: Settings, spec: GenerationSpec,
-                            contents, *, directory_rounds: bool = False
-                            ) -> _GenerationLimits | None:
-    """小节 1 开头：按策略上限计算逐场/全片两级配额；无可产出时返回 None。"""
+def _plan_generation_limits(spec: GenerationSpec, contents) -> _GenerationLimits | None:
+    """按策略上限计算逐场/全片两级配额；无可产出时返回 None。"""
     scenes = contents.content.scenes
     if not scenes or spec.policy.max_tags <= 0:
         return None
-    if directory_rounds:
-        scene_limit = min(10, len(scenes) * 2)
-        film_limit = FILM_REQUEST_LIMIT if len(scenes) >= 2 else 0
-        total_limit = min(spec.policy.max_tags, scene_limit + film_limit)
-        return _GenerationLimits(total_limit=total_limit, scene_limit=scene_limit,
-                                 film_limit=film_limit, scene_request_limit=SCENE_REQUEST_LIMIT,
-                                 film_request_limit=film_limit)
-    limit = max(0, min(settings.mtg_max_final_tags, spec.policy.max_tags))
-    total_limit = min(spec.policy.max_tags, 2 * limit)
-    if total_limit <= 0:
-        return None
-    scene_limit = (total_limit if len(scenes) == 1 else
-                   min(len(scenes), 5, max(1, total_limit // 3)))
-    scene_request_limit = min(3, scene_limit) if len(scenes) == 1 else 1
-    film_request_limit = (max(1, min(total_limit, settings.mtg_max_candidates_per_run)
-                              - scene_limit) if len(scenes) >= 2 else 0)
-    return _GenerationLimits(total_limit=total_limit, scene_limit=scene_limit, film_limit=limit,
-                             scene_request_limit=scene_request_limit,
-                             film_request_limit=film_request_limit, origin_limit=limit)
-
-
-def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
-                    *, spec, usage, scene_ids, parsed_calls
-                    ) -> tuple[list[dict], int]:
-    """单轮生成调用 → 过滤后的候选条目；顺带累计 usage 与成功解析轮数。"""
-    items = request_generation_items(client, messages, run_id=spec.run_id,
-                                     suffix=suffix, usage=usage)
-    parsed_calls += items is not None
-
-    valid = []
-    for item in items or []:
-        if item["scope"] not in (None, scope):
-            continue
-        ids = list(dict.fromkeys(s for s in item["scenes"] if s in scene_ids))
-        if scope == "scene":
-            if scene_id not in ids:
-                continue
-            ids = [scene_id]
-        elif len(ids) < 2:
-            continue
-        valid.append({**item, "scope": scope, "scenes": ids})
-        if len(valid) == max_items:
-            break
-    return valid, parsed_calls
-
-
-def _run_legacy_generation_rounds(spec: GenerationSpec, llm, contents, frames, modalities,
-                                  usage: dict, hints: list[str], limits: _GenerationLimits,
-                                  *, catalog_only: bool,
-                                  ) -> tuple[list[dict], list[dict], list[dict]]:
-    """使用已有的两轮请求补全库内标签。"""
-    scenes = contents.content.scenes
-    scene_request_limit = limits.scene_request_limit
-    film_request_limit = limits.film_request_limit
-    scene_ids = {scene.scene_id for scene in scenes}
-    runs: list[dict] = []
-    scene_client = _sample_client(spec, llm, "generation_scene", partial(build_generation_template, "scene"))
-    film_client = _sample_client(spec, llm, "generation_film", partial(build_generation_template, "film"))
-    parsed_calls = 0
-
-    scene_usage = usage.copy()
-    per_scene = {}
-    for index, scene in enumerate(scenes):
-        messages = build_scene_generation_messages(
-            scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
-            dir_hint=[], modalities=modalities,
-            catalog_choices=hints if catalog_only else None)
-        per_scene[scene.scene_id], parsed_calls = _generate_items(
-            scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
-            "scene", scene_id=scene.scene_id, spec=spec, usage=usage,
-            scene_ids=scene_ids, parsed_calls=parsed_calls)
-        logger.info("mtg 场景 %d/%d %s：%d 个候选", index + 1, len(scenes),
-                    scene.scene_id, len(per_scene[scene.scene_id]))
-
-    scene_entries = [item for items in per_scene.values() for item in items]
-    runs.append({
-        "run": 0, "scope": "scene", "items": len(scene_entries),
-        "tags": [item["tag"] for item in scene_entries],
-        "scenes": {scene_id: [item["tag"] for item in items]
-                   for scene_id, items in per_scene.items()},
-        **{key: value - scene_usage[key] for key, value in usage.items()},
-    })
-    film_entries = []
-    if film_request_limit:
-        messages = build_generation_messages(
-            contents, frames, max_tags=film_request_limit, scene_tags=per_scene,
-            library_hint=hints, modalities=modalities, catalog_only=catalog_only)
-        film_usage = usage.copy()
-        film_entries, parsed_calls = _generate_items(
-            film_client, messages, "film", film_request_limit, "film",
-            spec=spec, usage=usage, scene_ids=scene_ids, parsed_calls=parsed_calls)
-        runs.append({
-            "run": 1, "scope": "film", "items": len(film_entries),
-            "tags": [item["tag"] for item in film_entries],
-            **{key: value - film_usage[key] for key, value in usage.items()},
-        })
-        logger.info("mtg 全片综合：%d 个候选", len(film_entries))
-
-    if not parsed_calls:
-        raise RuntimeError("各轮生成均无法解析为 JSON")
-    return runs, scene_entries, film_entries
-
-
-def _merge_two_level_candidates(settings: Settings, embedder,
-                                film_entries: list[dict],
-                                scene_entries: list[dict]) -> list[MergedCandidate]:
-    """小节 2：两级候选合并（同名候选优先保留影片级生成的理由和释义）。"""
-    entries = ([{**item, "run": 1} for item in film_entries]
-               + [{**item, "run": 0} for item in scene_entries])
-    return merge_candidates(entries, embedder, settings.mtg_merge_threshold)
+    scene_limit = min(10, len(scenes) * 2)
+    film_limit = FILM_REQUEST_LIMIT if len(scenes) >= 2 else 0
+    total_limit = min(spec.policy.max_tags, scene_limit + film_limit)
+    return _GenerationLimits(total_limit=total_limit, scene_limit=scene_limit,
+                             film_limit=film_limit, scene_request_limit=SCENE_REQUEST_LIMIT,
+                             film_request_limit=film_limit)
 
 
 def _candidate_metadata(candidate: MergedCandidate) -> dict:
@@ -417,7 +299,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
     if settings.mtg_judge_enabled and merged:
         client = _sample_client(
             spec, judge_client or _make_judge_client(settings, llm), "judge",
-            partial(build_judge_template, with_candidate_ids=bool(merged[0].candidate_id)))
+            build_judge_template)
         payload = [
             {"tag": m.tag, "dimension": m.dimension,
              "scope": "excerpt" if m.candidate_id and m.scope == "scene" else m.scope,
@@ -484,10 +366,6 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
             if below:
                 dropped.append({**audit, "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
                 continue
-            if verdict["confidence"] < _JUDGE_CONFIDENCE_FLOOR:
-                dropped.append({**audit, "why": f"{_DROP_CONFIDENCE_BELOW} {verdict['confidence']:.2f} "
-                                       f"< {_JUDGE_CONFIDENCE_FLOOR}"})
-                continue
             if candidate.candidate_id:
                 fits = verdict.get("dir_fits", {})
                 if fits.get(candidate.dir_raw) is not True:
@@ -547,29 +425,6 @@ def _align_and_verify_candidates(settings: Settings, spec: GenerationSpec, llm,
     return alignment, verify_usage, verify_trace
 
 
-def _band_rank(alignment: dict[str, Alignment], tag: str) -> int:
-    """候选标签的库内分档序号（未参与对齐的按新词计）。"""
-    item = alignment.get(tag)
-    return BAND_RANK[item.band] if item is not None else BAND_RANK["new"]
-
-
-def _rank(alignment: dict[str, Alignment], item
-          ) -> tuple[int, int, float, int]:
-    """队列排序：value 分 → 库内分档（新词优先）→ judge 把握 → 出现轮数。
-
-    先看标签价值而不是轮数：重复出现只说明"模型爱说"，不代表这条标签
-    对用户有用；实测按轮数排会把 0.5 分的"自然光效运用"排进队列，
-    而高价值的"视角反转"被挤掉。分档插在价值之后、把握之前：
-    同样有用的两条，优先留库外新词。
-    """
-    candidate, verdict, _ = item
-    value = (verdict or {}).get("value")
-    value_rank = value if isinstance(value, int) else 0
-    confidence = verdict["confidence"] if verdict else 0.8
-    return (-value_rank, -_band_rank(alignment, candidate.tag), -confidence,
-            -candidate.runs)
-
-
 def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple[int, float]:
     candidate, verdict, _ = row
     value = (verdict or {}).get("value")
@@ -596,40 +451,9 @@ def _plan(alignment: dict[str, Alignment], settings: Settings,
     return item, same_name or replace_suspect
 
 
-def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
-                       accepted: list, limits: _GenerationLimits
-                       ) -> tuple[list, list[dict], dict]:
-    """小节 5 中段：按 value 分/分档排序，再按总量、来源与场景级配额截断。"""
-    total_limit = limits.total_limit
-    origin_limit = limits.origin_limit
-    assert origin_limit is not None
-    scene_limit = limits.scene_limit
-    accepted.sort(key=partial(_rank, alignment))
-
-    plans = {candidate.tag: _plan(alignment, settings, candidate)
-             for candidate, _, _ in accepted}
-    # 按原排序分配名额，同时执行总量、来源和场景级配额。
-    by_origin: dict[bool, list] = {False: [], True: []}
-    truncated = []
-    scene_count = 0
-    kept_count = 0
-    for item in accepted:
-        candidate = item[0]
-        queue = by_origin[plans[candidate.tag][1]]
-        if (kept_count >= total_limit or len(queue) >= origin_limit
-                or (candidate.scope == "scene" and scene_count >= scene_limit)):
-            truncated.append(item)
-            continue
-        queue.append(item)
-        kept_count += 1
-        scene_count += candidate.scope == "scene"
-    accepted = by_origin[False] + by_origin[True]
-    return accepted, truncated, plans
-
-
 def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
                      tag_library, accepted: list, plans: dict, dropped: list[dict],
-                     *, stage_limits: _GenerationLimits | None = None,
+                     *, stage_limits: _GenerationLimits,
                      ) -> tuple[list[ProducedTag], list[dict], list[dict], list]:
     """解析挂载。逐目录生成仅对成功挂载且唯一的结果消耗阶段配额。"""
     tags: list[ProducedTag] = []
@@ -642,26 +466,24 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
 
     def add_output(candidate: MergedCandidate, tag: ProducedTag, row: dict) -> bool:
         metadata = _candidate_metadata(candidate)
-        if stage_limits is not None:
-            # 对应 pre_asset_tag 的库内标签和待审新词唯一索引。
-            key = (tag.target_type, tag.target_id, tag.origin, tag.tag_id or tag.tag_name)
-            if key in occupied:
-                dropped.append({"tag": candidate.tag, **metadata,
-                                "why": "同一挂载点已有本次产出的相同标签"})
-                return False
-            occupied.add(key)
-            per_stage_count[tag.level] += 1
+        # 对应 pre_asset_tag 的库内标签和待审新词唯一索引。
+        key = (tag.target_type, tag.target_id, tag.origin, tag.tag_id or tag.tag_name)
+        if key in occupied:
+            dropped.append({"tag": candidate.tag, **metadata,
+                            "why": "同一挂载点已有本次产出的相同标签"})
+            return False
+        occupied.add(key)
+        per_stage_count[tag.level] += 1
         tags.append(tag)
         tag_rows.append({**row, **metadata, "name": tag.tag_name, "target_id": tag.target_id})
         return True
 
     for candidate, verdict, evidence in accepted:
         audit = {"tag": candidate.tag, **_candidate_metadata(candidate)}
-        if stage_limits is not None:
-            stage_limit = stage_limits.scene_limit if candidate.scope == "scene" else stage_limits.film_limit
-            if len(tags) >= stage_limits.total_limit or per_stage_count[candidate.scope] >= stage_limit:
-                truncated.append((candidate, verdict, evidence))
-                continue
+        stage_limit = stage_limits.scene_limit if candidate.scope == "scene" else stage_limits.film_limit
+        if len(tags) >= stage_limits.total_limit or per_stage_count[candidate.scope] >= stage_limit:
+            truncated.append((candidate, verdict, evidence))
+            continue
         confidence = verdict["confidence"] if verdict else 0.8
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
@@ -838,11 +660,10 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             "modalities": sorted(modalities),
             "frames_per_scene": settings.mtg_frames_per_scene,
             "max_frames": settings.mtg_max_frames,
-            **({"merge_threshold": settings.mtg_merge_threshold} if clustering is None
-               else {"cluster_target": clustering["target"], "max_film_tags": limits.film_limit}),
-            "judge_confidence_floor": _JUDGE_CONFIDENCE_FLOOR,
+            "cluster_target": clustering["target"],
+            "max_film_tags": limits.film_limit,
             "judge_score_floors": dict(_JUDGE_SCORE_FLOORS),
-            "max_final_tags": limits.origin_limit or total_limit,
+            "max_final_tags": total_limit,
             "library_enabled": bool(settings.open_library_enabled),
             "library_hint_count": len(hints),
             "suspect_cosine": settings.open_library_suspect_cosine,
@@ -934,31 +755,21 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     tag_library, library, hints = _load_library_context(settings, spec, embedder, contents)
 
     expandable_dirs = tag_library.new_tag_dirs(spec.policy.dir_ids) if tag_library else []
-    directory_rounds = bool(expandable_dirs and spec.policy.allow_new_tags)
-    limits = _plan_generation_limits(settings, spec, contents, directory_rounds=directory_rounds)
+    if not spec.policy.allow_new_tags or not expandable_dirs:
+        return []
+    limits = _plan_generation_limits(spec, contents)
     if limits is None:
         return []
     directories = _directory_entries(tag_library, expandable_dirs)
-    if directory_rounds:
-        dir_hint = sorted(directories, key=lambda item: (item["path"], item["dir_id"]))
-        scene_client = _sample_client(
-            spec, llm, "generation_scene",
-            partial(build_generation_template, "scene", single_directory=True))
-        film_client = _sample_client(
-            spec, llm, "generation_film",
-            partial(build_generation_template, "film", single_directory=True))
-        runs, merged = generate_directory_candidates(
-            scene_client, film_client, contents, frames, modalities, directories=dir_hint,
-            hints=hints, run_id=spec.run_id, usage=usage)
-        directory_targets = {candidate.candidate_id: [candidate.dir_raw] for candidate in merged}
-    else:
-        # 无可扩充目录或策略只允许复用时，沿用已有标签补全的入口。
-        runs, scene_entries, film_entries = _run_legacy_generation_rounds(
-            spec, llm, contents, frames, modalities, usage, hints, limits,
-            catalog_only=tag_library is not None)
-        merged = _merge_two_level_candidates(settings, embedder, film_entries, scene_entries)
-        directory_targets = {}
-        dir_hint = []
+    dir_hint = sorted(directories, key=lambda item: (item["path"], item["dir_id"]))
+    scene_client = _sample_client(
+        spec, llm, "generation_scene", partial(build_generation_template, "scene"))
+    film_client = _sample_client(
+        spec, llm, "generation_film", partial(build_generation_template, "film"))
+    runs, merged = generate_directory_candidates(
+        scene_client, film_client, contents, frames, modalities, directories=dir_hint,
+        hints=hints, run_id=spec.run_id, usage=usage)
+    directory_targets = {candidate.candidate_id: [candidate.dir_raw] for candidate in merged}
 
     # ---- 3. judge ----
     judge_trace: dict = {}
@@ -971,28 +782,20 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     accepted, dropped = _filter_candidates(settings, contents, verdicts,
                                            modalities, merged)
 
-    clustering = None
-    candidate_vectors = None
-    if directory_rounds:
-        accepted, clustering, candidate_vectors = cluster_scene_candidates(
-            accepted, embedder, scene_count=len(contents.content.scenes),
-            directory_count=len(directories))
+    accepted, clustering, candidate_vectors = cluster_scene_candidates(
+        accepted, embedder, scene_count=len(contents.content.scenes),
+        directory_count=len(directories))
     alignment, verify_usage, verify_trace = _align_and_verify_candidates(
         settings, spec, llm, embedder, library, accepted, candidate_vectors=candidate_vectors)
-    if directory_rounds:
-        rank = partial(_rank_by_value_and_similarity, alignment)
-        accepted = (sorted((row for row in accepted if row[0].scope == "film"), key=rank)
-                    + sorted((row for row in accepted if row[0].scope == "scene"), key=rank))
-        plans = {candidate.tag: _plan(alignment, settings, candidate)
-                 for candidate, _, _ in accepted}
-        truncated = []
-    else:
-        accepted, truncated, plans = _rank_and_truncate(settings, alignment, accepted, limits)
-    tags, tag_rows, replacements, stage_truncated = _assign_tag_dirs(
+    rank = partial(_rank_by_value_and_similarity, alignment)
+    accepted = (sorted((row for row in accepted if row[0].scope == "film"), key=rank)
+                + sorted((row for row in accepted if row[0].scope == "scene"), key=rank))
+    plans = {candidate.tag: _plan(alignment, settings, candidate)
+             for candidate, _, _ in accepted}
+    tags, tag_rows, replacements, truncated = _assign_tag_dirs(
         spec, contents, library, tag_library, accepted, plans, dropped,
-        stage_limits=limits if directory_rounds else None,
+        stage_limits=limits,
     )
-    truncated.extend(stage_truncated)
 
     # ---- 5.5 描述通用化 ----
     # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"

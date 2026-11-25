@@ -222,8 +222,9 @@ def test_scene_only_directory_has_no_film_request(session, content_fixture, dir_
     assert [run["scope"] for run in _report(dir_settings, "scene-only")["runs"]] == ["scene"]
 
 
-def test_static_scope_both_rounds_use_existing_labels(
+def test_static_scope_skips_open_generation(
         session, content_fixture, dir_settings):
+    """范围内仅有静态目录（无可扩充目录）→ 开放生成直接返回空，不调用 LLM。"""
     content = _scenes(content_fixture, 2)
     spec = _spec(content, "static", GenerationPolicy(dir_ids=["dir_genre"]))
     messages_by_run = {}
@@ -235,12 +236,7 @@ def test_static_scope_both_rounds_use_existing_labels(
 
     assert OpenTagProducer().produce(
         spec, session, RecordingLLM([]), MOCK_EMBEDDER) == []
-    assert len(messages_by_run) == 3
-    for messages in messages_by_run.values():
-        prompt = "".join(part["text"] for part in messages[0]["content"] if part["type"] == "text")
-        assert "目标目录内的已有标签" in prompt
-        assert "动作" in prompt
-        assert "可以放新标签的目录" not in prompt
+    assert messages_by_run == {}
 
 
 def test_cluster_representative_is_nearest_to_center():
