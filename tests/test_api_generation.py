@@ -527,10 +527,10 @@ def test_task_list_filters_and_pagination(client):
 
 
 def test_prompts_list(client):
-    """只读契约视图（四层重构 Task 3 本地化）：closed/open 各一项、无版本
-    字段（git 即版本），closed 正文为三模态 evidence 版。"""
+    """只读契约视图：仅暴露仍激活的 closed 模板（无版本字段，git 即版本），
+    closed 正文为三模态 evidence 版。"""
     rows = client.get("/api/v1/prompts").json()
-    assert [r["mode"] for r in rows] == ["closed", "open"]
+    assert [r["mode"] for r in rows] == ["closed"]
     assert all(set(r.keys()) == {"mode", "template_text",
                                 "allowed_fields", "required_placeholders"}
                for r in rows)
@@ -544,7 +544,6 @@ def test_prompts_list(client):
     assert "evidences" in closed_text
     assert "1=完全不适用" in closed_text
     assert "5=证据直接、充分且能够相互印证" in closed_text
-    assert "{content}" in by_key["open"]["template_text"]
 
     closed = client.get("/api/v1/prompts?mode=closed").json()
     assert [r["mode"] for r in closed] == ["closed"]
