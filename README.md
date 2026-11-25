@@ -38,8 +38,7 @@ curl http://127.0.0.1:8000/health        # {"status":"ok"}
   `OPENAI_API_KEY`（OpenAI 兼容端点）。不设 `TAGPLT_USE_MOCK_LLM`（默认
   false）即走真实端点；未配置就发起生成任务时，complete 会报错并提示
   "复制 .env.example 为 .env"。
-- **嵌入器**：不设 `TAGPLT_USE_MOCK_EMBEDDER`，首次使用自动下载
-  `intfloat/multilingual-e5-base`（768 维句向量）。
+- **嵌入器**：默认采用本地 `BAAI/bge-m3`（1024 维句向量，不设 `TAGPLT_USE_MOCK_EMBEDDER` 时首次使用自动加载）；也可设 `TAGPLT_EMBEDDING_BACKEND=remote` 并配置 `TAGPLT_EMBEDDING_API_BASE` 对接 OpenAI 兼容 `/v1/embeddings` 服务。
 
 ### 前端启动（双进程开发流）
 
@@ -61,21 +60,16 @@ npm run dev
 - **测试与构建**：`npm test`（Vitest + Testing Library）、`npm run build`
   （tsc 类型检查 + 产物输出 `dist/`）。
 
-### 生产任务标签质量评估
+### 开放评测（admin）
 
-在「生产任务」创建任务时可填写评估模型 ID，默认为 `deepseek-v4.1-flash`，
-复用当前 OpenAI 兼容端点。每部影片完成生产分流后，系统独立评估进入审核和
-直接挂载的最终标签快照。展开任务可查看同批影片的评估状态、覆盖率、评分和
-内容证据。失败或部分完成的影片可以单独重试，并可在重试时修改评估模型。
+「开放评测」页（仅 admin）零漂移干跑整条开放生成管线（不写入业务库，产物只落
+`TAGPLT_OPEN_EVAL_OUTPUT_ROOT`），并由独立评审模型按 0–4 五档量表逐条盲评
+内容相关性、语义准确性、标签价值，再综合给出保留结论。报告提供评审通过率、新词占比、
+三维均分与分布，并支持展开单部影片查看生产审计与逐次评审诊断，以及基于产出快照发起重评。
 
-质量评估包括内容相关性、语义准确性和标签价值。标签价值 2 分要求名称独立易懂，并
-概括全片属性或点明关键看点。1 分表示名称独立易懂且能传达次要属性。0 分用于局部
-剧情速记、语义依赖上下文等缺少独立标签价值的名称。
-
-平均分和高分率只使用对应维度的数值评分。三维联合合格率的分母为三个维度均获得数值
-评分的标签数。评估覆盖率以当次已产出标签为分母，等待其他影片时会标记汇总尚未完整。
-历史两维记录的标签价值显示「未评估」，没有评估记录的历史任务显示「无评估记录」。
-具体分档见 [标签质量评估设计](docs/open-tag-quality-evaluation.md)。
+> 注：早期内嵌在「生产任务」中的附带标签质量评估已退役并由独立的「开放评测」替代；
+> 历史评估记录保留于数据库兼容表。详细口径见 [评测方法 §5](docs/eval.md)，
+> 三维五档评分标准见 [标签质量评估设计](docs/open-tag-quality-evaluation.md)。
 
 ### 闭环评测（admin）
 
@@ -108,18 +102,23 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 | `TAGPLT_USE_MOCK_LLM`                  | `false`               | true = 确定性 MockLLMClient（零网络，测试/冒烟）                                                |
 | `TAGPLT_USE_MOCK_EMBEDDER`             | `false`               | true = 确定性 MockEmbedder（不下载模型）                                                        |
 | `TAGPLT_EMBEDDING_BACKEND`             | `local`               | 嵌入后端：`local`（sentence-transformers 本地）/ `remote`（OpenAI 兼容 /v1/embeddings）         |
+| `TAGPLT_EMBEDDING_MODEL`               | `BAAI/bge-m3`         | local 后端句向量模型名或本地模型路径（1024 维）                                                 |
 | `TAGPLT_EMBEDDING_API_BASE`            | 空                    | remote 后端服务地址（含 `/v1` 前缀，如 `http://9.15.87.193:8193/v1`）；backend=remote 时必填   |
 | `TAGPLT_EMBEDDING_API_MODEL`           | `bge-m3`              | remote 后端请求的 model 名                                                                      |
 | `TAGPLT_EMBEDDING_API_BATCH`           | `32`                  | remote 后端分批请求上限（大目录标签集按批编码）                                                 |
 | `TAGPLT_EMBEDDING_API_TIMEOUT`         | `60`                  | remote 后端单请求超时秒数                                                                       |
 | `TAGPLT_GENERATION_WORKERS`            | `2`                   | 生成任务线程池大小；0 = 同步执行（submit 返回即任务完成）                                       |
 | `TAGPLT_LLM_MODEL`                     | `qwen3.7-plus`        | LLM 模型名                                                                                      |
+| `TAGPLT_MTG_JUDGE_MODEL`               | `deepseek-v4.1-flash` | 模式 B 开放生成 Judge 审核模型名                                                                |
 | `TAGPLT_RECALL_TOP_K_PER_TYPE`         | `50`                  | 模式 A 向量 + BM25 召回经 RRF 融合后的全局候选上限（变量名为兼容旧配置保留）                     |
 | `TAGPLT_CLOSED_BATCH_SIZE`             | `1`                   | 模式 A 目录组内分批上限：每批一次 LLM 调用（防输出截断），组内批次全部完成后合并再门控截断      |
-| `TAGPLT_OPEN_MATCH_THRESHOLD`          | `0.85`                | 模式 B 归一匹配阈值：与库内标签相似度 >= 该值归入 catalog                                       |
+| `TAGPLT_OPEN_LIBRARY_SUSPECT_COSINE`   | `0.75`                | 模式 B 库内对齐疑似余弦阈值：与库内最近标签相似度 ≥ 该值时送 LLM 概念复核                       |
+| `TAGPLT_OPEN_LIBRARY_NAME_OVERLAP`     | `0.40`                | 模式 B 库内对齐疑似字面重合阈值：字符 Jaccard ≥ 该值时送 LLM 概念复核                           |
 | `TAGPLT_MEDIA_ROOT`                    | `data/media/`         | 上传视频存盘根目录（上传时按需创建；数据备份需覆盖该目录）                                      |
-| `TAGPLT_EVAL_DATASET_ROOT`             | `/cache/MovieTags`    | 闭环评测基准数据集根（`gt/*.csv` 三列 gt + `data/<ttID>/content.json`，全程只读；换数据集 = 改本变量，不接受前端提交路径） |
-| `TAGPLT_EVAL_OUTPUT_ROOT`              | `data/eval/closed`    | 闭环评测产物落盘根（meta/进度/报告三件套；评测代码唯一的写盘位置）                              |
+| `TAGPLT_EVAL_DATASET_ROOT`             | `/cache/MovieTags`    | 闭环/开放评测基准数据集根（`gt/*.csv` 三列 gt + `data/<ttID>/content.json`，全程只读；换数据集 = 改本变量，不接受前端提交路径） |
+| `TAGPLT_EVAL_OUTPUT_ROOT`              | `data/eval/closed`    | 闭环评测产物落盘根（meta/进度/报告三件套；闭环评测代码唯一的写盘位置）                          |
+| `TAGPLT_OPEN_EVAL_OUTPUT_ROOT`         | `data/eval/open`      | 开放评测产物落盘根（meta/报告/产出与评审快照；开放评测代码唯一的写盘位置）                      |
+| `TAGPLT_OPEN_EVAL_REVIEW_MODEL`        | 空                    | 开放评测独立评审模型名；留空时回落 `TAGPLT_LLM_MODEL`                                           |
 | `TAGPLT_LOG_LEVEL`                     | `INFO`                | 根日志级别；生成流水线与过滤责任链的逐步日志走 INFO，设 `DEBUG` 可看到每环节传入/传出的标签名 |
 
 其余 `TAGPLT_*` 配置项（温度、限速间隔、白名单等）见 `src/tagplatform/settings.py`。
@@ -130,7 +129,7 @@ unit、nginx 站点配置与 `requirements.lock` 均在 `deploy/` 下）。
 .venv/Scripts/python -m pytest
 ```
 
-全量约 740 条测试，默认全走 mock，不联网、不下载模型。
+全量 pytest 用例默认全走 mock，不联网、不下载模型。
 
 前端测试（Vitest + Testing Library，含组件与 API 契约测试）：
 
@@ -140,47 +139,48 @@ cd frontend && npm test
 
 ## 架构概览
 
-`src/tagplatform/` 是核心纯 Python 包，分层红线：除 `api/` 子包外，任何模块
-不得 import fastapi——业务逻辑与 Web 框架解耦，`api/` 只是 FastAPI 薄层
-（依赖注入 + 协议转换，路由不写业务规则）。
+`src/tagplatform/` 是核心纯 Python 包，按四层架构拆分，分层红线：除 `api/`
+子包外，任何模块不得 import fastapi——业务逻辑与 Web 框架解耦，`api/` 只是
+FastAPI 薄层（依赖注入 + 协议转换，路由不写业务规则）。
 
 ```
 src/tagplatform/
-├── db/                     SQLAlchemy 模型（10 张表，结构由 alembic 迁移管理）
-├── schemas/                影视内容 JSON 契约与解析
-├── adapters/               内容源适配（内容 JSON 导入）
-├── governance/             阶段 1：Excel 标签库导入、检测与治理流水线
-├── content_import.py       内容识别 JSON 导入
-├── embed/ + vectors.py     句向量嵌入与相似度计算
-├── llm/                    OpenAI 兼容客户端 / Mock / 输出解析
-├── generation/             阶段 2：模式 A（封闭式提取）/ 模式 B（开放式生成）+ 召回
-├── filtering/              生成结果过滤责任链：质量评估 → 信息围栏（当前占位）
-├── prompts.py              prompt 模板渲染（版本化模板存库）
-├── tasks/                  生成任务执行器：状态机、线程池、孤儿清理
-├── results.py              标签结果入库（approved 保留 / pending 覆盖）
-├── auth/                   阶段 3：账号表/密码哈希/会话认证（全 API 登录门槛）
-├── review/                 阶段 3：人工审核服务（四动作单条与批量 + 审核记录）
-├── metrics.py              阶段 3：审核推导质量指标（覆盖率/一致率等）
-└── api/                    FastAPI 薄层（唯一 import fastapi 的入口；
-                             routers 阶段 3 新增 auth/review/users/video/metrics）
+├── capabilities/           基础设施层：
+│   ├── storage/            SQLAlchemy ORM 模型与数据库会话（结构由 alembic 管理）
+│   ├── embed/ + vectors.py 句向量嵌入（local / remote / mock）与相似度计算
+│   ├── llm/                OpenAI 兼容客户端 / Mock / 用量统计
+│   ├── prompts/            本地化提示词常量与只读注册表（closed / open / open_review / assets）
+│   └── adapters/           内容源与视觉模型适配
+├── schemas/                影视内容 JSON 契约与上游数据解析
+├── services/               核心业务服务层：
+│   ├── tags/               阶段 1：标签库导入治理（Excel/XML）、目录树读取与挂载点解析
+│   ├── content/            内容识别导入、视频资产构建、审核后标签入库
+│   ├── generation/         阶段 2：模式 A（closed 封闭提取）、模式 B（open/mtg 逐目录两阶段
+│   │                       生成 + Judge + 聚类 + 库内对齐）、过滤责任链、结果落库与人工审核
+│   ├── eval/               闭环评测、开放评测（独立盲评与报告）、消融/排序/一致性与质量指标
+│   └── auth/               阶段 3：账号密码哈希、会话认证与用户管理
+├── orchestration/          跨服务编排与接口 DTO 装配（供 api/ 调用）
+├── tasks/                  后台任务执行器：生成队列状态机、线程池、孤儿清理与标签导入任务
+├── api/                    FastAPI 薄层（唯一 import fastapi 的入口；routers 仅做协议转换）
+├── settings.py             全局配置（TAGPLT_* 环境变量）
+└── reembed.py              标签/目录向量批量重灌命令行入口
 ```
 
-**数据表（11 张）**：`media_asset`、`tag_catalog`（目录）、`tag_define`（标签）、
+**数据表**：10 张现行表——`media_asset`、`tag_catalog`（目录）、`tag_define`（标签）、
 `tag_generation_task`、`pre_asset_tag`、`asset_tag`、`tag_import_task`、
-`tag_change_log`、`prompt_template`、`user_account`
-（`media_context` 已并入 `media_asset.content_json`；标签库在 v2 重建里拆成
-目录/标签两表，v1 的 `tag_catalog_v1` / `import_batch_v1` 已删除）。
+`tag_change_log`、`user_account`、`asset_build_task`，另保留 1 张历史兼容表
+`tag_quality_evaluation`。`prompt_template` 表已于迁移 `0018` 移除，提示词统一
+本地化维护于 `capabilities/prompts/`。
 
 **三阶段功能一览**：
 
-- **阶段 1（导入与治理）**：Excel 标签库上传 → 解析/检测 → 语义归一 →
+- **阶段 1（导入与治理）**：Excel/XML 标签库上传 → 解析/检测 → 语义归一与向量持久化 →
   入库；批次与变更全程留痕（`tag_import_task` / `tag_change_log`）。
-- **阶段 2（生成引擎）**：内容识别 JSON 导入 → 建生成任务（模式 A 从
-  库内按类型召回候选做封闭式提取 / 模式 B 开放式生成后归一匹配入库）→
-  后台线程池执行（0 = 同步）→ 生成结果过**过滤责任链**（质量评估 →
-  信息围栏，通过者才进审核队列）→ 生成结果与任务终态同事务落库，任务
-  可查询、失败可重试。
-- **阶段 3（审核后台）**：登录认证（admin/reviewer 两级角色，除 `/health`
-  外全 API 保护）→ 审核中心对结果行做 approve/reject/modify/merge 单条
-  与批量审核（并发冲突保护、逐条独立不中断）→ 审核记录全程留痕、
-  approved/rejected/merged 进入重跑保护集，闭环经质量指标页复盘。
+- **阶段 2（生成引擎）**：内容识别 JSON 导入或视频资产构建 → 建生成任务（模式 A
+  从库内混合召回候选做封闭式提取 / 模式 B 逐目录两阶段开放生成、Judge 三维过滤、
+  场景聚类与库内概念对齐）→ 后台线程池执行（0 = 同步）→ 过过滤责任链 →
+  按目录适用范围挂载并落库，任务可查询、失败可重试。
+- **阶段 3（审核后台与评测）**：登录认证（admin/reviewer 两级角色，除 `/health`
+  外全 API 保护）→ 审核中心执行 `approve` / `reject` / `modify`（仅限库外新词）/ `merge`
+  单条与批量审核（并发冲突保护、逐条独立不中断；新词通过自动入库并写入向量）→
+  闭环评测、开放评测与质量指标复盘。
