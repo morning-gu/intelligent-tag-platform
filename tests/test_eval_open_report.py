@@ -23,6 +23,7 @@ import pytest
 from tagplatform.services.eval.open_report import (
     _read_open_summary,
     assemble_open_report,
+    fill_open_report_mounts,
     render_open_report_md,
     upgrade_open_report,
     write_open_report,
@@ -86,6 +87,28 @@ def _dump(path: Path, payload):
 
 
 # ---- 汇总与三维指标 ----
+
+
+def test_historical_mounts_follow_final_name_origin_and_output_order(tmp_path):
+    movie = {"tt": "tt123", "hits": [_hit("t1", name="悬疑")],
+             "new_words": [_new("悬疑"), _new("悬疑"), _new("缺少记录")]}
+    _dump(tmp_path / "tt123.json", {"accepted": [
+        {"tag": "悬疑", "origin": "generated", "dir_id": "dir_scene", "target_type": "scene"},
+        {"tag": "悬疑", "origin": "catalog", "dir_id": "dir_catalog",
+         "dir_name": "氛围", "target_type": "content"},
+        {"tag": "悬疑", "origin": "generated", "dir_id": "dir_character", "target_type": "character"},
+        {"tag": "缺少记录", "origin": "generated", "target_type": "scene"},
+        {"tag": "缺少记录", "origin": "generated", "target_type": "content"},
+    ]})
+
+    fill_open_report_mounts([movie], tmp_path)
+
+    assert movie["hits"][0]["dir_name"] == "氛围"
+    assert movie["hits"][0]["target_type"] == "content"
+    assert [(row["dir_id"], row["target_type"]) for row in movie["new_words"][:2]] == [
+        ("dir_scene", "scene"), ("dir_character", "character"),
+    ]
+    assert "target_type" not in movie["new_words"][2]
 
 
 def test_assemble_summary_micro_rates_and_metrics():

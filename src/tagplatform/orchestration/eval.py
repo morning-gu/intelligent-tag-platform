@@ -54,6 +54,7 @@ from tagplatform.services.eval.dataset import movie_entries, scan_datasets
 from tagplatform.services.eval.movie_breakdown import breakdown_movie, summarize_movies
 from tagplatform.services.eval.open_report import (
     OPEN_REPORT_SCHEMA_VERSION,
+    fill_open_report_mounts,
     upgrade_open_report,
 )
 from tagplatform.services.eval.open_service import (
@@ -682,6 +683,7 @@ def get_open_run_report(settings: Settings, run_id: str) -> dict:
                     if upgraded is not None:
                         return upgraded
                     raise HTTPException(status_code=410, detail="旧版开放评测报告已停用")
+                fill_open_report_mounts(report.get("movies") or [], run_dir / "audit")
                 return report
     raise HTTPException(status_code=404,
                         detail=f"该 run 无报告：{run_id!r}")

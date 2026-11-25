@@ -101,6 +101,8 @@ interface LabelRow {
   sceneIds: string[]
   desc: string | null
   level: string | null
+  directory: string | null
+  targetType: string | null
   judge_reference: JudgeReference | null
   review: TagReview | null
   reviewFailed: boolean
@@ -115,6 +117,8 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       sceneIds: hit.scene_ids ?? [],
       desc: hit.desc,
       level: hit.level,
+      directory: hit.dir_name || hit.dir_id || null,
+      targetType: hit.target_type ?? null,
       judge_reference: hit.judge_reference,
       review: hit.review, reviewFailed: !!movie.review_error,
     })),
@@ -125,6 +129,8 @@ function movieLabelRows(movie: OpenMovieRow): LabelRow[] {
       sceneIds: word.scene_ids ?? [],
       desc: word.desc,
       level: word.level,
+      directory: word.dir_name || word.dir_id || null,
+      targetType: word.target_type ?? null,
       judge_reference: word.judge_reference,
       review: word.review, reviewFailed: !!movie.review_error,
     })),
@@ -136,6 +142,12 @@ function passTag({ review, reviewFailed }: LabelRow) {
   if (review.pass === null) return <Tag>{review.evaluated ? '无法判断' : '漏判'}</Tag>
   return review.pass ? <Tag color="green">通过</Tag> : <Tag color="red">未通过</Tag>
 }
+
+const MOUNT_LEVELS = new Map([
+  ['content', '全片级'],
+  ['scene', '场景级'],
+  ['character', '角色级'],
+])
 
 const labelColumns: TableProps<LabelRow>['columns'] = [
   {
@@ -153,13 +165,20 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
     width: '24%',
   },
   {
-    title: '层级',
+    title: '生成阶段',
     dataIndex: 'level',
     render: (level: string | null) => {
-      if (!level) return <Typography.Text type="secondary">—</Typography.Text>
-      const isScene = level === 'scene'
-      return <Tag color={isScene ? 'cyan' : 'default'}>{isScene ? '场景级' : '全片级'}</Tag>
+      if (level === 'scene') return <Tag color="cyan">一阶段</Tag>
+      if (level === 'film') return <Tag>二阶段</Tag>
+      return '—'
     },
+    width: 90,
+  },
+  { title: '挂载目录', dataIndex: 'directory', render: (directory) => directory ?? '—', width: 128 },
+  {
+    title: '挂载层级',
+    render: (_, row) => MOUNT_LEVELS.get(row.targetType ?? '') ?? '—',
+    width: 90,
   },
   { title: '内容相关性', render: (_, row) => <ScoreCell rating={row.review?.relevance} /> },
   { title: '语义准确性', render: (_, row) => <ScoreCell rating={row.review?.semantics} /> },
@@ -314,7 +333,7 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
                     columns={labelColumns}
                     dataSource={movieLabelRows(movie)}
                     pagination={false}
-                    scroll={{ x: 760 }}
+                    scroll={{ x: 1040 }}
                     expandable={{ expandedRowRender: (row) => labelDetail(row, calibre.review_config?.pass_mode === 'model') }}
                   />
                 )}
