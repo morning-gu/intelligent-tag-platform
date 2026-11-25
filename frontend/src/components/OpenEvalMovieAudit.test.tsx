@@ -3,7 +3,7 @@
 // 覆盖：整片 0 条产出时仍列出全部候选与淘汰原因（value=null 整批归零的
 // 现场）、保留行标出最终名、目录契合 false 如实呈现、judge 协议异常提示、
 // 评审失败批次原因、取数失败透出 message、无审计时的兜底文案。
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import OpenEvalMovieAudit from './OpenEvalMovieAudit'
 import { getOpenMovieDiagnostics, type OpenMovieDiagnostics } from '../api/evalOpen'
@@ -128,6 +128,52 @@ describe('OpenEvalMovieAudit 生产审计面板', () => {
     await screen.findByText('冷峻压抑')
     fireEvent.click(document.querySelectorAll('.ant-table-row-expand-icon')[0])
     expect(await screen.findByText('dir_mood 属于 · dir_event 不属于 · dir_missing 未判')).toBeInTheDocument()
+  })
+
+  it('同名候选按编号显示各自的阶段分数和聚类去向', async () => {
+    const tag = '重复意象'
+    const representative = '反复出现的镜像'
+    mockedFetch.mockResolvedValue(diagnostics({
+      audit: {
+        merged: [
+          { tag, stage: 1, candidate_id: 'scene-1' },
+          { tag, stage: 2, candidate_id: 'film-1' },
+          { tag: representative, stage: 1, candidate_id: 'scene-2' },
+        ],
+        clustering: { input: 2, target: 1, clusters: [
+          { representative: 'scene-2', members: ['scene-1', 'scene-2'] },
+        ] },
+        verdicts: [
+          { tag, candidate_id: 'scene-1', relevance: 4, semantics: 4, value: 2 },
+          { tag, candidate_id: 'film-1', relevance: 4, semantics: 4, value: 3 },
+        ],
+        accepted: [
+          { tag, candidate_id: 'film-1' },
+          { tag: '镜像母题', candidate: representative, candidate_id: 'scene-2', origin: 'catalog' },
+        ],
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    const first = await screen.findByRole('row', { name: /重复意象 一阶段/ })
+    const second = screen.getByRole('row', { name: /重复意象 二阶段/ })
+    expect(within(first).getByText('2')).toBeInTheDocument()
+    expect(within(first).getByText(`聚类未选为代表（代表标签：${representative}）`)).toBeInTheDocument()
+    expect(within(second).getByText('3')).toBeInTheDocument()
+    expect(within(second).getByText('保留')).toBeInTheDocument()
+    expect(screen.getByText('保留（库内标准名：镜像母题）')).toBeInTheDocument()
+  })
+
+  it('聚类记录缺少代表候选详情时仍显示原去向', async () => {
+    mockedFetch.mockResolvedValue(diagnostics({
+      audit: {
+        merged: [{ tag: '重复意象', candidate_id: 'scene-1' }],
+        clustering: { input: 2, target: 1, clusters: [
+          { representative: 'scene-2', members: ['scene-1', 'scene-2'] },
+        ] },
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    expect(await screen.findByText('聚类未选为代表')).toBeInTheDocument()
   })
 
   it('取数失败透出后端文案；无审计时给兜底说明', async () => {

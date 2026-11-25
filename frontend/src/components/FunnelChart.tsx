@@ -1,10 +1,10 @@
-// 纯 SVG 生产漏斗图：不引第三方图表库（与 BarChart 同纪律）。六环节
+// 纯 SVG 生产漏斗图。每个环节的
 //  band 宽度 ∝ 数量/原始生成（零数量给 4px 占位短条，左侧仍标真实数字，
 //  形状不撒谎）；右侧标上一环节→本环节的保留率，图下补两个非相邻分母
 //  口径（judge 通过率按合并候选、最终生产保留率）。null 比率「暂无」。
 import type { JudgeFunnel } from '../api/evalOpen'
 
-const COLORS = ['#1677ff', '#3d8bff', '#64a9ff', '#8bc7ff', '#b2e5ff', '#d6f0ff']
+const COLORS = ['#1677ff', '#3d8bff', '#64a9ff', '#8bc7ff', '#b2e5ff', '#d6f0ff', '#e7f6ff']
 const ZERO_COLOR = '#d9d9d9'
 
 function percent(value: number | null): string {
@@ -22,12 +22,18 @@ interface Stage {
 }
 
 function stages(f: JudgeFunnel): Stage[] {
+  const rankInput = f.cluster_kept ?? f.judge_passed
   return [
     { label: '原始生成', value: f.raw, fraction: `${f.raw}`, rate: null, rateLabel: '' },
-    { label: '合并保留', value: f.merged, fraction: `${f.merged} / ${f.raw}`, rate: f.merge_keep_rate, rateLabel: '合并保留率' },
+    { label: f.cluster_kept === undefined ? '合并保留' : '送审候选', value: f.merged, fraction: `${f.merged} / ${f.raw}`, rate: f.merge_keep_rate, rateLabel: f.cluster_kept === undefined ? '合并保留率' : '送审保留率' },
     { label: 'Judge 返回', value: f.verdicts, fraction: `${f.verdicts} / ${f.merged}`, rate: f.judge_coverage, rateLabel: '返回覆盖率' },
     { label: 'Judge 通过', value: f.judge_passed, fraction: `${f.judge_passed} / ${f.merged}`, rate: f.judge_pass_rate_scored, rateLabel: '按已评分候选' },
-    { label: '排序配额保留', value: f.rank_kept, fraction: `${f.rank_kept} / ${f.judge_passed}`, rate: f.rank_keep_rate, rateLabel: '配额保留率' },
+    ...(f.cluster_kept === undefined ? [] : [{
+      label: '聚类后保留', value: f.cluster_kept,
+      fraction: `${f.cluster_kept} / ${f.judge_passed}`,
+      rate: f.cluster_keep_rate ?? null, rateLabel: '聚类保留率',
+    }]),
+    { label: '排序配额保留', value: f.rank_kept, fraction: `${f.rank_kept} / ${rankInput}`, rate: f.rank_keep_rate, rateLabel: '配额保留率' },
     { label: '最终生产保留', value: f.final, fraction: `${f.final} / ${f.rank_kept}`, rate: f.dir_mount_rate, rateLabel: '挂载成功率' },
   ]
 }

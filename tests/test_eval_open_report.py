@@ -301,6 +301,23 @@ def test_judge_funnel_separates_filter_and_dir_drops(tmp_path):
     assert funnel["final_keep_rate"] == 0.0
 
 
+def test_judge_funnel_counts_clustering_before_quota(tmp_path):
+    audit_dir = tmp_path / "audit"
+    _dump(audit_dir / "ttA.json", {
+        "runs": [{"items": 8}],
+        "merged": [{"tag": str(index)} for index in range(8)],
+        "verdicts": [{"tag": str(index)} for index in range(8)],
+        "clustering": {"input": 6, "clusters": [{"representative": "0"}, {"representative": "1"}]},
+        "library": {"truncated": [{"tag": "3"}]},
+        "accepted": [{"tag": "0"}, {"tag": "1"}, {"tag": "2"}],
+    })
+    report = assemble_open_report([_result("ttA")], _meta(done=1, total=1), audit_dir=audit_dir)
+    funnel = report["judge"]["funnel"]
+    assert funnel["judge_passed"] == 8
+    assert funnel["cluster_kept"] == 4 and funnel["cluster_keep_rate"] == 0.5
+    assert funnel["rank_kept"] == 3 and funnel["rank_keep_rate"] == 0.75
+
+
 def test_judge_funnel_stub_audit_without_keys_is_none(tmp_path):
     """替身审计（只有 task_id/stub）无漏斗键 → funnel None，不伪造 0。"""
     audit_dir = tmp_path / "audit"

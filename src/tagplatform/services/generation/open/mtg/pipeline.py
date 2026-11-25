@@ -1,25 +1,7 @@
-"""开放式生成流水线（MovieTagGen 移植版）：多轮生成 → 语义合并 → judge → 落库前产物。
+"""开放生成流水线：逐场逐目录 → 全片逐目录 → Judge 过滤 → 聚类、对齐与取额。
 
-与平台原 open 实现的差别（2026-11 替换）：
-- 输入不是一份文本 prompt，而是"资产 JSON 的场景文本 + 按场景对齐的关键帧"；
-- 逐场单独生成，再用全片材料和逐场候选综合生成影片级标签，两级候选一起去重聚类；
-- 产出先过 judge（deepseek-v4.1-flash）逐条做三维结果导向评分
-  （relevance/semantics/value，0-4），只有三维分数过线且置信度过线的
-  候选才落 `asset_tag`；
-- 证据锚点必须是资产里真实存在的场景（模型编的 id 直接丢），
-  与 MovieTagGen 的"证据可追溯"要求对齐。
-
-保留的平台语义：
-- 空目录不报错（与 closed 相反）；
-- 标签库装满后按"库内对齐"分三档标记（`catalog_align`）：同名 → origin=catalog
-  并挂 tag_id；疑似经 LLM 复核（`verify`）确认同一概念 → 替换成库内标准名并
-  挂 tag_id（原词记进审计，供将来写别名）；其余走 generated，分档只进审计与
-  排序，不删任何行；
-- `persist_tags` 的 upsert 与审核已定集跳过规则不变（runner 负责落库）。
-
-每任务一份审计 JSON（`mtg_report_dir/<task_id>.json`）：两轮原始候选、合并簇、
-judge 判决、淘汰原因、tokens 与耗时——`generation_task` 表没有 usage 列，
-不为此加迁移。
+生成阶段来源和目录适用范围分别控制候选配额与最终挂载。每任务写一份审计 JSON，
+记录请求、候选、Judge 判决、聚类、库内对齐和淘汰原因。生产执行器负责实际入库。
 """
 from __future__ import annotations
 
@@ -29,11 +11,11 @@ import re
 import time
 from dataclasses import dataclass, replace
 from functools import partial
+from itertools import zip_longest
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from tagplatform.capabilities.llm.usage import accumulate_usage
 from tagplatform.services.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
 from tagplatform.services.generation.open.mtg.catalog_align import (
@@ -52,25 +34,30 @@ from tagplatform.services.generation.open.mtg.descriptions import (
     fill_descriptions,
     is_general,
 )
+from tagplatform.services.generation.open.mtg.directory_candidates import (
+    FILM_REQUEST_LIMIT,
+    SCENE_REQUEST_LIMIT,
+    cluster_scene_candidates,
+    generate_directory_candidates,
+    request_generation_items,
+)
 from tagplatform.services.generation.open.mtg.judge import build_judge_template, judge_candidates
 from tagplatform.services.generation.open.mtg.merge import (
     MergedCandidate,
     merge_candidates,
 )
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
-from tagplatform.services.generation.open.mtg.parse import parse_generation_items
 from tagplatform.services.generation.open.mtg.prompt_samples import SampledPromptClient
 from tagplatform.services.generation.open.mtg.prompts import (
     build_generation_messages,
     build_generation_template,
     build_scene_generation_messages,
     render_content,
+    render_scene,
 )
 from tagplatform.services.generation.open.mtg.verify import build_verify_template, verify_pairs
 from tagplatform.services.tags.library import (
-    DirAssignment,
     library_index,
-    rank_dir_assignments,
 )
 from tagplatform.services.tags.mounting import resolve_mount
 from tagplatform.settings import Settings, get_settings
@@ -89,7 +76,8 @@ logger = logging.getLogger(__name__)
 #      不属于的候选直接淘汰；生成侧目标文案改为服从目录定义。
 # v10 = 按候选对齐重试漏判，并统一三维定义和重试格式。
 # v11 = 目录判决绑定可实际采用的目录 ID，库内复用走既有目录。
-MTG_VERSION = "mtg-v11-target-directory"
+# v12 = 按目录分别生成，先评判再聚类，按生成阶段分配配额。
+MTG_VERSION = "mtg-v12-directory-rounds"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
@@ -153,17 +141,19 @@ def _quote_ok(quote: str | None, haystack: str) -> bool:
     return False
 
 
-def _require_quotes(verdicts: dict[str, dict], haystack: str) -> None:
+def _require_quotes(verdicts: dict[str, dict], haystack: str,
+                    excerpts: dict[str, list[str]]) -> None:
     """引用不到原文的高 relevance 评分压到 1（只有话题、无可核验依据）。
 
     并入评分本身（不单开一道闸、不加淘汰原因）：judge 给了 ≥3 的内容支持
     分但给不出可核对的原文，等同于没依据——降档后自然过不了保留阈值。
     """
-    for verdict in verdicts.values():
+    for key, verdict in verdicts.items():
         relevance = verdict.get("relevance")
         if not isinstance(relevance, int) or relevance < _JUDGE_SCORE_FLOORS["relevance"]:
             continue
-        if _quote_ok(verdict.get("quote"), haystack):
+        if any(_quote_ok(verdict.get("quote"), source)
+               for source in excerpts.get(key, (haystack,))):
             continue
         verdict["relevance"] = 1
         verdict["reason"] = (verdict.get("reason") or "未引用可核对原文")[:40]
@@ -209,98 +199,12 @@ def _make_verify_client(settings: Settings, llm):
                               max_tokens=settings.open_library_verify_max_tokens)
 
 
-def _dir_hint_entries(tag_library, spec: GenerationSpec,
-                      limit: int) -> list[dict]:
-    """可新增标签的目录 → 提示词条目（id + 全路径 + 粒度）。
-
-    只收可扩充目录（dir_dynamic/dir_asset，允许扩充）且落在本次生成
-    范围内的目录——静态目录不该出现在提示词里，否则模型会往不允许新增的
-    目录里塞词，然后在校验环节被打回，白烧一轮 token。
-    """
-    if tag_library is None or limit <= 0:
-        return []
-    entries = _directory_entries(tag_library, tag_library.new_tag_dirs(spec.policy.dir_ids))
-    return sorted(entries, key=lambda item: (item["path"], item["dir_id"]))[:limit]
-
-
 def _directory_entries(tag_library, directories) -> list[dict]:
     return [{"dir_id": directory.dir_id,
              "path": "/".join(tag_library.path_of(directory.dir_id)) or directory.dir_name,
              "scope": tag_library.scope_of(directory.dir_id),
              "description": directory.description}
             for directory in directories]
-
-
-def _resolve_dir_value(tag_library, raw: str | None) -> str | None:
-    """模型给的目录串 → dir_id（容忍 id / 全路径 / 唯一目录名）。"""
-    if not raw or tag_library is None:
-        return None
-    text = raw.strip()
-    if tag_library.directory(text) is not None:
-        return text
-    by_path = {"/".join(tag_library.path_of(d.dir_id)): d.dir_id
-               for d in tag_library.dirs()}
-    if text in by_path:
-        return by_path[text]
-    by_name = [d.dir_id for d in tag_library.dirs() if d.dir_name == text]
-    return by_name[0] if len(by_name) == 1 else None
-
-
-def _plan_directory_options(spec, tag_library, embedder, merged, directories, *, require_model_dir):
-    """准备模型选定目录和可能用到的向量备选，供同一批 judge 逐目录判定。"""
-    if not directories or not spec.policy.allow_new_tags:
-        return {}, {}
-    scopes = {entry["dir_id"]: entry["scope"] for entry in directories}
-    model_dirs = {candidate.tag: _resolve_dir_value(tag_library, candidate.dir_raw)
-                  for candidate in merged}
-    fallback_dirs = {}
-    if not require_model_dir:
-        # 无目录限额时，整片挂载一定可用，不必为它计算向量备选。
-        names = [candidate.tag for candidate in merged
-                 if scopes.get(model_dirs[candidate.tag]) != "content"
-                 or spec.policy.max_tags_per_dir]
-        vectors = embedder.embed(names, role="query") if names else []
-        fallback_dirs = {name: rank_dir_assignments(tag_library, embedder, vector, spec.policy.dir_ids)
-                         for name, vector in zip(names, vectors)}
-    targets = {}
-    for name, model_dir in model_dirs.items():
-        options = [model_dir] if model_dir in scopes else []
-        options.extend(option.dir_id for option in fallback_dirs.get(name, [])
-                       if option.dir_id in scopes)
-        targets[name] = list(dict.fromkeys(options))
-    return targets, fallback_dirs
-
-
-def _validate_model_dir(tag_library, dir_id: str | None, spec: GenerationSpec,
-                        contents, evidence: list[Evidence],
-                        per_dir_count: dict[str, int]
-                        ) -> tuple[DirAssignment | None, object | None, str]:
-    """校验模型指定的目录：范围 → 存在 → 可扩展 → 配额 → 挂载点。
-
-    任何一步不过都返回 (None, None, 原因)，由调用方回退到向量归类；不静默
-    改写模型的目录归属（审核页要能看到"模型选错了"这件事）。
-    """
-    if not dir_id:
-        return None, None, "模型未给目录"
-    allowed = tag_library.descendants(spec.policy.dir_ids)
-    if dir_id not in allowed:
-        return None, None, f"模型给的目录 {dir_id} 不在本次生成范围"
-    directory = tag_library.directory(dir_id)
-    if directory is None:
-        return None, None, f"模型给的目录 {dir_id} 不存在"
-    if not directory.allows_new_tags:
-        return None, None, f"目录「{directory.dir_name}」不允许新增标签"
-    if (spec.policy.max_tags_per_dir
-            and per_dir_count.get(dir_id, 0) >= spec.policy.max_tags_per_dir):
-        return None, None, f"目录「{directory.dir_name}」已达产出上限"
-    scope = tag_library.scope_of(dir_id)
-    mount = resolve_mount(scope, spec.asset_id, contents, evidence)
-    if mount is None:
-        return None, None, (f"目录「{directory.dir_name}」适用范围 {scope} "
-                            "解析不出唯一挂载点")
-    return (DirAssignment(dir_id=dir_id, dir_name=directory.dir_name,
-                          scope=scope, score=0.0, reason="模型指定目录"),
-            mount, "")
 
 
 def _evidence_for(candidate: MergedCandidate, verdict: dict | None,
@@ -341,72 +245,65 @@ def _sample_client(spec: GenerationSpec, client, stage, template):
 
 
 def _load_library_context(settings: Settings, spec: GenerationSpec, embedder,
-                          contents) -> tuple[object | None, list, list[str],
-                                             list[dict]]:
-    """小节 0：加载只读标签库、向量索引、库内提示与可扩展目录清单（绝不写库）。"""
-    # 库来自 JSON 模拟（spec.library），按任务的目录范围过滤；向量按
-    # 库/模型/范围缓存，同一进程内不重复嵌入。
+                          contents) -> tuple[object | None, list, list[str]]:
+    """读取任务范围内的标签索引和生成提示。"""
     tag_library = spec.library if settings.open_library_enabled else None
     library = (library_index(tag_library, embedder, spec.policy.dir_ids)
                if tag_library is not None else [])
-    hints: list[str] = []
-    if library and settings.open_library_hint_enabled:
-        hints = recall_library_hints(library, embedder, contents,
-                                     settings.open_library_hint_count)
-    # 可扩展目录清单：生成阶段就交给模型决定归属（"在某目录下新增某标签"），
-    # 而不是等生成完再按向量猜。只列可扩充目录（dir_dynamic/dir_asset）
-    # 且落在范围内的目录。
-    dir_hint = (_dir_hint_entries(tag_library, spec, settings.open_dir_hint_max)
-                if settings.open_dir_hint_max > 0 else [])
-    return tag_library, library, hints, dir_hint
+    hints = (recall_library_hints(library, embedder, contents, settings.open_library_hint_count)
+             if library and settings.open_library_hint_enabled else [])
+    return tag_library, library, hints
 
 
 @dataclass
 class _GenerationLimits:
-    """小节 1 的产出配额：队列截断上限与单轮请求条数（小节 1/5/6 共用）。"""
-    limit: int
+    """任务、阶段和单次请求的配额。已有标签补全沿用来源配额。"""
     total_limit: int
     scene_limit: int
+    film_limit: int
     scene_request_limit: int
     film_request_limit: int
+    origin_limit: int | None = None
 
 
 def _plan_generation_limits(settings: Settings, spec: GenerationSpec,
-                            contents) -> _GenerationLimits | None:
+                            contents, *, directory_rounds: bool = False
+                            ) -> _GenerationLimits | None:
     """小节 1 开头：按策略上限计算逐场/全片两级配额；无可产出时返回 None。"""
     scenes = contents.content.scenes
+    if not scenes or spec.policy.max_tags <= 0:
+        return None
+    if directory_rounds:
+        scene_limit = min(10, len(scenes) * 2)
+        film_limit = FILM_REQUEST_LIMIT if len(scenes) >= 2 else 0
+        total_limit = min(spec.policy.max_tags, scene_limit + film_limit)
+        return _GenerationLimits(total_limit=total_limit, scene_limit=scene_limit,
+                                 film_limit=film_limit, scene_request_limit=SCENE_REQUEST_LIMIT,
+                                 film_request_limit=film_limit)
     limit = max(0, min(settings.mtg_max_final_tags, spec.policy.max_tags))
     total_limit = min(spec.policy.max_tags, 2 * limit)
-    if total_limit <= 0 or not scenes:
+    if total_limit <= 0:
         return None
     scene_limit = (total_limit if len(scenes) == 1 else
                    min(len(scenes), 5, max(1, total_limit // 3)))
     scene_request_limit = min(3, scene_limit) if len(scenes) == 1 else 1
     film_request_limit = (max(1, min(total_limit, settings.mtg_max_candidates_per_run)
                               - scene_limit) if len(scenes) >= 2 else 0)
-    return _GenerationLimits(limit=limit, total_limit=total_limit,
-                             scene_limit=scene_limit,
+    return _GenerationLimits(total_limit=total_limit, scene_limit=scene_limit, film_limit=limit,
                              scene_request_limit=scene_request_limit,
-                             film_request_limit=film_request_limit)
+                             film_request_limit=film_request_limit, origin_limit=limit)
 
 
 def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
                     *, spec, usage, scene_ids, parsed_calls
                     ) -> tuple[list[dict], int]:
     """单轮生成调用 → 过滤后的候选条目；顺带累计 usage 与成功解析轮数。"""
-    response = client.complete(messages, f"{spec.run_id}:{suffix}")
-    accumulate_usage(usage, response.usage)
-    if not response.ok:
-        raise RuntimeError(f"LLM 调用失败（{suffix}）: {response.raw.get('error')}")
-    try:
-        items = parse_generation_items(response.content, max_items=None)
-        parsed_calls += 1
-    except ValueError as exc:
-        logger.warning("生成输出解析失败（%s）：%s", suffix, exc)
-        items = []
+    items = request_generation_items(client, messages, run_id=spec.run_id,
+                                     suffix=suffix, usage=usage)
+    parsed_calls += items is not None
 
     valid = []
-    for item in items:
+    for item in items or []:
         if item["scope"] not in (None, scope):
             continue
         ids = list(dict.fromkeys(s for s in item["scenes"] if s in scene_ids))
@@ -422,13 +319,11 @@ def _generate_items(client, messages, suffix, max_items, scope, scene_id=None,
     return valid, parsed_calls
 
 
-def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
-                           contents, frames, modalities, usage: dict,
-                           hints: list[str], dir_hint: list[dict],
-                           limits: _GenerationLimits,
-                           *, catalog_only: bool = False,
-                           ) -> tuple[list[dict], list[dict], list[dict]]:
-    """小节 1：逐场生成 → 全片综合（两轮 LLM 调用，产出 runs 审计与两级候选）。"""
+def _run_legacy_generation_rounds(spec: GenerationSpec, llm, contents, frames, modalities,
+                                  usage: dict, hints: list[str], limits: _GenerationLimits,
+                                  *, catalog_only: bool,
+                                  ) -> tuple[list[dict], list[dict], list[dict]]:
+    """使用已有的两轮请求补全库内标签。"""
     scenes = contents.content.scenes
     scene_request_limit = limits.scene_request_limit
     film_request_limit = limits.film_request_limit
@@ -443,7 +338,7 @@ def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
     for index, scene in enumerate(scenes):
         messages = build_scene_generation_messages(
             scene, frames.get(scene.scene_id, ()), content=contents, max_tags=scene_request_limit,
-            dir_hint=dir_hint, modalities=modalities,
+            dir_hint=[], modalities=modalities,
             catalog_choices=hints if catalog_only else None)
         per_scene[scene.scene_id], parsed_calls = _generate_items(
             scene_client, messages, f"scene-{index + 1:03d}", scene_request_limit,
@@ -464,8 +359,7 @@ def _run_generation_rounds(settings: Settings, spec: GenerationSpec, llm,
     if film_request_limit:
         messages = build_generation_messages(
             contents, frames, max_tags=film_request_limit, scene_tags=per_scene,
-            library_hint=hints, dir_hint=dir_hint, modalities=modalities,
-            catalog_only=catalog_only)
+            library_hint=hints, modalities=modalities, catalog_only=catalog_only)
         film_usage = usage.copy()
         film_entries, parsed_calls = _generate_items(
             film_client, messages, "film", film_request_limit, "film",
@@ -491,9 +385,19 @@ def _merge_two_level_candidates(settings: Settings, embedder,
     return merge_candidates(entries, embedder, settings.mtg_merge_threshold)
 
 
+def _candidate_metadata(candidate: MergedCandidate) -> dict:
+    if candidate.candidate_id is None:
+        return {}
+    return {"candidate_id": candidate.candidate_id,
+            "stage": 1 if candidate.scope == "scene" else 2,
+            "generated_dir_id": candidate.dir_raw}
+
+
 def _merged_audit_rows(merged) -> list[dict]:
     return [{"tag": item.tag, "aliases": list(item.aliases), "runs": item.runs,
-             "dimension": item.dimension, "scope": item.scope}
+             "dimension": item.dimension, "scope": item.scope,
+             **({"scenes": list(item.scenes)} if item.candidate_id else {}),
+             **_candidate_metadata(item)}
             for item in merged]
 
 
@@ -502,6 +406,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              usage: dict, frame_count: int, started: float,
                              *, trace: dict | None = None,
                              directory_entries: list[dict], directory_targets: dict,
+                             runs: list[dict],
                              ) -> tuple[dict[str, dict], dict]:
     """小节 3：judge 逐条判内容支持度；失败也留审计现场后原样抛出。
 
@@ -510,12 +415,17 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
     verdicts: dict[str, dict] = {}
     judge_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     if settings.mtg_judge_enabled and merged:
-        client = _sample_client(spec, judge_client or _make_judge_client(settings, llm),
-                                "judge", build_judge_template)
-        payload = [{"tag": m.tag, "dimension": m.dimension, "scope": m.scope,
-                    "reason": m.reason, "scenes": list(m.scenes),
-                    "dir_ids": directory_targets.get(m.tag, [])}
-                   for m in merged]
+        client = _sample_client(
+            spec, judge_client or _make_judge_client(settings, llm), "judge",
+            partial(build_judge_template, with_candidate_ids=bool(merged[0].candidate_id)))
+        payload = [
+            {"tag": m.tag, "dimension": m.dimension,
+             "scope": "excerpt" if m.candidate_id and m.scope == "scene" else m.scope,
+             "reason": m.reason, "scenes": list(m.scenes),
+             "dir_ids": directory_targets.get(m.candidate_id or m.tag, []),
+             **({"candidate_id": m.candidate_id} if m.candidate_id else {})}
+            for m in merged
+        ]
         try:
             verdicts = judge_candidates(client, contents, payload,
                                         run_id=spec.run_id, usage=judge_usage,
@@ -529,6 +439,7 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                 "error": f"{type(exc).__name__}: {exc}",
                 "scenes": len(contents.content.scenes),
                 "frames": frame_count,
+                "runs": runs,
                 "usage": usage,
                 "judge_usage": judge_usage,
                 "judge_trace": trace or {},
@@ -547,15 +458,23 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
     if settings.mtg_judge_enabled:
         # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
         # 会让“引用了模型没看过的台词”误判为有效。
-        _require_quotes(verdicts,
-                        _normalize_quote(render_content(contents, modalities)))
+        scene_texts = {scene_id: _normalize_quote(render_scene(scene, modalities))
+                       for scene_id, scene in scene_index.items()}
+        excerpts = {
+            candidate.candidate_id: [scene_texts[s] for s in candidate.scenes
+                                     if s in scene_texts]
+            for candidate in merged if candidate.candidate_id and candidate.scope == "scene"
+        }
+        _require_quotes(verdicts, _normalize_quote(render_content(contents, modalities)),
+                        excerpts)
     accepted: list[tuple[MergedCandidate, dict | None, list[Evidence]]] = []
     dropped: list[dict] = []
     for candidate in merged:
-        verdict = verdicts.get(normalize_key(candidate.tag))
+        verdict = verdicts.get(candidate.candidate_id or normalize_key(candidate.tag))
+        audit = {"tag": candidate.tag, **_candidate_metadata(candidate)}
         if settings.mtg_judge_enabled:
             if verdict is None:
-                dropped.append({"tag": candidate.tag, "why": _DROP_NO_VERDICT})
+                dropped.append({**audit, "why": _DROP_NO_VERDICT})
                 continue
             below = [f"{axis}={'null' if verdict.get(axis) is None else verdict[axis]}"
                      f" < {floor}"
@@ -563,40 +482,44 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
                      if not isinstance(verdict.get(axis), int)
                      or verdict[axis] < floor]
             if below:
-                dropped.append({"tag": candidate.tag,
-                                "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
+                dropped.append({**audit, "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
                 continue
             if verdict["confidence"] < _JUDGE_CONFIDENCE_FLOOR:
-                dropped.append({"tag": candidate.tag,
-                                "why": f"{_DROP_CONFIDENCE_BELOW} {verdict['confidence']:.2f} "
+                dropped.append({**audit, "why": f"{_DROP_CONFIDENCE_BELOW} {verdict['confidence']:.2f} "
                                        f"< {_JUDGE_CONFIDENCE_FLOOR}"})
                 continue
+            if candidate.candidate_id:
+                fits = verdict.get("dir_fits", {})
+                if fits.get(candidate.dir_raw) is not True:
+                    why = _DROP_DIR_MISMATCH if candidate.dir_raw in fits else _DROP_DIR_UNJUDGED
+                    dropped.append({**audit, "why": why})
+                    continue
         evidence = _evidence_for(candidate, verdict, scene_index)
         if not evidence:
-            dropped.append({"tag": candidate.tag, "why": _DROP_NO_EVIDENCE})
+            dropped.append({**audit, "why": _DROP_NO_EVIDENCE})
             continue
         # 层级约束（只用于把关，不落库）：全片级必须有两个以上场景支撑，
         # 单场支撑的"全片级"标签一律不进队列——它本质是场景级措辞被写大了
         if candidate.scope == "film" and len(evidence) < 2:
-            dropped.append({"tag": candidate.tag,
-                            "why": _DROP_SINGLE_SCENE})
+            dropped.append({**audit, "why": _DROP_SINGLE_SCENE})
             continue
         accepted.append((candidate, verdict, evidence))
     return accepted, dropped
 
 
 def _align_and_verify_candidates(settings: Settings, spec: GenerationSpec, llm,
-                                 embedder, library: list, accepted: list
-                                 ) -> tuple[dict[str, Alignment], dict, dict]:
+                                 embedder, library: list, accepted: list, *,
+                                 candidate_vectors=None) -> tuple[dict[str, Alignment], dict, dict]:
     """小节 5 前段：库内对齐分档 + 疑似对子 LLM 复核（结论只进排序与审计）。"""
     alignment: dict[str, Alignment] = {}
     verify_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     verify_trace: dict = {}
     if library and accepted:
         alignment = align_candidates(
-            library, embedder, [candidate.tag for candidate, _, _ in accepted],
+            library, embedder, list(dict.fromkeys(candidate.tag for candidate, _, _ in accepted)),
             suspect_cosine=settings.open_library_suspect_cosine,
             name_overlap=settings.open_library_name_overlap,
+            candidate_vectors=candidate_vectors,
         )
         # 疑似对子交给模型复核：分档只能看"像不像"，替换要看"是不是"。
         # 复核失败/开关关掉都按"未复核"处理（不替换），并把结论写进审计。
@@ -647,6 +570,14 @@ def _rank(alignment: dict[str, Alignment], item
             -candidate.runs)
 
 
+def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple[int, float]:
+    candidate, verdict, _ = row
+    value = (verdict or {}).get("value")
+    aligned = alignment.get(candidate.tag)
+    cosine = aligned.cosine if aligned is not None else None
+    return (-(value if isinstance(value, int) else 0), cosine if cosine is not None else 0.0)
+
+
 def _plan(alignment: dict[str, Alignment], settings: Settings,
           candidate) -> tuple[Alignment | None, bool]:
     """(对齐结论, 是否替换成库内标签)。
@@ -665,30 +596,13 @@ def _plan(alignment: dict[str, Alignment], settings: Settings,
     return item, same_name or replace_suspect
 
 
-def _filter_directory_mismatches(settings, alignment, accepted, directory_targets, dropped):
-    """在消耗产出配额前筛掉没有任何合格目标目录的新词。"""
-    if not settings.mtg_judge_enabled:
-        return accepted
-    kept = []
-    for row in accepted:
-        candidate, verdict, _ = row
-        targets = directory_targets.get(candidate.tag, [])
-        fits = verdict.get("dir_fits", {})
-        if targets and not _plan(alignment, settings, candidate)[1] and not any(
-                fits.get(dir_id) is True for dir_id in targets):
-            why = _DROP_DIR_UNJUDGED if any(dir_id not in fits for dir_id in targets) else _DROP_DIR_MISMATCH
-            dropped.append({"tag": candidate.tag, "why": why})
-        else:
-            kept.append(row)
-    return kept
-
-
 def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
                        accepted: list, limits: _GenerationLimits
                        ) -> tuple[list, list[dict], dict]:
     """小节 5 中段：按 value 分/分档排序，再按总量、来源与场景级配额截断。"""
     total_limit = limits.total_limit
-    limit = limits.limit
+    origin_limit = limits.origin_limit
+    assert origin_limit is not None
     scene_limit = limits.scene_limit
     accepted.sort(key=partial(_rank, alignment))
 
@@ -702,7 +616,7 @@ def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
     for item in accepted:
         candidate = item[0]
         queue = by_origin[plans[candidate.tag][1]]
-        if (kept_count >= total_limit or len(queue) >= limit
+        if (kept_count >= total_limit or len(queue) >= origin_limit
                 or (candidate.scope == "scene" and scene_count >= scene_limit)):
             truncated.append(item)
             continue
@@ -715,14 +629,39 @@ def _rank_and_truncate(settings: Settings, alignment: dict[str, Alignment],
 
 def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
                      tag_library, accepted: list, plans: dict, dropped: list[dict],
-                     *, fallback_dirs: dict, check_dir_fit: bool
-                     ) -> tuple[list[ProducedTag], list[dict], list[dict]]:
-    """小节 5 尾段：落库归属——库内替换生成 ProducedTag，新词按模型指定目录/向量回退归类。"""
+                     *, stage_limits: _GenerationLimits | None = None,
+                     ) -> tuple[list[ProducedTag], list[dict], list[dict], list]:
+    """解析挂载。逐目录生成仅对成功挂载且唯一的结果消耗阶段配额。"""
     tags: list[ProducedTag] = []
     tag_rows: list[dict] = []
     per_dir_count: dict[str, int] = {}
     replacements: list[dict] = []
+    truncated = []
+    occupied = set()
+    per_stage_count = {"scene": 0, "film": 0}
+
+    def add_output(candidate: MergedCandidate, tag: ProducedTag, row: dict) -> bool:
+        metadata = _candidate_metadata(candidate)
+        if stage_limits is not None:
+            # 对应 pre_asset_tag 的库内标签和待审新词唯一索引。
+            key = (tag.target_type, tag.target_id, tag.origin, tag.tag_id or tag.tag_name)
+            if key in occupied:
+                dropped.append({"tag": candidate.tag, **metadata,
+                                "why": "同一挂载点已有本次产出的相同标签"})
+                return False
+            occupied.add(key)
+            per_stage_count[tag.level] += 1
+        tags.append(tag)
+        tag_rows.append({**row, **metadata, "name": tag.tag_name, "target_id": tag.target_id})
+        return True
+
     for candidate, verdict, evidence in accepted:
+        audit = {"tag": candidate.tag, **_candidate_metadata(candidate)}
+        if stage_limits is not None:
+            stage_limit = stage_limits.scene_limit if candidate.scope == "scene" else stage_limits.film_limit
+            if len(tags) >= stage_limits.total_limit or per_stage_count[candidate.scope] >= stage_limit:
+                truncated.append((candidate, verdict, evidence))
+                continue
         confidence = verdict["confidence"] if verdict else 0.8
         # 层级随合并结果落库：film 需≥2 场景支撑（上游已校验），scene 为
         # 个别场景特征；scope 缺失（旧数据/解析失败）按 film 兜底
@@ -734,20 +673,11 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
             mount = resolve_mount(matched.scope if matched else "content",
                                   spec.asset_id, contents, evidence)
             if mount is None:
-                dropped.append({"tag": candidate.tag,
+                dropped.append({**audit,
                                 "why": f"目录适用范围 {matched.scope if matched else '?'} "
                                        "解析不出唯一挂载点"})
                 continue
-            if item.band == BAND_SUSPECT:
-                replacements.append({
-                    "generated": candidate.tag,
-                    "library": item.matched_name,
-                    "tag_id": item.matched_tag_id,
-                    "cosine": (None if item.cosine is None
-                               else round(item.cosine, 3)),
-                    "reason": item.reason,
-                })
-            tags.append(ProducedTag(
+            tag = ProducedTag(
                 origin="catalog", tag_id=item.matched_tag_id,
                 tag_name=item.matched_name or candidate.tag,
                 candidate_type=None, candidate_description=None,
@@ -755,80 +685,46 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
                 evidence=evidence, level=level, generation_reason=candidate.reason,
                 dir_id=matched.dir_id if matched else None,
                 target_type=mount.target_type, target_id=mount.target_id,
-                # 相似命中：模型原词将来写进 tag_define.aliases
                 alias_name=(candidate.tag
                             if item.band == BAND_SUSPECT
                             and candidate.tag != (item.matched_name or "") else None),
-            ))
-            tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
-                             "origin": "catalog", "band": item.band,
-                             "dimension": None,
-                             "dir_id": tags[-1].dir_id,
-                             "dir_source": "library",
-                             "target_type": mount.target_type,
-                             "confidence": confidence,
-                             "evidence": [e.scene_id for e in evidence]})
+            )
+            added = add_output(candidate, tag, {
+                "tag": candidate.tag, "origin": "catalog", "band": item.band,
+                "dimension": None, "dir_id": tag.dir_id, "dir_source": "library",
+                "target_type": mount.target_type, "confidence": confidence,
+                "evidence": [e.scene_id for e in evidence],
+            })
+            if added and item.band == BAND_SUSPECT:
+                replacements.append({
+                    **audit, "generated": candidate.tag, "library": item.matched_name,
+                    "tag_id": item.matched_tag_id,
+                    "cosine": None if item.cosine is None else round(item.cosine, 3),
+                    "reason": item.reason,
+                })
             continue
 
-        # 新词：先看模型给的目录能不能用，再回退到向量归类
         if not spec.policy.allow_new_tags:
-            dropped.append({"tag": candidate.tag, "why": "策略禁止产出新词"})
+            dropped.append({**audit, "why": "策略禁止产出新词"})
             continue
         if tag_library is None:
-            dropped.append({"tag": candidate.tag, "why": "标签库不可用，新词无处归属"})
+            dropped.append({**audit, "why": "标签库不可用，新词无处归属"})
             continue
-        # ① 模型在生成时就选好的目录：只做校验，合法就直接用（这是"生成时
-        #    考虑目录"的主路径）；不合法记下原因，回退②，不静默改写归属。
-        assignment = None
-        mount = None
-        dir_source = None
-        dir_reason = ""
-        reasons: list[str] = []
-        model_dir = _resolve_dir_value(tag_library, candidate.dir_raw)
-        if candidate.dir_raw and model_dir is None:
-            reasons.append(f"模型给的目录「{candidate.dir_raw}」无法解析")
-        fits = (verdict or {}).get("dir_fits", {})
-        if model_dir:
-            assignment, mount, why = _validate_model_dir(
-                tag_library, model_dir, spec, contents, evidence, per_dir_count)
-            if assignment is not None and check_dir_fit and fits.get(model_dir) is not True:
-                why = _DROP_DIR_MISMATCH if model_dir in fits else _DROP_DIR_UNJUDGED
-                assignment = mount = None
-            if assignment is not None:
-                dir_source = "model"
-            else:
-                reasons.append(why)
-        # ② 回退时逐个校验实际备选目录，禁止把一个目录的结论移用到另一个。
-        if assignment is None:
-            for option in fallback_dirs.get(candidate.tag, []):
-                if option.dir_id is None:
-                    reasons.append(f"无可归属目录（{option.reason}）")
-                    continue
-                if (spec.policy.max_tags_per_dir
-                        and per_dir_count.get(option.dir_id, 0) >= spec.policy.max_tags_per_dir):
-                    reasons.append(f"目录「{option.dir_name}」已达产出上限")
-                    continue
-                candidate_mount = resolve_mount(option.scope, spec.asset_id, contents, evidence)
-                if candidate_mount is None:
-                    reasons.append(f"目录「{option.dir_name}」适用范围 "
-                                   f"{option.scope} 解析不出唯一挂载点")
-                    continue
-                if check_dir_fit and fits.get(option.dir_id) is not True:
-                    why = _DROP_DIR_MISMATCH if option.dir_id in fits else _DROP_DIR_UNJUDGED
-                    detail = f"目录「{option.dir_name}」：{why}"
-                    if detail not in reasons:
-                        reasons.append(detail)
-                    continue
-                assignment, mount = option, candidate_mount
-                dir_source = "fallback"
-                dir_reason = option.reason
-                break
-        if assignment is None or mount is None:
-            dropped.append({"tag": candidate.tag,
-                            "why": "；".join(reasons) or "无可归属目录"})
+        directory = tag_library.directory(candidate.dir_raw) if candidate.candidate_id else None
+        if directory is None:
+            dropped.append({**audit, "why": "无可归属目录"})
             continue
-        per_dir_count[assignment.dir_id] = per_dir_count.get(assignment.dir_id, 0) + 1
-        tags.append(ProducedTag(
+        dir_id = directory.dir_id
+        if (spec.policy.max_tags_per_dir
+                and per_dir_count.get(dir_id, 0) >= spec.policy.max_tags_per_dir):
+            dropped.append({**audit, "why": f"目录「{directory.dir_name}」已达产出上限"})
+            continue
+        scope = tag_library.scope_of(dir_id)
+        mount = resolve_mount(scope, spec.asset_id, contents, evidence)
+        if mount is None:
+            dropped.append({**audit, "why": f"目录适用范围 {scope} 解析不出唯一挂载点"})
+            continue
+        tag = ProducedTag(
             origin="generated", tag_id=None, tag_name=candidate.tag,
             candidate_type=candidate.dimension,
             # 描述是"这个词本身"的通用释义；模型给的 desc 先落在这里，
@@ -840,24 +736,22 @@ def _assign_tag_dirs(spec: GenerationSpec, contents, library: list,
             relevance_score=(item.cosine if item is not None else None),
             confidence=confidence,
             evidence=evidence, level=level, generation_reason=candidate.reason,
-            dir_id=assignment.dir_id,
+            dir_id=dir_id,
             target_type=mount.target_type, target_id=mount.target_id,
-        ))
-        tag_rows.append({"tag": candidate.tag, "name": tags[-1].tag_name,
-                         "origin": "generated",
-                         "band": (item.band if item is not None else None),
-                         "dimension": candidate.dimension,
-                         "dir_id": assignment.dir_id,
-                         "dir_name": assignment.dir_name,
-                         "dir_source": dir_source,
-                         "dir_model_raw": candidate.dir_raw,
-                         "dir_reason": (assignment.reason
-                                        if dir_source == "model"
-                                        else (dir_reason or assignment.reason)),
-                         "target_type": mount.target_type,
-                         "confidence": confidence,
-                         "evidence": [e.scene_id for e in evidence]})
-    return tags, tag_rows, replacements
+        )
+        added = add_output(candidate, tag, {
+            "tag": candidate.tag, "origin": "generated",
+            "band": item.band if item is not None else None,
+            "dimension": candidate.dimension,
+            "dir_id": dir_id, "dir_name": directory.dir_name,
+            "dir_source": "request", "dir_reason": "请求绑定目录",
+            "target_type": mount.target_type,
+            "confidence": confidence,
+            "evidence": [e.scene_id for e in evidence],
+        })
+        if added:
+            per_dir_count[dir_id] = per_dir_count.get(dir_id, 0) + 1
+    return tags, tag_rows, replacements, truncated
 
 
 def _generalize_descriptions(spec: GenerationSpec, llm, contents, tags,
@@ -868,21 +762,35 @@ def _generalize_descriptions(spec: GenerationSpec, llm, contents, tags,
                   if tag.origin == "generated"
                   and not is_general(tag.candidate_description, names)]
     desc_usage: dict = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
-    desc_filled: dict[str, str] = {}
-    if needs_desc:
-        desc_filled = fill_descriptions(
-            _sample_client(spec, llm, "description", build_description_template),
-            [{"tag": tag.tag_name,
-              "dir": (" / ".join(tag_library.path_of(tag.dir_id))
-                      if tag_library is not None and tag.dir_id else None)}
-             for tag in needs_desc],
-            names=names, run_id=spec.run_id, usage=desc_usage)
-        for tag in needs_desc:
-            tag.candidate_description = desc_filled.get(normalize_key(tag.tag_name))
+    by_name: dict[str, dict[tuple[str, str | None], list[ProducedTag]]] = {}
+    for tag in needs_desc:
+        key = normalize_key(tag.tag_name)
+        by_name.setdefault(key, {}).setdefault((tag.tag_name, tag.dir_id), []).append(tag)
+    filled = 0
+    if by_name:
+        client = _sample_client(spec, llm, "description", build_description_template)
+        # 补写按名字回收，同名的不同目录分批发送，使释义各自使用所属目录。
+        groups = (list(same_name.values()) for same_name in by_name.values())
+        for index, batch in enumerate(zip_longest(*groups), 1):
+            targets = [group for group in batch if group is not None]
+            request = [
+                {"tag": group[0].tag_name,
+                 "dir": (" / ".join(tag_library.path_of(group[0].dir_id))
+                         if tag_library is not None and group[0].dir_id else None)}
+                for group in targets
+            ]
+            run_id = spec.run_id if index == 1 else f"{spec.run_id}:batch-{index:03d}"
+            descriptions = fill_descriptions(client, request, names=names, run_id=run_id, usage=desc_usage)
+            for group in targets:
+                desc = descriptions.get(normalize_key(group[0].tag_name))
+                for tag in group:
+                    tag.candidate_description = desc
+                if desc:
+                    filled += len(group)
     descriptions_summary = {
         "needs": len(needs_desc),
-        "filled": len(desc_filled),
-        "empty": len(needs_desc) - len(desc_filled),
+        "filled": filled,
+        "empty": len(needs_desc) - filled,
         "usage": desc_usage,
     }
     return descriptions_summary
@@ -898,17 +806,17 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                   verify_usage: dict, truncated: list,
                   descriptions_summary: dict, dropped: list[dict],
                   judge_trace: dict | None = None,
-                  directory_targets: dict | None = None) -> dict:
+                  directory_targets: dict | None = None,
+                  clustering: dict | None = None) -> dict:
     """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
-    assigned_dirs = {row["tag"]: row["dir_id"] for row in tag_rows
+    assigned_dirs = {row.get("candidate_id", row["tag"]): row["dir_id"] for row in tag_rows
                      if row["origin"] == "generated"}
     verdict_rows = []
     for verdict in verdicts.values():
-        name = verdict["tag"]
-        targets = (directory_targets or {}).get(name, [])
-        display_dir = assigned_dirs.get(name) or (targets[0] if len(targets) == 1 else None)
+        key = verdict.get("candidate_id", verdict["tag"])
+        targets = (directory_targets or {}).get(key, [])
+        display_dir = assigned_dirs.get(key) or (targets[0] if len(targets) == 1 else None)
         verdict_rows.append({**verdict, "in_dir": verdict.get("dir_fits", {}).get(display_dir)})
-    limit = limits.limit
     total_limit = limits.total_limit
     scene_limit = limits.scene_limit
     scene_request_limit = limits.scene_request_limit
@@ -930,17 +838,17 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             "modalities": sorted(modalities),
             "frames_per_scene": settings.mtg_frames_per_scene,
             "max_frames": settings.mtg_max_frames,
-            "merge_threshold": settings.mtg_merge_threshold,
+            **({"merge_threshold": settings.mtg_merge_threshold} if clustering is None
+               else {"cluster_target": clustering["target"], "max_film_tags": limits.film_limit}),
             "judge_confidence_floor": _JUDGE_CONFIDENCE_FLOOR,
             "judge_score_floors": dict(_JUDGE_SCORE_FLOORS),
-            "max_final_tags": limit,
+            "max_final_tags": limits.origin_limit or total_limit,
             "library_enabled": bool(settings.open_library_enabled),
             "library_hint_count": len(hints),
             "suspect_cosine": settings.open_library_suspect_cosine,
             "name_overlap": settings.open_library_name_overlap,
             "verify_enabled": bool(settings.open_library_verify_enabled),
             "replace_enabled": bool(settings.open_library_replace_enabled),
-            "dir_hint_max": settings.open_dir_hint_max,
             "dir_hint_count": len(dir_hint),
         },
         "scenes": len(contents.content.scenes),
@@ -950,6 +858,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
         "judge_usage": judge_usage,
         "judge_trace": judge_trace or {},
         "merged": _merged_audit_rows(merged),
+        **({"clustering": clustering} if clustering is not None else {}),
         "verdicts": verdict_rows,
         "directory_targets": directory_targets or {},
         "accepted": [{"tag": row["name"], "candidate": row["tag"],
@@ -959,7 +868,10 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                       "dir_model_raw": row.get("dir_model_raw"),
                       "dir_reason": row.get("dir_reason"),
                       "confidence": row["confidence"], "band": row["band"],
-                      "evidence": row["evidence"]}
+                      "evidence": row["evidence"],
+                      **{key: row[key] for key in ("candidate_id", "stage", "generated_dir_id",
+                                                   "target_type", "target_id")
+                         if key in row}}
                      for row in tag_rows],
         "dir_hint": [entry["dir_id"] for entry in dir_hint],
         "library": {
@@ -976,10 +888,12 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             ],
             "replacements": replacements,
             "verify_raw": verify_trace.get("raw"),
+            "verify_batches": verify_trace.get("batches", []),
             "truncated": [
                 {"tag": candidate.tag,
                  "band": (alignment[candidate.tag].band
-                          if candidate.tag in alignment else None)}
+                          if candidate.tag in alignment else None),
+                 **_candidate_metadata(candidate)}
                 for candidate, _, _ in truncated
             ],
         },
@@ -1017,55 +931,68 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
     usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
     # ---- 0. 标签库：给模型看的"已有标签"清单（只读，绝不写库）----
-    tag_library, library, hints, dir_hint = _load_library_context(
-        settings, spec, embedder, contents)
+    tag_library, library, hints = _load_library_context(settings, spec, embedder, contents)
 
-    # ---- 1. 逐场生成 → 全片综合 ----
-    limits = _plan_generation_limits(settings, spec, contents)
+    expandable_dirs = tag_library.new_tag_dirs(spec.policy.dir_ids) if tag_library else []
+    directory_rounds = bool(expandable_dirs and spec.policy.allow_new_tags)
+    limits = _plan_generation_limits(settings, spec, contents, directory_rounds=directory_rounds)
     if limits is None:
         return []
-    expandable_dirs = tag_library.new_tag_dirs(spec.policy.dir_ids) if tag_library else []
-    catalog_only = tag_library is not None and (
-        not spec.policy.allow_new_tags or not expandable_dirs
-    )
-    runs, scene_entries, film_entries = _run_generation_rounds(
-        settings, spec, llm, contents, frames, modalities, usage, hints,
-        dir_hint, limits, catalog_only=catalog_only)
-
-    # ---- 2. 两级候选合并 ----
-    merged = _merge_two_level_candidates(settings, embedder, film_entries,
-                                         scene_entries)
-
-    # 显式目录范围或完整的单分支目录清单沿用模型指定目录规则。
-    single_branch = (len(dir_hint) == len(expandable_dirs)
-                     and len({entry["path"].split("/", 1)[0] for entry in dir_hint}) == 1)
-    require_model_dir = bool(dir_hint) and (bool(spec.policy.dir_ids) or single_branch)
     directories = _directory_entries(tag_library, expandable_dirs)
-    directory_targets, fallback_dirs = _plan_directory_options(
-        spec, tag_library, embedder, merged, directories, require_model_dir=require_model_dir)
+    if directory_rounds:
+        dir_hint = sorted(directories, key=lambda item: (item["path"], item["dir_id"]))
+        scene_client = _sample_client(
+            spec, llm, "generation_scene",
+            partial(build_generation_template, "scene", single_directory=True))
+        film_client = _sample_client(
+            spec, llm, "generation_film",
+            partial(build_generation_template, "film", single_directory=True))
+        runs, merged = generate_directory_candidates(
+            scene_client, film_client, contents, frames, modalities, directories=dir_hint,
+            hints=hints, run_id=spec.run_id, usage=usage)
+        directory_targets = {candidate.candidate_id: [candidate.dir_raw] for candidate in merged}
+    else:
+        # 无可扩充目录或策略只允许复用时，沿用已有标签补全的入口。
+        runs, scene_entries, film_entries = _run_legacy_generation_rounds(
+            spec, llm, contents, frames, modalities, usage, hints, limits,
+            catalog_only=tag_library is not None)
+        merged = _merge_two_level_candidates(settings, embedder, film_entries, scene_entries)
+        directory_targets = {}
+        dir_hint = []
 
     # ---- 3. judge ----
     judge_trace: dict = {}
     verdicts, judge_usage = _judge_merged_candidates(
         settings, spec, llm, judge_client, contents, merged, modalities,
         usage, frame_count, started, trace=judge_trace,
-        directory_entries=directories, directory_targets=directory_targets)
+        directory_entries=directories, directory_targets=directory_targets, runs=runs)
 
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
     accepted, dropped = _filter_candidates(settings, contents, verdicts,
                                            modalities, merged)
 
-    # ---- 5. 库内对齐、复核、排序、截断、落库归属 ----
-    # 对齐放在截断之前：分档要参与排序（新词优先占名额），也要在审计里
-    # 记录"被挤掉的是哪一档"，截断后再对齐就只剩 15 条、看不到全貌。
+    clustering = None
+    candidate_vectors = None
+    if directory_rounds:
+        accepted, clustering, candidate_vectors = cluster_scene_candidates(
+            accepted, embedder, scene_count=len(contents.content.scenes),
+            directory_count=len(directories))
     alignment, verify_usage, verify_trace = _align_and_verify_candidates(
-        settings, spec, llm, embedder, library, accepted)
-    accepted = _filter_directory_mismatches(settings, alignment, accepted, directory_targets, dropped)
-    accepted, truncated, plans = _rank_and_truncate(settings, alignment, accepted, limits)
-    tags, tag_rows, replacements = _assign_tag_dirs(
+        settings, spec, llm, embedder, library, accepted, candidate_vectors=candidate_vectors)
+    if directory_rounds:
+        rank = partial(_rank_by_value_and_similarity, alignment)
+        accepted = (sorted((row for row in accepted if row[0].scope == "film"), key=rank)
+                    + sorted((row for row in accepted if row[0].scope == "scene"), key=rank))
+        plans = {candidate.tag: _plan(alignment, settings, candidate)
+                 for candidate, _, _ in accepted}
+        truncated = []
+    else:
+        accepted, truncated, plans = _rank_and_truncate(settings, alignment, accepted, limits)
+    tags, tag_rows, replacements, stage_truncated = _assign_tag_dirs(
         spec, contents, library, tag_library, accepted, plans, dropped,
-        fallback_dirs=fallback_dirs, check_dir_fit=settings.mtg_judge_enabled,
+        stage_limits=limits if directory_rounds else None,
     )
+    truncated.extend(stage_truncated)
 
     # ---- 5.5 描述通用化 ----
     # 生成侧只天然知道"本片哪里有依据"（reason），而库里要的是"这个词是什么"
@@ -1082,7 +1009,8 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
                            usage, judge_usage, merged, verdicts, tag_rows,
                            alignment, replacements, verify_trace, verify_usage,
                            truncated, descriptions_summary, dropped,
-                           judge_trace=judge_trace, directory_targets=directory_targets)
+                           judge_trace=judge_trace, directory_targets=directory_targets,
+                           clustering=clustering)
     _write_report(settings, spec.task_id, report)
     logger.info("mtg 完成：%d 轮 / %d 帧 / 合并 %d / 接受 %d / %.1fs",
                 len(runs), frame_count, len(merged), len(tags), elapsed)

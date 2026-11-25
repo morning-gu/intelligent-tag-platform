@@ -68,12 +68,12 @@ class ProducedTag:
       candidate_* 描述新标签）。注意它与 `pre_asset_tag.origin` 列（任务的
       closed/open 产出来源）不是同一概念，落库时由任务模式决定。
     - `dir_id`：候选归属目录。catalog 取标签自身所在目录；generated 取
-      可扩展目录里最相近的那个（生成时按目录范围与可否扩展决定）。
+      开放生成时绑定的可扩充目录。
     - `target_type/target_id`：挂载粒度与挂载点，由目录的 applicable_scope
       决定——content → asset_id、scene → scene_id、character → character_id。
     - `alias_name`：命中库内时模型给出的原词（同名时为空）。它将来写进
       `tag_define.aliases`，本期先随行保存，供入库预览用。
-    - `level` 为历史字段（film/scene），保留兼容旧调用。
+    - `level` 记录开放标签源自全片或逐场请求，挂载按目标字段读取。
     """
 
     origin: str  # "catalog" | "generated"
@@ -84,8 +84,7 @@ class ProducedTag:
     relevance_score: float | None
     confidence: float
     evidence: list[Evidence]
-    # 标签层级：film（影片级）/ scene（场景级）。默认 film 让闭环与目录
-    # 产出无需显式传参；开放生成按 MTG 合并结果的 scope 落值。
+    # 生成来源：film（全片）或 scene（逐场）。闭环使用默认值。
     level: str = "film"
     # ---- v2 增量：目录归属与挂载点 ----
     dir_id: str | None = None

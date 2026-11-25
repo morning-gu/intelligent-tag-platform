@@ -13,6 +13,7 @@ interface AuditRow {
   key: string
   tag: string
   scope: string | null
+  stage?: number
   relevance: number | null
   semantics: number | null
   value: number | null
@@ -29,32 +30,43 @@ function score(value: number | null | undefined): string {
   return value === null || value === undefined ? 'null' : String(value)
 }
 
-/** 审计 → 逐候选行：判决按标签名对齐，去向按 accepted / dropped / 配额截断。 */
+/** 新审计按候选编号对齐，旧审计仍可按标签名读取。 */
 function auditRows(audit: NonNullable<OpenMovieDiagnostics['audit']>): AuditRow[] {
-  const verdicts = new Map((audit.verdicts ?? []).map((row) => [row.tag, row]))
-  const dropped = new Map((audit.dropped ?? []).map((row) => [row.tag, row.why]))
-  const kept = new Map((audit.accepted ?? []).map((row) => [row.candidate ?? row.tag, row]))
-  const truncated = new Set((audit.library?.truncated ?? []).map((row) => row.tag))
-  const merged = audit.merged ?? (audit.candidates ?? []).map((tag) => ({ tag, scope: null }))
+  const verdicts = new Map((audit.verdicts ?? []).map((row) => [row.candidate_id ?? row.tag, row]))
+  const dropped = new Map((audit.dropped ?? []).map((row) => [row.candidate_id ?? row.tag, row.why]))
+  const kept = new Map((audit.accepted ?? []).map((row) => [row.candidate_id ?? row.candidate ?? row.tag, row]))
+  const truncated = new Set((audit.library?.truncated ?? []).map((row) => row.candidate_id ?? row.tag))
+  const merged: NonNullable<typeof audit.merged> =
+    audit.merged ?? (audit.candidates ?? []).map((tag) => ({ tag, scope: null }))
+  const candidateNames = new Map(merged.map((row) => [row.candidate_id ?? row.tag, row.tag]))
+  const clusterOutcomes = new Map(audit.clustering?.clusters.flatMap(({ representative, members }) => {
+    const name = candidateNames.get(representative)
+    const outcome = name ? `聚类未选为代表（代表标签：${name}）` : '聚类未选为代表'
+    return members
+      .filter((id) => id !== representative)
+      .map((id) => [id, outcome] as const)
+  }))
   return merged.map((candidate, index) => {
-    const verdict = verdicts.get(candidate.tag)
-    const final = kept.get(candidate.tag)
-    const why = dropped.get(candidate.tag)
+    const id = candidate.candidate_id ?? candidate.tag
+    const verdict = verdicts.get(id)
+    const final = kept.get(id)
+    const why = dropped.get(id)
     const unassigned = audit.error ? '生产中断' : '未进入产出'
     const outcome = final
       ? (final.tag === candidate.tag ? '保留' : `保留（库内标准名：${final.tag}）`)
-      : why ?? (truncated.has(candidate.tag) ? '超出队列配额' : unassigned)
+      : why ?? (truncated.has(id) ? '超出队列配额' : clusterOutcomes.get(id) ?? unassigned)
     const fits = verdict?.dir_fits ?? {}
-    const targets = audit.directory_targets?.[candidate.tag] ?? Object.keys(fits)
+    const targets = audit.directory_targets?.[id] ?? Object.keys(fits)
     const checks = targets.map((id) => `${id} ${directoryFit(fits[id])}`).join(' · ')
     const displayedFit = final?.dir_id ? fits[final.dir_id] ?? verdict?.in_dir : verdict?.in_dir
     const directory = final?.origin === 'catalog'
       ? '库内复用'
       : displayedFit == null && Object.keys(fits).length ? '见目录判决' : directoryFit(displayedFit)
     return {
-      key: `${candidate.tag}-${index}`,
+      key: candidate.candidate_id ?? `${candidate.tag}-${index}`,
       tag: candidate.tag,
       scope: candidate.scope ?? null,
+      stage: candidate.stage,
       relevance: verdict?.relevance ?? null,
       semantics: verdict?.semantics ?? null,
       value: verdict?.value ?? null,
@@ -99,8 +111,10 @@ function ResponseDetails({ title, responses }: { title: string; responses: Respo
 const COLUMNS: TableProps<AuditRow>['columns'] = [
   { title: '候选标签', dataIndex: 'tag' },
   {
-    title: '层级',
-    render: (_, row) => (row.scope === 'scene' ? '场景级' : row.scope === 'film' ? '全片级' : NA),
+    title: '生成来源',
+    render: (_, row) => row.stage
+      ? (row.stage === 1 ? '一阶段' : '二阶段')
+      : (row.scope === 'scene' ? '场景级' : row.scope === 'film' ? '全片级' : NA),
   },
   { title: '内容支持', render: (_, row) => row.hasVerdict ? score(row.relevance) : '未判' },
   { title: '名称清晰', render: (_, row) => row.hasVerdict ? score(row.semantics) : '未判' },
@@ -137,6 +151,7 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
   const audit = data.audit
   const review = data.review
   const rows = audit ? auditRows(audit) : []
+  const candidateLabel = rows.some((row) => row.stage) ? '送审候选' : '合并候选'
   const judgeErrors = new Map(audit?.judge_trace?.errors?.map(({ attempt, error }) => [attempt, error]))
   const judgeRaw = new Map(audit?.judge_trace?.raw?.map(({ attempt, content }) => [attempt, content]))
   const judgeResponses = [...new Set([...judgeRaw.keys(), ...judgeErrors.keys()])]
@@ -157,7 +172,7 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
       {audit ? (
         <>
           <Typography.Text type="secondary">
-            合并候选 {rows.length} 条 · judge 判决 {audit.verdicts?.length ?? 0} 条
+            {candidateLabel} {rows.length} 条 · judge 判决 {audit.verdicts?.length ?? 0} 条
             {' '}· 最终保留 {audit.accepted?.length ?? 0} 条
           </Typography.Text>
           {judgeErrors.size > 0 && (
@@ -166,7 +181,8 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
           {rows.length > 0 ? (
             <Table<AuditRow>
               size="small" rowKey="key" columns={COLUMNS} dataSource={rows}
-              pagination={false} scroll={{ x: 720 }}
+              pagination={rows.length > 50 ? { pageSize: 50, showSizeChanger: false } : false}
+              scroll={{ x: 720 }}
               expandable={{
                 expandedRowRender: (row) => (
                   <Descriptions size="small" column={1} bordered

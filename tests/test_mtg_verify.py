@@ -84,3 +84,22 @@ def test_verify_pairs_empty_input_makes_no_call():
     client = _Client("{}")
     assert verify_pairs(client, [], run_id="r1") == {}
     assert client.calls == 0
+
+
+def test_verify_pairs_covers_candidates_after_first_batch():
+    class EchoClient:
+        def complete(self, messages, run_id):
+            rows = [line.split("｜", 1)[0][2:] for line in messages[0]["content"].splitlines()
+                    if line.startswith("- 候选")]
+            return LLMResponse(content=json.dumps({"results": [
+                {"candidate": name, "same": False} for name in rows
+            ]}), usage={}, raw={}, ok=True)
+
+    pairs = [(f"候选{i}", f"库{i}", 0.9) for i in range(45)]
+    usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    trace = {}
+    assert verify_pairs(EchoClient(), pairs, run_id="verify", usage=usage, trace=trace) == {
+        name: False for name, _, _ in pairs
+    }
+    assert usage["calls"] == 2
+    assert [row["batch"] for row in trace["batches"]] == [1, 2]

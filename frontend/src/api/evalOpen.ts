@@ -134,12 +134,14 @@ export interface JudgeFunnel {
   merged: number
   verdicts: number
   judge_passed: number
+  cluster_kept?: number
   rank_kept: number
   final: number
   merge_keep_rate: number | null
   judge_coverage: number | null
   judge_pass_rate: number | null
   judge_pass_rate_scored: number | null
+  cluster_keep_rate?: number | null
   rank_keep_rate: number | null
   dir_mount_rate: number | null
   final_keep_rate: number | null
@@ -246,6 +248,7 @@ export interface OpenEvalReport {
  * 三维分 0-4 或 null。目录契合按目录 ID 返回，in_dir 兼容单一目录的历史产物。 */
 export interface JudgeVerdictRow {
   tag: string
+  candidate_id?: string
   relevance: number | null
   semantics: number | null
   value: number | null
@@ -261,13 +264,27 @@ export interface JudgeVerdictRow {
 export interface OpenMovieAudit {
   version?: string
   error?: string
-  merged?: { tag: string; aliases?: string[]; dimension?: string | null; scope?: string | null }[]
+  merged?: {
+    tag: string
+    candidate_id?: string
+    stage?: number
+    aliases?: string[]
+    dimension?: string | null
+    scope?: string | null
+  }[]
+  clustering?: {
+    input: number
+    target: number
+    clusters: { representative: string; members: string[] }[]
+  }
   candidates?: string[]
   directory_targets?: Record<string, string[]>
   verdicts?: JudgeVerdictRow[]
-  dropped?: { tag: string; why: string }[]
-  accepted?: { tag: string; candidate?: string; dir_id?: string | null; origin?: string }[]
-  library?: { truncated?: { tag: string; band?: string | null }[] }
+  dropped?: { tag: string; candidate_id?: string; why: string }[]
+  accepted?: {
+    tag: string; candidate_id?: string; candidate?: string; dir_id?: string | null; origin?: string
+  }[]
+  library?: { truncated?: { tag: string; candidate_id?: string; band?: string | null }[] }
   judge_trace?: {
     raw?: { attempt: number; content: string }[]
     errors?: { attempt: number; error: string }[]

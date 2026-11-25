@@ -129,7 +129,8 @@ def normalize_scope(value) -> str | None:
     return _SCOPE_ALIASES.get(value.strip().lower())
 
 
-def parse_generation_items(text: str, max_items: int | None = 20) -> list[dict]:
+def parse_generation_items(text: str, max_items: int | None = 20, *,
+                           exact_names: bool = False) -> list[dict]:
     """生成输出 → [{tag, scope, dimension, dir, scenes, reason, desc}]（非法项丢弃）。"""
     if max_items is not None and max_items <= 0:
         return []
@@ -141,7 +142,7 @@ def parse_generation_items(text: str, max_items: int | None = 20) -> list[dict]:
         tag = str(entry.get("tag") or entry.get("tag_name") or "").strip()
         if not tag or len(tag) > _MAX_TAG_LEN:
             continue
-        key = tag.casefold()
+        key = tag if exact_names else tag.casefold()
         if key in seen:
             continue
         seen.add(key)
@@ -250,8 +251,11 @@ def parse_judge_items(text: str) -> list[dict]:
             continue
         scenes = [s.strip() for s in raw_scenes or []
                   if isinstance(s, str) and s.strip()]
+        candidate_id = entry.get("candidate_id")
         items.append({
             "tag": tag,
+            **({"candidate_id": candidate_id.strip()} if isinstance(candidate_id, str)
+               and candidate_id.strip() else {}),
             **scores,
             "dir_fits": entry.get("dir_fits"),
             "confidence": _clamp_confidence(entry.get("confidence")),

@@ -227,13 +227,8 @@ class _OpenJob:
     live_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
-    """run 审计 → {最终标签名: judge 三维参考分}。
-
-    审计 verdicts 按候选名记 judge 分，accepted 行记候选→最终名映射
-    （库内对齐可能改名）。读不到审计/映射缺失 → 空 dict：参考缺失不
-    影响独立评审（评审层对 judge_reference=None 的行不附参考）。
-    """
+def _judge_references(run_settings: Settings, tt: str) -> dict[tuple, dict]:
+    """按最终标签和挂载点取参考分，旧审计按最终标签名回退。"""
     try:
         audit = json.loads((Path(run_settings.mtg_report_dir) / f"{tt}.json")
                            .read_text(encoding="utf-8"))
@@ -241,16 +236,20 @@ def _judge_references(run_settings: Settings, tt: str) -> dict[str, dict]:
         return {}
     if not isinstance(audit, dict):
         return {}
-    verdicts = {str(row["tag"]): row for row in audit.get("verdicts") or []
+    verdicts = {row.get("candidate_id") or row["tag"]: row
+                for row in audit.get("verdicts") or []
                 if isinstance(row, dict) and row.get("tag")}
-    references: dict[str, dict] = {}
+    references: dict[tuple, dict] = {}
     for row in audit.get("accepted") or []:
         if not isinstance(row, dict) or not row.get("tag"):
             continue
-        verdict = verdicts.get(str(row.get("candidate")))
+        verdict = verdicts.get(row.get("candidate_id") or row.get("candidate"))
         if verdict is None:
             continue
-        references[str(row["tag"])] = {
+        key = (row["tag"], row.get("origin"), row.get("target_type"), row.get("target_id"))
+        if not row.get("target_id"):
+            key = (row["tag"],)
+        references[key] = {
             "relevance": verdict.get("relevance"),
             "semantics": verdict.get("semantics"),
             "value": verdict.get("value"),
@@ -757,7 +756,9 @@ class OpenEvalService:
                 "desc": (definition.description if (definition := library.tag(tag.tag_id))
                          else tag.candidate_description), "level": tag.level,
                 "scene_ids": [ev.scene_id for ev in (tag.evidence or [])],
-                "judge_reference": references.get(tag.tag_name),
+                "judge_reference": references.get(
+                    (tag.tag_name, tag.origin, tag.target_type, tag.target_id),
+                    references.get((tag.tag_name,))),
             } for tag in produced]
             try:
                 self._save_snapshot(job.run_id, tt, snapshot, content)

@@ -1,6 +1,6 @@
 """judge 审核：逐候选做三维结果导向评分（relevance/semantics/value，0-4）。
 
-一次调用判完全部候选（控制成本），输出逐条三维分。语义边界：
+候选分批送审，逐条返回三维分。语义边界：
 - 评标签的实际效果——内容支持多准确、名称是否清晰、对检索浏览有多大
   作用，不评标签好不好听；释义此时尚未补写，semantics 只评名称本身；
 - 内容证据不足时 relevance 可填 null；semantics 和 value 评名称，给 0-4 整数。
@@ -34,15 +34,21 @@ from tagplatform.schemas import ContentJSON
 
 logger = logging.getLogger(__name__)
 
+_MAX_BATCH_SIZE = 20
 
-def build_judge_template() -> dict:
+
+def build_judge_template(*, with_candidate_ids: bool = False) -> dict:
+    marks = "目录 {{目录 ID}}"
+    if with_candidate_ids:
+        marks = "excerpt｜依据场景 {{来源场景 ID}}｜" + marks + "｜候选 ID {{候选 ID}}"
     line = candidate_line("{{候选标签}}", "{{维度}}",
-                          "〔目录 {{目录 ID}}〕{{生成侧的简短理由}}")
+                          f"〔{marks}〕{{{{生成侧的简短理由}}}}")
     dirs = [{"dir_id": "{{目录 ID}}", "path": "{{目录全路径}}",
              "description": "{{目录定义}}"}]
     return {
-        "messages": render_judge_messages("{{影片资料与按场景组织的内容文本}}", line,
-                                          dir_block=judge_dir_block(dirs)),
+        "messages": render_judge_messages(
+            "{{影片资料与按场景组织的内容文本}}", line, dir_block=judge_dir_block(dirs),
+            with_candidate_ids=with_candidate_ids, with_excerpts=with_candidate_ids),
         "retry_suffix": JUDGE_RETRY_HINT,
     }
 
@@ -53,11 +59,18 @@ class JudgeError(RuntimeError):
 
 def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
     """判决项 → {候选归一化标签: 判决}：精确优先，其次唯一前缀匹配。"""
-    tags_by_key = {normalize_key(c["tag"]): c["tag"]
-                   for c in candidates if normalize_key(c["tag"])}
+    tags_by_id = {c["candidate_id"]: c["tag"] for c in candidates if c.get("candidate_id")}
+    tags_by_key = {normalize_key(c["tag"]): c["tag"] for c in candidates
+                   if not c.get("candidate_id") and normalize_key(c["tag"])}
     mapped: dict[str, dict] = {}
     leftovers: list[tuple[str, dict]] = []
     for item in items:
+        candidate_id = item.get("candidate_id")
+        if candidate_id:
+            if candidate_id in tags_by_id:
+                item["tag"] = tags_by_id[candidate_id]
+                mapped.setdefault(candidate_id, item)
+            continue
         key = normalize_key(item["tag"])
         if key in tags_by_key:
             mapped.setdefault(key, item)
@@ -71,7 +84,8 @@ def _map_items(items: list[dict], candidates: list[dict]) -> dict[str, dict]:
         if len(hits) == 1 and hits[0] not in mapped:
             mapped[hits[0]] = item
     for key, item in mapped.items():
-        item["tag"] = tags_by_key[key]
+        if key in tags_by_key:
+            item["tag"] = tags_by_key[key]
     return mapped
 
 
@@ -81,16 +95,36 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
                      usage: dict | None = None,
                      trace: dict | None = None,
                      dirs: list[dict] | None = None) -> dict[str, dict]:
-    """候选 → {归一化标签名: 判决 dict}（未返回的候选由上层按未判处理）。
+    """候选 → {候选 ID 或归一化标签名: 判决 dict}。
 
     usage 传入 dict 时累计本阶段的调用数与 tokens（审计报告用）；
     trace 传入 dict 时记录逐次原始响应（`raw`）、解析错误（`errors`）与
     末轮兜底保住的判决条数（`salvaged`）——审计据此还原异常形态。
     目录契合按候选及其目标目录校验。目录漏判时仍保留已有的三维评分。
     """
-    if not candidates:
-        return {}
-    pending = {normalize_key(row["tag"]): row for row in candidates}
+    verdicts: dict[str, dict] = {}
+    errors: list[JudgeError] = []
+    for start in range(0, len(candidates), _MAX_BATCH_SIZE):
+        batch = candidates[start:start + _MAX_BATCH_SIZE]
+        batch_run_id = (run_id if len(candidates) <= _MAX_BATCH_SIZE
+                        else f"{run_id}:batch-{start // _MAX_BATCH_SIZE + 1:03d}")
+        try:
+            verdicts.update(_judge_batch(
+                client, content, batch, run_id=batch_run_id, retries=retries,
+                include_dialogue=include_dialogue, usage=usage, trace=trace, dirs=dirs))
+        except JudgeError as exc:
+            errors.append(exc)
+            logger.warning("judge 批次 %s 未取得有效判决：%s", batch_run_id, exc)
+    if errors and not verdicts:
+        raise errors[0]
+    return verdicts
+
+
+def _judge_batch(client, content, candidates, *, run_id, retries, include_dialogue,
+                 usage, trace, dirs) -> dict[str, dict]:
+    pending = {row.get("candidate_id") or normalize_key(row["tag"]): row
+               for row in candidates}
+    trace_offset = len(trace.get("raw", [])) if trace is not None else 0
     verdicts: dict[str, dict] = {}
     dir_index = {entry["dir_id"]: entry for entry in (dirs or [])}
     last_error = ""
@@ -109,7 +143,8 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         raw_text = response.content or ""
         last_raw = raw_text[:400]
         if trace is not None:
-            trace.setdefault("raw", []).append({"attempt": attempt, "content": raw_text})
+            trace.setdefault("raw", []).append(
+                {"attempt": trace_offset + attempt, "content": raw_text})
         problems = []
         if response.ok:
             try:
@@ -143,14 +178,15 @@ def judge_candidates(client, content: ContentJSON, candidates: list[dict],
         if problems:
             last_error = "；".join(problems)
             if trace is not None:
-                trace.setdefault("errors", []).append({"attempt": attempt, "error": last_error})
+                trace.setdefault("errors", []).append(
+                    {"attempt": trace_offset + attempt, "error": last_error})
         if not pending or not response.ok:
             break
     if pending:
         if not verdicts:
             raise JudgeError(f"{last_error}；原始输出前 400 字: {last_raw!r}")
         if trace is not None:
-            trace["salvaged"] = len(verdicts)
+            trace["salvaged"] = trace.get("salvaged", 0) + len(verdicts)
         logger.warning("judge 部分候选未判，保留 %d 条合格判决：%s", len(verdicts), last_error)
     for verdict in verdicts.values():
         if not verdict["dir_fits"]:

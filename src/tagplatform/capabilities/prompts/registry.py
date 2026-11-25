@@ -17,10 +17,11 @@ from tagplatform.capabilities.prompts.assets import (
 from tagplatform.capabilities.prompts.mtg import (
     DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT, DIR_FIELD_RULE_TEXT,
     CATALOG_ONLY_HINT_TEXT, DIR_HINT_HEAD_TEXT, DIR_HINT_TAIL_TEXT, FILM_GOAL_TEXT,
-    GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT, JUDGE_CRITERIA,
+    EXCERPT_DIR_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
+    JUDGE_CANDIDATE_ID_TEXT, JUDGE_CRITERIA, JUDGE_EXCERPT_TEXT,
     JUDGE_DIR_BLOCK_HEAD_TEXT, JUDGE_DIR_FIT_TEXT,
     JUDGE_RETRY_HINT, JUDGE_ROLE_BRIEF, LIBRARY_HINT_HEAD_TEXT,
-    SCENE_GOAL_TEXT, VERIFY_INSTRUCTIONS, VERIFY_OUTPUT_FORMAT,
+    SCENE_GOAL_TEXT, TARGET_DIR_RULE_TEXT, VERIFY_INSTRUCTIONS, VERIFY_OUTPUT_FORMAT,
     VERIFY_RETRY_HINT,
 )
 from tagplatform.capabilities.prompts.open_review import (
@@ -54,9 +55,11 @@ def list_prompt_registry() -> list[dict]:
             "items": [
                 {"name": "GENERATION_ROLE_TEXT", "text": GENERATION_ROLE_TEXT},
                 {"name": "SCENE_GOAL_TEXT", "text": SCENE_GOAL_TEXT},
+                {"name": "EXCERPT_DIR_GOAL_TEXT", "text": EXCERPT_DIR_GOAL_TEXT},
                 {"name": "FILM_GOAL_TEXT", "text": FILM_GOAL_TEXT},
                 {"name": "HOW_TO_FILL_TEXT", "text": HOW_TO_FILL_TEXT},
                 {"name": "DIR_FIELD_RULE_TEXT", "text": DIR_FIELD_RULE_TEXT},
+                {"name": "TARGET_DIR_RULE_TEXT", "text": TARGET_DIR_RULE_TEXT},
                 {"name": "DIR_HINT_HEAD_TEXT", "text": DIR_HINT_HEAD_TEXT},
                 {"name": "CATALOG_ONLY_HINT_TEXT", "text": CATALOG_ONLY_HINT_TEXT},
                 {"name": "DIR_HINT_TAIL_TEXT", "text": DIR_HINT_TAIL_TEXT},
@@ -64,6 +67,8 @@ def list_prompt_registry() -> list[dict]:
                  "text": LIBRARY_HINT_HEAD_TEXT},
                 {"name": "JUDGE_ROLE_BRIEF", "text": JUDGE_ROLE_BRIEF},
                 {"name": "JUDGE_CRITERIA", "text": JUDGE_CRITERIA},
+                {"name": "JUDGE_EXCERPT_TEXT", "text": JUDGE_EXCERPT_TEXT},
+                {"name": "JUDGE_CANDIDATE_ID_TEXT", "text": JUDGE_CANDIDATE_ID_TEXT},
                 {"name": "JUDGE_DIR_BLOCK_HEAD_TEXT",
                  "text": JUDGE_DIR_BLOCK_HEAD_TEXT},
                 {"name": "JUDGE_DIR_FIT_TEXT", "text": JUDGE_DIR_FIT_TEXT},

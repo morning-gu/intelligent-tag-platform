@@ -42,6 +42,7 @@ class MergedCandidate:
     # 模型自报的归属目录（原始串，可能是 id / 路径 / 名字）；合并时取多数派，
     # 由流水线解析成 dir_id 并校验，这里不做合法性判断。
     dir_raw: str | None = None
+    candidate_id: str | None = None
 
 
 def _clusters(vectors, threshold: float) -> list[list[int]]:
