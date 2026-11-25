@@ -76,6 +76,17 @@ class Settings(BaseSettings):
     closed_evi_weights: str = "0.3,0.3,0.4"
     # 模式 B 归一匹配阈值：与库内标签相似度 >= 该值（含等于）归入 catalog
     open_match_threshold: float = 0.85
+    # ---------- 阶段 2.5：closed 产出的置信度计算（2026-12） ----------
+    # 置信度 Craw = w1·Ccons + w2·Cver + w3·Cmod（评分一致性 / 证据可验性 /
+    # 跨模态一致性）。逗号分隔，顺序固定 (Ccons, Cver, Cmod)，权重和归一化
+    #（TAGPLT_CLOSED_CONFIDENCE_WEIGHTS 可覆盖，"45,30,25" 与 "0.45,0.30,0.25" 等价）
+    closed_confidence_weights: str = "0.45,0.30,0.25"
+    # Ccons 的波动容忍参数 b：Ccons = exp(−As/b)（As = 三次 Sevi 融合分的总体方差）
+    closed_confidence_variance_tolerance: float = 0.2
+    # Cmod 的融合系数 j：Cmod = j·Cs + (1−j)·(1−Cc)
+    closed_confidence_fusion_j: float = 0.5
+    # 置信度 MD 报告落盘目录（文件名：资产名_时间戳.md；每任务一份）
+    closed_confidence_report_dir: str = "data/audit/confidence"
     # 生成任务线程池大小；0 = 同步执行（测试与单步调试）
     generation_workers: int = 2
 
@@ -180,6 +191,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "closed_evi_weights 需为三个非负数（content,scene,frame），"
                 f"当前: {self.closed_evi_weights!r}")
+        total = sum(raw)
+        return (raw[0] / total, raw[1] / total, raw[2] / total)
+
+    @property
+    def closed_confidence_weight_values(self) -> tuple[float, float, float]:
+        """`closed_confidence_weights` → 归一化三权重 (Ccons, Cver, Cmod)。
+
+        与 `closed_evi_weight_values` 同款式：权重和为 0 视为配置错误，
+        解析失败在首次取值时报错，不让任务跑到一半才发现写错了。
+        """
+        try:
+            raw = [float(part)
+                   for part in self.closed_confidence_weights.split(",")
+                   if part.strip()]
+        except ValueError as exc:
+            raise ValueError(
+                "closed_confidence_weights 无法解析: "
+                f"{self.closed_confidence_weights!r}") from exc
+        if len(raw) != 3 or any(w < 0 for w in raw) or sum(raw) <= 0:
+            raise ValueError(
+                "closed_confidence_weights 需为三个非负数"
+                f"（Ccons,Cver,Cmod），当前: {self.closed_confidence_weights!r}")
         total = sum(raw)
         return (raw[0] / total, raw[1] / total, raw[2] / total)
 

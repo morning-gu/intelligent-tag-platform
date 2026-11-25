@@ -25,6 +25,11 @@ from tagplatform.settings import Settings
 # 避免单测往仓库里写文件、或误扫 /cache/MovieNet（零网络、零外部依赖红线）。
 os.environ.setdefault("TAGPLT_MTG_REPORT_DIR", tempfile.mkdtemp(prefix="mtg-audit-"))
 os.environ.setdefault("TAGPLT_DATASET_ROOT", tempfile.mkdtemp(prefix="mtg-dataset-"))
+# 置信度 MD 报告目录（closed/confidence.py 落盘）：默认真实目录
+# data/audit/confidence——测试必须重定向，否则全量回归会往仓库写文件。
+os.environ.setdefault(
+    "TAGPLT_CLOSED_CONFIDENCE_REPORT_DIR",
+    tempfile.mkdtemp(prefix="confidence-audit-"))
 # 只由显式指定临时目录的夹具采样，避免 Mock 流程覆盖本地实跑样本。
 os.environ.setdefault("TAGPLT_MTG_PROMPT_SAMPLE_DIR", "")
 # 评审模型默认空（同模回落）：env 优先级高于 .env，隔离本地 .env 里配的
@@ -121,7 +126,12 @@ def client(tmp_path, request):
                         eval_output_root=str(tmp_path / "eval-out"),
                         # 开放评测产物根同理隔离（open-eval Task 6）：默认
                         # data/eval/open 是相对路径，会污染真实工作区
-                        open_eval_output_root=str(tmp_path / "open-eval-out"))
+                        open_eval_output_root=str(tmp_path / "open-eval-out"),
+                        # 置信度 MD 报告目录同理隔离（closed 置信度）：
+                        # 默认 data/audit/confidence 是相对路径，会污染
+                        # 真实工作区
+                        closed_confidence_report_dir=str(
+                            tmp_path / "confidence-out"))
     engine = create_engine_for(str(db_path))
     Base.metadata.create_all(engine)
     engine.dispose()  # 建表引擎即弃，app 内部自建引擎

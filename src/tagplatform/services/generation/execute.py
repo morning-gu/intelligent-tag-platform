@@ -47,6 +47,7 @@ from tagplatform.services.generation.assemble import (
     build_spec,
     load_assembly_context,
 )
+from tagplatform.services.generation.closed.confidence import apply_confidence
 from tagplatform.services.generation.filtering import FilterContext, run_filter_chain
 from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
 from tagplatform.services.generation.persist import persist_tags
@@ -130,6 +131,14 @@ def run_generation_task(
                 task.task_id, candidate_count, len(tags),
                 "、".join(f"{report.name}(保留 {report.kept}/丢弃 "
                           f"{report.dropped})" for report in reports))
+        # 6.6 置信度计算（closed-only，2026-12）：Craw = 0.45·Ccons +
+        #     0.30·Cver + 0.25·Cmod 覆写 tags[*].confidence（producer 原
+        #     值为融合 Sevi），并把全量中间数据写成 MD 报告（资产名+时间
+        #     命名）。环节内部全面降级：任何失败只 log warning 保持原值，
+        #     绝不把任务落 failed（不进任务级事务）。
+        if task.mode == "closed" and tags:
+            apply_confidence(tags, spec, asset.title or task.asset_id,
+                             session, llm)
         # 7. 结果入库（不 commit）：persist_tags 内部先清同 origin 的 pending
         #    行再逐条插入，重跑不会在审核队列里叠加历史候选
         summary = persist_tags(session, asset_id, task.task_id, tags, task.mode)
