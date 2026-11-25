@@ -68,6 +68,7 @@ class ReviewItemOut(BaseModel):
     id: int
     asset_id: str
     asset_title: str | None = None
+    tag_id: str | None = None
     tag_name: str
     origin: str
     mode: str | None = None
@@ -265,6 +266,7 @@ def list_review_queue(
             id=row.id,
             asset_id=row.asset_id,
             asset_title=asset_title,
+            tag_id=row.tag_id,
             # 展示解析 candidate_name 优先、库内标签回退
             # 三级回退同 _shared._result_out：历史行的 tag_id 不在 JSON
             # 库里时显示 id，而不是空白

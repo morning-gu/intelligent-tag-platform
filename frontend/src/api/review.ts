@@ -43,6 +43,8 @@ export interface ReviewItem {
   id: number
   asset_id: string
   asset_title: string | null
+  /** 库内已有标签 ID；非 null 表示命中库内标签（不支持审核修改），null 表示库外新词候选。 */
+  tag_id: string | null
   tag_name: string
   origin: string
   mode: string | null

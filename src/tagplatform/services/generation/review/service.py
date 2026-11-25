@@ -169,6 +169,8 @@ def apply_review(session: Session, row_id: int, action: str,
 
     new_fields: dict[str, str] = {}
     if action == "modify":
+        if row.tag_id is not None:
+            raise ValueError("库内已有标签不支持审核修改，请使用通过、拒绝或合并")
         for canonical, alias in _MODIFY_FIELDS:
             value = (payload or {}).get(canonical)
             if value is None:

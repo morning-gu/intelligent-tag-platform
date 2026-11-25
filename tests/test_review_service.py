@@ -95,16 +95,16 @@ def test_modify_fields_and_approves(session):
     assert returned.review_comment == "措辞修正"
 
 
-def test_modify_catalog_row_maps_display_keys(session):
-    """库内行按展示别名改行内字段，不触碰共享 tag_catalog 字典。"""
+def test_modify_catalog_row_raises_value_error(session):
+    """库内已有标签行（tag_id 非空）禁止审核修改，避免出现候选名与正式库名分裂。"""
     row = _seed_row(session, origin="closed", tag_id="tag_action")
-    returned = apply_review(session, row.id, "modify", "alice", {
-        "tag_name": "动作改", "description": "新定义", "dir_id": "dir_theme"})
-    assert returned.candidate_name == "动作改"
-    assert returned.candidate_description == "新定义"
-    assert returned.candidate_dir_id == "dir_theme"
-    assert returned.tag_id == "tag_action"  # 挂载关系不动
-    assert returned.review_status == "approved"
+    with pytest.raises(ValueError, match="库内已有标签不支持审核修改"):
+        apply_review(session, row.id, "modify", "alice", {
+            "tag_name": "动作改", "description": "新定义", "dir_id": "dir_theme"})
+    fresh = session.get(PreAssetTag, row.id)
+    assert fresh.review_status == "pending"
+    assert fresh.tag_id == "tag_action"
+    assert fresh.candidate_name is None
 
 
 def test_modify_without_mappable_field_raises(session):

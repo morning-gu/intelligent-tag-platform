@@ -30,7 +30,7 @@ ASSET_TAG_KEYS = {"id", "tag_name", "origin", "relevance_score", "confidence",
                   "review_status", "target_type", "dir_id", "dir_name",
                   "dir_path", "evidence", "tag_id", "candidate_name", "created_at"}
 
-REVIEW_ITEM_KEYS = {"id", "asset_id", "asset_title", "tag_name", "origin",
+REVIEW_ITEM_KEYS = {"id", "asset_id", "asset_title", "tag_id", "tag_name", "origin",
                     "mode", "tag_type", "confidence", "relevance",
                     "review_status", "target_type", "dir_id", "dir_name",
                     "dir_path", "evidence", "task_id", "reviewer_id",
@@ -377,6 +377,7 @@ def test_review_items_default_ordering_and_row_shape(client):
     by_id = {it["id"]: it for it in body["items"]}
     r1 = by_id[ids["r1"]]
     assert set(r1.keys()) == REVIEW_ITEM_KEYS
+    assert r1["tag_id"] is None
     assert r1["tag_name"] == "反转" and r1["tag_type"] is None  # 库外新词无类型
     assert r1["dir_id"] == "dir_scene" and r1["dir_name"] == "微观语义标签"
     assert r1["dir_path"] == "微观语义标签"
@@ -388,6 +389,7 @@ def test_review_items_default_ordering_and_row_shape(client):
     assert r1["evidence"] == [{"scene_id": "s1", "start_ms": 0, "end_ms": 100,
                                "description": "开场反转"}]
     r2 = by_id[ids["r2"]]
+    assert r2["tag_id"] == "tag_action"
     assert r2["tag_name"] == "动作" and r2["tag_type"] == "val_fixed"
     assert r2["dir_id"] == "dir_genre" and r2["dir_name"] == "主类型"
     assert r2["dir_path"] == "内容特征标签/主类型"
@@ -514,47 +516,53 @@ def test_review_items_merged_row_uses_catalog_name(client):
     assert item["origin"] == "open"
 
 
-def test_modify_display_name_visible_in_list_and_detail(client):
-    """modify 后展示三处同步：审核列表、任务详情、资产已通过标签。"""
+def test_modify_rejected_on_catalog_row_and_synced_on_candidate_row(client):
+    """库内已有标签行禁止 modify（422）；新词候选行 modify 后审核列表、任务详情与资产标签同步。"""
     factory = client.app.state.session_factory
     with factory() as s:
         s.add(MediaAsset(asset_id="a_mod", asset_type="movie", title="改名影片"))
         s.add(TagGenerationTask(task_id="gen_mod", asset_id="a_mod",
-                                mode="closed", status="succeeded",
+                                mode="open", status="succeeded",
                                 created_at=_NOW))
         s.flush()
-        row = PreAssetTag(asset_id="a_mod", target_type="content",
-                          target_id="a_mod", tag_id="tag_action",
-                          origin="closed", confidence=0.8,
-                          evidence_json="[]", review_status="pending",
-                          task_id="gen_mod", created_at=_NOW, updated_at=_NOW)
-        s.add(row)
+        catalog_row = PreAssetTag(asset_id="a_mod", target_type="content",
+                                  target_id="a_mod", tag_id="tag_action",
+                                  origin="closed", confidence=0.8,
+                                  evidence_json="[]", review_status="pending",
+                                  task_id="gen_mod", created_at=_NOW, updated_at=_NOW)
+        cand_row = PreAssetTag(asset_id="a_mod", target_type="content",
+                               target_id="a_mod", tag_id=None,
+                               candidate_name="原始新词", candidate_description="原始定义",
+                               candidate_dir_id="dir_theme",
+                               origin="open", confidence=0.7,
+                               evidence_json="[]", review_status="pending",
+                               task_id="gen_mod", created_at=_NOW, updated_at=_NOW)
+        s.add_all([catalog_row, cand_row])
         s.flush()
-        row_id = row.id
+        catalog_id, cand_id = catalog_row.id, cand_row.id
         s.commit()
 
-    # 改名前：列表/详情显示库内名；资产标签视图只收 approved 行 → 空
-    items = client.get("/api/v1/review/items").json()["items"]
-    assert items[0]["tag_name"] == "动作" and items[0]["tag_type"] == "val_fixed"
-    detail = client.get("/api/v1/generation/tasks/gen_mod").json()
-    assert detail["results"][0]["tag_name"] == "动作"
-    assert client.get("/api/v1/assets/a_mod/tags").json() == []
-
-    modified = client.post(f"/api/v1/asset-tags/{row_id}/review", json={
+    # 库内已有标签行禁止 modify → 422 且状态不变
+    rejected = client.post(f"/api/v1/asset-tags/{catalog_id}/review", json={
         "action": "modify", "payload": {"tag_name": "动作改"}})
-    assert modified.status_code == 200
-    assert modified.json()["tag_name"] == "动作改"
+    assert rejected.status_code == 422
+    assert "库内已有标签不支持审核修改" in rejected.json()["detail"]
 
-    # 改名后：审核侧（列表/详情）显示修改后的名字；正式挂载按 doc §3.6
-    # 复制 define 现值，资产详情仍是库内规范名"动作"
-    items = client.get("/api/v1/review/items").json()["items"]
-    assert items[0]["tag_name"] == "动作改"
+    # 新词候选行 modify → 200，并同步写入 tag_define 与 asset_tag
+    modified = client.post(f"/api/v1/asset-tags/{cand_id}/review", json={
+        "action": "modify", "payload": {"tag_name": "修正新词"}})
+    assert modified.status_code == 200
+    assert modified.json()["tag_name"] == "修正新词"
+
+    items = {it["id"]: it for it in client.get("/api/v1/review/items").json()["items"]}
+    assert items[catalog_id]["tag_id"] == "tag_action"
+    assert items[catalog_id]["review_status"] == "pending"
+    assert items[cand_id]["tag_name"] == "修正新词"
     detail = client.get("/api/v1/generation/tasks/gen_mod").json()
-    assert detail["results"][0]["tag_name"] == "动作改"
+    by_id = {row["id"]: row for row in detail["results"]}
+    assert by_id[cand_id]["tag_name"] == "修正新词"
     tags = client.get("/api/v1/assets/a_mod/tags").json()
-    assert tags[0]["tag_name"] == "动作"
-    # 候选名随行返回，前端要展示"审核侧改名"时用它
-    assert tags[0]["candidate_name"] == "动作改"
+    assert [t["tag_name"] for t in tags] == ["修正新词"]
 
 
 def test_bad_evidence_degrades_to_empty_list(client):

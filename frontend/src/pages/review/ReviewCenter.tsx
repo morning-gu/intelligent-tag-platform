@@ -378,7 +378,9 @@ export default function ReviewCenter() {
           >
             <Button type="link" size="small" danger>拒绝</Button>
           </Popconfirm>
-          <Button type="link" size="small" onClick={() => openModify(item)}>修改</Button>
+          {item.tag_id === null && (
+            <Button type="link" size="small" onClick={() => openModify(item)}>修改</Button>
+          )}
           {/* 合并 = 候选名记为库内标签别名（不改标准名） */}
           <Button type="link" size="small" onClick={() => openMerge(item)}>合并</Button>
         </Space>
