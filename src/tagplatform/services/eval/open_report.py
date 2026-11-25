@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING
 
 from tagplatform.services.eval.report import (
     BANNER_PARTIAL,
-    NOTE_SILVER,
     _dump_json,
 )
 from tagplatform.services.eval.tag_quality import MAX_SCORE, quality_metrics
@@ -422,7 +421,6 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
                                  for r in results
                                  if r.ok and r.review_error is not None],
         "warnings": warnings,
-        "note": NOTE_SILVER,
     }
 
 
@@ -544,12 +542,15 @@ def render_open_report_md(report: dict) -> str:
         rows = ([{**r, "_group": "命中"} for r in movie.get("hits") or []]
                 + [{**r, "_group": "新词"} for r in movie.get("new_words") or []])
         if rows:
-            lines += ["", "| 组 | 标签 | 层级 | 相关 | 语义 | 价值 | 通过 | 理由 |",
-                      "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+            lines += ["", "| 组 | 标签 | 生成阶段 | 挂载目录 | 挂载层级 | 相关 | 语义 | 价值 | 通过 | 理由 |",
+                      "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
             for row in rows:
                 review = row.get("review")
                 name = row.get("tag_name") or row.get("name")
-                level = {"scene": "场景", "film": "全片"}.get(row.get("level"), "—")
+                stage = {"scene": "一阶段", "film": "二阶段"}.get(row.get("level"), "—")
+                directory = row.get("dir_name") or row.get("dir_id") or "—"
+                mount_level = {"content": "全片级", "scene": "场景级", "character": "角色级"}.get(
+                    row.get("target_type") or "", "—")
                 if review is None:
                     passed = "评审失败" if movie.get("review_error") else "待评"
                 elif review["pass"] is None:
@@ -557,7 +558,7 @@ def render_open_report_md(report: dict) -> str:
                 else:
                     passed = "是" if review["pass"] else "否"
                 reason = (review or {}).get("reason") or ""
-                lines.append(f"| {row['_group']} | {name} | {level} "
+                lines.append(f"| {row['_group']} | {name} | {stage} | {directory} | {mount_level} "
                              f"| {_score_cell(review, 'relevance')} "
                              f"| {_score_cell(review, 'semantics')} "
                              f"| {_score_cell(review, 'value')} "
@@ -585,8 +586,6 @@ def render_open_report_md(report: dict) -> str:
               f"，模态：{cal.get('modalities')}", ""]
     for warning in report.get("warnings") or []:
         lines.append(f"> ⚠ {warning}")
-    if report.get("note"):
-        lines += ["", report["note"]]
     return "\n".join(lines) + "\n"
 
 

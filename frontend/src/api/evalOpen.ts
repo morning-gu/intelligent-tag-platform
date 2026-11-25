@@ -186,9 +186,8 @@ export interface OpenMovieRow {
 /** 开放评测报告（GET /runs/{id}/report，report.json 原样透出，与后端
  * assemble_open_report 结构一致，键名逐一镜像 open_report.py，改动前先读
  * 该模块的组装代码）：banner 为 **list[str]**（部分运行/同模评审/小样本，
- * 全量干净 run → 空数组）；warnings 为口径警示列表；note 为银标准警示
- * 原文，展示时恒不可省。汇总微口径：通过率分母只计有判定行，评审失败片
- * 整体排除（None≠0）。 */
+ * 全量干净 run → 空数组）；warnings 为口径警示列表。汇总微口径：通过率分母
+ * 只计有判定行，评审失败片整体排除（None≠0）。 */
 export interface OpenEvalReport {
   schema_version: number
   status: string
@@ -248,7 +247,6 @@ export interface OpenEvalReport {
   failed_movies: { tt: string; error: string }[]
   review_failed_movies: { tt: string; review_error: string }[]
   warnings: string[]
-  note: string
 }
 
 /** 生产 judge 的一条判决（审计 verdicts 行，键与 parse_judge_items 一致）：

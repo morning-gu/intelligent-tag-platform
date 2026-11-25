@@ -1,6 +1,6 @@
 // 开放评测报告视图测试（三维评审口径，分支式内容组织）：以与后端
 // open_report.assemble_open_report 键逐一镜像的夹具驱动各块视图——
-// ① banner/warnings 逐条 Alert + 银标准 note 恒渲染 ② 汇总卡（通过率族
+// ① banner/warnings 逐条 Alert ② 汇总卡（通过率族
 // + 新词占比 + 三维满分率，null → 暂无）③ 评分分布表（0-4 五档 + 无法
 // 判断 + 联合满分率）④ judge 审计段（数量漏斗/三维聚合/dropped 中文键/
 // bands）⑤ 逐片折叠明细（默认折叠；展开后失败片置顶、评审失败次之；
@@ -110,17 +110,15 @@ function baseReport(over: Partial<OpenEvalReportData> = {}): OpenEvalReportData 
     failed_movies: [{ tt: 'tt0000003', error: 'RuntimeError: produce 失败' }],
     review_failed_movies: [],
     warnings: ['评审失败 1 部，已整体排除出通过率'],
-    note: 'genome relevance 是模型输出非人工标注',
     ...over,
   }
 }
 
 describe('OpenEvalReport 报告视图', () => {
-  it('banner 与 warnings 逐条渲染；银标准 note 恒渲染', () => {
+  it('banner 与 warnings 逐条渲染', () => {
     render(<OpenEvalReport report={baseReport()} runId={RUN_ID} />)
     expect(screen.getByText('部分运行：指标仅覆盖完成影片，与全量口径不可直接横比')).toBeInTheDocument()
     expect(screen.getByText('评审失败 1 部，已整体排除出通过率')).toBeInTheDocument()
-    expect(screen.getByText('genome relevance 是模型输出非人工标注')).toBeInTheDocument()
   })
 
   it('汇总卡：通过率族 + 新词占比 + 三维满分率，样本核算三类分开', () => {
@@ -272,6 +270,5 @@ describe('OpenEvalReport 报告视图', () => {
     expect(screen.queryByRole('region', { name: '逐片明细' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'produce 失败影片' })).not.toBeInTheDocument()
     expect(screen.getByText(/数量漏斗 暂无/)).toBeInTheDocument()
-    expect(screen.getByText('genome relevance 是模型输出非人工标注')).toBeInTheDocument()
   })
 })
