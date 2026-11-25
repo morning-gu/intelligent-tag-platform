@@ -53,7 +53,7 @@ def test_recall_embeds_content_as_query():
     recall_candidates(library, rec, ["雨夜中警方展开追击"], top_k=3)
     assert "query" in rec.roles()
     assert rec.texts_by_role("query") == ["雨夜中警方展开追击"]
-    assert "雨夜追击" in rec.texts_by_role("passage")
+    assert "雨夜追击。雨夜中的追击" in rec.texts_by_role("passage")
 
 
 def test_open_producer_embeds_candidates_as_query(session, content_fixture):

@@ -429,8 +429,14 @@ def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple
     candidate, verdict, _ = row
     value = (verdict or {}).get("value")
     aligned = alignment.get(candidate.tag)
-    cosine = aligned.cosine if aligned is not None else None
-    return (-(value if isinstance(value, int) else 0), cosine if cosine is not None else 0.0)
+    if aligned is None:
+        similarity = 0.0
+    elif aligned.band == BAND_DUPLICATE:
+        # 精确同名即已存在库内：无论库侧带描述向量的余弦多高，同价值下均排在库外新词之后
+        similarity = 1.0
+    else:
+        similarity = aligned.cosine if aligned.cosine is not None else 0.0
+    return (-(value if isinstance(value, int) else 0), similarity)
 
 
 def _plan(alignment: dict[str, Alignment], settings: Settings,

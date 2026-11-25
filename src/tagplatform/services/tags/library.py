@@ -44,6 +44,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from tagplatform.capabilities.vectors import decode_vector
+
 logger = logging.getLogger(__name__)
 
 DIR_STATIC = "dir_static"
@@ -113,6 +115,12 @@ class TagDef:
     description: str = ""
     aliases: tuple[str, ...] = ()
     status: str = "active"
+    embedding: bytes | None = None
+
+
+def tag_embedding_text(tag_name: str, description: str | None = "") -> str:
+    """标签落库与运行时检索共用的嵌入文本（与 reembed / 治理入库逐字同源）。"""
+    return f"{tag_name}。{description or ''}"
 
 
 def _as_tuple(values) -> tuple[str, ...]:
@@ -299,6 +307,7 @@ class TagLibrary:
                 description=str(row.description or ""),
                 aliases=_as_tuple(parse_aliases(row.aliases, normalize=True)),
                 status=str(row.status or "active"),
+                embedding=getattr(row, "embedding", None),
             )
             for row in tag_rows
         ]
@@ -325,8 +334,9 @@ def _fingerprint(dirs: list[Directory], tags: list[TagDef]) -> str:
                       f"{d.applicable_scope}|{d.description}|{','.join(d.aliases)}\n"
                       .encode("utf-8"))
     for t in tags:
+        emb_sig = hashlib.sha1(t.embedding).hexdigest()[:8] if t.embedding else ""
         digest.update(f"T|{t.tag_id}|{t.dir_id}|{t.tag_name}|{t.tag_type}|"
-                      f"{t.status}|{t.description}|{','.join(t.aliases)}\n"
+                      f"{t.status}|{t.description}|{','.join(t.aliases)}|{emb_sig}\n"
                       .encode("utf-8"))
     return digest.hexdigest()[:16]
 
@@ -430,7 +440,10 @@ def library_index(library: TagLibrary, embedder,
                   dir_ids: list[str] | None = None) -> list[LibraryTag]:
     """库内标签的对齐索引（带向量），只含范围内、有效、非目录、非占位的行。
 
-    向量按库 + 模型 + 范围缓存：同一进程内多次生成不重复嵌入。
+    优先复用 DB 持久化在 `tag_define.embedding` 中的向量（文本口径为
+    `f"{tag_name}。{description}"`，role="passage"）；缺失或与当前嵌入器
+    维度不符时按同一文本口径实时补算。结果按库 + 模型 + 范围缓存，同一进程内
+    多次生成不重复嵌入。
     """
     key = _embeddings_key(library, embedder, dir_ids)
     with _INDEX_LOCK:
@@ -443,10 +456,51 @@ def library_index(library: TagLibrary, embedder,
     if not tags:
         index: list[LibraryTag] = []
     else:
-        vectors = embedder.embed([t.tag_name for t in tags], role="passage")
+        expected_dim = getattr(embedder, "dim", None)
+        vectors: list[np.ndarray | None] = [None] * len(tags)
+        missing_positions: list[int] = []
+        for pos, tag in enumerate(tags):
+            if tag.embedding:
+                try:
+                    vec = decode_vector(tag.embedding)
+                except ValueError:
+                    vec = np.zeros(0, dtype=np.float32)
+                if vec.size > 0 and (expected_dim is None or vec.shape[0] == expected_dim):
+                    vectors[pos] = vec
+                    continue
+            missing_positions.append(pos)
+        if missing_positions:
+            computed = embedder.embed(
+                [tag_embedding_text(tags[pos].tag_name, tags[pos].description)
+                 for pos in missing_positions],
+                role="passage",
+            )
+            for pos, vec in zip(missing_positions, computed):
+                vectors[pos] = np.asarray(vec, dtype=np.float32)
+            actual_dim = vectors[missing_positions[0]].shape[0]
+            mismatched = [
+                pos for pos, vec in enumerate(vectors)
+                if vec is not None and vec.shape[0] != actual_dim
+            ]
+            if mismatched:
+                recomputed = embedder.embed(
+                    [tag_embedding_text(tags[pos].tag_name, tags[pos].description)
+                     for pos in mismatched],
+                    role="passage",
+                )
+                for pos, vec in zip(mismatched, recomputed):
+                    vectors[pos] = np.asarray(vec, dtype=np.float32)
+        elif expected_dim is None:
+            dims = {vec.shape[0] for vec in vectors if vec is not None}
+            if len(dims) > 1:
+                recomputed = embedder.embed(
+                    [tag_embedding_text(t.tag_name, t.description) for t in tags],
+                    role="passage",
+                )
+                vectors = [np.asarray(vec, dtype=np.float32) for vec in recomputed]
         index = [
             LibraryTag(tag_id=t.tag_id, name=t.tag_name,
-                       vector=np.asarray(vec, dtype=np.float32),
+                       vector=vec,
                        dir_id=t.dir_id, scope=library.scope_of(t.dir_id))
             for t, vec in zip(tags, vectors)
         ]

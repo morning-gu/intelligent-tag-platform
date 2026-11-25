@@ -302,7 +302,7 @@ def test_open_film_without_valid_evidence_dropped(session, content_fixture, mtg_
 
 
 def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_settings):
-    """目录里有同文本标签 → 命中（相似度 1.0）落 origin=catalog。"""
+    """目录里有同名标签 → 按同名规则命中并落 origin=catalog。"""
     add_tags([{"tag_id": "tag_cat_1", "dir_id": "dir_theme",
                "tag_name": "多线叙事", "tag_type": "val_fixed",
                "description": "多线叙事", "status": "active"}])
@@ -311,7 +311,8 @@ def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_se
     hits = [t for t in out if t.origin == "catalog"]
     assert len(hits) == 1
     assert hits[0].tag_id == "tag_cat_1"
-    assert hits[0].relevance_score == pytest.approx(1.0)
+    assert isinstance(hits[0].relevance_score, float)
+    assert -1.0 <= hits[0].relevance_score <= 1.0
     assert hits[0].candidate_type is None and hits[0].candidate_description is None
 
 

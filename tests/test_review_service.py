@@ -243,6 +243,22 @@ def test_approve_new_word_writes_tag_define(session):
     assert f'"pre_asset_tag_id": {row.id}' in (log.after_json or "")
 
 
+def test_approve_new_word_writes_tag_define_embedding(session):
+    """审核通过新词且传入 embedder → 同步写入统一口径的 tag_define.embedding。"""
+    import numpy as np
+    from conftest import MOCK_EMBEDDER
+    from tagplatform.capabilities.storage.models import TagDefine
+    from tagplatform.capabilities.vectors import decode_vector
+
+    row = _seed_row(session, candidate_name="时间循环")
+    apply_review(session, row.id, "approve", "alice", None, embedder=MOCK_EMBEDDER)
+    created = (session.query(TagDefine)
+               .filter_by(dir_id="dir_theme", tag_name="时间循环").one())
+    assert created.embedding is not None
+    expected = MOCK_EMBEDDER.embed(["时间循环。候选描述"], role="passage")[0]
+    assert np.allclose(decode_vector(created.embedding), expected)
+
+
 def test_approve_new_word_in_static_dir_raises(session):
     """静态目录的取值是固定的，审核通过也不能往里塞新标签。"""
     row = _seed_row(session, candidate_name="静态目录新词")

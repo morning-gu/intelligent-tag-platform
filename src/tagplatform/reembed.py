@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
 from tagplatform.capabilities.vectors import encode_vector
+from tagplatform.services.tags.library import tag_embedding_text
 
 
 @dataclass
@@ -61,7 +62,7 @@ def reembed_all(session: Session, embedder) -> ReembedSummary:
             row.updated_at = now
     if tags:
         vecs = embedder.embed(
-            [f"{row.tag_name}。{row.description}" for row in tags],
+            [tag_embedding_text(row.tag_name, row.description) for row in tags],
             role="passage")
         for row, vec in zip(tags, vecs):
             row.embedding = encode_vector(vec)

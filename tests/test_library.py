@@ -297,6 +297,22 @@ def test_record_tag_definition_writes_row_and_is_idempotent(session):
     assert try_load_library(session).tag(first["tag_id"]).tag_name == "时间循环"
 
 
+def test_record_tag_definition_persists_embedding_with_unified_text(session):
+    """传 embedder 时同步按“标签名。描述”（passage）写入 tag_define.embedding。"""
+    from tagplatform.capabilities.storage.models import TagDefine
+    from tagplatform.capabilities.vectors import decode_vector
+
+    library = try_load_library(session)
+    created = record_tag_definition(
+        session, library, tag_name="时间循环", dir_id="dir_theme",
+        description="同一段时间反复重来", embedder=MOCK_EMBEDDER)
+    session.commit()
+    row = session.get(TagDefine, created["tag_id"])
+    assert row is not None and row.embedding is not None
+    expected = MOCK_EMBEDDER.embed(["时间循环。同一段时间反复重来"], role="passage")[0]
+    assert np.allclose(decode_vector(row.embedding), expected)
+
+
 def test_record_tag_definition_rejects_unknown_dir(session):
     library = try_load_library(session)
     with pytest.raises(ValueError, match="目录不存在"):

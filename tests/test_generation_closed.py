@@ -177,8 +177,8 @@ def _hybrid_recall_library() -> TagLibrary:
 
 def test_closed_recall_fuses_keyword_alias_and_normalizes_to_tag_id():
     embedder = _FixedRecallEmbedder({
-        "悬疑": [1.0, 0.0],
-        "复仇": [0.8, 0.6],
+        "悬疑。制造谜团": [1.0, 0.0],
+        "复仇。主角追查凶手": [0.8, 0.6],
     })
     candidates = recall_candidates(
         _hybrid_recall_library(), embedder, ["报仇"], top_k=1)
@@ -191,8 +191,8 @@ def test_closed_recall_fuses_keyword_alias_and_normalizes_to_tag_id():
 
 def test_closed_recall_bm25_matches_tag_description():
     embedder = _FixedRecallEmbedder({
-        "悬疑": [1.0, 0.0],
-        "复仇": [0.8, 0.6],
+        "悬疑。制造谜团": [1.0, 0.0],
+        "复仇。主角追查凶手": [0.8, 0.6],
     })
     candidates = recall_candidates(
         _hybrid_recall_library(), embedder, ["追查凶手"], top_k=1)
@@ -712,10 +712,12 @@ def test_closed_produce_parse_retry_exhaustion_raises(
                 usage={}, raw={}, ok=True)
 
     llm = _AlwaysBadLLM()
-    with pytest.raises(LLMParseError, match="dir_genre") as excinfo:
+    with pytest.raises(LLMParseError, match=r"dir_(genre|mood)") as excinfo:
         ClosedTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
     # 坏组恰好重试了一次（2 次调用）后放弃
-    assert llm.calls["dir_genre"] == 2
+    assert len(llm.calls) == 1 and list(llm.calls.values()) == [2]
+    failed_dir = next(iter(llm.calls))
+    assert failed_dir in str(excinfo.value)
     # 错误消息含最后一次原始输出摘录（坏元素文本在内，可对账定位）
     assert "重试后仍解析失败" in str(excinfo.value)
     assert "evidence_strength" in str(excinfo.value)

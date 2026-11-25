@@ -19,8 +19,9 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from tagplatform.api import get_session
+from tagplatform.api import get_embedder, get_session
 from tagplatform.api.depends import get_current_user
+from tagplatform.capabilities.embed import Embedder
 from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.orchestration import review as review_orch
 from tagplatform.orchestration._shared import AssetTagOut
@@ -53,22 +54,26 @@ def review_asset_tag(
     asset_tag_id: int,
     body: ReviewRequest,
     session: Session = Depends(get_session),
+    embedder: Embedder = Depends(get_embedder),
     user: UserAccount = Depends(get_current_user),
 ) -> AssetTagOut:
     """单条审核：四动作即时落库，返回更新后的行摘要（与 AssetTagOut 同形）。"""
     return review_orch.submit_review(
-        session, asset_tag_id, body.action, user.username, body.payload)
+        session, asset_tag_id, body.action, user.username, body.payload,
+        embedder=embedder)
 
 
 @router.post("/asset-tags/batch-review", response_model=BatchReviewResponse)
 def batch_review_asset_tags(
     body: BatchReviewRequest,
     session: Session = Depends(get_session),
+    embedder: Embedder = Depends(get_embedder),
     user: UserAccount = Depends(get_current_user),
 ) -> BatchReviewResponse:
     """批量审核：逐条独立执行，失败原因进 per-item detail（Review Focus 4）。"""
     return review_orch.submit_review_batch(
-        session, body.ids, body.action, user.username, body.payload)
+        session, body.ids, body.action, user.username, body.payload,
+        embedder=embedder)
 
 
 @router.get("/review/items", response_model=ReviewItemsResponse)

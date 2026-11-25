@@ -86,8 +86,12 @@ def test_review_approve_returns_row_summary(client):
     assert body["target_type"] == "content"
 
     with client.app.state.session_factory() as s:
+        from tagplatform.capabilities.storage.models import TagDefine
+
         row = s.get(PreAssetTag, row_id)
         assert row.reviewer_id == "admin"
+        created = s.get(TagDefine, row.tag_id)
+        assert created is not None and created.embedding is not None
 
 
 def test_review_conflict_409(client):

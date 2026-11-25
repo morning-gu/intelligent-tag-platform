@@ -122,6 +122,8 @@ def submit_review(
     action: Literal["approve", "reject", "modify", "merge"],
     reviewer: str,
     payload: dict | None,
+    *,
+    embedder=None,
 ) -> AssetTagOut:
     """单条审核：四动作即时落库，返回更新后的行摘要（与 AssetTagOut 同形）。
 
@@ -134,7 +136,7 @@ def submit_review(
                             detail=f"标签行不存在：{asset_tag_id}")
     try:
         row = apply_review(session, asset_tag_id, action,
-                           reviewer, payload)
+                           reviewer, payload, embedder=embedder)
     except ConflictError as exc:
         # 已被处理（重复提交/并发抢先）：409，detail 即服务层消息
         raise HTTPException(status_code=409, detail=str(exc))
@@ -152,6 +154,8 @@ def submit_review_batch(
     action: Literal["approve", "reject", "modify", "merge"],
     reviewer: str,
     payload: dict | None,
+    *,
+    embedder=None,
 ) -> BatchReviewResponse:
     """批量审核：逐条独立执行（服务层逐条提交），未知行/冲突/载荷失败/
     索引冲突不中断其余条目——失败原因进 per-item detail（Review Focus 4）；
@@ -160,7 +164,7 @@ def submit_review_batch(
     for asset_tag_id in ids:
         try:
             apply_review(session, asset_tag_id, action,
-                         reviewer, payload)
+                         reviewer, payload, embedder=embedder)
             results.append(BatchReviewItemOut(id=asset_tag_id, ok=True))
         except (ConflictError, ValueError, IntegrityError) as exc:
             # 服务层已把 IntegrityError 转译为 ConflictError（含回滚），
