@@ -42,6 +42,10 @@ _MTG_VERIFY_MARKER = "## 相似度复核"
 # 标签描述补写请求（services/generation/open/mtg/descriptions.py）：行格式
 # `- {tag}（归属目录：...）`，与生成/审核请求互斥
 _MTG_DESC_MARKER = "## 通用释义"
+# 证据核验请求（services/generation/closed/confidence.py）：CLOSED_TEMPLATE
+# 正文 + 五级核验表；必须在 _CLOSED_MARKER 之前分流（核验 prompt 含场景行
+# 无组 JSON，掉进模式 A 会破坏确定性）
+_CLOSED_VERIFY_MARKER = "## 证据核验"
 # 审核候选行格式：`- {tag}｜{dimension}｜{reason}`（全角竖线，与场景行互斥）
 _JUDGE_LINE_RE = re.compile(r"^- (.+?)｜(.+?)｜(.*)$", re.MULTILINE)
 # 选中概率阈值（~40%）
@@ -261,6 +265,8 @@ class MockLLMClient:
             out = _verify_output(text)
         elif _MTG_DESC_MARKER in text:
             out = _desc_output(text)
+        elif _CLOSED_VERIFY_MARKER in text:
+            out = {"score": 4}
         elif _CLOSED_MARKER in text:
             out = _closed_output(text, run_id)
         else:

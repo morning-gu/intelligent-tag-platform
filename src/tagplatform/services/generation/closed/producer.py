@@ -409,6 +409,11 @@ class ClosedTagProducer:
                 dir_id=candidate.dir_id,
                 target_type=mount.target_type,
                 target_id=mount.target_id,
+                evidence_scores={
+                    "content": sections["content"]["evidence_strength"],
+                    "scene": sections["scene"]["evidence_strength"],
+                    "frame": sections["frame"]["evidence_strength"],
+                },
             ))
         return produced
 

@@ -93,6 +93,11 @@ class ProducedTag:
     target_id: str | None = None
     alias_name: str | None = None
     generation_reason: str | None = None
+    # ---- 置信度计算（2026-12）：三模态证据强度的原始读数（1–5）----
+    # closed producer 从判定里带出 {"content": 4, "scene": 5, "frame": 4}
+    # 形态；Cmod（跨模态一致性）在置信度环节读它取差。open 产出不填
+    #（置信度只对 closed 计算）。向后兼容：默认 None。
+    evidence_scores: dict[str, int] | None = None
 
 
 @dataclass
