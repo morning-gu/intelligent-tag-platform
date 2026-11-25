@@ -23,6 +23,7 @@ JSON 逗号回落（与 ingest 落库侧同一份解析器，行为变化经裁�
 """
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -39,10 +40,18 @@ from tagplatform.capabilities.storage.models import (
     TagDefine,
     TagImportTask,
 )
-from tagplatform.orchestration._shared import ImportSummary, _build_export_archive
+from tagplatform.orchestration._shared import (
+    ClearCountsOut,
+    ClearPreviewOut,
+    ClearResultOut,
+    ImportSummary,
+    _build_export_archive,
+)
 from tagplatform.services.content.ingest import recent_ingest
+from tagplatform.services.content.reset import active_task_counts
 from tagplatform.services.tags.governance import run_governance
 from tagplatform.services.tags.library import parse_aliases, try_load_library
+from tagplatform.services.tags.reset import clear_library
 from tagplatform.tasks.tag_import import TagImportFileError, parse_upload
 
 
@@ -137,18 +146,42 @@ def import_tag_file(
 
     解析失败（TagImportFileError）→ 422；治理流水线（embed + DB）为阻塞
     操作，接入层以同步 def 走线程池不占事件循环。
+
+    治理执行前先落 task(status=processing) 并提交（与异步导入
+    TagImportExecutor.submit 同构）——这是 ③ 清空标签库 processing 守卫的
+    数据锚点（clear-reset 终审 Important-1：原实现治理全程不落行，守卫对
+    同步导入在途窗口失效）。治理异常时把 task 复位 failed 后原样上抛
+    （不留永久 processing 行挡死守卫）。
     """
     try:
         parsed = parse_upload(data, file_name)
     except TagImportFileError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    result = run_governance(parsed.rows, session, embedder, file_name=file_name,
-                            parse_errors=parsed.errors)
-    task = session.get(TagImportTask, result.task_id)
+    task = TagImportTask(
+        task_id=f"task_{uuid.uuid4().hex[:8]}",
+        file_name=file_name,
+        status="processing",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(task)
+    session.commit()
+    try:
+        result = run_governance(parsed.rows, session, embedder, task=task,
+                                parse_errors=parsed.errors)
+    except Exception:
+        session.rollback()
+        task.status = "failed"
+        task.result_summary = json.dumps(
+            {"error": "导入处理失败，请重新上传文件或联系管理员"},
+            ensure_ascii=False)
+        session.add(task)
+        session.commit()
+        raise
+    row = session.get(TagImportTask, result.task_id)
     return ImportResponse(
         task_id=result.task_id,
-        summary=ImportSummary.model_validate_json(task.result_summary),
+        summary=ImportSummary.model_validate_json(row.result_summary),
     )
 
 
@@ -499,6 +532,35 @@ def delete_tag(session: Session, tag_id: str) -> TagDeleteResponse:
         parent_id=redirect_target.dir_id if redirect_target is not None else None,
         parent_name=redirect_target.dir_name if redirect_target is not None else None,
     )
+
+
+# ---------- clear-reset（2026-11-24 spec §3.2：③ 清空标签库 + 预览） ----------
+
+def clear_tag_library(session: Session) -> ClearResultOut:
+    """③ 清空标签库：级联全部标签数据与任务历史；批次/日志幸存。
+
+    守卫（删除前）：running 生成/构建 + processing 导入 → 409
+    （spec §3.3——只有正在执行的写方挡路，queued 在删除半径内）。
+    """
+    active = active_task_counts(session, None)
+    running = active["running_generation"] + active["running_build"]
+    if running > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"有 {running} 个生成/构建任务正在执行，请先等待其完成")
+    if active["processing_import"] > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"有 {active['processing_import']} 个标签导入任务正在执行，"
+                   "请先等待其完成")
+    counts = clear_library(session)
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def library_clear_preview(session: Session) -> ClearPreviewOut:
+    """③ 计数预览（只读，dry_run 与实删同源计数）。"""
+    counts = clear_library(session, dry_run=True)
+    return ClearPreviewOut(scope="library", counts=ClearCountsOut(**counts))
 
 
 # ---------- 用例：标签库统计视图（原 api/routers/library.py）----------

@@ -322,3 +322,37 @@ def _build_export_archive(
         archive.writestr("tags-export.xlsx", workbook_output.getvalue())
         archive.writestr("tags-export.xml", xml_output)
     return output.getvalue()
+
+
+# ---------- clear-reset 响应模型（2026-11-24 spec §3.1，content/tags 共用） ----------
+
+class ClearCountsOut(BaseModel):
+    """清空/删除操作的行数快照：九键固定（缺省 0 不省略）。
+
+    media_assets（顶层行）与 scenes（子场景行）不重叠；generation_tasks
+    含被一并删除的 queued 任务。消费者：GET preview 与 DELETE 同形。
+    """
+
+    pre_asset_tag: int = 0
+    asset_tag: int = 0
+    generation_tasks: int = 0
+    quality_evaluations: int = 0
+    asset_build_task: int = 0
+    media_assets: int = 0
+    scenes: int = 0
+    tag_define: int = 0
+    tag_catalog: int = 0
+
+
+class ClearResultOut(BaseModel):
+    """清空/删除端点响应：ok + counts（POST/DELETE 通用）。"""
+
+    ok: bool
+    counts: ClearCountsOut
+
+
+class ClearPreviewOut(BaseModel):
+    """预览端点响应：scope + counts（与对应 DELETE 的 counts 同源同形）。"""
+
+    scope: str
+    counts: ClearCountsOut

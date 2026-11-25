@@ -24,6 +24,7 @@ import {
 } from 'antd'
 import type { TableProps } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
+import { useOutletContext } from 'react-router-dom'
 import {
   downloadTagCatalog,
   fetchTagCatalog,
@@ -34,6 +35,10 @@ import {
   type TagNode,
   type TagNodeDetail,
 } from '../../api/catalog'
+import { clearTagLibrary } from '../../api/clear'
+import ClearConfirmModal from '../../components/ClearConfirmModal'
+import type { ClearOpConfig } from '../../components/ClearConfirmModal'
+import type { AuthedOutlet } from '../Layout'
 
 /** 标签状态中文展示与 Tag 颜色（active/deprecated 与 v2 治理流水线入库语义
  * 一致；目录节点 status 恒 null，两表均不查值直接显示 "—"）。 */
@@ -79,6 +84,33 @@ export default function TagCatalog() {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
   const [deleting, setDeleting] = useState(false)
+
+  // —— 清空标签库（clear-reset）：登录态门控 + 弹窗配置 ——
+  const outlet = useOutletContext<AuthedOutlet>() as AuthedOutlet | undefined
+  const isAdmin = outlet?.user?.role === 'admin'
+  const [clearOp, setClearOp] = useState<ClearOpConfig | null>(null)
+
+  /** 打开"清空标签库"确认弹窗：附导出备份入口，成功后回根目录并重载。 */
+  function openClearLibrary() {
+    setClearOp({
+      title: '清空标签库',
+      description:
+        '将删除全部标签目录与标签定义，连同全部内容的标签数据与生成任务历史。导入批次与审计日志保留。此操作不可撤销。',
+      previewScope: 'library',
+      execute: clearTagLibrary,
+      // 清空后当前 scope 可能指向已删目录：回根视图重载。注意根视图下
+      // selectDirectory 的各 state 同值 bail out、effect 不会重跑——此时
+      // 直接补一次 loadCatalog；非根/带搜索时重置 state 经 effect 重载
+      onDone: () => {
+        if (scopeId === undefined && searchQ === '') {
+          void loadCatalog()
+        } else {
+          void selectDirectory(undefined)
+        }
+      },
+      onExport: () => void exportCatalog(),
+    })
+  }
 
   async function exportCatalog() {
     setExporting(true)
@@ -374,6 +406,7 @@ export default function TagCatalog() {
           <Button type="primary" onClick={() => void exportCatalog()} loading={exporting}>
             标签导出
           </Button>
+          {isAdmin && <Button danger onClick={openClearLibrary}>清空标签库</Button>}
         </Space>
         {loadError !== null && (
           <Alert type="error" showIcon message="标签库加载失败" description={loadError} />
@@ -557,6 +590,11 @@ export default function TagCatalog() {
           </>
         )}
       </Drawer>
+      <ClearConfirmModal
+        open={clearOp !== null}
+        onClose={() => setClearOp(null)}
+        config={clearOp}
+      />
     </Card>
   )
 }

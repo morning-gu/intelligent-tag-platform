@@ -5,13 +5,30 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Modal } from 'antd'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom'
 import TagCatalog from './TagCatalog'
 import { apiFetch } from '../../api/client'
+import type { UserBrief } from '../../api/client'
+import { clearTagLibrary, fetchClearPreview } from '../../api/clear'
+import type { ClearPreview, ClearResult } from '../../api/clear'
 import type { TagNode, TagNodeDetail } from '../../api/catalog'
 
 vi.mock('../../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/client')>()
   return { ...actual, apiFetch: vi.fn() }
+})
+
+vi.mock('../../api/clear', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../api/clear')>()
+  return {
+    ...actual,
+    fetchClearPreview: vi.fn(),
+    clearAssetTags: vi.fn(),
+    clearAllContentTags: vi.fn(),
+    clearTagLibrary: vi.fn(),
+    deleteAsset: vi.fn(),
+    deleteAllAssets: vi.fn(),
+  }
 })
 
 const mockedApiFetch = vi.mocked(apiFetch)
@@ -397,5 +414,98 @@ describe('TagCatalog 标签库页（v2 混合树）', () => {
 
     expect(await screen.findByText('标签库加载失败')).toBeInTheDocument()
     expect(screen.getByText('后端不可用')).toBeInTheDocument()
+  })
+})
+
+// ---------- 清空标签库（clear-reset Task 4：admin 门控 + 共享弹窗 + 导出备份） ----------
+
+const mockedClearTagLibrary = vi.mocked(clearTagLibrary)
+const mockedPreview = vi.mocked(fetchClearPreview)
+
+const ADMIN: UserBrief = { user_id: 'u-admin', username: 'admin', role: 'admin' }
+const REVIEWER: UserBrief = { user_id: 'u-bob', username: 'bob', role: 'reviewer' }
+
+const LIB_PREVIEW: ClearPreview = {
+  scope: 'library',
+  counts: {
+    pre_asset_tag: 2, asset_tag: 1, generation_tasks: 3, quality_evaluations: 0,
+    asset_build_task: 0, media_assets: 0, scenes: 0, tag_define: 7,
+    tag_catalog: 5,
+  },
+}
+
+const CLEAR_RESULT: ClearResult = { ok: true, counts: LIB_PREVIEW.counts }
+
+/** 登录态上下文模板：模拟 Layout 的 Outlet context（user.role 门控源）。 */
+function UserOutlet({ user }: { user: UserBrief }) {
+  return <Outlet context={{ user }} />
+}
+
+/** 按登录角色渲染本页（admin 门控用例的装配入口）。 */
+function renderTagCatalogAs(user: UserBrief) {
+  return render(
+    <MemoryRouter initialEntries={['/tags']}>
+      <Routes>
+        <Route element={<UserOutlet user={user} />}>
+          <Route path="/tags" element={<TagCatalog />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+describe('TagCatalog 清空标签库', () => {
+  beforeEach(() => {
+    mockedPreview.mockResolvedValue(LIB_PREVIEW)
+    mockedClearTagLibrary.mockResolvedValue(CLEAR_RESULT)
+  })
+
+  it('admin 工具栏渲染清空标签库按钮，非 admin 不渲染', async () => {
+    mockApis({ root: [ROOT_DIR, ROOT_TAG_ACTIVE] })
+    const admin = renderTagCatalogAs(ADMIN)
+    expect(await screen.findByText('清空标签库')).toBeInTheDocument()
+    admin.unmount()
+
+    mockApis({ root: [ROOT_DIR, ROOT_TAG_ACTIVE] })
+    renderTagCatalogAs(REVIEWER)
+    await screen.findByText('剧情') // 页面就绪后再断言按钮缺席
+    expect(screen.queryByText('清空标签库')).toBeNull()
+  })
+
+  it('确认流：调 clearTagLibrary，成功后回根目录重载（root=true 二次）', async () => {
+    mockApis({ root: [ROOT_DIR, ROOT_TAG_ACTIVE] })
+    renderTagCatalogAs(ADMIN)
+    await screen.findByText('反转')
+    fireEvent.click(screen.getByText('清空标签库'))
+    await screen.findByLabelText('清空确认输入')
+    fireEvent.change(screen.getByLabelText('清空确认输入'), {
+      target: { value: '清空' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '确认清空' }))
+    await waitFor(() =>
+      expect(mockedClearTagLibrary).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const rootLoads = catalogCallPaths().filter((p) =>
+        p.includes('root=true'))
+      expect(rootLoads.length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  it('弹窗渲染先导出备份链接，click 触发标签导出请求', async () => {
+    mockApis({ root: [ROOT_DIR] })
+    // 导出走原生 fetch（blob 下载），不经被 mock 的 apiFetch
+    const fetchMock = vi.fn(
+      async (_url: string, _init?: RequestInit) => new Response('zip'))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      renderTagCatalogAs(ADMIN)
+      await screen.findByText('剧情')
+      fireEvent.click(screen.getByText('清空标签库'))
+      fireEvent.click(await screen.findByText('先导出备份'))
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/tags/export')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -20,13 +20,24 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from tagplatform.orchestration._shared import UtcDatetime
+from tagplatform.orchestration._shared import (
+    ClearCountsOut,
+    ClearPreviewOut,
+    ClearResultOut,
+    UtcDatetime,
+)
 from tagplatform.capabilities.adapters import get_adapter
 from tagplatform.capabilities.adapters import list_adapters as list_registered_adapters
 from tagplatform.capabilities.storage.models import MediaAsset
 from tagplatform.services.content import movie_import
 from tagplatform.services.content.content_import import import_content as import_content_svc
 from tagplatform.services.content.content_template import template_from_stored
+from tagplatform.services.content.reset import (
+    active_task_counts,
+    asset_closure,
+    delete_assets as delete_assets_svc,
+)
+from tagplatform.services.tags.reset import clear_tag_data
 
 
 # ---------- 响应模型 ----------
@@ -309,3 +320,72 @@ def import_movie_dirs(
     return MovieImportResponse(imported=counts["imported"],
                                skipped=counts["skipped"],
                                failed=counts["failed"], items=rows)
+
+
+# ---------- clear-reset（2026-11-24 spec §3.2：守卫→服务→响应） ----------
+
+def _require_closure(session: Session, asset_id: str) -> list[str]:
+    """①④ 的作用域 = 顶层 + 后代闭包；未知资产 → 404（同 get_asset 文案）。"""
+    closure = asset_closure(session, asset_id)
+    if closure is None:
+        raise HTTPException(status_code=404, detail=f"资产不存在：{asset_id}")
+    return closure
+
+
+def _guard_running(session: Session, asset_ids: list[str] | None) -> None:
+    """running 生成/构建任务 → 409（queued 不设防，spec §3.3）。"""
+    active = active_task_counts(session, asset_ids)
+    running = active["running_generation"] + active["running_build"]
+    if running > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"有 {running} 个生成/构建任务正在执行，请先等待其完成")
+
+
+def clear_asset_tags(session: Session, asset_id: str) -> ClearResultOut:
+    """① 清空单内容标签数据（含其生成任务历史；queued 一并删）。"""
+    closure = _require_closure(session, asset_id)
+    _guard_running(session, closure)
+    counts = clear_tag_data(session, closure)
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def clear_all_content_tags(session: Session) -> ClearResultOut:
+    """② 清空全部内容的标签数据（库与资产幸存）。"""
+    _guard_running(session, None)
+    counts = clear_tag_data(session, None)
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def delete_asset(session: Session, asset_id: str) -> ClearResultOut:
+    """④ 删除单内容资产（含子场景与全部关联行；视频源文件不碰）。"""
+    closure = _require_closure(session, asset_id)
+    _guard_running(session, closure)
+    counts = delete_assets_svc(session, [asset_id])
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def delete_all_assets(session: Session) -> ClearResultOut:
+    """⑤ 删除全部内容资产（标签库幸存）。"""
+    _guard_running(session, None)
+    counts = delete_assets_svc(session, None)
+    return ClearResultOut(ok=True, counts=ClearCountsOut(**counts))
+
+
+def clear_preview(session: Session, scope: str,
+                  asset_id: str | None) -> ClearPreviewOut:
+    """①②④⑤ 的计数预览（只读，dry_run 与实删同源计数）。"""
+    if scope in ("asset-tags", "asset"):
+        if asset_id is None:
+            raise HTTPException(
+                status_code=422, detail=f"scope={scope} 需要 asset_id")
+        closure = _require_closure(session, asset_id)  # 未知 → 404
+        if scope == "asset-tags":
+            counts = clear_tag_data(session, closure, dry_run=True)
+        else:
+            counts = delete_assets_svc(session, [asset_id], dry_run=True)
+    elif scope == "all-tags":
+        counts = clear_tag_data(session, None, dry_run=True)
+    else:  # all-assets（scope 枚举由路由 Query pattern 收口）
+        counts = delete_assets_svc(session, None, dry_run=True)
+    return ClearPreviewOut(scope=scope, counts=ClearCountsOut(**counts))

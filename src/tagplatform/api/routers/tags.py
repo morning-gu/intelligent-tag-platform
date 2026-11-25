@@ -15,7 +15,10 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from tagplatform.api import get_embedder, get_session
+from tagplatform.api.depends import require_admin
+from tagplatform.capabilities.storage.models import UserAccount
 from tagplatform.orchestration import tags as tags_orch
+from tagplatform.orchestration._shared import ClearPreviewOut, ClearResultOut
 from tagplatform.orchestration.tags import (
     ImportResponse,
     TagDeleteResponse,
@@ -64,6 +67,28 @@ def export_tags(
 ):
     """导出当前目录作用域或名称筛选命中的目录及其全部标签（zip）。"""
     return tags_orch.export_tags(session, q, scope_id)
+
+
+# ---------- clear-reset（2026-11-24 spec §3.1：③ + 预览，admin 专属） ----------
+# 路由顺序：字面量 /clear-preview 先于 /{node_id} 注册（照 /export 先例），
+# 否则 "clear-preview" 会被 {node_id} 参数吞掉。
+
+@router.get("/clear-preview", response_model=ClearPreviewOut)
+def tags_clear_preview(
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearPreviewOut:
+    """③ 计数预览（只读）：清空标签库将删除的行数。"""
+    return tags_orch.library_clear_preview(session)
+
+
+@router.delete("", response_model=ClearResultOut)
+def clear_tag_library(
+    session: Session = Depends(get_session),
+    user: UserAccount = Depends(require_admin),
+) -> ClearResultOut:
+    """③ 清空标签库（级联全部内容标签数据与任务历史；批次/日志幸存）。"""
+    return tags_orch.clear_tag_library(session)
 
 
 @router.get("/{node_id}", response_model=TagNodeDetail)
