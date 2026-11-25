@@ -76,8 +76,8 @@ class TagCatalog(Base):
     """标签目录（v2）：目录树节点，标签定义见 `TagDefine`。
 
     与 main 分支的 v2 schema 逐字对齐（v2 重建时从 v1 混合表切换过来）：
-    `dir_type` 区分静态/动态目录，`applicable_scope` 声明该目录可挂的粒度
-    （content/scene/character 的逗号组合），`parent_id` 自引用构成目录树。
+    `dir_type` 区分静态/动态目录，`applicable_scope` 声明该目录的挂载粒度
+    （content / scene / character），`parent_id` 自引用构成目录树。
     标签本体在 `tag_define`，`pre_asset_tag.candidate_dir_id` 指这里的 dir_id。
     """
 
@@ -89,8 +89,7 @@ class TagCatalog(Base):
             name="ck_tag_catalog_dir_type",
         ),
         CheckConstraint(
-            "applicable_scope IN ('content', 'scene', 'character', 'content,scene', "
-            "'content,character', 'scene,character', 'content,scene,character')",
+            "applicable_scope IN ('content', 'scene', 'character')",
             name="ck_tag_catalog_applicable_scope",
         ),
         UniqueConstraint("parent_id", "dir_name", name="ux_tag_catalog_parent_name"),
@@ -110,7 +109,7 @@ class TagCatalog(Base):
     # JSON 数组字符串，由服务层序列化
     aliases: Mapped[str | None] = mapped_column(Text, nullable=True)
     applicable_scope: Mapped[str | None] = mapped_column(
-        Text, nullable=True, server_default="content,scene,character"
+        Text, nullable=True, server_default="content"
     )
     embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

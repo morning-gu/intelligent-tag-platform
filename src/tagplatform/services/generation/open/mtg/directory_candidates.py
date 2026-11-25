@@ -12,7 +12,7 @@ from tagplatform.services.generation.open.mtg.parse import parse_generation_item
 from tagplatform.services.generation.open.mtg.prompts import (
     build_generation_messages, build_scene_generation_messages, target_generation_directory,
 )
-from tagplatform.services.tags.library import SCOPE_CONTENT, parse_scope
+from tagplatform.services.tags.library import SCOPE_CONTENT
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def generate_directory_candidates(scene_client, film_client, contents, frames, m
     runs[0]["after_exact_dedup"] = len(grouped)
 
     film_items: list[dict] = []
-    film_dirs = [entry for entry in directories if SCOPE_CONTENT in parse_scope(entry["scope"])]
+    film_dirs = [entry for entry in directories if entry["scope"] == SCOPE_CONTENT]
     if len(scenes) >= 2 and film_dirs:
         before = usage.copy()
         requests = []

@@ -79,14 +79,12 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
     # 被改成静态目录，或人工 modify 换了目录）。两条规则：
     # 1) 只有可扩充目录（dir_dynamic/dir_asset）允许审核后扩充新标签，
     #    静态目录的取值是固定的；
-    # 2) 候选行的挂载粒度必须落在目录的 applicable_scope 里（目录可能挂多个
-    #    粒度，逗号分隔），否则入的是挂不上资产的标签。
+    # 2) 候选行的挂载粒度必须与目录的 applicable_scope 一致，否则入的是挂不上资产的标签。
     if not directory.allows_new_tags:
         raise ValueError(
             f"目录「{directory.dir_name}」是静态目录（dir_static），不允许扩充新标签")
     scope = library.scope_of(row.candidate_dir_id)
-    allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
-    if row.target_type not in allowed:
+    if row.target_type != scope:
         raise ValueError(
             f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
             f"与候选行的 {row.target_type} 不一致")
@@ -213,8 +211,7 @@ def apply_review(session: Session, row_id: int, action: str,
                     f"目录「{directory.dir_name}」是静态目录（dir_static），"
                     "不允许扩充新标签")
             scope = library.scope_of(final_dir)
-            allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
-            if row.target_type not in allowed:
+            if row.target_type != scope:
                 raise ValueError(
                     f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
                     f"与候选行的 {row.target_type} 不一致")

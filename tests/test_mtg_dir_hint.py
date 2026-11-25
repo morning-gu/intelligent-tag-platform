@@ -79,9 +79,9 @@ def dir_settings(tmp_path, monkeypatch):
 
 def test_directory_requests_and_film_context_before_clustering(
         session, content_fixture, dir_settings):
-    add_dirs([{"dir_id": "dir_combined", "level": 1, "dir_name": "多范围试验目录",
-               "dir_type": "dir_asset", "applicable_scope": "content,scene",
-               "description": "多范围目录的定义"}])
+    add_dirs([{"dir_id": "dir_combined", "level": 1, "dir_name": "全片扩展目录",
+               "dir_type": "dir_asset", "applicable_scope": "content",
+               "description": "全片扩展目录的定义"}])
     dir_settings.open_dir_hint_max = 1
     content = _scenes(content_fixture, 3)
     ids = [scene.scene_id for scene in content.content.scenes]
@@ -104,7 +104,7 @@ def test_directory_requests_and_film_context_before_clustering(
             assert set(repeated) == {"dir_combined", "dir_scene", "dir_theme", "dir_char"}
             assert len(row["tags"]) == 12
         assert all(scene.description in part for scene in content.content.scenes)
-        group = "甲组" if "多范围试验目录" in prompt else "乙组"
+        group = "甲组" if "全片扩展目录" in prompt else "乙组"
         return _items([f"{group}全片词{i}" for i in range(6)], scenes=ids)
 
     llm = _GenerationScript(output)
@@ -269,27 +269,30 @@ def test_cluster_representative_is_nearest_to_center():
 
 def test_same_name_in_two_mounted_directories_gets_its_own_definition(
         session, content_fixture, dir_settings):
-    add_dirs([{"dir_id": "dir_mixed", "level": 1, "dir_name": "兼容范围目录",
-               "dir_type": "dir_dynamic", "applicable_scope": "content,scene"}])
     content = _scenes(content_fixture, 2)
     scene_ids = [scene.scene_id for scene in content.content.scenes]
     descriptions = {
         "dir_theme": "以长久延宕的仇怨推动情节发展的叙事母题",
-        "dir_mixed": "以冷色光线和低饱和画面形成疏离感的视觉处理",
+        "dir_scene": "以冷色光线和低饱和画面形成疏离感的视觉处理",
     }
 
     class LLM(_GenerationScript):
         def complete(self, messages, run_id):
             if run_id.endswith(":desc"):
                 text = messages[0]["content"]
-                directory = "dir_mixed" if "兼容范围目录" in text else "dir_theme"
+                directory = "dir_scene" if "微观语义标签" in text else "dir_theme"
                 return _result({"items": [{"tag": "边界感", "desc": descriptions[directory]}]})
             return super().complete(messages, run_id)
 
-    llm = LLM(lambda key, messages: _items(("边界感",), scenes=scene_ids)
-              if key.startswith("film-") else [])
-    spec = _spec(content, "descriptions", GenerationPolicy(dir_ids=["dir_theme", "dir_mixed"]))
-    out = OpenTagProducer().produce(spec, session, llm, MOCK_EMBEDDER)
+    def output(key, messages):
+        if key.startswith("film-"):
+            return _items(("边界感",), scenes=scene_ids)
+        if key.startswith("scene-001") and "微观语义标签" in _text(messages):
+            return _items(("边界感",))
+        return []
+
+    spec = _spec(content, "descriptions", GenerationPolicy(dir_ids=["dir_theme", "dir_scene"]))
+    out = OpenTagProducer().produce(spec, session, LLM(output), MOCK_EMBEDDER)
     assert {tag.target_type for tag in out} == {"content", "scene"}
     assert {tag.dir_id: tag.candidate_description for tag in out} == descriptions
     assert _report(dir_settings, "descriptions")["descriptions"]["filled"] == 2

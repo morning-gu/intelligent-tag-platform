@@ -132,7 +132,7 @@ def test_hierarchical_split_and_flat_fallback(session):
     assert dirs["内容"].parent_id is None
     assert dirs["剧情"].parent_id == dirs["内容"].dir_id
     assert all(d.dir_type == "dir_dynamic"
-               and d.applicable_scope == "content,scene,character"
+               and d.applicable_scope == "content"
                for d in dirs.values())
     # (dir, name) 落位：反转挂剧情目录、悬疑挂「未分类」；一律 val_fixed
     assert defines["反转"].dir_id == dirs["剧情"].dir_id

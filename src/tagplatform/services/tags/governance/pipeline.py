@@ -55,7 +55,6 @@ flush——自引用外键无 relationship()，保证父行先落库）。判定
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -73,14 +72,14 @@ _UNCATEGORIZED_DIR_NAME = "未分类"
 # 审计日志操作者标识：本流水线产生的 import 动作统一记 governance
 _OPERATOR = "governance"
 
-# v2 落位常量：导入路径缺省值——动态目录 + 三范围全选 + 固定值标签
+# v2 落位常量：导入路径缺省值——动态目录 + content 适用范围 + 固定值标签
 # （行值优先，非法枚举归一回默认；dir_type=dir_static / dir_asset /
 # val_generalized 行值合法时按行落库；dir_asset 为元数据导入/联网搜索
 # 来源目录，扩充语义同 dir_dynamic）
 _DIR_TYPES = ("dir_static", "dir_dynamic", "dir_asset")
 _DEFAULT_DIR_TYPE = "dir_dynamic"
 _SCOPES = ("content", "scene", "character")
-_DEFAULT_SCOPE = "content,scene,character"
+_DEFAULT_SCOPE = "content"
 _TAG_TYPES = ("val_fixed", "val_generalized")
 _DEFAULT_TAG_TYPE = "val_fixed"
 
@@ -152,13 +151,9 @@ class _DirPlanState:
 
 
 def _normalize_scope(raw: str | None) -> str:
-    """目录 applicable_scope 归一：content/scene/character 组合（逗号或
-    | 分隔、去重、规范序），空/全非法回退三值全选（CHECK 兜底）。"""
-    if not raw:
-        return _DEFAULT_SCOPE
-    tokens = {t.strip() for t in re.split(r"[,，;；|]", raw) if t.strip()}
-    valid = [s for s in _SCOPES if s in tokens]
-    return ",".join(valid) if valid else _DEFAULT_SCOPE
+    """目录 applicable_scope 归一：content / scene / character，缺省或非法回退 content。"""
+    cleaned = (raw or "").strip()
+    return cleaned if cleaned in _SCOPES else _DEFAULT_SCOPE
 
 
 def _normalize_dir_type(raw: str | None) -> str:

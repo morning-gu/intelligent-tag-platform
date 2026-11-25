@@ -39,7 +39,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import threading
 from dataclasses import dataclass
 
@@ -58,21 +57,6 @@ SCOPE_CONTENT = "content"
 SCOPE_SCENE = "scene"
 SCOPE_CHARACTER = "character"
 SCOPES = (SCOPE_CONTENT, SCOPE_SCENE, SCOPE_CHARACTER)
-# applicable_scope 组合值的分隔符：与治理流水线 _normalize_scope 同一套
-# （中英文逗号/分号/竖线），DB 只放行 7 个规范值（CHECK 约束），分隔符
-# 容忍面向内存构造与历史数据
-_SCOPE_SEPARATOR = re.compile(r"[,，;；|]")
-
-
-def parse_scope(value: str | None) -> tuple[str, ...]:
-    """applicable_scope 文本 → 有效粒度元组（规范序、去重、容忍组合值）。
-
-    `"content,scene,character"` 解析为 `("content", "scene", "character")`；
-    非法词丢弃、空段忽略；没有有效值返回空元组（回退策略由调用方定——
-    scope_of 走父链，resolve_mount 空集按 content）。
-    """
-    tokens = {t.strip() for t in _SCOPE_SEPARATOR.split(value or "") if t.strip()}
-    return tuple(s for s in SCOPES if s in tokens)
 
 
 # 失效状态：v1 的 JSON 库写 `deprecate`，`tag_define.status` 的 CHECK 只允许
@@ -237,23 +221,14 @@ class TagLibrary:
     # ---------- 语义能力 ----------
 
     def scope_of(self, dir_id: str | None) -> str:
-        """目录的挂载粒度：自身声明优先（支持组合值），缺失/非法沿父链回退，
-        最后按 content。
-
-        v2 治理导入主路径与 DB 默认值写**组合值**（content,scene,character）
-        ——组合值按规范序以逗号连接返回，不再静默降级为父链/content；目录
-        自身有有效声明时即覆盖父目录（"子目录覆盖父目录"语义）。消费方按
-        逗号拆分或经 `parse_scope` 取成员集合（review 粒度校验、mounting
-        挂载解析）。单值行为与历史实现一致：合法单值原样返回，非法值
-        （DB CHECK 挡住入库，仅内存构造/历史数据可见）沿父链回退。
-        """
+        """目录的挂载粒度：自身有效声明优先，缺失或非法沿父链回退，最终回落 content。"""
         seen: set[str] = set()
         current = self._dirs.get(dir_id or "")
         while current is not None and current.dir_id not in seen:
             seen.add(current.dir_id)
-            parsed = parse_scope(current.applicable_scope)
-            if parsed:
-                return ",".join(parsed)
+            cleaned = (current.applicable_scope or "").strip()
+            if cleaned in SCOPES:
+                return cleaned
             current = self._dirs.get(current.parent_id or "")
         return SCOPE_CONTENT
 
