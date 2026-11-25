@@ -99,9 +99,9 @@ def test_open_library_calibration_defaults():
     settings = Settings()
 
     assert settings.embedding_model == "BAAI/bge-m3"
-    assert settings.mtg_merge_threshold == 0.75
+    assert settings.open_library_suspect_cosine == 0.75
+    assert settings.open_library_name_overlap == 0.40
     assert settings.asset_dialogue_limit == 8
-    assert settings.semantic_similar_threshold == 0.85
 
 
 def test_verify_client_carries_max_tokens(monkeypatch):

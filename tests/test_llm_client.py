@@ -226,7 +226,6 @@ def test_settings_llm_defaults():
     assert s.llm_request_interval == 0.5
     assert s.use_mock_llm is False
     assert s.recall_top_k_per_type == 50
-    assert s.open_match_threshold == 0.85
     assert s.generation_workers == 2
 
 

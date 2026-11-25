@@ -23,10 +23,23 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-from tagplatform.capabilities.prompts.templates import (
-    CLOSED_TEMPLATE_TEXT,
-    OPEN_TEMPLATE_TEXT,
-)
+from tagplatform.capabilities.prompts.templates import CLOSED_TEMPLATE_TEXT
+
+# 历史 open v1 冻结字面量（仅用于 0018 downgrade 回滚旧库；运行时 open 模板常量已退役）
+_OPEN_V1_FALLBACK_TEXT = "\n".join([
+    "你是影视内容标签专家。以下是一部影视内容的结构化描述：",
+    "",
+    "{content}",
+    "",
+    "任务：为该内容自由生成最贴切的语义标签（不受任何既有标签体系限制）。对每个标签输出：",
+    "- tag_name：简洁的标签名（2-8 字）",
+    "- tag_type：标签分类（如 genre/mood/theme/narrative/style/character 或自拟）",
+    "- description：一句话语义定义",
+    "- confidence：你对该标签的置信度，0 到 1",
+    "- evidence：支持该标签的内容证据列表，每条含 scene_id、start_ms、end_ms、description",
+    "",
+    "只输出 JSON 数组，不要输出其他文字。输出 5 到 15 个标签。",
+])
 
 
 # revision identifiers, used by Alembic.
@@ -62,7 +75,7 @@ _DOWNGRADE_SEED = (
     {
         "mode": "open",
         "version": 1,
-        "template_text": OPEN_TEMPLATE_TEXT,
+        "template_text": _OPEN_V1_FALLBACK_TEXT,
         "is_active": True,
         "created_at": _V1_SEED_CREATED_AT,
     },

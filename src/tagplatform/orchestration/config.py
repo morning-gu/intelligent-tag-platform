@@ -31,7 +31,8 @@ class ConfigOut(BaseModel):
     embedding_model: str
     open_eval_review_model: str
     recall_top_k_per_type: int
-    open_match_threshold: float
+    open_library_suspect_cosine: float
+    open_library_name_overlap: float
     generation_workers: int
     use_mock_llm: bool
     use_mock_embedder: bool
@@ -40,16 +41,22 @@ class ConfigOut(BaseModel):
 
 def get_config(settings: Settings) -> ConfigOut:
     """只读运行配置：字段与设计契约一一对应，不含任何机密。"""
+    effective_embedding_model = (
+        settings.embedding_api_model
+        if settings.embedding_backend == "remote"
+        else settings.embedding_model
+    )
     return ConfigOut(
         llm_model=settings.llm_model,
         llm_temperature=settings.llm_temperature,
         mtg_judge_model=settings.mtg_judge_model,
         mtg_judge_enabled=settings.mtg_judge_enabled,
         embedding_backend=settings.embedding_backend,
-        embedding_model=settings.embedding_model,
+        embedding_model=effective_embedding_model,
         open_eval_review_model=settings.open_eval_review_model,
         recall_top_k_per_type=settings.recall_top_k_per_type,
-        open_match_threshold=settings.open_match_threshold,
+        open_library_suspect_cosine=settings.open_library_suspect_cosine,
+        open_library_name_overlap=settings.open_library_name_overlap,
         generation_workers=settings.generation_workers,
         use_mock_llm=settings.use_mock_llm,
         use_mock_embedder=settings.use_mock_embedder,

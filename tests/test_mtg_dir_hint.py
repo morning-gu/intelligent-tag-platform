@@ -82,7 +82,6 @@ def test_directory_requests_and_film_context_before_clustering(
     add_dirs([{"dir_id": "dir_combined", "level": 1, "dir_name": "全片扩展目录",
                "dir_type": "dir_asset", "applicable_scope": "content",
                "description": "全片扩展目录的定义"}])
-    dir_settings.open_dir_hint_max = 1
     content = _scenes(content_fixture, 3)
     ids = [scene.scene_id for scene in content.content.scenes]
 

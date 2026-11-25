@@ -50,24 +50,6 @@ CLOSED_TEMPLATE_TEXT = "\n".join([
     "只输出 JSON 数组，不要输出其他文字。未选中的标签不要输出。",
 ])
 
-# open v1：open 模式自 2026-11 起改由内置流水线 mtg-v1 接管（builds_prompt
-# 生产器自拼 prompt），本常量为该 mode 的模板口径存续（get_prompt("open")
-# 契约完整），不再被生成任务渲染消费。
-OPEN_TEMPLATE_TEXT = "\n".join([
-    "你是影视内容标签专家。以下是一部影视内容的结构化描述：",
-    "",
-    "{content}",
-    "",
-    "任务：为该内容自由生成最贴切的语义标签（不受任何既有标签体系限制）。对每个标签输出：",
-    "- tag_name：简洁的标签名（2-8 字）",
-    "- tag_type：标签分类（如 genre/mood/theme/narrative/style/character 或自拟）",
-    "- description：一句话语义定义",
-    "- confidence：你对该标签的置信度，0 到 1",
-    "- evidence：支持该标签的内容证据列表，每条含 scene_id、start_ms、end_ms、description",
-    "",
-    "只输出 JSON 数组，不要输出其他文字。输出 5 到 15 个标签。",
-])
-
 # closed 模式解析重试的格式纠正提示（2026-11-22 文案集中：逐字搬自
 # closed/producer.py 的 _RETRY_HINT，重调本组一次）。解析端是
 # closed/parse.parse_closed_output——重试描述的输出形状与解析契约

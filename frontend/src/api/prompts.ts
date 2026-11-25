@@ -18,7 +18,7 @@ export interface PromptContractItem {
   required_placeholders: string[]
 }
 
-/** Prompt 模板只读清单：mode 精确过滤（closed|open），缺省返回全部 mode，
+/** Prompt 模板只读清单：mode 精确过滤（当前仅 closed 使用外部模板），缺省返回全部，
  * 后端按 mode 排序；正文与后端本地常量逐字一致。 */
 export function fetchPrompts(mode?: string): Promise<PromptContractItem[]> {
   const query = mode === undefined ? '' : `?mode=${encodeURIComponent(mode)}`

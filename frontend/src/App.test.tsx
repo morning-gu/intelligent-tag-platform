@@ -123,8 +123,13 @@ function mockAdminApis() {
     }
     if (path === '/api/v1/config') {
       return {
-        llm_model: 'qwen3.7-plus', llm_temperature: 0.7, recall_top_k_per_type: 50,
-        open_match_threshold: 0.9,
+        llm_model: 'qwen3.7-plus', llm_temperature: 0.7,
+        mtg_judge_model: 'deepseek-v4.1-flash', mtg_judge_enabled: true,
+        embedding_backend: 'local', embedding_model: 'BAAI/bge-m3',
+        open_eval_review_model: '',
+        recall_top_k_per_type: 50,
+        open_library_suspect_cosine: 0.75,
+        open_library_name_overlap: 0.4,
         generation_workers: 2, use_mock_llm: false, use_mock_embedder: false,
         database_path: '/data/tagplatform.db',
       }

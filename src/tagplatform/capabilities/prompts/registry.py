@@ -29,7 +29,6 @@ from tagplatform.capabilities.prompts.open_review import (
 )
 from tagplatform.capabilities.prompts.templates import (
     CLOSED_RETRY_HINT, CLOSED_TEMPLATE_TEXT, CLOSED_VERIFICATION_PROMPT,
-    OPEN_TEMPLATE_TEXT,
 )
 
 
@@ -45,7 +44,6 @@ def list_prompt_registry() -> list[dict]:
             "title": "闭环生成",
             "items": [
                 {"name": "CLOSED_TEMPLATE_TEXT", "text": CLOSED_TEMPLATE_TEXT},
-                {"name": "OPEN_TEMPLATE_TEXT", "text": OPEN_TEMPLATE_TEXT},
                 {"name": "CLOSED_RETRY_HINT", "text": CLOSED_RETRY_HINT},
                 {"name": "CLOSED_VERIFICATION_PROMPT",
                  "text": CLOSED_VERIFICATION_PROMPT},
