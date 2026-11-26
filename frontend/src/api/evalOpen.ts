@@ -54,10 +54,19 @@ export interface OpenRunSummary {
   three_high: number | null
 }
 
-/** 单维评分（评审层回填）：score 0-4 或 null（无法判断）；reason 简短理由。 */
+/** 标签价值单方向评分（内容呈现 / 内容搜索 / 内容推荐）。 */
+export interface ValueDirectionScore {
+  score: number | null
+  reason: string
+}
+
+/** 单维评分（评审层回填）：score 0-4（value 为加权两位小数）或 null（无法判断）；reason 简短理由。 */
 export interface DimensionScore {
   score: number | null
   reason: string
+  tag_kind?: string
+  weights?: Record<string, number>
+  dimensions?: Record<'presentation' | 'search' | 'recommendation', ValueDirectionScore>
 }
 
 /** 标签评审结果，pass 由终评模型直接给出。 */
@@ -76,6 +85,8 @@ export interface JudgeReference {
   relevance: number | null
   semantics: number | null
   value: number | null
+  value_scores?: Record<string, number>
+  tag_kind?: string
   reason: string
   quote?: string | null
 }
@@ -250,13 +261,15 @@ export interface OpenEvalReport {
 }
 
 /** 生产 judge 的一条判决（审计 verdicts 行，键与 parse_judge_items 一致）：
- * 三维分 0-4 或 null。目录契合按目录 ID 返回，in_dir 兼容单一目录的历史产物。 */
+ * 三维分 0-4（value 为三方向加权小数）或 null。dir_fits/in_dir 仅兼容历史审计产物。 */
 export interface JudgeVerdictRow {
   tag: string
   candidate_id?: string
   relevance: number | null
   semantics: number | null
   value: number | null
+  value_scores?: Record<string, number>
+  tag_kind?: string
   in_dir?: boolean | null
   dir_fits?: Record<string, boolean>
   confidence?: number

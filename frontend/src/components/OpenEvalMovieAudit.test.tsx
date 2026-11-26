@@ -176,6 +176,27 @@ describe('OpenEvalMovieAudit 生产审计面板', () => {
     expect(await screen.findByText('聚类未选为代表')).toBeInTheDocument()
   })
 
+  it('新版无 dir_fits 审计隐藏旧目录契合列并在展开行展示价值三方向明细', async () => {
+    mockedFetch.mockResolvedValue(diagnostics({
+      audit: {
+        version: 'mtg-v13-aligned-criteria',
+        merged: [{ tag: '雨夜追击', stage: 1, candidate_id: 'scene-1' }],
+        verdicts: [{
+          tag: '雨夜追击', candidate_id: 'scene-1',
+          relevance: 4, semantics: 4, value: 2.8, tag_kind: 'scene',
+          value_scores: { presentation: 4, search: 2, recommendation: 0 },
+          reason: '场景直接可核', quote: '雨夜中两人追逐',
+        }],
+        accepted: [{ tag: '雨夜追击', candidate_id: 'scene-1' }],
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    expect(await screen.findByText('2.80')).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '目录契合' })).not.toBeInTheDocument()
+    fireEvent.click(document.querySelectorAll('.ant-table-row-expand-icon')[0])
+    expect(await screen.findByText('场景级：内容呈现 4 · 内容搜索 2 · 内容推荐 0')).toBeInTheDocument()
+  })
+
   it('取数失败透出后端文案；无审计时给兜底说明', async () => {
     mockedFetch.mockRejectedValue(new Error('该影片无诊断产物'))
     const { unmount } = render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)

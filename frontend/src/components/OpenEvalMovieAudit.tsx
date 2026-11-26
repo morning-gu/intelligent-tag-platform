@@ -17,6 +17,7 @@ interface AuditRow {
   relevance: number | null
   semantics: number | null
   value: number | null
+  valueBreakdown: string
   directory: string
   checks: string
   hasVerdict: boolean
@@ -26,8 +27,29 @@ interface AuditRow {
   kept: boolean
 }
 
+const KIND_LABELS: Record<string, string> = {
+  content: '内容级',
+  scene: '场景级',
+  character: '人物级',
+}
+
 function score(value: number | null | undefined): string {
-  return value === null || value === undefined ? 'null' : String(value)
+  if (value === null || value === undefined) return 'null'
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
+}
+
+function formatValueScores(
+  scores: Record<string, number> | undefined,
+  tagKind: string | undefined,
+): string {
+  if (!scores) return ''
+  const parts = [
+    `内容呈现 ${score(scores.presentation)}`,
+    `内容搜索 ${score(scores.search)}`,
+    `内容推荐 ${score(scores.recommendation)}`,
+  ].join(' · ')
+  const kind = tagKind ? KIND_LABELS[tagKind] ?? tagKind : ''
+  return kind ? `${kind}：${parts}` : parts
 }
 
 /** 新审计按候选编号对齐，旧审计仍可按标签名读取。 */
@@ -70,6 +92,7 @@ function auditRows(audit: NonNullable<OpenMovieDiagnostics['audit']>): AuditRow[
       relevance: verdict?.relevance ?? null,
       semantics: verdict?.semantics ?? null,
       value: verdict?.value ?? null,
+      valueBreakdown: formatValueScores(verdict?.value_scores, verdict?.tag_kind),
       directory,
       checks,
       hasVerdict: verdict !== undefined,
@@ -108,28 +131,29 @@ function ResponseDetails({ title, responses }: { title: string; responses: Respo
   )
 }
 
-const COLUMNS: TableProps<AuditRow>['columns'] = [
-  { title: '候选标签', dataIndex: 'tag' },
-  {
-    title: '生成来源',
-    render: (_, row) => row.stage
-      ? (row.stage === 1 ? '一阶段' : '二阶段')
-      : (row.scope === 'scene' ? '场景级' : row.scope === 'film' ? '全片级' : NA),
-  },
-  { title: '内容支持', render: (_, row) => row.hasVerdict ? score(row.relevance) : '未判' },
-  { title: '名称清晰', render: (_, row) => row.hasVerdict ? score(row.semantics) : '未判' },
-  { title: '标签价值', render: (_, row) => row.hasVerdict ? score(row.value) : '未判' },
-  {
-    title: '目录契合',
-    render: (_, row) => row.directory,
-  },
-  {
-    title: '去向',
-    render: (_, row) => (row.kept
-      ? <Tag color="green">{row.outcome}</Tag>
-      : <Typography.Text type="secondary">{row.outcome}</Typography.Text>),
-  },
-]
+function buildColumns(showLegacyDirFit: boolean): TableProps<AuditRow>['columns'] {
+  return [
+    { title: '候选标签', dataIndex: 'tag' },
+    {
+      title: '生成来源',
+      render: (_, row) => row.stage
+        ? (row.stage === 1 ? '一阶段' : '二阶段')
+        : (row.scope === 'scene' ? '场景级' : row.scope === 'film' ? '全片级' : NA),
+    },
+    { title: '内容相关性', render: (_, row) => row.hasVerdict ? score(row.relevance) : '未判' },
+    { title: '语义准确性', render: (_, row) => row.hasVerdict ? score(row.semantics) : '未判' },
+    { title: '标签价值', render: (_, row) => row.hasVerdict ? score(row.value) : '未判' },
+    ...(showLegacyDirFit
+      ? [{ title: '目录契合', render: (_: unknown, row: AuditRow) => row.directory }]
+      : []),
+    {
+      title: '去向',
+      render: (_, row) => (row.kept
+        ? <Tag color="green">{row.outcome}</Tag>
+        : <Typography.Text type="secondary">{row.outcome}</Typography.Text>),
+    },
+  ]
+}
 
 export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: string }) {
   const [data, setData] = useState<OpenMovieDiagnostics | null>(null)
@@ -151,6 +175,10 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
   const audit = data.audit
   const review = data.review
   const rows = audit ? auditRows(audit) : []
+  const showLegacyDirFit = (audit?.verdicts ?? []).some(
+    (row) => (row.dir_fits && Object.keys(row.dir_fits).length > 0) || row.in_dir !== undefined,
+  )
+  const columns = buildColumns(showLegacyDirFit)
   const candidateLabel = rows.some((row) => row.stage) ? '送审候选' : '合并候选'
   const judgeErrors = new Map(audit?.judge_trace?.errors?.map(({ attempt, error }) => [attempt, error]))
   const judgeRaw = new Map(audit?.judge_trace?.raw?.map(({ attempt, content }) => [attempt, content]))
@@ -180,7 +208,7 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
           )}
           {rows.length > 0 ? (
             <Table<AuditRow>
-              size="small" rowKey="key" columns={COLUMNS} dataSource={rows}
+              size="small" rowKey="key" columns={columns} dataSource={rows}
               pagination={rows.length > 50 ? { pageSize: 50, showSizeChanger: false } : false}
               scroll={{ x: 720 }}
               expandable={{
@@ -189,7 +217,8 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
                     items={[
                       { key: 'reason', label: 'judge 理由', children: row.reason || NA },
                       { key: 'quote', label: '原文摘录', children: row.quote || NA },
-                      ...(row.checks ? [{ key: 'dirs', label: '目录判决', children: row.checks }] : []),
+                      ...(row.valueBreakdown ? [{ key: 'value', label: '价值明细', children: row.valueBreakdown }] : []),
+                      ...(showLegacyDirFit && row.checks ? [{ key: 'dirs', label: '目录判决', children: row.checks }] : []),
                     ]} />
                 ),
               }}

@@ -205,6 +205,43 @@ describe('OpenEvalReport 报告视图', () => {
     expect(within(section).getAllByText('原文摘录').length).toBeGreaterThan(0)
   })
 
+  it('标签价值保留两位小数并展示内容呈现/内容搜索/内容推荐明细分', async () => {
+    const detailed = movie({
+      hits: [{
+        tag_id: 't1', tag_name: '硬科幻', desc: '基于严谨科学设定展开的科幻题材',
+        scene_ids: ['scene_001'], level: 'film',
+        dir_id: 'dir_genre', dir_name: '题材类型', target_type: 'content',
+        judge_reference: {
+          relevance: 4, semantics: 4, value: 3.1,
+          value_scores: { presentation: 3, search: 4, recommendation: 2 },
+          tag_kind: 'content', reason: 'judge 依据', quote: '原文摘录',
+        },
+        review: {
+          ...review(true, 4, 4, 2.85),
+          value: {
+            score: 2.85,
+            reason: '呈现与搜索价值突出',
+            tag_kind: 'content',
+            dimensions: {
+              presentation: { score: 3, reason: '主题明确' },
+              search: { score: 4, reason: '精准类型词' },
+              recommendation: { score: 1, reason: '弱推荐信号' },
+            },
+          },
+        },
+      }],
+      new_words: [],
+    })
+    render(<OpenEvalReport report={baseReport({ movies: [detailed] })} runId={RUN_ID} />)
+    const section = screen.getByRole('region', { name: '逐片明细' })
+    fireEvent.click(within(section).getByText('铁道游击队'))
+    expect(await within(section).findByText('2.85 / 4')).toBeInTheDocument()
+    expect(within(section).getByText('呈现 3 · 搜索 4 · 推荐 1')).toBeInTheDocument()
+    const expandButtons = within(section).getAllByRole('button', { name: /展开行|Expand row/ })
+    fireEvent.click(expandButtons[0])
+    expect(await within(section).findByText(/价值 3\.10（呈现 3 \/ 搜索 4 \/ 推荐 2）/)).toBeInTheDocument()
+  })
+
   it('评审失败片：警示注明产出保留，通过率暂无', async () => {
     const reviewed = movie({
       tt: 'tt0000002', title: '评审失败片',
