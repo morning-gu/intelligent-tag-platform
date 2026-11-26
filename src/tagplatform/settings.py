@@ -134,6 +134,12 @@ class Settings(BaseSettings):
     mtg_judge_model: str = "deepseek-v4.1-flash"
     mtg_judge_enabled: bool = True
     mtg_judge_temperature: float = 0.0
+    # 标签价值三方向权重（逗号分隔，顺序固定：内容呈现, 内容搜索, 内容推荐；
+    # 运行时自动归一化，按标签种类 content/scene/character 分别取值，
+    # Judge 过滤与开放评测评审共用同一组配置）
+    tag_value_weights_content: str = "0.30,0.40,0.30"
+    tag_value_weights_scene: str = "0.50,0.40,0.10"
+    tag_value_weights_character: str = "0.55,0.30,0.15"
     # 审计报告落盘目录（每任务一份 JSON：候选、判决、用量、耗时）
     mtg_report_dir: str = "data/audit/mtg"
     # 平台开放生成按批采集提示词样本；空字符串可关闭。
@@ -200,6 +206,20 @@ class Settings(BaseSettings):
                 f"（Ccons,Cver,Cmod），当前: {self.closed_confidence_weights!r}")
         total = sum(raw)
         return (raw[0] / total, raw[1] / total, raw[2] / total)
+
+    @property
+    def tag_value_weights(self) -> dict[str, tuple[float, float, float]]:
+        """标签价值三方向权重表（按标签种类 content/scene/character 归一化）。"""
+        from tagplatform.services.tags.value_scoring import parse_direction_weights
+
+        return {
+            "content": parse_direction_weights(
+                self.tag_value_weights_content, "tag_value_weights_content"),
+            "scene": parse_direction_weights(
+                self.tag_value_weights_scene, "tag_value_weights_scene"),
+            "character": parse_direction_weights(
+                self.tag_value_weights_character, "tag_value_weights_character"),
+        }
 
     # ---------- 阶段 7：用标签库提升开放生成质量（2026-11） ----------
     # 总开关：关掉 = 回到"不看库"的旧行为（提示不注入、分档不做、排序不含分档）

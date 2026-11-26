@@ -32,6 +32,7 @@ from tagplatform.services.eval.report import (
 )
 from tagplatform.services.eval.tag_quality import MAX_SCORE, quality_metrics
 from tagplatform.services.generation.open.mtg.pipeline import is_filter_stage_drop
+from tagplatform.services.tags.value_scoring import format_score, score_bucket
 
 if TYPE_CHECKING:
     from tagplatform.services.eval.open_service import OpenMovieResult
@@ -161,12 +162,15 @@ def fill_open_report_mounts(movies: list[dict], audit_dir: Path) -> None:
 
 
 def _judge_score_summary(verdict_rows: list[dict]) -> dict:
-    """judge 三维分跨片聚合：逐维均分 / 分布（0-4 五档）/ null 计数。"""
+    """judge 三维分跨片聚合：逐维均分（保留精确小数）/ 分布（0-4 四舍五入归档）/ null 计数。"""
     summary = {}
     for axis in _SCORE_AXES:
         values = [row.get(axis) for row in verdict_rows]
-        scored = [v for v in values if isinstance(v, int) and not isinstance(v, bool)]
-        distribution = [scored.count(s) for s in range(MAX_SCORE + 1)]
+        scored = [float(v) for v in values
+                  if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        distribution = [0] * (MAX_SCORE + 1)
+        for v in scored:
+            distribution[score_bucket(v, MAX_SCORE)] += 1
         summary[axis] = {
             "n": len(scored),
             "average": (sum(scored) / len(scored)) if scored else None,
@@ -446,8 +450,7 @@ def _score_cell(review: dict | None, axis: str) -> str:
     if review is None:
         return "—"
     dim = review.get(axis) or {}
-    score = dim.get("score")
-    return "null" if score is None else str(score)
+    return format_score(dim.get("score"))
 
 
 def render_open_report_md(report: dict) -> str:

@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v12-directory-rounds`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v13-aligned-criteria`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
@@ -90,13 +90,17 @@ class _JudgeClient:
             source = re.search(r"｜依据场景 ([^〕｜]+)", row)
             scene_id = source[1].split("、")[0] if source else next(iter(excerpts), "")
             quote = excerpts.get(scene_id, "")[:12] if self.quote == "" else self.quote
+            val = self.value_map.get(tag, self.value)
+            value_scores = (
+                val if isinstance(val, dict)
+                else {"presentation": val, "search": val, "recommendation": val}
+            )
             items.append({
                 **({"candidate_id": identifier[1]} if identifier else {}),
-                "dir_fits": dict.fromkeys(dirs[1].split("、"), True) if dirs else {},
                 "tag": row if self.echo_full else tag,
                 "relevance": self.relevance,
                 "semantics": self.semantics,
-                "value": self.value_map.get(tag, self.value),
+                "value_scores": value_scores,
                 "confidence": self.confidence,
                 "scenes": self.scenes if self.scenes is not None else [],
                 "quote": quote,
@@ -138,7 +142,7 @@ def test_open_producer_declares_self_built_prompt():
     producer = OpenTagProducer()
     assert producer.mode == "open"
     assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v12-directory-rounds"
+    assert producer.prompt_version == "mtg-v13-aligned-criteria"
 
 
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
@@ -157,7 +161,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v12-directory-rounds"
+    assert report["version"] == "mtg-v13-aligned-criteria"
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}
@@ -202,16 +206,27 @@ def test_open_judge_semantics_floor(session, content_fixture, mtg_settings):
 
 
 def test_open_judge_value_floor(session, content_fixture, mtg_settings):
-    """value=1（泛泛评价词）< 2 → 淘汰；=2（普通类目）保留。"""
+    """加权聚合价值分 < 2.0 → 淘汰；>= 2.0 → 保留（支持两位小数阈值）。"""
     spec = _build_spec(session, content_fixture, run_id="r2e")
     out = OpenTagProducer().produce(
         spec, session, MOCK_LLM, MOCK_EMBEDDER,
         judge_client=_JudgeClient(value=1))
     assert out == []
-    kept = OpenTagProducer().produce(
-        _build_spec(session, content_fixture, run_id="r2f"),
+    # content 权重 (0.30, 0.40, 0.30): (2, 2, 1) -> 1.70 < 2.0 淘汰
+    out_float = OpenTagProducer().produce(
+        _build_spec(session, content_fixture, run_id="r2e2",
+                    policy=GenerationPolicy(dir_ids=["dir_theme"])),
         session, MOCK_LLM, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(value=2))
+        judge_client=_JudgeClient(
+            value={"presentation": 2, "search": 2, "recommendation": 1}))
+    assert out_float == []
+    # content 权重 (0.30, 0.40, 0.30): (3, 2, 1) -> 2.00 >= 2.0 保留
+    kept = OpenTagProducer().produce(
+        _build_spec(session, content_fixture, run_id="r2f",
+                    policy=GenerationPolicy(dir_ids=["dir_theme"])),
+        session, MOCK_LLM, MOCK_EMBEDDER,
+        judge_client=_JudgeClient(
+            value={"presentation": 3, "search": 2, "recommendation": 1}))
     assert len(kept) == 1
 
 
@@ -420,15 +435,19 @@ def test_open_judge_without_quote_downgraded(session, content_fixture,
 
 
 def test_open_value_orders_queue(session, content_fixture, mtg_settings):
-    """队列先按 judge value 分排：4 分排在 2 分前（同把握同轮数时）。"""
+    """队列先按 judge 加权 value 精确小数分降序排：3.10 排在 2.80 前。"""
     content = _scene_content(content_fixture, "tt0000030", 2)
     spec = _build_spec(session, content, "rq2", GenerationPolicy(dir_ids=["dir_theme"]))
     scenes = [s.scene_id for s in content.content.scenes]
-    items = [{"tag": tag, "scenes": scenes} for tag in ("次要标签", "核心标签")]
+    items = [{"tag": tag, "desc": f"{tag}通用释义", "scenes": scenes} for tag in ("次要标签", "核心标签")]
     llm = _FixedGenLLM(lambda run: items if ":film-dir-" in run else [])
     out = OpenTagProducer().produce(
         spec, session, llm, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(value_map={"核心标签": 4, "次要标签": 2}))
+        judge_client=_JudgeClient(value_map={
+            # content 权重 0.30/0.40/0.30 -> 核心标签=3.10, 次要标签=2.80
+            "核心标签": {"presentation": 3, "search": 4, "recommendation": 2},
+            "次要标签": {"presentation": 4, "search": 2, "recommendation": 2},
+        }))
     assert [tag.tag_name for tag in out] == ["核心标签", "次要标签"]
 
 

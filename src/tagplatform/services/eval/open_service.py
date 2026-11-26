@@ -254,6 +254,9 @@ def _judge_references(run_settings: Settings, tt: str) -> dict[tuple, dict]:
             "relevance": verdict.get("relevance"),
             "semantics": verdict.get("semantics"),
             "value": verdict.get("value"),
+            **({"value_scores": verdict["value_scores"]}
+               if isinstance(verdict.get("value_scores"), dict) else {}),
+            **({"tag_kind": verdict["tag_kind"]} if verdict.get("tag_kind") else {}),
             "reason": verdict.get("reason") or "",
             "quote": verdict.get("quote"),
         }
@@ -752,18 +755,27 @@ class OpenEvalService:
             # 生产 judge 的分数和摘录仅供报告展示，快照另外保存供重评。
             references = _judge_references(job.run_settings, tt)
             library = job.context.library
-            snapshot = [{
-                "tag_id": tag.tag_id, "name": tag.tag_name,
-                "desc": (definition.description if (definition := library.tag(tag.tag_id))
-                         else tag.candidate_description), "level": tag.level,
-                "dir_id": tag.dir_id,
-                "dir_name": (directory.dir_name if (directory := library.directory(tag.dir_id)) else None),
-                "target_type": tag.target_type,
-                "scene_ids": [ev.scene_id for ev in (tag.evidence or [])],
-                "judge_reference": references.get(
-                    (tag.tag_name, tag.origin, tag.target_type, tag.target_id),
-                    references.get((tag.tag_name,))),
-            } for tag in produced]
+            snapshot = []
+            for tag in produced:
+                definition = library.tag(tag.tag_id) if tag.tag_id else None
+                effective_dir_id = tag.dir_id or (definition.dir_id if definition else None)
+                directory = library.directory(effective_dir_id) if effective_dir_id else None
+                snapshot.append({
+                    "tag_id": tag.tag_id, "name": tag.tag_name,
+                    "desc": (definition.description if definition
+                             else tag.candidate_description),
+                    "level": tag.level,
+                    "dir_id": tag.dir_id,
+                    "dir_name": (directory.dir_name if directory else None),
+                    "dir_path": ("/".join(library.path_of(effective_dir_id))
+                                 if directory else None),
+                    "dir_description": (directory.description if directory else None),
+                    "target_type": tag.target_type,
+                    "scene_ids": [ev.scene_id for ev in (tag.evidence or [])],
+                    "judge_reference": references.get(
+                        (tag.tag_name, tag.origin, tag.target_type, tag.target_id),
+                        references.get((tag.tag_name,))),
+                })
             try:
                 self._save_snapshot(job.run_id, tt, snapshot, content)
             except OSError:
@@ -828,6 +840,10 @@ class OpenEvalService:
             review_rows.append({
                 "name": item["name"], "desc": item.get("desc"),
                 "level": item.get("level"),
+                "target_type": item.get("target_type"),
+                "dir_name": item.get("dir_name"),
+                "dir_path": item.get("dir_path") or item.get("dir_name"),
+                "dir_description": item.get("dir_description"),
                 "scene_ids": row["scene_ids"],
             })
             owners.append(row)
@@ -844,7 +860,7 @@ class OpenEvalService:
                 reviewed = review_movie_tags(
                     self._review_client, content, review_rows, modalities=modalities,
                     run_id=f"{run_id}:{tt}", request_slot=self._review_slots,
-                    trace=review_trace)
+                    trace=review_trace, value_weights=self.settings.tag_value_weights)
                 fields = ("pass", "relevance", "semantics", "value", "reason",
                           "evidence_scene_ids", "evaluated")
                 reviews = [{key: row[key] for key in fields} for row in reviewed]

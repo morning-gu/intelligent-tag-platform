@@ -57,6 +57,15 @@ def test_metrics_aggregates_on_five_level_scale():
     assert metrics.three_dimension_high_rate == 0.5
 
 
+def test_metrics_supports_weighted_float_value_scores():
+    # 2.85 四舍五入入 3 档，3.65 四舍五入入 4 档；均分保留精确小数 (2.85+3.65)/2 = 3.25
+    metrics = quality_metrics(2, [_score(4, 4, 2.85), _score(4, 4, 3.65)])
+    assert metrics.value.average == 3.25
+    assert metrics.value.distribution == [0, 0, 0, 1, 1]
+    assert metrics.value.high_rate == 0.5
+    assert metrics.three_dimension_high_rate == 0.5
+
+
 def test_migration_preserves_existing_production_results(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     db_path = str(tmp_path / "quality.db")

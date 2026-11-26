@@ -26,6 +26,7 @@ from tagplatform.capabilities.prompts.mtg import (
     JUDGE_TEMPLATE,
     SCENE_GENERATION_TEMPLATE,
 )
+from tagplatform.services.tags.value_scoring import TAG_KIND_LABELS, normalize_tag_kind
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
 DIMENSIONS: dict[str, str] = {
@@ -318,25 +319,40 @@ def build_generation_template(scope: str) -> dict:
 def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
                          include_dialogue: bool = True,
                          dirs: list[dict] | None = None) -> list[dict]:
-    """构造 judge 请求：候选清单 + 内容证据，要求逐条判定。
+    """构造 judge 请求：候选清单（含释义/目标目录/标签种类）+ 内容证据，要求逐条判定。
 
-    candidates 每项：{tag, dimension, scope, reason, scenes, dir_ids}。
-    有目录的候选逐项判 dir_fits，无目录的候选只做评分。
+    candidates 每项：{tag, desc, dimension, scope, tag_kind, reason, scenes, dir_ids, candidate_id}。
+    目标目录匹配度融合进语义准确性（semantics）评分，不再单独要求 dir_fits。
     """
+    dir_scopes = {entry["dir_id"]: entry.get("scope") for entry in (dirs or [])
+                  if entry.get("dir_id") and entry.get("scope")}
     lines = []
     for candidate in candidates:
-        reason = " ".join((candidate.get("reason") or "").splitlines())
+        desc = " ".join((candidate.get("desc") or "").splitlines()).strip()
+        reason = " ".join((candidate.get("reason") or "").splitlines()).strip()
         marks: list[str] = []
         if candidate.get("scope"):
             marks.append(candidate["scope"])
-            marks.append("依据场景 " + "、".join(candidate["scenes"]))
+            if candidate.get("scenes"):
+                marks.append("依据场景 " + "、".join(candidate["scenes"]))
+        raw_kind = candidate.get("tag_kind")
+        if not raw_kind and candidate.get("dir_ids"):
+            raw_kind = dir_scopes.get(candidate["dir_ids"][0])
+        if raw_kind:
+            marks.append("标签种类 " + TAG_KIND_LABELS[normalize_tag_kind(raw_kind)])
         if candidate.get("dir_ids"):
             marks.append("目录 " + "、".join(candidate["dir_ids"]))
         if candidate.get("candidate_id"):
             marks.append("候选 ID " + candidate["candidate_id"])
+        if desc and reason:
+            body = f"释义：{desc}；依据：{reason}"
+        elif desc:
+            body = f"释义：{desc}"
+        else:
+            body = reason
         if marks:
-            reason = f"〔{'｜'.join(marks)}〕{reason}"
-        lines.append(candidate_line(candidate["tag"], candidate.get("dimension"), reason))
+            body = f"〔{'｜'.join(marks)}〕{body}"
+        lines.append(candidate_line(candidate["tag"], candidate.get("dimension"), body))
     modalities = {"script", "dialogue"} if include_dialogue else {"script"}
     return render_judge_messages(
         render_content(content, modalities), "\n".join(lines),
@@ -347,27 +363,32 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
 
 
 def judge_dir_block(dirs: list[dict]) -> str:
-    """格式化 judge 目录清单行（空清单 → 空串）。"""
+    """格式化 judge 目标目录清单行（空清单 → 空串）。"""
     if not dirs:
         return ""
     lines = []
     for entry in dirs:
+        parts = [f"- {entry['dir_id']}", entry["path"]]
+        if entry.get("scope"):
+            scope_key = normalize_tag_kind(entry["scope"])
+            parts.append(f"适用种类：{TAG_KIND_LABELS.get(scope_key, entry['scope'])}")
         description = " ".join((entry.get("description") or "").split())
-        line = f"- {entry['dir_id']}｜{entry['path']}"
-        lines.append(f"{line}｜{description}" if description else line)
+        if description:
+            parts.append(description)
+        lines.append("｜".join(parts))
     return "\n".join(lines)
 
 
-def _judge_output_example(*, with_candidate_ids: bool, with_dirs: bool) -> str:
+def _judge_output_example(*, with_candidate_ids: bool) -> str:
     fields = ['"tag":"候选标签原文"']
     if with_candidate_ids:
         fields.append('"candidate_id":"候选 ID"')
     fields.extend([
-        '"relevance":4', '"semantics":3', '"value":3', '"confidence":0.85',
+        '"relevance":4', '"semantics":3',
+        '"value_scores":{"presentation":3,"search":4,"recommendation":2}',
+        '"confidence":0.85',
         '"scenes":["场景 id"]', '"quote":"原文逐字摘录"', '"reason":"30 字以内"',
     ])
-    if with_dirs:
-        fields.append('"dir_fits":{"目录 ID":true}')
     return '{"verdicts":[{' + ",".join(fields) + '}]}'
 
 
@@ -375,17 +396,16 @@ def render_judge_messages(body: str, candidate_lines: str, *,
                           dir_block: str = "", with_candidate_ids: bool = False,
                           with_excerpts: bool = False) -> list[dict]:
     text = JUDGE_TEMPLATE
-    if not with_excerpts:
-        text = _strip_section(text, "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时")
-    if not with_candidate_ids:
-        text = _strip_section(text, "\n\n候选行标有「候选 ID」时", "\n\n## 目标目录与目录契合")
     if dir_block:
         text = text.replace("{dirs}", dir_block)
     else:
-        text = _strip_section(text, "\n\n## 目标目录与目录契合", "\n\n只输出一个 JSON 对象")
+        text = _strip_section(text, "\n\n## 目标目录\n", "\n\n## 评分标准")
+    if not with_excerpts:
+        text = _strip_section(text, "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时")
+    if not with_candidate_ids:
+        text = _strip_section(text, "\n\n候选行标有「候选 ID」时", "\n\n只输出一个 JSON 对象")
     head, _ = text.rsplit("\n", 1)
-    example = _judge_output_example(
-        with_candidate_ids=with_candidate_ids, with_dirs=bool(dir_block))
+    example = _judge_output_example(with_candidate_ids=with_candidate_ids)
     rendered = (
         f"{head}\n{example}"
         .replace("{candidates}", candidate_lines)

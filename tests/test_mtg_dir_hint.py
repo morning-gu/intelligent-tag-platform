@@ -127,14 +127,15 @@ def test_directory_requests_and_film_context_before_clustering(
     assert sum(tag.level == "scene" for tag in out) == 2
 
 
-def test_filter_rejects_out_of_directory_even_when_label_exists(
+def test_filter_rejects_out_of_directory_via_semantics_even_when_label_exists(
         session, content_fixture, dir_settings):
+    """目标目录匹配度已融合进 semantics：不符目标目录的标签按低 semantics 淘汰。"""
     class Judge:
         def complete(self, messages, run_id):
             rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
             for row in rows:
                 if row["tag"] == "复仇":
-                    row["dir_fits"]["dir_theme"] = False
+                    row["semantics"] = 1
             return _result(rows)
 
     spec = _spec(content_fixture, "mismatch", GenerationPolicy(dir_ids=["dir_theme"]))
@@ -145,7 +146,7 @@ def test_filter_rejects_out_of_directory_even_when_label_exists(
     assert report["clustering"]["input"] == 1
     assert [row["tag"] for row in report["library"]["align"]] == ["名字合格"]
     assert [(row["tag"], row["why"]) for row in report["dropped"]] == [
-        ("复仇", "标签含义不属于目标目录")]
+        ("复仇", "judge 评分未过线（semantics=1 < 3）")]
     assert report["accepted"][0]["dir_source"] == "request"
 
 
@@ -184,7 +185,10 @@ def test_second_stage_uses_value_then_minimum_similarity(
         def complete(self, messages, run_id):
             rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
             for row in rows:
-                row["value"] = 2 if row["tag"] == names[2] else 4
+                score = 2 if row["tag"] == names[2] else 4
+                row["value_scores"] = {
+                    "presentation": score, "search": score, "recommendation": score,
+                }
             return _result(rows)
 
     monkeypatch.setattr(pipeline, "align_candidates", lambda library, embedder, names, **kwargs: {

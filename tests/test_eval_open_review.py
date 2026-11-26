@@ -45,24 +45,36 @@ def _content() -> ContentJSON:
 def _rows(count: int = 2) -> list[dict]:
     head = [
         {"id": "t0", "name": "逃离安排", "desc": "主角察觉生活被全程安排并决意逃离",
-         "level": "film", "scene_ids": [],
-         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3,
+         "level": "film", "target_type": "content",
+         "dir_path": "内容类标签/主题", "dir_description": "描述影片的核心主题",
+         "scene_ids": [],
+         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3.0,
                              "reason": "judge 依据", "quote": QUOTE}},
         {"id": "t1", "name": "街道晨跑", "desc": "清晨在小镇街道跑步的情节",
-         "level": "scene", "scene_ids": ["scene_001"],
-         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3,
+         "level": "scene", "target_type": "scene",
+         "dir_path": "补充类标签/场景桥段", "dir_description": "描述关键剧情桥段",
+         "scene_ids": ["scene_001"],
+         "judge_reference": {"relevance": 4, "semantics": 3, "value": 3.0,
                              "reason": "judge 依据", "quote": QUOTE}},
     ]
     tail = [{"id": f"t{i}", "name": f"标签{i}", "desc": f"第 {i} 条测试标签",
-             "level": "film", "scene_ids": []} for i in range(2, count)]
+             "level": "film", "target_type": "content", "scene_ids": []} for i in range(2, count)]
     return (head + tail)[:count]
 
 
 def _v(r=4, s=3, v=3, evidence=("scene_001", "scene_002"), reason="台词有据", decision=True, overall="提供独立检索价值，建议保留"):
+    if isinstance(v, dict):
+        value_block = v
+    else:
+        value_block = {
+            "presentation": {"score": v, "reason": "呈现理由"},
+            "search": {"score": v, "reason": "搜索理由"},
+            "recommendation": {"score": v, "reason": "推荐理由"},
+        }
     return {"pass": decision, "reason": overall,
             "relevance": {"score": r, "reason": reason},
             "semantics": {"score": s, "reason": "名称清晰"},
-            "value": {"score": v, "reason": "有区分度"},
+            "value": value_block,
             "evidence_scene_ids": list(evidence)}
 
 
@@ -149,10 +161,79 @@ def test_missing_decision_or_overall_reason_is_not_inferred(field):
     assert rows[1]["evaluated"] is False and rows[1]["pass"] is None
 
 
-def test_redundancy_instruction_in_prompt():
+def test_redundancy_instruction_and_unified_criteria_in_prompt():
+    from tagplatform.capabilities.prompts._evaluation import UNIFIED_EVALUATION_CRITERIA
+    from tagplatform.capabilities.prompts.mtg import JUDGE_TEMPLATE
+
     assert "独立保留价值" in REVIEW_PROMPT
     assert '"evidence":' not in REVIEW_PROMPT
     assert "缺失时参考场景挂载点" not in REVIEW_PROMPT
+    # Judge 与开放评测必须共用完全一致的统一三维评价标准正文
+    assert UNIFIED_EVALUATION_CRITERIA in REVIEW_PROMPT
+    assert UNIFIED_EVALUATION_CRITERIA in JUDGE_TEMPLATE
+
+
+def test_review_forwards_directory_and_aggregates_value_by_tag_kind():
+    rows = [
+        {"id": "t0", "name": "逃离安排", "desc": "通用释义", "level": "film",
+         "target_type": "content", "dir_path": "内容类/主题", "dir_description": "主题定义",
+         "scene_ids": []},
+        {"id": "t1", "name": "街道晨跑", "desc": "通用释义", "level": "scene",
+         "target_type": "scene", "dir_path": "补充类/场景", "dir_description": "场景定义",
+         "scene_ids": ["scene_001"]},
+        {"id": "t2", "name": "警觉逃亡者", "desc": "通用释义", "level": "scene",
+         "target_type": "character", "dir_path": "补充类/角色", "dir_description": "角色定义",
+         "scene_ids": ["scene_001"]},
+    ]
+    raw_value = {
+        "presentation": {"score": 4, "reason": "看点鲜明"},
+        "search": {"score": 2, "reason": "可检索"},
+        "recommendation": {"score": 0, "reason": "无推荐语境"},
+    }
+    client = StubClient(default=_v(v=raw_value))
+    out = review_movie_tags(client, _content(), rows, run_id="r1:m1")
+    sent = _targets(client.calls[0])
+    assert sent[0]["dir_path"] == "内容类/主题"
+    assert sent[0]["dir_description"] == "主题定义"
+    assert [item["target_type"] for item in sent] == ["content", "scene", "character"]
+    # content: 0.30*4 + 0.40*2 + 0.30*0 = 2.0
+    assert out[0]["value"]["score"] == 2.0
+    assert out[0]["value"]["tag_kind"] == "content"
+    assert out[0]["value"]["dimensions"]["presentation"] == {"score": 4, "reason": "看点鲜明"}
+    # scene: 0.50*4 + 0.40*2 + 0.10*0 = 2.8
+    assert out[1]["value"]["score"] == 2.8
+    assert out[1]["value"]["tag_kind"] == "scene"
+    # character: 0.55*4 + 0.30*2 + 0.15*0 = 2.8
+    assert out[2]["value"]["score"] == 2.8
+    assert out[2]["value"]["tag_kind"] == "character"
+
+
+def test_review_rejects_legacy_scalar_value_and_retries():
+    calls = {"n": 0}
+
+    def handler(_i, messages):
+        calls["n"] += 1
+        targets = _targets(messages)
+        if calls["n"] == 1:
+            bad = {**_v(), "value": {"score": 3, "reason": "旧标量格式"}}
+            return json.dumps({"reviews": [{"id": targets[0]["id"], **bad}]})
+        return json.dumps({"reviews": [{"id": targets[0]["id"], **_v()}]})
+
+    out = review_movie_tags(StubClient(handler=handler), _content(), _rows(1), run_id="r1:m1")
+    assert calls["n"] == 2
+    assert out[0]["evaluated"] is True
+    assert out[0]["value"]["score"] == 3.0
+
+
+def test_missing_desc_keeps_low_semantics_defect_but_nulls_high_score():
+    rows = [
+        {"id": "t0", "name": "不合目录词", "desc": None, "level": "film", "scene_ids": []},
+        {"id": "t1", "name": "清晰词", "desc": "", "level": "film", "scene_ids": []},
+    ]
+    client = StubClient(by_name={"不合目录词": _v(s=1), "清晰词": _v(s=3)})
+    out = review_movie_tags(client, _content(), rows, run_id="r1:m1")
+    assert out[0]["semantics"]["score"] == 1
+    assert out[1]["semantics"] == {"score": None, "reason": "缺少释义"}
 
 
 def test_mock_llm_open_review_uses_0_to_4_scale():
@@ -160,7 +241,9 @@ def test_mock_llm_open_review_uses_0_to_4_scale():
     assert all(row["pass"] is True for row in rows)
     assert all(row["relevance"]["score"] == 4 for row in rows)
     assert all(row["semantics"]["score"] == 4 for row in rows)
-    assert all(row["value"]["score"] == 4 for row in rows)
+    assert all(row["value"]["score"] == 4.0 for row in rows)
+    assert all(set(row["value"]["dimensions"]) == {"presentation", "search", "recommendation"}
+               for row in rows)
 
 
 def test_film_high_relevance_requires_two_valid_distinct_scenes():

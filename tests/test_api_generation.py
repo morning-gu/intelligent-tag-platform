@@ -498,7 +498,7 @@ def test_task_list_filters_and_pagination(client):
     assert all(set(row.keys()) == TASK_KEYS for row in listing)
     # created_at 降序：后创建的 open 任务在前
     assert [row["task_id"] for row in listing] == [second["task_id"], first["task_id"]]
-    assert listing[0]["prompt_version"] == "mtg-v12-directory-rounds"  # open 自拼 prompt 的口径版本
+    assert listing[0]["prompt_version"] == "mtg-v13-aligned-criteria"  # open 自拼 prompt 的口径版本
     assert listing[0]["asset_id"] == "movie_001"
 
     # status / mode / asset_id 过滤

@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from tagplatform.services.tags.value_scoring import score_bucket
+
 MAX_SCORE = 4
 DIMENSIONS = ("relevance", "semantics", "value")
 
@@ -46,23 +48,36 @@ def _ratio(count: int, total: int) -> float | None:
     return count / total if total else None
 
 
-def _dimension_metrics(values: list[int | None]) -> DimensionMetrics:
-    distribution = [values.count(value) for value in range(MAX_SCORE + 1)]
-    judged = sum(distribution)
+def _is_numeric_score(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _dimension_metrics(values: list[int | float | None]) -> DimensionMetrics:
+    scored = [float(value) for value in values if _is_numeric_score(value)]
+    distribution = [0] * (MAX_SCORE + 1)
+    for value in scored:
+        distribution[score_bucket(value, MAX_SCORE)] += 1
+    judged = len(scored)
     unknown = values.count(None)
     return DimensionMetrics(
         evaluated_tags=len(values),
-        average=_ratio(sum(score * count for score, count in enumerate(distribution)), judged),
+        average=_ratio(sum(scored), judged),
         high_rate=_ratio(distribution[-1], judged),
         distribution=distribution,
         undetermined=unknown, undetermined_rate=_ratio(unknown, len(values)),
     )
 
 
-def _joint_high_rate(rows: list[dict[str, int | None]], axes: tuple[str, ...]) -> float | None:
+def _joint_high_rate(
+    rows: list[dict[str, int | float | None]], axes: tuple[str, ...],
+) -> float | None:
     ratings = [tuple(row.get(axis) for axis in axes) for row in rows]
-    return _ratio(ratings.count((MAX_SCORE,) * len(axes)),
-                  sum(None not in rating for rating in ratings))
+    complete = [rating for rating in ratings if all(_is_numeric_score(v) for v in rating)]
+    high = sum(
+        all(score_bucket(v, MAX_SCORE) == MAX_SCORE for v in rating)
+        for rating in complete
+    )
+    return _ratio(high, len(complete))
 
 
 def quality_metrics(total: int, scores: list[dict]) -> QualityMetrics:

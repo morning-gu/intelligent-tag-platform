@@ -80,14 +80,40 @@ function ScoreDistribution({ metrics }: { metrics: QualityMetrics }) {
   )
 }
 
-/** 单维评分 cell：分值 + 理由（null = 无法判断）。 */
+function formatScoreValue(value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'null'
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
+}
+
+function formatValueBreakdown(
+  dimensions: DimensionScore['dimensions'],
+): string | null {
+  if (!dimensions) return null
+  const p = dimensions.presentation?.score
+  const s = dimensions.search?.score
+  const r = dimensions.recommendation?.score
+  return `呈现 ${formatScoreValue(p)} · 搜索 ${formatScoreValue(s)} · 推荐 ${formatScoreValue(r)}`
+}
+
+function formatJudgeValueBreakdown(scores: Record<string, number> | undefined): string {
+  if (!scores) return ''
+  const p = scores.presentation
+  const s = scores.search
+  const r = scores.recommendation
+  if (p === undefined && s === undefined && r === undefined) return ''
+  return `（呈现 ${formatScoreValue(p)} / 搜索 ${formatScoreValue(s)} / 推荐 ${formatScoreValue(r)}）`
+}
+
+/** 单维评分 cell：分值 + 三方向明细分（value 有明细时）+ 理由（null = 无法判断）。 */
 function ScoreCell({ rating }: { rating: DimensionScore | null | undefined }) {
   if (!rating) return <Typography.Text type="secondary">—</Typography.Text>
+  const breakdown = formatValueBreakdown(rating.dimensions)
   return (
     <Space direction="vertical" size={0}>
       <Typography.Text strong>
-        {rating.score === null ? '无法判断' : `${rating.score} / 4`}
+        {rating.score === null ? '无法判断' : `${formatScoreValue(rating.score)} / 4`}
       </Typography.Text>
+      {breakdown && <Typography.Text type="secondary">{breakdown}</Typography.Text>}
       <Typography.Text type="secondary">{rating.reason}</Typography.Text>
     </Space>
   )
@@ -201,8 +227,9 @@ function labelDetail(row: LabelRow, modelDecision: boolean) {
         children: reference ? (
           <Space direction="vertical" size={0}>
             <Typography.Text>
-              相关 {reference.relevance ?? 'null'} · 语义 {reference.semantics ?? 'null'}
-              {' '}· 价值 {reference.value ?? 'null'}（生产 judge，仅供参考）
+              相关 {formatScoreValue(reference.relevance)} · 语义 {formatScoreValue(reference.semantics)}
+              {' '}· 价值 {formatScoreValue(reference.value)}
+              {formatJudgeValueBreakdown(reference.value_scores)}（生产 judge，仅供参考）
             </Typography.Text>
             {reference.reason && (
               <Typography.Text type="secondary">{reference.reason}</Typography.Text>
