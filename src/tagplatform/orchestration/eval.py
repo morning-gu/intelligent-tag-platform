@@ -299,7 +299,7 @@ class MissTagOut(BaseModel):
     标签库回填（库缺该标签 → None）；lost_at 为丢失环节（unrecalled /
     gate / unmountable / m_cap / unmentioned）或 None——trace 缺失（老
     run）「暂无」与 kept-却-漏检的不自洽防御同走 None（None≠0，没数据
-    ≠没召回），消费方按 null 显示「—」。"""
+    ≠没召回），消费方按 null 显示「暂无」。"""
 
     tag_id: str
     tag_name: str | None = None

@@ -225,12 +225,13 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 
 回答的问题：**一部片的标签从「召回在册」到「最终产出」，每一环各丢多少、漏检的标签死在哪一环？**
 
-闭环干跑在既有生产流程的六个点上顺路采集漏斗踪迹（`generation/trace.py`
-的 `ProduceTrace` 被动收集器，可选参数 `trace=None` 走与旧代码逐字节相同
-的路径——采集器纯旁观，不参与任何判定）：`set_max_tags` 记全局输出上限
-M（策略原值）、`add_candidates` 召回后按批入册（`recall` = 召回余弦
-Semb）、`note_batch` 批次解析成功落册、`resolve` 在门控/挂载/选择各点
-回填结局、`note_fabricated` 记编造/越组 id。漏斗计数由候选行**纯派生**
+闭环干跑在既有生产流程的七处采集点上顺路采集漏斗踪迹（producer 注释
+编号 1–7；`generation/trace.py` 的 `ProduceTrace` 被动收集器，可选参数
+`trace=None` 走与旧代码逐字节相同的路径——采集器纯旁观，不参与任何判定）：
+`set_max_tags` 记全局输出上限 M（策略原值）、`add_candidates` 召回后按批
+入册（`recall` = 召回余弦 Semb）、`note_batch` 批次解析成功落册、`resolve`
+在门控/挂载/选择各点回填结局（全局选择环节 kept 与 m_cap 是两个 resolve
+调用位）、`note_fabricated` 记编造/越组 id。漏斗计数由候选行**纯派生**
 （`funnel_counts`——落盘只存逐候选行，单一事实源），经逐片摘要的
 `funnel` 键、单片明细的 `trace` 包层与 misses 的 `lost_at` 列透出。
 
@@ -269,8 +270,9 @@ FileResponse 直下；run 目录越界 / tt 不过白名单 / tt 不在 raw 行�
 
 **重试批次只存成功份（已拍板）**。每批解析成功才 `note_batch` 一次，
 `raw` = **最终成功那次**输出的全文；`parse_retried` 布尔如实记录首败重调
-过。首败原文仅存留于 producer 的 warning 日志，不落任何产物——对账以
-成功份为准。
+过。首败原文仅存前 400 字截断摘录于 producer 的 warning 日志
+（`last_raw[:400]`），不落任何产物——对账以成功份为准，排查勿去日志找
+全文。
 
 **老 run 全链路「暂无」**。trace 是 2026-11-26 起的新增键：老 run 的
 raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None

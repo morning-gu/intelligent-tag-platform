@@ -133,6 +133,10 @@ class ProduceTrace:
   中性重构）；每批解析后 `note_batch`；门控/编造丢弃处 `resolve`/
   `note_fabricated`；挂载失败处 `resolve("unmountable", sf=…)`；全局选择
   后对入选集 `resolve("kept", …)`、落选集 `resolve("m_cap", …)`。
+  （勘误 2026-11-26 终审：实现落定为**七处**采集调用位（producer 注释
+  编号 1–7：`set_max_tags` / `add_candidates` / `note_batch` / 门控
+  `resolve` / `note_fabricated` / 挂载 `resolve` / 全局选择 kept 与
+  m_cap 两个 `resolve` 调用位）——上列语义不变，计数以实现为准。）
 - `OpenTagProducer.produce` 签名加同款可选参数，接受并忽略（协议调用方
   统一；文档注明 open 侧语义未实现）。
 - `TagProducer` 协议（base.py）produce 增可选参数。`register_producer`
