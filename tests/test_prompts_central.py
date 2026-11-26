@@ -60,17 +60,20 @@ def test_generation_template_uses_central_copy():
     scene_text = "\n".join(p["text"] for p in scene["messages"][0]["content"]
                            if p["type"] == "text")
     assert "## 标签生成任务" in scene_text
-    assert "根据当前片段，提炼核心含义符合目标目录定义" in scene_text
-    assert "只生成核心含义属于当前目标目录的标签。" in scene_text
+    assert "第一轮：根据当前片段的描述、台词和画面" in scene_text
+    assert "紧扣目标目录的路径和定义，仅提炼核心含义属于当前目标目录的标签。" in scene_text
+    assert "## 如何填写" in scene_text
+    assert "## 输出格式" in scene_text
     assert "{content}" not in scene_text and "{target_directory}" not in scene_text
 
     film = build_generation_template("film")
     film_text = "\n".join(p["text"] for p in film["messages"][0]["content"]
                           if p["type"] == "text")
-    assert "第二轮：结合影片材料和逐场候选" in film_text
+    assert "第二轮：结合全片材料和第一轮逐场候选" in film_text
     assert "## 如何填写" in film_text
+    assert "## 输出格式" in film_text
     assert "## 库里已有的标签" in film_text
-    assert "只生成核心含义属于当前目标目录的标签。" in film_text
+    assert "紧扣目标目录的路径和定义，仅提炼核心含义属于当前目标目录的标签。" in film_text
     assert "{library_hint}" not in film_text and "{max_tags}" not in film_text
 
 

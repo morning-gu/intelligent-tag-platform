@@ -12,7 +12,7 @@ from tagplatform.capabilities.prompts._evaluation import (
     UNIFIED_EVALUATION_CRITERIA as _UNIFIED_EVALUATION_CRITERIA,
 )
 
-REVIEW_PROMPT_VERSION = "open-review-v11"
+REVIEW_PROMPT_VERSION = "open-review-v12"
 
 _REVIEW_HEADER = """## 标签质量评估
 你是影视标签评估员。只对「待评估标签」列表中的标签逐一评分，原样返回每个 id。
@@ -26,28 +26,19 @@ _REVIEW_HEADER = """## 标签质量评估
 _REVIEW_PROTOCOL_NOTE = """
 
 ## 开放评测补充规则
-同时阅读整片产出的标签。只评「待评估标签」中的条目，保留各自的 id。
-若还有「该片其他标签（上下文）」，将它和待评列表一起用于比较标签用途和信息重复。
-结合名称、释义、目标目录、用途层级和来源场景比较同组标签。同一用途、信息实质重复时，考虑
-哪一条表达更准确具体，说明其余标签是否仍有独立保留价值。不同场景的片段定位用途可以独立成立。
+同时阅读整片产出的标签，仅对「待评估标签」中的条目输出评审结果并保留各自 id。
+若提供「该片其他标签（上下文）」，结合它与待评列表比较标签用途与信息重叠。
+结合名称、释义、目标目录、用途层级和来源场景比较同组标签：同一用途存在实质重叠时，评估哪一条表达更准确具体，并判断其余标签是否仍具独立保留价值；不同场景的片段定位用途可各自独立成立。
 
-分别返回三维评分与理由：
-- relevance 与 semantics 返回 {"score": 0–4 整数或 null, "reason": "简短理由"}；
-  缺少释义且未观察到明显名称或目录缺陷时 semantics 填 null 并说明原因。
-- value 返回三个方向的独立评分对象：
-  {"presentation": {"score": 0–4 或 null, "reason": "理由"},
-   "search": {"score": 0–4 或 null, "reason": "理由"},
-   "recommendation": {"score": 0–4 或 null, "reason": "理由"}}，
-  不需要模型自行加权汇总，系统将按 target_type（内容级/场景级/人物级）对应权重自动聚合总分。
-- 相关性达到 3 或 4 时，返回实际支撑结论的 evidence_scene_ids。每条都必须包含该字段，
-  无引用时返回空列表。film 至少两处独立场景，scene 必须来自该标签的 scene_ids。
-  引用时写完整 ID，例如 scene_001。
-
-另外独立判断这个标签是否值得作为该片的最终标签保留。综合它是否准确反映影片、
-是否契合所属目录与释义、有实际呈现/检索/推荐价值、相对同组标签提供了什么信息。
-三维分仅供参考，禁止按分数阈值或总分推导保留结论。pass 为 true 表示保留，false 表示不保留，
-材料不足以进行整体判断时填 null。顶层 reason 写清模型对标签的整体评价和决定保留、不保留
-或暂无法判断的关键原因。避免复述三条评分理由或列出分数。每个目标 id 返回一次。
+输出字段要求：
+- relevance 与 semantics：返回 {"score": 0–4 整数或 null, "reason": "简短理由"}；
+  缺少释义且未观察到明显名称或目录缺陷时，semantics 填 null 并说明原因。
+- value：返回三个方向的独立评分对象，形如
+  {"presentation": {"score": 0–4 整数或 null, "reason": "理由"},
+   "search": {"score": 0–4 整数或 null, "reason": "理由"},
+   "recommendation": {"score": 0–4 整数或 null, "reason": "理由"}}。
+- evidence_scene_ids：每条均须返回，无引用时为空列表；相关性达到 3 或 4 分时填写实际支撑结论的完整场景 ID（例如 scene_001），film 至少两处独立场景，scene 取自该标签的 scene_ids。
+- pass 与 reason：结合标签对影片的准确反映程度、与所属目录及释义的契合度、呈现/检索/推荐价值以及相对同组标签的独立信息贡献，独立判断该标签是否值得作为最终标签保留。pass 为 true 表示保留，false 表示不保留，材料不足以进行整体判断时填 null；顶层 reason 简明概括最终保留或不保留的核心依据。每个目标 id 返回一次。
 """
 
 _REVIEW_OUTPUT_FORMAT = (

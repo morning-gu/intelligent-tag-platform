@@ -80,11 +80,14 @@ def test_registry_open_review_content(client):
     assert set(items) == {
         "REVIEW_PROMPT", "REVIEW_RETRY_HINT", "REVIEW_PROMPT_VERSION",
     }
-    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v11"
+    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v12"
     assert "## 开放评测补充规则" in items["REVIEW_PROMPT"]
     assert "## 标签质量评估" in items["REVIEW_PROMPT"]
     assert "内容呈现（presentation）" in items["REVIEW_PROMPT"]
     assert "目标目录匹配度" in items["REVIEW_PROMPT"]
+    assert "不代表" not in items["REVIEW_PROMPT"]
+    assert "不需要自行加权汇总" not in items["REVIEW_PROMPT"]
+    assert "自动聚合总分" not in items["REVIEW_PROMPT"]
     assert "evidence_scene_ids" in items["REVIEW_PROMPT"]
     assert "reviews" in items["REVIEW_PROMPT"]
     assert "judge_reference" not in items["REVIEW_PROMPT"]
