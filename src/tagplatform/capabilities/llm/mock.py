@@ -195,10 +195,10 @@ def _verify_output(text: str) -> dict:
 
 
 def _judge_output(text: str, run_id: str) -> list[dict]:
-    """judge：解析候选行，全部给过线三维分（4/3/3，confidence 0.9，引用首场景并摘原文）。
+    """judge：解析候选行，全部给过线三维分（4/3/三方向3分，confidence 0.9，引用首场景并摘原文）。
 
     必须给 quote：流水线要求"评分引用内容原文"，模拟客户端从首场景描述里
-    截一段，口径与真实 judge 一致。
+    截一段，口径与真实 judge 一致。目录匹配已融合进 semantics，不再输出 dir_fits。
     """
     scenes = _parse_scenes(text)
     scene_id = scenes[0]["scene_id"] if scenes else None
@@ -209,20 +209,18 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
         marks = reason.partition("〕")[0] if reason.startswith("〔") else ""
         source = re.search(r"｜依据场景 ([^｜]+)", marks)
         evidence = source.group(1).split("、") if source else ([scene_id] if scene_id else [])
-        dirs = re.search(r"(?:〔|｜)目录 ([^｜]+)", marks)
         candidate_id = re.search(r"(?:〔|｜)候选 ID ([^｜]+)", marks)
         cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
             "tag": tag.strip(),
             "relevance": 4,
             "semantics": 3,
-            "value": 3,
+            "value_scores": {"presentation": 3, "search": 3, "recommendation": 3},
             "confidence": 0.9,
             "scenes": evidence,
             "quote": cited["description"][:12] if cited else quote,
             "reason": "模拟判定：所引原文支撑标签",
             **({"candidate_id": candidate_id[1]} if candidate_id else {}),
-            **({"dir_fits": dict.fromkeys(dirs[1].split("、"), True)} if dirs else {}),
         })
     return items
 

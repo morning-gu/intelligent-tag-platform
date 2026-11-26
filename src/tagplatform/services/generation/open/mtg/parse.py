@@ -19,6 +19,10 @@ import json
 import re
 
 from tagplatform.services.generation.open.mtg.prompts import DIMENSIONS
+from tagplatform.services.tags.value_scoring import (
+    VALUE_DIRECTIONS,
+    VALUE_DIRECTION_ALIASES,
+)
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _MAX_TAG_LEN = 20
@@ -31,10 +35,10 @@ _DIMENSION_ALIASES: dict[str, str] = {
     "story": "叙事", "plot": "叙事", "角色特征": "角色",
 }
 
-# judge 三维评分轴（与提示词 JUDGE_CRITERIA、pipeline 的分数阈值互为协议）
-_JUDGE_SCORE_AXES = ("relevance", "semantics", "value")
-# 只有内容支持度可能因影片材料不足而无法判断。
-_NULLABLE_SCORE_AXES = ("relevance",)
+# judge 标量评分轴（与统一评分标准、pipeline 阈值互为协议；value 由三方向分聚合）
+_JUDGE_SCORE_AXES = ("relevance", "semantics")
+# 材料缺失（relevance）或缺少通用释义（semantics）时允许显式 null。
+_NULLABLE_SCORE_AXES = ("relevance", "semantics")
 
 
 class MTGParseError(ValueError):
@@ -214,8 +218,47 @@ def _clean_score(value):
     return _MISSING
 
 
+def _clean_value_scores(entry: dict) -> tuple[dict[str, int] | None, list[str]]:
+    """解析标签价值三方向分（presentation/search/recommendation，均为 0-4 整数）。
+
+    支持顶层 `value_scores` 对象，也容忍模型把三方向对象放在 `value` 下或用中文键名。
+    任一方向缺失、为 null 或非 0-4 整数均记为协议错误，交上层重试。
+    """
+    raw = entry.get("value_scores")
+    if raw is None and isinstance(entry.get("value"), dict):
+        raw = entry["value"]
+    if not isinstance(raw, dict):
+        if "value_scores" not in entry and "value" not in entry:
+            return None, ["value_scores 漏字段"]
+        return None, [f"value_scores 必须是三方向分值对象（收到 {raw!r}）"]
+    normalized: dict[str, object] = {}
+    for key, val in raw.items():
+        canonical = VALUE_DIRECTION_ALIASES.get(str(key).strip().lower()) or VALUE_DIRECTION_ALIASES.get(str(key).strip())
+        if canonical and canonical not in normalized:
+            normalized[canonical] = val
+    parsed: dict[str, int] = {}
+    errors: list[str] = []
+    for direction in VALUE_DIRECTIONS:
+        if direction not in normalized:
+            errors.append(f"value_scores.{direction} 漏字段")
+            continue
+        raw_score = normalized[direction]
+        if isinstance(raw_score, dict) and "score" in raw_score:
+            raw_score = raw_score["score"]
+        score = _clean_score(raw_score)
+        if score is _MISSING:
+            errors.append(f"value_scores.{direction} 非法值 {raw_score!r}")
+        elif score is None:
+            errors.append(f"value_scores.{direction} 不接受 null")
+        else:
+            parsed[direction] = score
+    if errors:
+        return None, errors
+    return parsed, []
+
+
 def parse_judge_items(text: str) -> list[dict]:
-    """解析三维分和证据，目录结论由调用方按候选的目标目录校验。
+    """解析三维评分（含价值三方向分）和证据。
 
     部分条目的分数或证据字段违协议时，异常仍携带同批可用判决。
     """
@@ -242,6 +285,8 @@ def parse_judge_items(text: str) -> list[dict]:
                 broken.append(f"{axis} 不接受 null")
             else:
                 scores[axis] = score
+        value_scores, value_errors = _clean_value_scores(entry)
+        broken.extend(value_errors)
         raw_scenes = entry.get("scenes")
         if raw_scenes is not None and (not isinstance(raw_scenes, list)
                                        or any(not isinstance(s, str) for s in raw_scenes)):
@@ -257,7 +302,7 @@ def parse_judge_items(text: str) -> list[dict]:
             **({"candidate_id": candidate_id.strip()} if isinstance(candidate_id, str)
                and candidate_id.strip() else {}),
             **scores,
-            "dir_fits": entry.get("dir_fits"),
+            "value_scores": value_scores,
             "confidence": _clamp_confidence(entry.get("confidence")),
             "scenes": scenes,
             "quote": str(entry.get("quote") or "").strip()[:60],

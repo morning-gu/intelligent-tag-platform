@@ -53,6 +53,7 @@ from tagplatform.services.tags.library import (
     library_index,
 )
 from tagplatform.services.tags.mounting import resolve_mount
+from tagplatform.services.tags.value_scoring import format_score, normalize_tag_kind
 from tagplatform.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -70,24 +71,25 @@ logger = logging.getLogger(__name__)
 # v10 = 按候选对齐重试漏判，并统一三维定义和重试格式。
 # v11 = 目录判决绑定可实际采用的目录 ID，库内复用走既有目录。
 # v12 = 按目录分别生成，先评判再聚类，按生成阶段分配配额。
-MTG_VERSION = "mtg-v12-directory-rounds"
+# v13 = Judge 与开放评测对齐统一三维评分标准：目录匹配融合进 semantics，
+#       标签价值改为内容呈现/内容搜索/内容推荐三方向打分并按标签种类加权聚合。
+MTG_VERSION = "mtg-v13-aligned-criteria"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
 
-# judge 三维分数的保留阈值：relevance/semantics ≥3（内容支持可推导、名称
-# 清晰无歧义），value ≥2（至少能筛到一类内容——0/1 档的泛泛评价与情节
-# 依赖词在这里淘汰）。null 分按未过线处理，绝不猜分放行。
+# judge 三维分数的保留阈值：relevance ≥3、semantics ≥3（已融合目录匹配度与释义一致性）、
+# value ≥2.0（三方向按标签种类权重加权聚合分）。null 分按未过线处理，绝不猜分放行。
 _JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
 
 # 小节 4 过滤段（judge 判决 + 证据把关）的淘汰原因常量：审计读侧
 # （open_report 的数量漏斗）据 is_filter_stage_drop 把"过滤段淘汰"与
 # "目录归属段淘汰"分开——改文案必须同步分类函数，否则漏斗推导失真。
 _DROP_NO_VERDICT = "judge 未返回判决"
+# 历史审计兼容（旧版目录契合独立硬闸与置信度硬过滤已移除，仅保留供漏斗统计读取历史审计）
 _DROP_DIR_MISMATCH = "标签含义不属于目标目录"
 _DROP_DIR_UNJUDGED = "judge 缺少有效目录判决"
 _DROP_SCORE_BELOW = "judge 评分未过线"
-# 历史审计兼容（旧版置信度硬过滤已移除，仅保留供漏斗统计读取历史审计）
 _DROP_CONFIDENCE_BELOW = "judge 判定把握"
 _DROP_NO_EVIDENCE = "无有效场景证据"
 _DROP_SINGLE_SCENE = "全片级但只有单场支撑"
@@ -300,9 +302,11 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
         client = _sample_client(
             spec, judge_client or _make_judge_client(settings, llm), "judge",
             build_judge_template)
+        dir_scopes = {entry["dir_id"]: entry.get("scope") for entry in directory_entries}
         payload = [
-            {"tag": m.tag, "dimension": m.dimension,
+            {"tag": m.tag, "desc": m.desc, "dimension": m.dimension,
              "scope": "excerpt" if m.candidate_id and m.scope == "scene" else m.scope,
+             "tag_kind": normalize_tag_kind(dir_scopes.get(m.dir_raw)),
              "reason": m.reason, "scenes": list(m.scenes),
              "dir_ids": directory_targets.get(m.candidate_id or m.tag, []),
              **({"candidate_id": m.candidate_id} if m.candidate_id else {})}
@@ -312,7 +316,8 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
             verdicts = judge_candidates(client, contents, payload,
                                         run_id=spec.run_id, usage=judge_usage,
                                         include_dialogue="dialogue" in modalities and "script" in modalities,
-                                        trace=trace, dirs=directory_entries)
+                                        trace=trace, dirs=directory_entries,
+                                        value_weights=settings.tag_value_weights)
         except Exception as exc:  # noqa: BLE001 —— 失败也要留审计现场
             _write_report(settings, spec.task_id, {
                 "version": MTG_VERSION,
@@ -333,9 +338,13 @@ def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
     return verdicts, judge_usage
 
 
+def _is_numeric_score(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
                        modalities, merged) -> tuple[list, list[dict]]:
-    """小节 4：过滤 + 证据 + 目录匹配（judge 三维分/把握度/场景证据逐条把关）。"""
+    """小节 4：过滤 + 证据（judge 三维分与场景证据逐条把关，目录匹配已融合进 semantics）。"""
     scene_index = {scene.scene_id: scene for scene in contents.content.scenes}
     if settings.mtg_judge_enabled:
         # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
@@ -358,20 +367,14 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
             if verdict is None:
                 dropped.append({**audit, "why": _DROP_NO_VERDICT})
                 continue
-            below = [f"{axis}={'null' if verdict.get(axis) is None else verdict[axis]}"
+            below = [f"{axis}={format_score(verdict.get(axis))}"
                      f" < {floor}"
                      for axis, floor in _JUDGE_SCORE_FLOORS.items()
-                     if not isinstance(verdict.get(axis), int)
+                     if not _is_numeric_score(verdict.get(axis))
                      or verdict[axis] < floor]
             if below:
                 dropped.append({**audit, "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
                 continue
-            if candidate.candidate_id:
-                fits = verdict.get("dir_fits", {})
-                if fits.get(candidate.dir_raw) is not True:
-                    why = _DROP_DIR_MISMATCH if candidate.dir_raw in fits else _DROP_DIR_UNJUDGED
-                    dropped.append({**audit, "why": why})
-                    continue
         evidence = _evidence_for(candidate, verdict, scene_index)
         if not evidence:
             dropped.append({**audit, "why": _DROP_NO_EVIDENCE})
@@ -425,7 +428,7 @@ def _align_and_verify_candidates(settings: Settings, spec: GenerationSpec, llm,
     return alignment, verify_usage, verify_trace
 
 
-def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple[int, float]:
+def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple[float, float]:
     candidate, verdict, _ = row
     value = (verdict or {}).get("value")
     aligned = alignment.get(candidate.tag)
@@ -436,7 +439,7 @@ def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple
         similarity = 1.0
     else:
         similarity = aligned.cosine if aligned.cosine is not None else 0.0
-    return (-(value if isinstance(value, int) else 0), similarity)
+    return (-(float(value) if _is_numeric_score(value) else 0.0), similarity)
 
 
 def _plan(alignment: dict[str, Alignment], settings: Settings,
@@ -637,14 +640,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                   directory_targets: dict | None = None,
                   clustering: dict | None = None) -> dict:
     """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
-    assigned_dirs = {row.get("candidate_id", row["tag"]): row["dir_id"] for row in tag_rows
-                     if row["origin"] == "generated"}
-    verdict_rows = []
-    for verdict in verdicts.values():
-        key = verdict.get("candidate_id", verdict["tag"])
-        targets = (directory_targets or {}).get(key, [])
-        display_dir = assigned_dirs.get(key) or (targets[0] if len(targets) == 1 else None)
-        verdict_rows.append({**verdict, "in_dir": verdict.get("dir_fits", {}).get(display_dir)})
+    verdict_rows = list(verdicts.values())
     total_limit = limits.total_limit
     scene_limit = limits.scene_limit
     scene_request_limit = limits.scene_request_limit
@@ -669,6 +665,8 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             "cluster_target": clustering["target"],
             "max_film_tags": limits.film_limit,
             "judge_score_floors": dict(_JUDGE_SCORE_FLOORS),
+            "value_weights": {kind: [round(w, 4) for w in triple]
+                              for kind, triple in settings.tag_value_weights.items()},
             "max_final_tags": total_limit,
             "library_enabled": bool(settings.open_library_enabled),
             "library_hint_count": len(hints),

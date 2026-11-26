@@ -76,8 +76,9 @@ def test_generation_template_uses_central_copy():
 
 def test_judge_messages_use_central_copy():
     text = render_judge_messages("正文", "- 候选｜维度｜理由")[0]["content"]
-    assert "你是严格的影视内容标签审核员。" in text
+    assert "你是影视内容标签审核员。" in text
     assert "## 评分标准" in text
+    assert "内容呈现（presentation）" in text
     assert "{candidates}" not in text and "{content}" not in text
 
 
