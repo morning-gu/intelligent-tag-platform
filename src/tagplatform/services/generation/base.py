@@ -25,6 +25,7 @@ from tagplatform.schemas import ContentJSON
 
 if TYPE_CHECKING:
     from tagplatform.services.generation.open.mtg.prompt_samples import PromptSampleBatch
+    from tagplatform.services.generation.trace import ProduceTrace
 
 
 @dataclass
@@ -135,6 +136,10 @@ class TagProducer(Protocol):
     Task 4 起后两者为协议成员：实现类漏声明在 `register_producer` 注册
     时即抛 TypeError（非调用时）——动态扩展承诺的护栏，漏实现成员不允许
     静默写空口径进 generation_task。
+
+    `produce` 的 `trace` 为可选漏斗追踪收集器（trace.py ProduceTrace）：
+    实现方可顺路采集，None 时必须走与旧代码完全相同的路径（生产路径
+    零行为变化红线）；不采集的模式（open）接受并忽略。
     """
 
     mode: str
@@ -147,6 +152,7 @@ class TagProducer(Protocol):
         session: Session,
         llm,
         embedder,
+        trace: ProduceTrace | None = None,
     ) -> list[ProducedTag]:
         """按 spec 生成候选标签列表。"""
         ...

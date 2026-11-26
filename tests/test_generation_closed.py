@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from tagplatform.services.generation import Evidence, GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.closed import producer as closed_module
 from tagplatform.services.generation.closed.producer import ClosedTagProducer
+from tagplatform.services.generation.trace import ProduceTrace, TraceCandidate
 from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
 from tagplatform.services.tags.library import (
     DIR_ASSET,
@@ -1180,3 +1181,212 @@ def test_parse_closed_flat_format_rejected():
             {"tag_id": "x", "applicability": 4,
              "evidence_strength": 4, "evidences": []},
         ], ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- 管线追踪（funnel trace）
+
+
+def _seed_funnel_library() -> None:
+    """漏斗全场景单目录库：dir_genre 下挂 tag_001..tag_004 四条候选。
+
+    全漏斗一测需要"同目录 4 条可挂载候选"（组保底胜者 kept、同组次优
+    m_cap、A=3 门控、模型未提及），默认两目录库每目录只有 3 条，凑不出
+    "4 候选单批"，故按本文件 write_library 直落模式（如 asset 目录用例）
+    单独落库。
+    """
+    write_library(library_root(), dirs=[dict(_DEFAULT_DIRS[0])],
+                  tags=[{"tag_id": f"tag_{i:03d}", "dir_id": "dir_genre",
+                         "tag_name": name, "tag_type": "val_fixed",
+                         "description": desc, "status": "active"}
+                        for i, name, desc in [
+                            (1, "悬疑", "推理谜团"),
+                            (2, "剧情", "人物关系驱动"),
+                            (3, "动作", "追逐打斗"),
+                            (4, "紧张", "情绪紧绷"),
+                        ]])
+
+
+def test_produce_trace_full_funnel(session, content_fixture, monkeypatch):
+    """单目录 4 候选的全漏斗：五类结局各就各位，产出行为不变。
+
+    判定给 3 条（A=5 保留、A=5 落选 m_cap、A=3 门控）+ 1 条不提
+    + 1 条编造 id tag_999（A=5）；max_tags=1：同目录两条可挂载，证据
+    分差锁死胜负（tag_001 三模态全 5 → Sevi=1.0，tag_004 全 1 → Sevi=0，
+    Sf 区间 [0.8,1.0] 对 [0.5,0.7] 不重叠，与 mock Semb 取值无关），
+    次优者落 m_cap。批大小放大（50 > 4）：单目录单批，batches[0].n == 4、
+    编造 id 只记一次。
+    """
+    _seed_funnel_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r20",
+                       policy=GenerationPolicy(max_tags=1))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 5,
+             "evidence": _evi(5, 5, 5)},   # 组内最高 → kept
+            {"tag_id": "tag_004", "applicability": 5,
+             "evidence": _evi(1, 1, 1)},   # 可挂载但名额被截 → m_cap
+            {"tag_id": "tag_002", "applicability": 3,
+             "evidence": _evi(3, 3, 3)},   # 门控不过 → gate
+            {"tag_id": "tag_999", "applicability": 5,
+             "evidence": _evi(5, 5, 5)},   # 编造 id → fabricated
+        ],  # tag_003 刻意不提 → unmentioned
+    }
+    trace = ProduceTrace()
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER,
+                                      trace=trace)
+    snap = trace.snapshot()
+    by_id = {c["tag_id"]: c for c in snap["candidates"]}
+    assert by_id["tag_001"]["outcome"] == "kept"
+    assert by_id["tag_001"]["sf"] is not None and by_id["tag_001"]["applicability"] == 5
+    assert by_id["tag_002"]["outcome"] == "gate"      # A=3
+    assert by_id["tag_003"]["outcome"] == "unmentioned"  # 模型没提
+    assert by_id["tag_004"]["outcome"] == "m_cap"     # 挂载成但没选上
+    assert snap["fabricated"] == ["tag_999"]          # 编造 id
+    assert snap["batches"][0]["n"] == 4 and snap["max_tags"] == 1
+    assert len(out) == 1                              # 行为不变：只出 1 条
+
+
+def test_produce_trace_unmountable_outcome(session, content_fixture):
+    """角色 scope 标签挂载失败 → outcome == "unmountable"（采集点 6）。
+
+    复用 test_closed_produce_unmountable_dropped_before_selection 的库/scope
+    夹具：多角色内容上 character scope 定位不到唯一角色，挂载解析必败；
+    选择行为不变（两组可挂载头占满 M=2），trace 如实记录淘汰结局与 Sf
+    （淘汰发生在打分之后，sf 必有值）。
+    """
+    _seed_scoped_library()
+    for scene in content_fixture.content.scenes:
+        scene.character_ids = ["char_a", "char_b"]
+    spec = _build_spec(session, content_fixture, run_id="r21",
+                       policy=GenerationPolicy(max_tags=2))
+    responses = {
+        "dir_char": [{"tag_id": "tag_101", "applicability": 5,
+                      "evidence": _evi(5, 5, 5, [{"scene_id": "scene_001",
+                                                  "evidence": "主角孤胆"}])}],
+        "dir_genre": [{"tag_id": "tag_001", "applicability": 5,
+                       "evidence": _evi(5, 5, 5)}],
+        "dir_mood": [{"tag_id": "tag_004", "applicability": 4,
+                      "evidence": _evi(1, 1, 1)}],
+    }
+    trace = ProduceTrace()
+    out = ClosedTagProducer().produce(spec, session,
+                                      _ScriptedLLM(responses), MOCK_EMBEDDER,
+                                      trace=trace)
+    by_id = {c["tag_id"]: c for c in trace.snapshot()["candidates"]}
+    assert by_id["tag_101"]["outcome"] == "unmountable"
+    assert by_id["tag_101"]["sf"] is not None
+    assert by_id["tag_001"]["outcome"] == "kept"
+    assert by_id["tag_004"]["outcome"] == "kept"
+    assert len(out) == 2  # 行为不变：tag_101 不占名额，两组头入选
+
+
+def test_produce_trace_none_matches_no_trace(session, content_fixture,
+                                             monkeypatch):
+    """生产路径零漂移（全局红线）：传 trace 与不传的两次 produce 输出全等。
+
+    同一 _ScriptedLLM 双跑：trace=ProduceTrace() 与缺省（None）各跑一次，
+    ProducedTag 列表逐项全等（dataclass 结构等值）——采集器必须纯旁观；
+    双跑都非空且含门控/编造路径，等值不是"双方恒空"的假绿。
+    """
+    _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r22",
+                       policy=GenerationPolicy(max_tags=5))
+    responses = {
+        "dir_genre": [
+            {"tag_id": "tag_001", "applicability": 5,
+             "evidence": _evi(5, 5, 5)},
+            {"tag_id": "tag_fake", "applicability": 5,
+             "evidence": _evi(5, 5, 5)},  # 编造 id：采集路径也要走过
+            {"tag_id": "tag_002", "applicability": 3,
+             "evidence": _evi(3, 3, 3)},  # 门控丢弃
+        ],
+        "dir_mood": [
+            {"tag_id": "tag_004", "applicability": 4,
+             "evidence": _evi(1, 1, 1)},
+        ],
+    }
+    llm = _ScriptedLLM(responses)
+    out_with = ClosedTagProducer().produce(spec, session, llm, MOCK_EMBEDDER,
+                                           trace=ProduceTrace())
+    out_without = ClosedTagProducer().produce(spec, session, llm,
+                                              MOCK_EMBEDDER)
+    assert out_with == out_without
+    assert len(out_with) == 2  # tag_001 + tag_004：等值且非恒空
+
+
+def test_produce_trace_snapshot_rules():
+    """采集器单元语义：resolve 末次为准（整行覆盖）、未注册 id no-op、
+    编造清单不去重、未 resolve 的候选快照归一 unmentioned。"""
+    t = ProduceTrace()
+    t.add_candidates([TraceCandidate(tag_id="a", tag_name="A", dir_id="d",
+                                     recall=0.5, batch=0)])
+    t.resolve("a", "gate", applicability=3)
+    t.resolve("a", "kept", applicability=5, sf=0.9)   # 末次为准
+    t.resolve("ghost", "gate")                        # 未注册 no-op
+    t.note_fabricated("x"); t.note_fabricated("x")    # 清单不去重
+    t.add_candidates([TraceCandidate(tag_id="b", tag_name="B", dir_id="d",
+                                     recall=0.4, batch=1)])
+    snap = t.snapshot()
+    assert snap["candidates"][0]["outcome"] == "kept" and snap["candidates"][0]["sf"] == 0.9
+    assert snap["candidates"][0]["applicability"] == 5  # 末次为准覆盖全部字段
+    assert snap["candidates"][1]["outcome"] == "unmentioned"  # 未 resolve 归一
+    assert snap["fabricated"] == ["x", "x"]
+
+
+def test_produce_trace_raw_rows_success_only(session, content_fixture,
+                                             monkeypatch):
+    """解析重试批的原始输出只存成功份：parse_retried=True 且
+    content == 重试成功那份全文（首败原文仅存留于 warning 日志，
+    不进任何 trace 载荷）；快照批次行不带 content（llm_raw 只经
+    raw_rows 落盘，不进 raw_results、不进 API 载荷）。"""
+    _seed_library()
+    monkeypatch.setattr(closed_module, "get_settings",
+                        lambda: Settings(closed_batch_size=50))
+    spec = _build_spec(session, content_fixture, run_id="r23",
+                       policy=GenerationPolicy(max_tags=10))
+    good_text = json.dumps(
+        [{"tag_id": "tag_001", "applicability": 4, "evidence": _evi(4, 4, 4)}],
+        ensure_ascii=False)
+
+    class _RetryRawLLM:
+        """dir_genre 首次返回不可解析文本、重调返回合法 JSON 的桩。"""
+
+        def __init__(self):
+            self.calls: dict[str, int] = {}
+
+        def complete(self, messages, run_id):
+            tail = messages[0]["content"].partition(
+                "\n\n## 候选标签分组\n")[2]
+            dir_id = json.JSONDecoder().raw_decode(tail)[0]["dir_id"]
+            self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
+            if dir_id == "dir_genre" and self.calls[dir_id] == 1:
+                return LLMResponse(content="抱歉，我无法按该格式输出",
+                                   usage={}, raw={}, ok=True)
+            if dir_id == "dir_genre":
+                return LLMResponse(content=good_text, usage={}, raw={},
+                                   ok=True)
+            return LLMResponse(content=json.dumps(
+                [{"tag_id": "tag_004", "applicability": 4,
+                  "evidence": _evi(4, 4, 4)}], ensure_ascii=False),
+                usage={}, raw={}, ok=True)
+
+    trace = ProduceTrace()
+    out = ClosedTagProducer().produce(spec, session, _RetryRawLLM(),
+                                      MOCK_EMBEDDER, trace=trace)
+    assert {t.tag_id for t in out} == {"tag_001", "tag_004"}  # 重试后正常产出
+    rows = trace.raw_rows()
+    genre = [r for r in rows if r["dir_id"] == "dir_genre"]
+    assert len(genre) == 1 and genre[0]["parse_retried"] is True
+    assert genre[0]["content"] == good_text  # 成功份全文，非首败原文
+    assert genre[0]["n"] == 3
+    assert set(genre[0]) == {"dir_id", "batch", "n", "parse_retried",
+                             "content"}
+    mood = [r for r in rows if r["dir_id"] == "dir_mood"]
+    assert mood[0]["parse_retried"] is False  # 好组零重试
+    # 快照批次行不带原始输出
+    assert all("content" not in b for b in trace.snapshot()["batches"])
