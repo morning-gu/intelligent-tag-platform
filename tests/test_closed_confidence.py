@@ -3,8 +3,9 @@
 覆盖契约（用户口径）：
 - Cmod 本地算术：s_m=(强度−1)/4、dij=|si−sj|、Cs=1−(d12+d13+d23)/3、
   Cc=max(dij)、Cmod=j·Cs+(1−j)(1−Cc)；全同分 → 1.0，极端分歧 → 低位；
-- Ccons：三次 Sevi（原判定 + 2 次重评）总体方差 → exp(−As/b)；
-  重评失败降级为原分补位（As=0 → Ccons=1.0，partial 标注）；
+- Ccons：三次 Sevi（原判定 + 2 次重评）总体方差 → exp(−As/b)；有帧时
+  重评消息带多模态 parts（三次同条件测量），无帧纯文本；重评失败降级
+  为原分补位（As=0 → Ccons=1.0，partial 标注）；
 - Cver：五级分 (S−1)/4；解析宽容（围栏/键名漂移/分值钳 1–5）；失败
   降级 0.5 占位；
 - Craw 加权（默认 0.45/0.30/0.25，Settings 层归一化）并覆写
@@ -27,6 +28,7 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.llm.client import LLMResponse
+from tagplatform.capabilities.llm.mock import _extract_text
 from tagplatform.services.generation import Evidence, GenerationSpec, ProducedTag
 from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.services.generation.closed.confidence import (
@@ -103,6 +105,9 @@ class _ScriptedConfLLM:
       （按调用序取 reconsistency_outputs[i]，可实现三次分数不同）；
     - 含 "## 证据核验"：Cver 核验请求 → 返回 {"score": N}；
     - 其余：抛 AssertionError（置信度环节不应发其他请求）。
+
+    消息取文本走 _extract_text 口径（纯文本与多模态 parts 两种形态
+    兼容——Ccons/Cver 有帧时消息带关键帧 parts）。
     """
 
     def __init__(self, reconsistency_outputs: list[dict] | None = None,
@@ -115,7 +120,7 @@ class _ScriptedConfLLM:
     model = "stub-conf"
 
     def complete(self, messages, run_id):
-        text = messages[0]["content"]
+        text = _extract_text(messages)
         if "## 候选标签分组" in text:
             # 单标签成组：从组 JSON 尾巴取 tag_id，拼进判定
             tail = text.partition("\n\n## 候选标签分组\n")[2]
@@ -369,3 +374,54 @@ def test_apply_confidence_empty_tags(session, tmp_path):
     llm = _ScriptedConfLLM()
     assert apply_confidence([], spec, "空", session, llm) == []
     assert llm.re_calls == 0 and llm.verify_calls == 0
+
+
+def test_reconsistency_scores_with_frames_multimodal(session):
+    """有帧时重评消息走多模态 parts（用户口径：三次判定同条件带图）。
+
+    帧列表注入后：content = [text part, *frame_parts]，text part 仍是
+    完整组 JSON 拼法正文，帧 parts 原样跟在后面；无帧调用方不受影响。
+    """
+    from tagplatform.services.content.content_io import load_content
+    from tagplatform.services.generation.assemble import build_spec, load_assembly_context
+
+    _seed_catalog(session)
+    content = load_content(json.dumps(_CONTENT_DATA, ensure_ascii=False))
+    context = load_assembly_context("closed", "{}")
+    spec = build_spec(context, content=content, task_id="conf_t7",
+                      asset_id="asset_x", run_id="conf_t7:run1")
+    captured = []
+
+    class CaptureLLM:
+        model = "cap"
+        def complete(self, messages, run_id):
+            captured.append(messages[0]["content"])
+            return LLMResponse(content=json.dumps([{
+                "tag_id": "tag_g_00", "applicability": 5,
+                "evidence": _evi(4, 4, 4)}], ensure_ascii=False),
+                usage={}, raw={}, ok=True)
+
+    tag = ProducedTag(
+        origin="catalog", tag_id="tag_g_00", tag_name="类型标签0",
+        candidate_type=None, candidate_description=None,
+        relevance_score=0.9, confidence=0.75, evidence=[], dir_id="dir_genre",
+    )
+    frame_parts = [
+        {"type": "text", "text": "〔关键帧〕scene_001 第 1/3 张"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,x"}},
+    ]
+    scores = _reconsistency_scores(spec, tag, CaptureLLM(),
+                                   (0.3, 0.3, 0.4), frame_parts)
+    assert scores == [0.75, 0.75]
+    assert len(captured) == 2
+    for msg_content in captured:
+        # 多模态形态：首 part 为 text（完整组拼法正文），帧 parts 依序跟后
+        assert isinstance(msg_content, list)
+        assert msg_content[0]["type"] == "text"
+        prompt = msg_content[0]["text"]
+        head, sep, tail = prompt.partition("\n\n## 候选标签分组\n")
+        assert sep and head
+        group = json.JSONDecoder().raw_decode(tail)[0]
+        assert group["tags"][0]["tag_id"] == "tag_g_00"
+        rest = msg_content[1:]
+        assert rest == frame_parts
