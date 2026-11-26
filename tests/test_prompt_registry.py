@@ -67,19 +67,25 @@ def test_registry_closed_content(client):
 def test_registry_mtg_items_match_constants(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     by_name = {i["name"]: i["text"] for i in groups["mtg"]["items"]}
-    assert by_name["JUDGE_CRITERIA"] == mtg_prompts.JUDGE_CRITERIA  # 单一来源钉死
-    assert by_name["EXCERPT_DIR_GOAL_TEXT"] == mtg_prompts.EXCERPT_DIR_GOAL_TEXT
+    assert by_name["SCENE_GENERATION_TEMPLATE"] == mtg_prompts.SCENE_GENERATION_TEMPLATE
+    assert by_name["FILM_GENERATION_TEMPLATE"] == mtg_prompts.FILM_GENERATION_TEMPLATE
+    assert by_name["JUDGE_TEMPLATE"] == mtg_prompts.JUDGE_TEMPLATE  # 单一来源钉死
+    assert by_name["DESCRIPTION_TEMPLATE"] == mtg_prompts.DESCRIPTION_TEMPLATE
+    assert by_name["VERIFY_TEMPLATE"] == mtg_prompts.VERIFY_TEMPLATE
 
 
 def test_registry_open_review_content(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     items = {i["name"]: i["text"] for i in groups["open_review"]["items"]}
+    assert set(items) == {
+        "REVIEW_PROMPT", "REVIEW_RETRY_HINT", "REVIEW_PROMPT_VERSION",
+    }
     assert items["REVIEW_PROMPT_VERSION"] == "open-review-v10"
     assert "## 开放评测补充规则" in items["REVIEW_PROMPT"]
     assert "## 标签质量评估" in items["REVIEW_PROMPT"]  # rubric 驻本模块
     assert "evidence_scene_ids" in items["REVIEW_PROMPT"]
+    assert "reviews" in items["REVIEW_PROMPT"]
     assert "judge_reference" not in items["REVIEW_PROMPT"]
-    assert "reviews" in items["REVIEW_OUTPUT_FORMAT"]
     assert "reviews" in items["REVIEW_RETRY_HINT"]
 
 

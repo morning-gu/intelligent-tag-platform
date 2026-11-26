@@ -98,12 +98,12 @@ def test_is_general_rejects_plot_specific(text, names):
 
 def test_is_general_accepts_generic_protagonist_word():
     """“主角”在库里是通用用法，不能当泄漏（否则会误杀成片定义）。"""
-    from tagplatform.capabilities.prompts.mtg import DESCRIPTION_INSTRUCTIONS
+    from tagplatform.capabilities.prompts.mtg import DESCRIPTION_TEMPLATE
 
     assert is_general("主角因遭受不公或伤害而展开复仇行动的剧情母题")
-    assert "9-32 字" in DESCRIPTION_INSTRUCTIONS
-    assert "主角" not in DESCRIPTION_INSTRUCTIONS
-    assert "结尾" not in DESCRIPTION_INSTRUCTIONS
+    assert "9-32 字" in DESCRIPTION_TEMPLATE
+    assert "主角" not in DESCRIPTION_TEMPLATE
+    assert "结尾" not in DESCRIPTION_TEMPLATE
 
 
 def test_clean_description_strips_wrappers():

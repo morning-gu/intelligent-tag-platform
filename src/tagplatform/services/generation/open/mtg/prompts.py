@@ -22,10 +22,9 @@ from pathlib import Path
 from tagplatform.schemas import ContentJSON
 from tagplatform.schemas.content import Character, Scene
 from tagplatform.capabilities.prompts.mtg import (
-    EXCERPT_DIR_GOAL_TEXT, FILM_GOAL_TEXT, GENERATION_ROLE_TEXT, HOW_TO_FILL_TEXT,
-    JUDGE_CRITERIA, JUDGE_DIR_BLOCK_HEAD_TEXT, JUDGE_DIR_FIT_TEXT,
-    JUDGE_ROLE_BRIEF, JUDGE_CANDIDATE_ID_TEXT, JUDGE_EXCERPT_TEXT,
-    LIBRARY_HINT_HEAD_TEXT, TARGET_DIR_RULE_TEXT,
+    FILM_GENERATION_TEMPLATE,
+    JUDGE_TEMPLATE,
+    SCENE_GENERATION_TEMPLATE,
 )
 
 # 五个生成维度（键与 MovieTagGen 的 dimensions 对齐，值为中文展示名）
@@ -49,8 +48,7 @@ def _scope_label(scope: str | None) -> str:
 GENERATION_MARKER = "## 标签生成任务"
 JUDGE_MARKER = "## 审核任务"
 
-# judge 指令文案（JUDGE_ROLE_BRIEF / JUDGE_CRITERIA）自 2026-11-22 文案集中
-# 起移驻 tagplatform.capabilities.prompts.mtg（本模块 import 消费）。
+# 生成与 Judge 完整模板驻留于 tagplatform.capabilities.prompts.mtg（本模块 import 消费）。
 
 # prompt 内明细上限（控制 token；资产本身已按场景裁剪过台词）
 _MAX_CAST = 8
@@ -169,28 +167,40 @@ def render_scene(scene: Scene, active: frozenset[str]) -> str:
     return f"场景 ID：{scene.scene_id}"
 
 
-def _generation_instructions(scope: str, max_tags: int | str) -> str:
-    # goal 文案与"如何填写"块自文案集中起为中央常量（capabilities.prompts.mtg）
-    if scope == "scene":
-        return (
-            f"## 要求\n{EXCERPT_DIR_GOAL_TEXT}\n"
-            f"最多 {max_tags} 条，按价值和证据强度降序排列。证据不足可以少给或返回空 tags。\n"
-            "一个概念只保留一个说法。desc 填可跨影片复用的释义，"
-            "reason 说明材料中可核对的依据。\n"
-            '直接返回 JSON：{"tags":[{"tag":"简洁的中文词组",'
-            '"desc":"9-32 字通用释义","reason":"具体依据"}]}'
-        )
-    return (
-        f"## 要求\n{FILM_GOAL_TEXT}\n"
-        f"最多 {max_tags} 条，按对当前用途的价值和证据强度降序排列。"
-        "一个概念只保留一个说法。证据不足可以少给或返回空 tags。\n"
-        f"{HOW_TO_FILL_TEXT}\n## 输出格式\n"
-        "直接返回一个 JSON 对象，结构如下：\n"
-        '{"tags":[{"tag":"2-8 字中文标签",'
-        '"scope":"film",'
-        '"desc":"9-32 字通用释义",'
-        '"scenes":["实际场景 ID"],"reason":"可核对的细节及其支撑标签的理由"}]}'
-    )
+def _split_generation_template(scope: str) -> tuple[str, str]:
+    """按 `{keyframes}` 切分整块生成模板 → (内容头模板, 尾部指令模板)。"""
+    template = SCENE_GENERATION_TEMPLATE if scope == "scene" else FILM_GENERATION_TEMPLATE
+    head, tail = template.split("\n{keyframes}\n", 1)
+    return head, tail
+
+
+def _strip_section(text: str, start_marker: str, end_marker: str) -> str:
+    """移除整块模板中某段可选章节（从 start_marker 到 end_marker 之前）。"""
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    return text[:start] + text[end:]
+
+
+def _library_hint_section(names: list[str]) -> str:
+    """从 FILM_GENERATION_TEMPLATE 提取并填充库内已有标签提示块。"""
+    _, tail = _split_generation_template("film")
+    end = tail.index("\n\n## 目标目录\n")
+    section = tail[:end]
+    listing = "\n".join(f"- {name}" for name in names)
+    return section.replace("{library_hint}", listing)
+
+
+def _generation_tail(scope: str, max_tags: int | str,
+                     target_directory: str | None = None) -> str:
+    """从完整生成模板渲染目标目录与要求段（不含库内提示，库内提示独立前置）。"""
+    _, tail = _split_generation_template(scope)
+    if scope != "scene":
+        tail = _strip_section(tail, "## 库里已有的标签\n", "## 目标目录\n")
+    if target_directory is None:
+        tail = _strip_section(tail, "## 目标目录\n", "## 要求\n")
+    else:
+        tail = tail.replace("{target_directory}", target_directory)
+    return tail.replace("{max_tags}", str(max_tags))
 
 
 def build_scene_generation_messages(scene: Scene, frames: tuple[Path, ...], *,
@@ -255,34 +265,31 @@ def keyframe_parts(scene_id: str, order: int | str, total: int | str,
 def _generation_messages(body: str, frame_parts: list[dict],
                          library_hint: list[str] | None, *, scope: str,
                          max_tags: int | str) -> list[dict]:
+    head_tpl, _ = _split_generation_template(scope)
     parts: list[dict] = [{
         "type": "text",
-        "text": (f"{GENERATION_MARKER}\n"
-                 f"{GENERATION_ROLE_TEXT}" + body),
+        "text": head_tpl.replace("{content}", body),
     }, *frame_parts]
     if library_hint:
-        parts.append({"type": "text", "text": _library_hint_block(library_hint)})
-    parts.append({"type": "text",
-                  "text": _generation_instructions(scope, max_tags)})
+        parts.append({"type": "text", "text": _library_hint_section(library_hint)})
+    parts.append({"type": "text", "text": _generation_tail(scope, max_tags)})
     return [{"role": "user", "content": parts}]
 
 
 def target_generation_directory(messages: list[dict], directory: dict, *,
                                 scope: str, max_tags: int | str) -> list[dict]:
     """绑定单目录，复用已经渲染好的影片材料、关键帧和库内提示。"""
-    path = directory["path"]
-    definition = " ".join((directory.get("description") or "").split())
-    target = f"## 目标目录\n路径：{path}\n"
+    lines = [f"路径：{directory['path']}"]
     if scope == "film" and directory.get("scope"):
-        target += f"适用范围：{_scope_label(directory['scope'])}\n"
+        lines.append(f"适用范围：{_scope_label(directory['scope'])}")
+    definition = " ".join((directory.get("description") or "").split())
     if definition:
-        target += f"定义：{definition}\n"
-    instructions = _generation_instructions(scope, max_tags)
+        lines.append(f"定义：{definition}")
+    tail = _generation_tail(scope, max_tags, target_directory="\n".join(lines))
     message = messages[0]
     return [{**message, "content": [
         *message["content"][:-1],
-        {"type": "text", "text": target + TARGET_DIR_RULE_TEXT},
-        {"type": "text", "text": instructions},
+        {"type": "text", "text": tail},
     ]}]
 
 
@@ -306,16 +313,6 @@ def build_generation_template(scope: str) -> dict:
     messages = _generation_messages(body, frames, hints, scope=scope, max_tags=budget)
     return {"messages": target_generation_directory(
         messages, directory, scope=scope, max_tags=budget)}
-
-
-def _library_hint_block(names: list[str]) -> str:
-    """库内已有标签的提示块（只给名字，不给定义）。
-
-    措辞刻意留出"更精确说法"的口子：库里有"悬疑"时，模型仍可以给出
-    "悬疑解谜"这类更细的候选，只是不该原样复述。
-    """
-    listing = "\n".join(f"- {name}" for name in names)
-    return LIBRARY_HINT_HEAD_TEXT + listing
 
 
 def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
@@ -350,7 +347,7 @@ def build_judge_messages(content: ContentJSON, candidates: list[dict], *,
 
 
 def judge_dir_block(dirs: list[dict]) -> str:
-    """judge 侧目录块：目录 id｜全路径｜定义 + 契合判定要求（空清单 → 空串）。"""
+    """格式化 judge 目录清单行（空清单 → 空串）。"""
     if not dirs:
         return ""
     lines = []
@@ -358,7 +355,7 @@ def judge_dir_block(dirs: list[dict]) -> str:
         description = " ".join((entry.get("description") or "").split())
         line = f"- {entry['dir_id']}｜{entry['path']}"
         lines.append(f"{line}｜{description}" if description else line)
-    return JUDGE_DIR_BLOCK_HEAD_TEXT + "\n".join(lines) + "\n" + JUDGE_DIR_FIT_TEXT
+    return "\n".join(lines)
 
 
 def _judge_output_example(*, with_candidate_ids: bool, with_dirs: bool) -> str:
@@ -377,20 +374,24 @@ def _judge_output_example(*, with_candidate_ids: bool, with_dirs: bool) -> str:
 def render_judge_messages(body: str, candidate_lines: str, *,
                           dir_block: str = "", with_candidate_ids: bool = False,
                           with_excerpts: bool = False) -> list[dict]:
-    text = (
-        f"{JUDGE_MARKER}\n"
-        f"{JUDGE_ROLE_BRIEF}"
-        "## 候选标签\n" + candidate_lines + "\n\n"
-        "## 影片内容\n" + body + "\n\n"
-        + JUDGE_CRITERIA
-        + (JUDGE_EXCERPT_TEXT if with_excerpts else "")
-        + (JUDGE_CANDIDATE_ID_TEXT if with_candidate_ids else "")
-        + dir_block
-        + "\n\n只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
-        + _judge_output_example(
-            with_candidate_ids=with_candidate_ids, with_dirs=bool(dir_block))
+    text = JUDGE_TEMPLATE
+    if not with_excerpts:
+        text = _strip_section(text, "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时")
+    if not with_candidate_ids:
+        text = _strip_section(text, "\n\n候选行标有「候选 ID」时", "\n\n## 目标目录与目录契合")
+    if dir_block:
+        text = text.replace("{dirs}", dir_block)
+    else:
+        text = _strip_section(text, "\n\n## 目标目录与目录契合", "\n\n只输出一个 JSON 对象")
+    head, _ = text.rsplit("\n", 1)
+    example = _judge_output_example(
+        with_candidate_ids=with_candidate_ids, with_dirs=bool(dir_block))
+    rendered = (
+        f"{head}\n{example}"
+        .replace("{candidates}", candidate_lines)
+        .replace("{content}", body)
     )
-    return [{"role": "user", "content": text}]
+    return [{"role": "user", "content": rendered}]
 
 
 def candidate_line(tag: str, dimension: str | None, reason: str | None) -> str:

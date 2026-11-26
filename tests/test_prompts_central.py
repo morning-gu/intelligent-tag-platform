@@ -1,15 +1,13 @@
-"""Prompt 文案集中（capabilities/prompts）的 wiring 与分层红线测试。"""
+"""Prompt 完整模板（capabilities/prompts）的 wiring 与分层红线测试。"""
 import re
 from pathlib import Path
 
 import pytest
 
 from tagplatform.capabilities.prompts.mtg import (
-    DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT,
-    EXCERPT_DIR_GOAL_TEXT, FILM_GOAL_TEXT, GENERATION_ROLE_TEXT,
-    HOW_TO_FILL_TEXT, JUDGE_CRITERIA, JUDGE_RETRY_HINT, JUDGE_ROLE_BRIEF,
-    LIBRARY_HINT_HEAD_TEXT, TARGET_DIR_RULE_TEXT, VERIFY_INSTRUCTIONS,
-    VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT,
+    DESCRIPTION_RETRY_HINT, DESCRIPTION_TEMPLATE,
+    FILM_GENERATION_TEMPLATE, JUDGE_RETRY_HINT, JUDGE_TEMPLATE,
+    SCENE_GENERATION_TEMPLATE, VERIFY_RETRY_HINT, VERIFY_TEMPLATE,
 )
 from tagplatform.capabilities.prompts.templates import CLOSED_RETRY_HINT
 from tagplatform.services.generation.open.mtg.descriptions import (
@@ -46,36 +44,41 @@ def test_central_modules_layering(module):
     _layering_clean(module)
 
 
-@pytest.mark.parametrize("text", [GENERATION_ROLE_TEXT, EXCERPT_DIR_GOAL_TEXT,
-    FILM_GOAL_TEXT, HOW_TO_FILL_TEXT, TARGET_DIR_RULE_TEXT,
-    LIBRARY_HINT_HEAD_TEXT, JUDGE_CRITERIA, JUDGE_ROLE_BRIEF,
-    DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT, VERIFY_INSTRUCTIONS,
-    VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT, JUDGE_RETRY_HINT,
-    CLOSED_RETRY_HINT])
+@pytest.mark.parametrize("text", [
+    SCENE_GENERATION_TEMPLATE, FILM_GENERATION_TEMPLATE,
+    JUDGE_TEMPLATE, JUDGE_RETRY_HINT,
+    DESCRIPTION_TEMPLATE, DESCRIPTION_RETRY_HINT,
+    VERIFY_TEMPLATE, VERIFY_RETRY_HINT,
+    CLOSED_RETRY_HINT,
+])
 def test_constants_non_empty(text):
     assert text.strip()
 
 
 def test_generation_template_uses_central_copy():
     scene = build_generation_template("scene")
-    scene_text = "".join(p["text"] for p in scene["messages"][0]["content"]
-                         if p["type"] == "text")
-    assert GENERATION_ROLE_TEXT in scene_text
-    assert EXCERPT_DIR_GOAL_TEXT in scene_text
-    assert TARGET_DIR_RULE_TEXT in scene_text
+    scene_text = "\n".join(p["text"] for p in scene["messages"][0]["content"]
+                           if p["type"] == "text")
+    assert "## 标签生成任务" in scene_text
+    assert "根据当前片段，提炼核心含义符合目标目录定义" in scene_text
+    assert "只生成核心含义属于当前目标目录的标签。" in scene_text
+    assert "{content}" not in scene_text and "{target_directory}" not in scene_text
+
     film = build_generation_template("film")
-    film_text = "".join(p["text"] for p in film["messages"][0]["content"]
-                        if p["type"] == "text")
-    assert FILM_GOAL_TEXT in film_text
-    assert HOW_TO_FILL_TEXT in film_text
-    assert LIBRARY_HINT_HEAD_TEXT in film_text
-    assert TARGET_DIR_RULE_TEXT in film_text
+    film_text = "\n".join(p["text"] for p in film["messages"][0]["content"]
+                          if p["type"] == "text")
+    assert "第二轮：结合影片材料和逐场候选" in film_text
+    assert "## 如何填写" in film_text
+    assert "## 库里已有的标签" in film_text
+    assert "只生成核心含义属于当前目标目录的标签。" in film_text
+    assert "{library_hint}" not in film_text and "{max_tags}" not in film_text
 
 
 def test_judge_messages_use_central_copy():
     text = render_judge_messages("正文", "- 候选｜维度｜理由")[0]["content"]
-    assert JUDGE_ROLE_BRIEF in text
-    assert JUDGE_CRITERIA in text
+    assert "你是严格的影视内容标签审核员。" in text
+    assert "## 评分标准" in text
+    assert "{candidates}" not in text and "{content}" not in text
 
 
 def test_judge_retry_suffix_is_central():
@@ -85,12 +88,17 @@ def test_judge_retry_suffix_is_central():
 def test_verify_uses_central_copy():
     template = build_verify_template()
     content = template["messages"][0]["content"]
-    assert VERIFY_INSTRUCTIONS in content
-    assert VERIFY_OUTPUT_FORMAT in content
+    assert "## 相似度复核" in content
+    assert "判断标准只有一条" in content
+    assert '只输出一个 JSON 对象：{"results":' in content
+    assert "{pairs}" not in content
     assert template["retry_suffix"] == VERIFY_RETRY_HINT
 
 
 def test_description_uses_central_copy():
     template = build_description_template()
-    assert DESCRIPTION_INSTRUCTIONS in template["messages"][0]["content"]
+    content = template["messages"][0]["content"]
+    assert "## 通用释义（标签描述补写）" in content
+    assert "标签清单：" in content
+    assert "{items}" not in content
     assert template["retry_suffix"] == DESCRIPTION_RETRY_HINT

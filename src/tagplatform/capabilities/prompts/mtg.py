@@ -1,38 +1,56 @@
-"""开放流水线（mtg-v1）指令文案常量：唯一权威源（git 即版本机制）。
+"""开放流水线（mtg）完整提示词模板与重试提示：唯一权威源（git 即版本机制）。
 
-2026-11-22 文案集中（prompt-copy-centralization Task 1）：全部逐字搬自
-services 层五模块（prompts.py / descriptions.py / verify.py / judge.py 的
-指令段与重试提示）。搬运为纯位移——改文案 = 改常量 + 全量回归 + commit。
+每个 LLM 阶段维护一整块带显式占位符的完整模板（一阶段场景生成、二阶段全片生成、
+Judge 审核、通用释义补写、相似度复核），以及仅在解析失败重试时追加的 `*_RETRY_HINT`。
+服务层渲染函数直接消费本模块模板，不再散落拼接指令文案。
 
-协议耦合提醒：本模块文案与其解析端互为协议——JUDGE_CRITERIA / *_RETRY_HINT
-描述的输出 JSON 形状就是 parse.parse_judge_items / parse_verify_results /
-_parse_items / parse_closed_output 的输入契约，DESCRIPTION_INSTRUCTIONS 的
-"通用性"规则就是 descriptions.is_general 的校验口径。改字段名、取值集或
-输出 JSON 形状时两侧必须同改，改动只落提示词一侧 = 靠解析容错兜住的
-静默漂移。
+协议耦合提醒：本模块模板与其解析端互为协议——输出 JSON 形状与
+`parse.parse_judge_items` / `parse.parse_generation_items` /
+`verify.parse_verify_results` / `descriptions._parse_items` 互为契约，
+`DESCRIPTION_TEMPLATE` 的通用性要求与 `descriptions.is_general` 对齐。
+修改字段名、取值范围或输出结构时，模板、重试提示与解析端必须同步更新。
 
 分层红线：本模块纯常量，不得 import fastapi / sqlalchemy /
-tagplatform.services。含参数槽的行（输出格式 JSON 行、builder 数据头）
-留在服务层组装函数内——本模块只收无参数槽的完整文案块。
+tagplatform.services。
 """
 
-# 生成请求的角色行（## 标签生成任务 marker 之后、## 内容 之前的自报家门段）
-GENERATION_ROLE_TEXT = (
+# ---- 一阶段：逐场逐目录生成 ----
+SCENE_GENERATION_TEMPLATE = (
+    "## 标签生成任务\n"
     "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
     "## 内容\n"
-)
-
-EXCERPT_DIR_GOAL_TEXT = (
-    "根据当前片段，提炼核心含义符合目标目录定义、且有具体材料支持的标签。"
-    "从当前片段的描述、台词或画面找依据，用清晰、自然、可独立理解的词组命名。"
-)
-TARGET_DIR_RULE_TEXT = (
+    "{content}\n"
+    "{keyframes}\n"
+    "## 目标目录\n"
+    "{target_directory}\n"
     "只生成核心含义属于当前目标目录的标签。"
-    "结合目录路径和定义确定要识别的特征。"
+    "结合目录路径和定义确定要识别的特征。\n\n"
+    "## 要求\n"
+    "根据当前片段，提炼核心含义符合目标目录定义、且有具体材料支持的标签。"
+    "从当前片段的描述、台词或画面找依据，用清晰、自然、可独立理解的词组命名。\n"
+    "最多 {max_tags} 条，按价值和证据强度降序排列。证据不足可以少给或返回空 tags。\n"
+    "一个概念只保留一个说法。desc 填可跨影片复用的释义，"
+    "reason 说明材料中可核对的依据。\n"
+    '直接返回 JSON：{"tags":[{"tag":"简洁的中文词组",'
+    '"desc":"9-32 字通用释义","reason":"具体依据"}]}'
 )
 
-# 第二轮（整片粒度）的目标段：scope=film 时由 _generation_instructions 注入
-FILM_GOAL_TEXT = (
+# ---- 二阶段：全片逐目录生成 ----
+FILM_GENERATION_TEMPLATE = (
+    "## 标签生成任务\n"
+    "你是影视内容分析专家，任务是从影片内容中提炼语义标签。\n\n"
+    "## 内容\n"
+    "{content}\n"
+    "{keyframes}\n"
+    "## 库里已有的标签\n"
+    "以下是已收录的表述，供你对照。请输出尚未收录的表述，优先补充清单未覆盖的特征，"
+    "或用片中证据提炼出比现有词更精确的标签：\n"
+    "{library_hint}\n\n"
+    "## 目标目录\n"
+    "{target_directory}\n"
+    "只生成核心含义属于当前目标目录的标签。"
+    "结合目录路径和定义确定要识别的特征。\n\n"
+    "## 要求\n"
     "第二轮：结合影片材料和逐场候选，为观众提炼可独立展示的全片标签，scope 固定为 film。"
     "从反复出现的意象或情绪、人物变化、前后呼应和段落对照中找全片特征。"
     "逐场候选是检索线索，证据来自影片材料。允许发现候选里没有的全片特征。"
@@ -40,37 +58,34 @@ FILM_GOAL_TEXT = (
     "每条标签至少引用两个不同场景，在 reason 中说清它们的共性或联系，"
     "以及这些细节为何足以概括全片。"
     "结合目标目录定义，全片特征只能取自目录定义所指的那一类；不属于这一类的"
-    "人物变化、意象主题或事件，即使贯穿全片也不要输出。"
-)
-
-# 字段填写说明块（介于"最多 N 条"行与输出格式之间）
-HOW_TO_FILL_TEXT = (
-    "\n## 如何填写\n"
+    "人物变化、意象主题或事件，即使贯穿全片也不要输出。\n"
+    "最多 {max_tags} 条，按对当前用途的价值和证据强度降序排列。"
+    "一个概念只保留一个说法。证据不足可以少给或返回空 tags。\n\n"
+    "## 如何填写\n"
     "- tag：用简洁自然的中文词组命名，通常 2-8 字。\n"
     "- desc：用 9-32 字解释标签本身，写成可跨影片复用的词典式释义。\n"
     "- scenes：填写实际提供、且用于支撑标签的场景 ID。\n"
-    "- reason：用一到两句完整的话指出可核对的细节，并说明这些细节如何支持标签。\n"
+    "- reason：用一到两句完整的话指出可核对的细节，并说明这些细节如何支持标签。\n\n"
+    "## 输出格式\n"
+    "直接返回一个 JSON 对象，结构如下：\n"
+    '{"tags":[{"tag":"2-8 字中文标签",'
+    '"scope":"film",'
+    '"desc":"9-32 字通用释义",'
+    '"scenes":["实际场景 ID"],"reason":"可核对的细节及其支撑标签的理由"}]}'
 )
 
-# 库内已有标签提示块的头部说明（词表行由 _library_hint_block 渲染）
-LIBRARY_HINT_HEAD_TEXT = (
-    "## 库里已有的标签\n"
-    "以下是已收录的表述，供你对照。请输出尚未收录的表述，优先补充清单未覆盖的特征，"
-    "或用片中证据提炼出比现有词更精确的标签：\n"
-)
-
-# ---- judge 指令文案（与解析器互为协议）----
-# judge 输出的解析端是 parse.parse_judge_items（三维分值 0-4/null 清洗、
-# confidence 夹取、quote/reason 截断都在那里），JUDGE_RETRY_HINT 是同一输出
-# 协议的第三次出现——改字段名、分值范围或输出 JSON 形状时三处必须同改。
-# 三维口径与 capabilities/prompts/open_review.py 的评审 rubric 同源但任务不同：
-# judge 在释义补写之前评审，semantics 只评名称本身；评审侧评名称↔释义。
-JUDGE_ROLE_BRIEF = (
+# ---- Judge 审核（与 parse.parse_judge_items 互为协议）----
+# 三维口径与 capabilities/prompts/open_review.py 同源但任务不同：
+# Judge 在释义补写之前评审，semantics 只评名称本身；开放评测评审名称↔释义。
+JUDGE_TEMPLATE = (
+    "## 审核任务\n"
     "你是严格的影视内容标签审核员。下面是候选标签和影片内容。"
     "请逐个评审候选标签的实际效果：它被内容支持得有多准确、名称是否清晰、"
     "对检索和浏览有多大实际作用——不是评它听起来好不好。\n\n"
-)
-JUDGE_CRITERIA = (
+    "## 候选标签\n"
+    "{candidates}\n\n"
+    "## 影片内容\n"
+    "{content}\n\n"
     "## 评分标准\n"
     "逐条给全 relevance、semantics、value，按各维定义给 0–4 整数。"
     "relevance 仅在缺少必要影片材料、确实无法判断内容支持时可填 null，并在 reason 写明缺什么。"
@@ -104,37 +119,34 @@ JUDGE_CRITERIA = (
     "按候选标明的作用域核查 relevance。film 的 relevance ≥3 时，scenes 必须列出"
     "至少两个共同支撑标签的独立场景。scene 只在候选标明的依据场景内核验并引用原文。"
     "relevance ≥3 必须有逐字摘录支撑。材料可核验时，对证据的不足按档位评分；"
-    "必要材料缺失而无法判断时按前述规则填 null。"
-)
-
-JUDGE_EXCERPT_TEXT = (
-    "\n\n标为 excerpt 的候选只用该行所列的来源场景核对 relevance 和摘录，"
+    "必要材料缺失而无法判断时按前述规则填 null。\n\n"
+    "标为 excerpt 的候选只用该行所列的来源场景核对 relevance 和摘录，"
     "其中一个场景有充分证据即可。按名称给 value："
     "3 能表达具体的题材、情绪、叙事或视听特征，或为片段检索提供一项有效限定；"
-    "4 能单凭名称形成鲜明且有区分度的内容预期，或为片段检索提供至少两项独立的有效限定。"
-)
-JUDGE_CANDIDATE_ID_TEXT = (
-    '\n\n候选行标有「候选 ID」时，在该条判决中原样输出 "candidate_id"。'
-    "同名候选也要各自给出判决，只用各自行的证据和目录。"
-)
-
-# ---- judge 目录契合校验 ----
-JUDGE_DIR_BLOCK_HEAD_TEXT = (
-    "\n\n## 目标目录与目录契合\n"
+    "4 能单凭名称形成鲜明且有区分度的内容预期，或为片段检索提供至少两项独立的有效限定。\n\n"
+    '候选行标有「候选 ID」时，在该条判决中原样输出 "candidate_id"。'
+    "同名候选也要各自给出判决，只用各自行的证据和目录。\n\n"
+    "## 目标目录与目录契合\n"
     "下面给出候选所标目录的 ID、全路径和定义：\n"
-)
-JUDGE_DIR_FIT_TEXT = (
+    "{dirs}\n"
     "只看标签名称的核心含义和目录定义，逐个判断它是否属于候选行标出的目录。"
     "如目录要情感基调，核心含义是动作、事件、人物身份或题材的词应判 false。"
     "候选有目录 ID 时，在该条判决中追加 dir_fits 对象，键为该行列出的每个目录 ID，"
     '值为 true 或 false，例如 "dir_fits":{"dir_a":true,"dir_b":false}。'
-    "候选行没有目录 ID 时，省略 dir_fits。"
+    "候选行没有目录 ID 时，省略 dir_fits。\n\n"
+    "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
+    '{"verdicts":[{"tag":"候选标签原文","candidate_id":"候选 ID","relevance":4,'
+    '"semantics":3,"value":3,"confidence":0.85,"scenes":["场景 id"],'
+    '"quote":"原文逐字摘录","reason":"30 字以内","dir_fits":{"目录 ID":true}}]}'
+)
+JUDGE_RETRY_HINT = (
+    "\n\n请按上面的同一输出格式返回这次列出的所有候选，每条只判一次。"
+    "保留候选完整名称和全部必填字段（候选行标有「候选 ID」或「目录」时，"
+    "必须一并返回 candidate_id 与对应的 dir_fits 布尔值），逐条核对字段类型。"
 )
 
-# ---- 标签通用释义补写指令（descriptions）----
-# 解析端是 descriptions._parse_items / clean_description / is_general：条目
-# 形状 {"tag","desc"}、长度带（DESC_MIN/DESC_MAX）与"通用性"规则两侧同改。
-DESCRIPTION_INSTRUCTIONS = (
+# ---- 通用释义补写（与 descriptions._parse_items / is_general 互为协议）----
+DESCRIPTION_TEMPLATE = (
     "## 通用释义（标签描述补写）\n"
     "你在维护一个影视标签库。下面是待新增的标签（名称 + 归属目录），"
     "请为每个标签写一句**通用释义**。\n"
@@ -152,16 +164,16 @@ DESCRIPTION_INSTRUCTIONS = (
     "5. 只输出 JSON：{\"items\":[{\"tag\":\"标签名\",\"desc\":\"通用释义\"}]}，"
     "不要解释、不要 Markdown 代码块。\n\n"
     "标签清单：\n"
+    "{items}"
 )
 DESCRIPTION_RETRY_HINT = (
     "\n\n上一版不合格：出现了具体影片信息、专名或长度越界。"
     "请严格照要求重写，只输出 JSON。"
 )
 
-# ---- 相似度复核指令（verify）----
-# 解析端是 verify.parse_verify_results：候选行格式与输出 JSON 形状
-# {"results":[{"candidate","same"}]} 两侧同改。
-VERIFY_INSTRUCTIONS = (
+# ---- 相似度复核（与 verify.parse_verify_results 互为协议）----
+VERIFY_TEMPLATE = (
+    "## 相似度复核\n"
     "下面每行是一组「候选标签｜已有标签｜相似度」。\n"
     "判断标准只有一条：如果这两个词都进了标签库，审核的人会不会认为它们是"
     "重复条目、只该留一条？会 → same=true，否则 false。\n"
@@ -175,8 +187,7 @@ VERIFY_INSTRUCTIONS = (
     "2. 字面像但指不同事物（友情与背叛 / 权力与背叛；超能力觉醒 / 绝境觉醒）；\n"
     "3. 候选是另一个独立概念，只是共享了词（暴君多疑 / 多疑 视情况，"
     "共享词但主体不同的判 false）。\n"
-)
-VERIFY_OUTPUT_FORMAT = (
+    "{pairs}\n"
     '只输出一个 JSON 对象：{"results":[{"candidate":"候选原文","same":true}]}，'
     "每行都要给一条，不要解释、不要 Markdown 代码块。"
 )
@@ -184,11 +195,4 @@ VERIFY_RETRY_HINT = (
     "\n\n上一次输出无法解析：只输出一个 JSON 对象，形如 "
     '{"results":[{"candidate":"候选原文","same":true}]}，'
     "不要解释、不要 Markdown 代码块。"
-)
-
-# ---- judge 解析重试提示 ----
-JUDGE_RETRY_HINT = (
-    "\n\n请按上面的同一输出格式返回这次列出的所有候选，每条只判一次。"
-    "保留候选完整名称和全部必填字段（候选行标有「候选 ID」或「目录」时，"
-    "必须一并返回 candidate_id 与对应的 dir_fits 布尔值），逐条核对字段类型。"
 )

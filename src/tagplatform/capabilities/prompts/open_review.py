@@ -79,7 +79,7 @@ scene 的 3–4 分必须引用至少一个来源场景。film 的 3–4 分必�
 """
 
 REVIEW_PROMPT_VERSION = "open-review-v10"
-REVIEW_PROTOCOL_NOTE = """
+_REVIEW_PROTOCOL_NOTE = """
 ## 开放评测补充规则
 同时阅读整片产出的标签。只评「待评估标签」中的条目，保留各自的 id。
 若还有「该片其他标签（上下文）」，将它和待评列表一起用于比较标签用途和信息重复。
@@ -97,7 +97,7 @@ scene 必须来自该标签的 scene_ids。引用时写完整 ID，例如 scene_
 进行整体判断时填 null。顶层 reason 写清模型对标签的整体评价和决定保留、不保留
 或暂无法判断的关键原因。避免复述三条评分理由或列出分数。每个目标 id 返回一次。
 """
-REVIEW_OUTPUT_FORMAT = (
+_REVIEW_OUTPUT_FORMAT = (
     '只输出 JSON 对象，例如 {"reviews":[{"id":"t0",'
     '"pass":true,"reason":"直接概括影片的核心冲突，且提供了同组其他标签没有的区分信息，建议保留",'
     '"relevance":{"score":4,"reason":"理由"},'
@@ -105,7 +105,7 @@ REVIEW_OUTPUT_FORMAT = (
     '"value":{"score":3,"reason":"理由"},'
     '"evidence_scene_ids":["场景ID"]}]}。'
 )
-REVIEW_PROMPT = _RUBRIC_CRITERIA + REVIEW_PROTOCOL_NOTE + REVIEW_OUTPUT_FORMAT
+REVIEW_PROMPT = _RUBRIC_CRITERIA + _REVIEW_PROTOCOL_NOTE + _REVIEW_OUTPUT_FORMAT
 REVIEW_RETRY_HINT = (
     "\n\n上一响应缺少可用评审结果。请在 reviews 中按系统协议返回每个目标 id、"
     "三维分及理由、独立保留结论 pass、总评 reason 和引用场景。"
