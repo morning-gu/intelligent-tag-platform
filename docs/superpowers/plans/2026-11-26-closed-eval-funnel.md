@@ -57,8 +57,8 @@
 
 def test_produce_trace_full_funnel(session, content_fixture):
     # 复用 _seed_library/_build_spec/_ScriptedLLM/_evi 夹具：单目录 4 候选，
-    # 判定给 3 条（A=5 保留、A=3 门控、1 条不提）+ 1 条编造 id tag_999（A=5），
-    # max_tags=1：同目录两条可挂载判定，次优者落 m_cap
+    # 判定给 3 条（A=5 保留、A=5 落选 m_cap、A=3 门控）+ 1 条不提
+    # + 1 条编造 id tag_999（A=5）；max_tags=1：同目录两条可挂载，次优者落 m_cap
     trace = ProduceTrace()
     out = ClosedTagProducer().produce(spec, session, llm, MOCK_EMBEDDER, trace=trace)
     snap = trace.snapshot()
