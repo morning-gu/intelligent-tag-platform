@@ -36,7 +36,10 @@ class OpenTagProducer:
 
     def produce(self, spec: GenerationSpec, session: Session, llm,
                 embedder, judge_client=None,
-                settings: Settings | None = None) -> list[ProducedTag]:
+                settings: Settings | None = None,
+                trace=None) -> list[ProducedTag]:
+        """执行开放生成管线；trace 接受并忽略，开放侧语义未实现（漏斗
+        追踪为 closed 侧采集，此处仅为协议签名兼容）。"""
         # settings：run 级副本（开放评测用），None 时由流水线回落 get_settings()。
         return run_open_generation(spec, session, llm, embedder,
                                    judge_client=judge_client, settings=settings)

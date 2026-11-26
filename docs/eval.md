@@ -221,6 +221,91 @@ raw_results.json（逐片留痕，离线重算指标不必重烧 LLM）、report
 meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡在磁盘上
 可辨认）；report.json 缺失或截断的 run 按无报告处理，摘要列为「暂无」。
 
+### 管线追踪（漏斗口径）
+
+回答的问题：**一部片的标签从「召回在册」到「最终产出」，每一环各丢多少、漏检的标签死在哪一环？**
+
+闭环干跑在既有生产流程的七处采集点上顺路采集漏斗踪迹（producer 注释
+编号 1–7；`generation/trace.py` 的 `ProduceTrace` 被动收集器，可选参数
+`trace=None` 走与旧代码逐字节相同的路径——采集器纯旁观，不参与任何判定）：
+`set_max_tags` 记全局输出上限 M（策略原值）、`add_candidates` 召回后按批
+入册（`recall` = 召回余弦 Semb）、`note_batch` 批次解析成功落册、`resolve`
+在门控/挂载/选择各点回填结局（全局选择环节 kept 与 m_cap 是两个 resolve
+调用位）、`note_fabricated` 记编造/越组 id。漏斗计数由候选行**纯派生**
+（`funnel_counts`——落盘只存逐候选行，单一事实源），经逐片摘要的
+`funnel` 键、单片明细的 `trace` 包层与 misses 的 `lost_at` 列透出。
+
+**outcome 五值；dir_asset 剔除不设独立 outcome（已拍板）**。候选结局
+枚举 `kept | unmentioned | gate | unmountable | m_cap`：
+
+| outcome | 语义 |
+|---|---|
+| `kept` | 最终产出（`applicability`/`sf` 随行留痕） |
+| `unmentioned` | 召回在册但模型未提及（无显式上报点，快照时对结局为 None 的候选归一补齐） |
+| `gate` | 适用性门控丢弃（A≤3 → Sapp=(A−1)/4 < 0.75，Sf=0 整条丢弃） |
+| `unmountable` | 挂载解析失败（选择前淘汰，不占 M 名额；sf 已算出随结局留痕） |
+| `m_cap` | 可挂载但被全局上限 M 截下 |
+
+dir_asset 目录（元数据/联网搜索来源）的候选在**召回阶段**就剔除——发生在
+入册之前，根本进不了 trace，因此 outcome 不设独立值，`n_recall` 计的是
+**过滤后在册数**；该过滤后续上移召回侧。漏检交叉的「未召回」
+（`lost_at = "unrecalled"`）语义随之覆盖 dir_asset 剔除：不在 trace 候选
+= 召回就没捞到（含目录剔除），不再细分。`lost_at` 口径：在候选 → outcome
+原样透传（`gate`/`unmountable`/`m_cap`/`unmentioned`）；`kept` 却出现在
+漏检里属数据不自洽（kept 必产出），防御性回 None；trace 缺失 → None
+「暂无」——**没数据 ≠ 没召回**，不得与 `unrecalled` 混淆。
+
+**三处落盘，原始输出走独立文件与专用端点**。① `progress.jsonl` 每片完成
+锁内追加的增量行：成功片带 `trace` 键；② `raw_results.json` 终态正典行：
+成功片行带 `trace` 键（None 才省略——消费方以**键存在性**区分「无追踪」
+与「追踪为空」），原始输出不进此文件、不进 API 载荷；③
+`llm_raw/{tt}.json` 每片独立文件（池线程落盘，不持锁）：`raw_rows()` 即
+批次行加 `content` = 成功份全文。tt 写盘前过白名单 `_TT_FILENAME_RE`
+（`^[A-Za-z0-9_-]{1,64}$`），不过则跳过 raw 文件（trace 照常落行，宁缺
+勿险）——路径穿越/空串/怪字符进不了文件名。读取走专用下载端点
+`GET /api/v1/eval/closed/runs/{run_id}/movies/{tt}/llm-raw`（仅 admin，
+FileResponse 直下；run 目录越界 / tt 不过白名单 / tt 不在 raw 行或文件
+不存在，三重守卫任一不过 404——404 是既定语义不是异常，写侧本就跳过
+非法 tt 与失败片）。
+
+**重试批次只存成功份（已拍板）**。每批解析成功才 `note_batch` 一次，
+`raw` = **最终成功那次**输出的全文；`parse_retried` 布尔如实记录首败重调
+过。首败原文仅存前 400 字截断摘录于 producer 的 warning 日志
+（`last_raw[:400]`），不落任何产物——对账以成功份为准，排查勿去日志找
+全文。
+
+**老 run 全链路「暂无」**。trace 是 2026-11-26 起的新增键：老 run 的
+raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None
+（键恒在，通用纪律第 1 条），llm-raw 端点 404，前端渲染说明文案。失败片
+同理：失败 attempt 的采集器整体丢弃（半截追踪不落），`trace=None`——
+「暂无」不是「漏斗为空」。
+
+**snapshot / raw_rows 形状**。`snapshot()` 深拷贝出 dict，候选行序 =
+召回批次序，批次行不带 `content`；`raw_rows()` 专供 llm_raw 文件落盘：
+
+```json
+{
+  "max_tags": 40,
+  "candidates": [
+    {"tag_id": "tag_001", "tag_name": "功夫", "dir_id": "dir-action",
+     "recall": 0.82, "batch": 0, "outcome": "kept",
+     "applicability": 4, "sf": 0.91}
+  ],
+  "batches": [
+    {"dir_id": "dir-action", "batch": 0, "n": 12, "parse_retried": false}
+  ],
+  "fabricated": ["tag_999"]
+}
+```
+
+`batch` = 目录内批次序（切片起点 ÷ 批大小）；`fabricated` 按判定出现
+次序累积、不去重。漏斗十键计数（全 int）：`n_recall`（在册候选数）、
+`n_mentioned`（`applicability` 非 None 的候选数——模型给了适用度才算
+提及）、`n_kept`/`n_gate`/`n_unmountable`/`n_m_cap`（四类 outcome 各自
+计数，`unmentioned` 不单设键 = n_recall − 其余四类）、`n_fabricated`、
+`n_batches`、`parse_retries`（批次里 `parse_retried` 真值计数）、
+`max_tags`（策略原值 M）。
+
 ---
 
 ## 5. 开放评测口径（`services/eval/open_service.py` + `open_report.py` + `open_review.py`）

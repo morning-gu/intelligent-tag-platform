@@ -10,10 +10,13 @@ _EvalJob 快照携带）→ daemon worker 持线程池逐片生成 → 终态落
 第二级，起跑快照渲染 content 文本）→ `ClosedTagProducer.produce`（producer
 本就不落库——落库是正式执行器的职责），所以干跑全程对业务表只读（DB
 零写入红线，且干跑循环零 DB 交互——装配只在起跑发生一次），评测
-产物只写 `settings.eval_output_root/<run_id>/` 六个文件：起跑即写
+产物只写 `settings.eval_output_root/<run_id>/`（六个固定文件外，管线
+追踪起另有 llm_raw/{tt}.json 每片原始输出，管线追踪 Task 2）：起跑即写
 meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
-每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片）、
-终态由 worker 主线程写 meta + raw_results（gt 向量并入）+ 报告三件套
+每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片
+；成功片行带 trace）、每片成功在池线程落 llm_raw/{tt}.json（LLM 原始
+输出，不持锁）、终态由 worker 主线程写 meta + raw_results（gt 向量并
+入；成功片行带 trace）+ 报告三件套
 （report.json / report.md / metrics.csv，Task 5；组装/渲染/写在 report.py）。
 
 容错语义：每片共 1+RETRY_PER_MOVIE 次尝试（异常兜底记 error，单片失败
@@ -49,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -84,6 +88,7 @@ from tagplatform.services.generation.assemble import (
     build_spec,
     load_assembly_context,
 )
+from tagplatform.services.generation.trace import ProduceTrace
 from tagplatform.settings import Settings
 
 __all__ = [
@@ -109,6 +114,10 @@ RETRY_PER_MOVIE = 2
 # 完成序连续失败达该数 → 中止余量：系统性故障保险丝（网关整体不可用时
 # 别把整批烧完），单片失败远达不到该阈值
 ABORT_CONSECUTIVE = 5
+# llm_raw 文件名白名单（管线追踪 Task 2）：{tt}.json 以片 id 命名，tt 进
+# 文件名前过正则——路径穿越/空串/怪字符/超长直接跳过 raw 文件（trace 照
+# 常落行，宁缺勿险），绝不让数据集侧的片 id 把写盘带出 run 目录
+_TT_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class RunBusyError(RuntimeError):
@@ -132,7 +141,11 @@ class MovieResult:
       confidence 是证据维独立读数（(E−1)/4），语义不同，都随行保留；
     - `ok=False` 时 `error` 记最后一次异常（含异常类型名），`produced`
       清空（半截产出不可信）；
-    - `elapsed_ms` 覆盖该片的全部尝试（含重试）。
+    - `elapsed_ms` 覆盖该片的全部尝试（含重试）；
+    - `trace`：produce 成功时末次成功 attempt 的 ProduceTrace 快照（漏斗
+      踪迹，管线追踪 Task 2）；失败片 None——失败尝试的 sink 整体丢弃，
+      半截追踪不落（None≠0「暂无」纪律）。带默认值：报告组装等既有
+      构造点零改动。
     """
 
     tt: str
@@ -141,6 +154,7 @@ class MovieResult:
     error: str | None
     produced: list[dict]
     elapsed_ms: int
+    trace: dict | None = None
 
 
 @dataclass
@@ -672,12 +686,21 @@ class ClosedEvalService:
         None（producer 本不落库；未来 producer 改用会话会以 AttributeError
         显式失败，不静默漂移）。内容从起跑快照根加载（job.dataset_root）
         ——运行中切 override 不影响本 run。
+
+        管线追踪（Task 2）：每 attempt 新建 ProduceTrace 传入 produce
+        （trace=sink）——成功 attempt 的 snapshot() 随 MovieResult 带回，
+        llm_raw 每片原始输出在池线程落盘（produce 成功后、_record_result
+        前，不持锁——每片独立文件，mkdir(exist_ok=True) 天然并发安全）；
+        失败 attempt 的 sink 整体丢弃（半截追踪不落，None≠0「暂无」纪律
+        ），重试成功只留末次成功 attempt 的 trace。
         """
         started = time.perf_counter()
         title = ""
         error: str | None = None
         produced: list[dict] = []
+        trace: dict | None = None
         for _attempt in range(1 + RETRY_PER_MOVIE):
+            sink = ProduceTrace()  # 每 attempt 独立采集器：失败尝试随之丢弃
             try:
                 content = load_movie_content(job.dataset_root, tt)
                 title = content.asset.title
@@ -685,16 +708,34 @@ class ClosedEvalService:
                                   task_id=f"eval-{job.run_id}", asset_id=tt,
                                   run_id=f"{job.run_id}:{tt}")
                 tags = job.context.producer.produce(
-                    spec, None, self._llm, self._embedder)
+                    spec, None, self._llm, self._embedder, trace=sink)
                 produced = _produced_rows(tags)
+                trace = sink.snapshot()
+                self._write_llm_raw(job, tt, sink.raw_rows())
                 error = None
                 break
             except Exception as exc:  # noqa: BLE001 —— 单片失败兜底：记 error 继续收敛
                 error = f"{type(exc).__name__}: {exc}"
                 produced = []
+                trace = None  # 失败尝试的 sink 丢弃（半截追踪不落）
         return MovieResult(tt=tt, title=title, ok=error is None, error=error,
-                           produced=produced,
+                           produced=produced, trace=trace,
                            elapsed_ms=int((time.perf_counter() - started) * 1000))
+
+    def _write_llm_raw(self, job: _EvalJob, tt: str, rows: list[dict]) -> None:
+        """单片 LLM 原始输出落盘（池线程调用，不持锁——每片独立文件）。
+
+        `llm_raw/{tt}.json` = raw_rows() 的 JSON（content=成功份全文；
+        原始输出不进 snapshot——不进 raw_results 正典行、不进 API 载荷）。
+        tt 不过 `_TT_FILENAME_RE` 白名单或 rows 为空 → 直接 return（非法
+        tt 不落文件，trace 照常落行）；run_dir 由 eval_output_root / run_id
+        现算（目录骨架在 start 即建好），llm_raw 子目录按片懒建。
+        """
+        if not rows or not _TT_FILENAME_RE.fullmatch(tt):
+            return
+        run_dir = Path(self.settings.eval_output_root) / job.run_id
+        (run_dir / "llm_raw").mkdir(exist_ok=True)
+        _dump_json(run_dir / "llm_raw" / f"{tt}.json", rows)
 
     def _record_result(self, run_id: str, result: MovieResult) -> None:
         """锁内更新注册表并追加 progress.jsonl 一行（增量落盘）。"""
@@ -703,6 +744,9 @@ class ClosedEvalService:
             return
         line = {"tt": result.tt, "ok": result.ok,
                 "produced": result.produced, "elapsed_ms": result.elapsed_ms}
+        if result.trace is not None:
+            # 管线追踪（Task 2）：成功片增量行带 trace；失败片/老 run 无该键
+            line["trace"] = result.trace
         if result.error is not None:
             line["error"] = result.error
         payload = json.dumps(line, ensure_ascii=False)
@@ -734,9 +778,13 @@ class ClosedEvalService:
         })
         if error is not None:
             meta["error"] = error
+        # trace 键非 None 才写（管线追踪 Task 2）：失败片/老 run 的行无该键
+        # （消费方以键存在性区分「无追踪」与「追踪为空」）；snapshot 不含
+        # 原始输出——llm_raw 走每片独立文件（_write_llm_raw）
         rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
                  "produced": r.produced, "gt": job.gt.get(r.tt, {}),
-                 "elapsed_ms": r.elapsed_ms}
+                 "elapsed_ms": r.elapsed_ms,
+                 **({"trace": r.trace} if r.trace is not None else {})}
                 for r in results]
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)

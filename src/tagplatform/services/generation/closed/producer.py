@@ -80,6 +80,7 @@ from tagplatform.services.generation.base import (
     ProducedTag,
     register_producer,
 )
+from tagplatform.services.generation.trace import ProduceTrace, TraceCandidate
 from tagplatform.services.generation.open.mtg.keyframes import _local_roots
 from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts
 from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
@@ -158,7 +159,13 @@ class ClosedTagProducer:
     prompt_version = "1"
 
     def produce(self, spec: GenerationSpec, session: Session, llm,
-                embedder) -> list[ProducedTag]:
+                embedder, trace: ProduceTrace | None = None,
+                ) -> list[ProducedTag]:
+        """按 spec 生成候选标签列表。
+
+        trace 非空时在各既有流程点顺路上报漏斗踪迹（纯旁观，不参与任何
+        判定）；None 时与无参调用逐字节同行为（生产路径零行为变化红线）。
+        """
         library = spec.library
         if library is None:
             raise ValueError("标签库未就绪，无法执行封闭式生成")
@@ -179,6 +186,10 @@ class ClosedTagProducer:
         if not candidates:
             raise ValueError("候选标签为空，请先导入标签库")
         by_id = {c.tag_id: c for c in candidates}
+        if trace is not None:
+            # 采集点 1：全局输出上限 M（策略原值；选择阶段的钳负是兜底，
+            # 追踪按策略原值记录）
+            trace.set_max_tags(spec.policy.max_tags)
         # 4. 候选按目录分组（目录下有召回标签才建组；dict 插入序 = 召回序）
         groups: dict[str, list] = {}
         for c in candidates:
@@ -208,6 +219,15 @@ class ClosedTagProducer:
             scored_by_tag: dict[str, tuple[float, dict]] = {}
             for start in range(0, len(members), batch_size):
                 batch = members[start:start + batch_size]
+                if trace is not None:
+                    # 采集点 2：本批候选入册（batch 序 = 切片起点 ÷ 批大小，
+                    # recall = 召回余弦 Semb；结局留待各丢弃点 resolve 回填）
+                    trace.add_candidates([
+                        TraceCandidate(tag_id=c.tag_id, tag_name=c.tag_name,
+                                       dir_id=c.dir_id, recall=c.score,
+                                       batch=start // batch_size)
+                        for c in batch
+                    ])
                 group_payload = {
                     "dir_id": dir_id,
                     "dir_name": directory.dir_name if directory else "未分类",
@@ -266,6 +286,12 @@ class ClosedTagProducer:
                     raise LLMParseError(
                         f"目录组 {dir_id} 重试后仍解析失败: {parse_error}；"
                         f"最后一次原始输出前 400 字：{last_raw[:400]!r}")
+                if trace is not None:
+                    # 采集点 3：批次落册（紧随解析成功 break——attempt 为
+                    # 成功那次的下标，parse_retried = 首败重调过；raw 只存
+                    # 最终成功那份输出，首败原文仅存留于上方 warning 日志）
+                    trace.note_batch(dir_id, start // batch_size,
+                                     len(batch), attempt == 1, resp.content)
                 # 6. 终分与门控（a/b/c = 0.2/0.5/0.3）：Sapp 由 1–5 分线性
                 #    映射到 0–1（(A−1)/4），Semb 取召回候选自带的余弦分；
                 #    Sevi 为三模态融合分（v8）；G 为 Sapp≥0.75 的门控
@@ -278,6 +304,10 @@ class ClosedTagProducer:
                     if it["applicability"] < 4:
                         # Sapp=(A−1)/4 < 0.75：门控关闭，G=0 → Sf=0 丢弃
                         dropped_gate += 1
+                        if trace is not None:
+                            # 采集点 4：门控丢弃（A≤3 → Sapp<0.75）
+                            trace.resolve(it["tag_id"], "gate",
+                                          applicability=it["applicability"])
                         logger.warning(
                             "闭环目录 %s 标签 %s 门控不过"
                             "（applicability=%d < 4），已丢弃", dir_id,
@@ -288,6 +318,10 @@ class ClosedTagProducer:
                         # 打分前剔除，避免先占走组内保底名额才被丢，或经
                         # 别组重复入选
                         dropped_fabricated += 1
+                        if trace is not None:
+                            # 采集点 5：编造/越组 id（按判定出现次序累积，
+                            # 不去重——同 id 重复编造各记一条）
+                            trace.note_fabricated(it["tag_id"])
                         logger.warning(
                             "闭环目录 %s 判定引用本组候选外标签 %s，已丢弃",
                             dir_id, it["tag_id"])
@@ -349,6 +383,11 @@ class ClosedTagProducer:
                                   spec.content, evidence)
             if mount is None:
                 dropped_unmountable += 1
+                if trace is not None:
+                    # 采集点 6：挂载解析失败（选择前淘汰不占名额；sf 在
+                    # 打分阶段已算出，随结局一并留痕）
+                    trace.resolve(it["tag_id"], "unmountable",
+                                  applicability=it["applicability"], sf=sf)
                 logger.warning(
                     "闭环标签 %s（目录 %s，scope=%s）解析不出挂载点，"
                     "已在全局选择前丢弃，不占输出名额",
@@ -378,7 +417,19 @@ class ClosedTagProducer:
         # 输出整体按 Sf 降序：保底与补足合并后重排（入库行序 = 相关度
         # 降序的既有口径，v5 起如此）
         selected = sorted(tops + rest[: max(max_tags - len(tops), 0)],
-                         key=lambda entry: -entry[0])
+                          key=lambda entry: -entry[0])
+        if trace is not None:
+            # 采集点 7：全局选择落定——selected 全员 kept；mounted 减
+            # selected 的差集（可挂载但被 M 截下）记 m_cap。两组 tag_id
+            # 不相交，与 resolve 末次为准的覆盖语义互不干扰
+            selected_ids = {entry[1]["tag_id"] for entry in selected}
+            for sf, it, _evidence, _mount in selected:
+                trace.resolve(it["tag_id"], "kept",
+                              applicability=it["applicability"], sf=sf)
+            for sf, it, _evidence, _mount in mounted:
+                if it["tag_id"] not in selected_ids:
+                    trace.resolve(it["tag_id"], "m_cap",
+                                  applicability=it["applicability"], sf=sf)
         # 5.6 选择汇总：一条日志回答"为什么只出了 N 条"——进入选择的判定
         #     数、组保底数、补足数、最终输出数，以及三类丢弃计数
         logger.info(

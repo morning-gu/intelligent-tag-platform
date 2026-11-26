@@ -1,6 +1,6 @@
-"""闭环评测 admin API 路由契约（Task 6 基础 + Task 2 单片明细）：13 端点
-+ 错误映射 + app 装配；open-eval Task 6 追加开放评测端点族
-（/api/v1/eval/open 11 端点，文件末节）。
+"""闭环评测 admin API 路由契约（Task 6 基础 + Task 2 单片明细 + Task 4
+llm-raw）：14 端点 + 错误映射 + app 装配；open-eval Task 6 追加开放评测
+端点族（/api/v1/eval/open 11 端点，文件末节）。
 
 路由契约钉死（plan Task 6，全部端点 require_admin）：
 - GET /datasets → DatasetInfoOut（usable_movies 输出为**数量**；畸形 gt
@@ -18,7 +18,12 @@
 - GET runs/{id}/movies → 单片摘要包层 {theta_used, k_p, k_r, rows}（行
   序失败置顶、P 升序）；GET runs/{id}/movies/{tt} → 单片明细三表；读侧
   容错：raw_results.json 缺失/截断/非 list → 404「无单片明细」，meta
-  档位缺失/损坏 → DEFAULT 档（缺省取格 θ0.2/θ0.8、K10/20），未知 tt → 404。
+  档位缺失/损坏 → DEFAULT 档（缺省取格 θ0.2/θ0.8、K10/20），未知 tt → 404；
+- GET runs/{id}/movies/{tt}/llm-raw（管线追踪 Task 4）→ 单片 LLM 原始
+  输出下载（FileResponse 直下，不进 API 载荷）：三重守卫全 404——run
+  目录越界 / tt 文件名白名单外 / tt 不在 raw 行或文件缺失（失败片与老
+  run 本就无 raw 文件，404 是既定语义）；摘要行 funnel / 明细 trace /
+  misses lost_at 三键恒在，trace 缺失 → null（None≠0）。
 
 夹具：`_write_dataset`（来自 test_closed_eval.py）往
 client.app.state.settings.eval_dataset_root 写迷你 MovieTags（绝不扫
@@ -571,9 +576,11 @@ def test_run_movies_endpoint(client):
     assert hit["r_at_k"] == pytest.approx(2 / 3)  # 2 / 3 个相关
     assert hit["spearman"] == pytest.approx(0.4)
     assert (hit["n_produced"], hit["n_relevant"]) == (4, 3)
-    # 摘要行十键契约（不多不少）
+    # 摘要行十一键契约（不多不少；管线追踪 Task 4 增 funnel 恒在键——
+    # 本夹具 raw 行无 trace → null）
     assert {"tt", "title", "ok", "error", "spearman", "p_at_k", "r_at_k",
-            "elapsed_ms", "n_produced", "n_relevant"} == set(hit)
+            "elapsed_ms", "n_produced", "n_relevant",
+            "funnel"} == set(hit)
 
 
 def test_run_movie_detail_endpoint(client):
@@ -599,7 +606,8 @@ def test_run_movie_detail_endpoint(client):
     assert body["out_of_space"] == [
         {"tag_id": "zz", "tag_name": "噪声", "sf": 0.99}]
     assert body["misses"] == [
-        {"tag_id": "t7", "tag_name": "喜剧", "gt_score": 0.85}]
+        {"tag_id": "t7", "tag_name": "喜剧", "gt_score": 0.85,
+         "lost_at": None}]  # 夹具 raw 行无 trace → lost_at null（None≠0）
     # 失败片：三表全空、error 原样、档位键仍在
     r2 = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000002")
     assert r2.status_code == 200
@@ -769,6 +777,152 @@ def test_movie_detail_theta_query(client):
                      params={"theta_r": 0.4}).json()
     assert [p["hit"] for p in mid["produced"]] == [False, True]  # t2 0.7 ≥ 0.4
     assert [m["tag_id"] for m in mid["misses"]] == ["t7"]
+
+
+# ---------------------------------------------------------------- llm-raw 与 trace 键（管线追踪 Task 4）
+# （rebase 解冲突记录：test_movies_theta_non_admin_401 未随本分支保留——
+# main 3c18b76 测试精简已将其判为冗余删除；本节 llm-raw 门禁用例
+# test_llm_raw_admin_gate 覆盖新端点的同款门槛。）
+
+# 手造 trace（ProduceTrace.snapshot 形状，管线追踪 Task 2）：候选 4（t1
+# kept / t2 gate / t7 unmountable / t9 unmentioned）+ 批次 2（d2 重试 1
+# 次）+ 编造 1（zz）+ 全局上限 M=10 → 漏斗十键手算基准 _FUNNEL 钉死
+_TRACE = {
+    "max_tags": 10,
+    "candidates": [
+        {"tag_id": "t1", "tag_name": "悬疑", "dir_id": "d1", "recall": 0.8,
+         "batch": 1, "outcome": "kept", "applicability": 2, "sf": 0.9},
+        {"tag_id": "t2", "tag_name": "动作", "dir_id": "d1", "recall": 0.7,
+         "batch": 1, "outcome": "gate", "applicability": 1, "sf": None},
+        {"tag_id": "t7", "tag_name": "喜剧", "dir_id": "d2", "recall": 0.6,
+         "batch": 2, "outcome": "unmountable", "applicability": 0,
+         "sf": None},
+        {"tag_id": "t9", "tag_name": "爱情", "dir_id": "d2", "recall": 0.5,
+         "batch": 2, "outcome": "unmentioned", "applicability": None,
+         "sf": None},
+    ],
+    "batches": [
+        {"dir_id": "d1", "batch": 1, "n": 2, "parse_retried": False},
+        {"dir_id": "d2", "batch": 2, "n": 2, "parse_retried": True},
+    ],
+    "fabricated": ["zz"],
+}
+
+# 上 trace 的漏斗十键手算值（funnel_counts 派生基准；t7 的 applicability=0
+# 是合法值非 None → 计入 n_mentioned）
+_FUNNEL = {
+    "n_recall": 4, "n_mentioned": 3, "n_kept": 1, "n_gate": 1,
+    "n_unmountable": 1, "n_m_cap": 0, "n_fabricated": 1, "n_batches": 2,
+    "parse_retries": 1, "max_tags": 10,
+}
+
+
+def _trace_rows():
+    """默认行数据 + A 片（tt0000001）挂 trace：t7（gt 0.85 ≥θ 未产出）
+    是漏检 → lost_at 交叉到 unmountable；B 失败片无 trace。"""
+    rows = _movies_rows()
+    rows[0]["trace"] = _TRACE
+    return rows
+
+
+def _write_llm_raw(d: Path, tt: str = "tt0000001") -> None:
+    """写一份 llm_raw/{tt}.json（raw_rows 形：批次行含 content=成功份全文）。"""
+    raw = d / "llm_raw"
+    raw.mkdir(exist_ok=True)
+    (raw / f"{tt}.json").write_text(
+        json.dumps([{"dir_id": "d1", "batch": 1, "n": 2,
+                     "parse_retried": False,
+                     "content": "…最终成功份原始输出…"}], ensure_ascii=False),
+        encoding="utf-8")
+
+
+def test_movies_endpoints_carry_trace_fields(client):
+    """trace 键透出三处：摘要行 funnel（带 trace → 十键 dict；失败片无
+    trace → null）、明细 trace 包层（counts/candidates/batches/fabricated/
+    max_tags 原样透出）+ misses lost_at 交叉（unmountable）；老 run（raw
+    行无 trace 键）→ 三处全 null（None≠0「暂无」，键恒在）。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client, rows=_trace_rows())
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rows"][0]["tt"] == "tt0000002"  # 失败片置顶
+    assert body["rows"][0]["funnel"] is None  # 失败片无 trace → null
+    assert body["rows"][1]["funnel"] == _FUNNEL  # 十键手算值逐键相等
+    detail = client.get(
+        f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001").json()
+    assert detail["trace"] == {
+        "counts": _FUNNEL,
+        "candidates": _TRACE["candidates"],
+        "batches": _TRACE["batches"],
+        "fabricated": ["zz"],
+        "max_tags": 10,
+    }
+    assert detail["misses"] == [{"tag_id": "t7", "tag_name": "喜剧",
+                                 "gt_score": 0.85, "lost_at": "unmountable"}]
+    # 老 run（raw 行无 trace 键）：funnel / trace / lost_at 全 null（键恒在）
+    _write_movies_run(client, run_id="run-no-trace")
+    old = client.get(f"{_BASE}/runs/run-no-trace/movies").json()
+    assert all(row["funnel"] is None for row in old["rows"])
+    old_detail = client.get(
+        f"{_BASE}/runs/run-no-trace/movies/tt0000001").json()
+    assert old_detail["trace"] is None
+    assert old_detail["misses"][0]["lost_at"] is None
+
+
+def test_llm_raw_happy_path(client):
+    """llm-raw 下载：llm_raw/{tt}.json 存在 → 200 + Content-Disposition
+    filename + 体为写入的 JSON（FileResponse 直下，不进 API 载荷）。"""
+    _seed_dataset_and_library(client)
+    d = _write_movies_run(client, rows=_trace_rows())
+    _write_llm_raw(d)
+    r = client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001/llm-raw")
+    assert r.status_code == 200
+    assert 'filename="tt0000001.json"' in r.headers["content-disposition"]
+    assert json.loads(r.content) == [
+        {"dir_id": "d1", "batch": 1, "n": 2, "parse_retried": False,
+         "content": "…最终成功份原始输出…"}]
+
+
+def test_llm_raw_guards(client):
+    """llm-raw 三重守卫全 404 不 500：run 越界（_run_dir 守卫）/ tt 白名单
+    外（点号、斜杠）/ tt 不在 raw 行 / tt 在行但文件缺失（失败片或老 run
+    本就无 raw 文件——404 是既定语义）。"""
+    _seed_dataset_and_library(client)
+    _write_movies_run(client)  # 有 raw 行、无 llm_raw 文件
+    base = f"{_BASE}/runs/{_MOVIES_RUN}/movies"
+    # run 越界（守卫 404 非 500）
+    r = client.get(f"{_BASE}/runs/..%5Cescape/movies/tt0000001/llm-raw")
+    assert r.status_code == 404 and "原始输出" in r.json()["detail"]
+    # tt 白名单外：点号进端点被正则拒；%2F 路由不匹配 → 裸 404
+    r2 = client.get(f"{base}/tt0000001.json/llm-raw")
+    assert r2.status_code == 404 and "原始输出" in r2.json()["detail"]
+    assert client.get(f"{base}/tt0000001%2Fx/llm-raw").status_code == 404
+    # tt 不在 raw 行
+    r3 = client.get(f"{base}/tt9999999/llm-raw")
+    assert r3.status_code == 404 and "原始输出" in r3.json()["detail"]
+    # tt 在 raw 行但文件缺失
+    r4 = client.get(f"{base}/tt0000001/llm-raw")
+    assert r4.status_code == 404 and "原始输出" in r4.json()["detail"]
+
+
+def test_llm_raw_admin_gate(client):
+    """llm-raw 仅 admin：reviewer → 403、未登录 → 401（与 movies 端点
+    同门槛——文件下载端点不豁免）。"""
+    _seed_dataset_and_library(client)
+    d = _write_movies_run(client)
+    _write_llm_raw(d)
+    url = f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001/llm-raw"
+    assert client.get(url).status_code == 200  # admin 登录态（client fixture）
+    assert client.post("/api/v1/users", json={
+        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
+    }).status_code == 200
+    client.post("/api/v1/auth/logout")
+    client.post("/api/v1/auth/login",
+                json={"username": "bob", "password": "pw-bob-1"})
+    assert client.get(url).status_code == 403
+    client.post("/api/v1/auth/logout")
+    assert client.get(url).status_code == 401
 
 
 # ---------------------------------------------------------------- 开放评测端点族（open-eval Task 6）
