@@ -1,11 +1,14 @@
 // 模型配置中心页测试（Task 14 只读化后）：mock apiFetch 按路径分发，覆盖：
 // Prompt 只读契约渲染（模板正文逐字展示、必需占位符/可用字段动态来自
-// GET /prompts——P0 #4 根治，页面零手写文案）、只读语义（无新建版本/
-// 激活/版本列/编辑入口）、config 卡十三字段渲染（布尔是/否 Tag）与
-// Prompt/config 各自加载失败提示。
+// GET /prompts——P0 #4 根治，页面零手写文案）、closed 卡组装说明与置信度
+// prompt 内层卡（公式序三分区 Ccons → Cver → Cmod + 卡头携带资产总标注，
+// 文案本体按常量名动态来自 GET /prompts/registry，指明原始资产插入位置；
+// registry 缺条目时静默跳过）、只读语义（无新建版本/激活/版本列/编辑
+// 入口）、config 卡十三字段渲染（布尔是/否 Tag）与 Prompt/config 各自
+// 加载失败提示。
 // 写端点契约锁定（POST → 405 / activate → 404 / 无写函数导出）在
 // api/prompts.test.ts，本文件不重复。
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ModelConfig from './ModelConfig'
 import { apiFetch } from '../../api/client'
@@ -52,8 +55,69 @@ const CONFIG: RuntimeConfig = {
   database_path: '/data/tagplatform/tagplatform.db',
 }
 
+/** closed 组装说明条目（夹具文本为精简版，保留后端常量的特征文案——
+ * 「原始资产插入位置」标题与 {content} 占位符，页面按常量名取条目渲染）。 */
+const CLOSED_ASSEMBLY_NOTE_TEXT =
+  '组装说明（closed 生成 · 原始资产插入位置）：\n\n' +
+  '1. 模板渲染：{content} 即原始资产文本的插入位置。\n' +
+  '2. 候选标签注入：以「## 候选标签分组」追加在渲染后正文之后。\n' +
+  '3. 关键帧：帧目录可用时随请求发送；无帧退化为纯文本请求。'
+
+const CLOSED_CONFIDENCE_CCONS_TEXT =
+  '组装说明（置信度 Ccons 评分一致性重评）：\n\n' +
+  '1. 材料：复用生成时的 spec.prompt_text（原始资产已在 {content} 就位）。\n' +
+  '2. 调用：同一 run_id 重复调用 2 次，取三次 Sevi 的方差 As，Ccons = exp(−As/b)。'
+
+const CLOSED_CONFIDENCE_CVER_TEXT =
+  '组装说明（置信度 Cver 证据可核验性 · 原始资产插入位置）：\n\n' +
+  '1. 材料：spec.prompt_text + CLOSED_VERIFICATION_PROMPT（五级可核验表）。\n' +
+  '2. 调用：带上与生成时同一组关键帧图片；Cver = (S−1)/4。'
+
+const CLOSED_CONFIDENCE_CMOD_TEXT =
+  '组装说明（置信度 Cmod 跨模态一致性）：\n\n' +
+  '1. 纯本地计算，不调用 LLM、不注入资产文本；缺模态记 0.5 占位。\n' +
+  '2. Cmod = j·Cs + (1−j)·(1−Cc)，j 默认 0.5。'
+
+/** 置信度卡头携带资产总标注（精简版，保留特征文案：spec.prompt_text、
+ * {content} 插入位置、关键帧、Cmod 不调用 LLM）。 */
+const CLOSED_CONFIDENCE_ASSETS_TEXT =
+  '携带资产：Ccons 重评与 Cver 核验的 LLM 消息均以 spec.prompt_text ' +
+  '起头——原始资产文本已在模板 {content} 位置渲染就位，资产帧可用时随' +
+  '消息附关键帧图片；Cmod 为纯本地算术，不调用 LLM、不携带资产。'
+
 /** 流水线文案 registry 夹具（与后端 RegistryGroupOut 契约同形）。 */
 const REGISTRY: PromptRegistryGroup[] = [
+  {
+    module: 'closed',
+    title: '闭环生成',
+    items: [
+      { name: 'CLOSED_TEMPLATE_TEXT', text: '闭卷生成模板正文' },
+      {
+        name: 'CLOSED_VERIFICATION_PROMPT',
+        text: 'CLOSED_VERIFICATION_PROMPT 正文（五级可核验表）',
+      },
+      {
+        name: 'CLOSED_ASSEMBLY_NOTE',
+        text: CLOSED_ASSEMBLY_NOTE_TEXT,
+      },
+      {
+        name: 'CLOSED_CONFIDENCE_CCONS_NOTE',
+        text: CLOSED_CONFIDENCE_CCONS_TEXT,
+      },
+      {
+        name: 'CLOSED_CONFIDENCE_CVER_NOTE',
+        text: CLOSED_CONFIDENCE_CVER_TEXT,
+      },
+      {
+        name: 'CLOSED_CONFIDENCE_CMOD_NOTE',
+        text: CLOSED_CONFIDENCE_CMOD_TEXT,
+      },
+      {
+        name: 'CLOSED_CONFIDENCE_ASSETS_NOTE',
+        text: CLOSED_CONFIDENCE_ASSETS_TEXT,
+      },
+    ],
+  },
   {
     module: 'open_review',
     title: '开放评审',
@@ -258,5 +322,88 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(screen.getByText('后端不可用')).toBeInTheDocument()
     // Prompt 模板区独立加载不受影响
     expect(await screen.findByText('Prompt 模板 · 封闭生成（closed）')).toBeInTheDocument()
+  })
+
+  it('closed 卡组装说明：按常量名动态渲染 registry 条目（指明原始资产插入位置）', async () => {
+    mockApis()
+    render(<ModelConfig />)
+
+    const closedCard = await screen
+      .findByText('Prompt 模板 · 封闭生成（closed）')
+      .then((el) => el.closest('.ant-card') as HTMLElement)
+    // 组装说明出现在 closed 卡内（模板正文之后），标题与 {content} 特征串逐字可见
+    expect(
+      within(closedCard).getByText(/组装说明（closed 生成 · 原始资产插入位置）/, {
+        exact: false,
+      }),
+    ).toBeInTheDocument()
+    // 条目常量名作为说明区标题渲染
+    expect(within(closedCard).getByText('CLOSED_ASSEMBLY_NOTE')).toBeInTheDocument()
+    // open 卡不渲染组装说明（需求只针对 closed）
+    const openCard = screen
+      .getByText('Prompt 模板 · 开放生成（open）')
+      .closest('.ant-card') as HTMLElement
+    expect(within(openCard).queryByText(/组装说明/)).not.toBeInTheDocument()
+  })
+
+  it('置信度 prompt 内层卡：公式序三分区，核验 prompt 本体与携带资产标注动态渲染', async () => {
+    mockApis()
+    render(<ModelConfig />)
+
+    const confidenceCard = await screen
+      .findByText('置信度计算 · 提示词（closed）')
+      .then((el) => el.closest('.ant-card') as HTMLElement)
+    // 卡头携带资产总标注（高亮段落）：指明 Ccons/Cver 携带原始资产与关键帧
+    expect(
+      within(confidenceCard).getByText(/携带资产：Ccons 重评与 Cver 核验/, {
+        exact: false,
+      }),
+    ).toBeInTheDocument()
+    // 公式序三分区标题
+    expect(
+      within(confidenceCard).getByText('① Ccons · 评分一致性重评'),
+    ).toBeInTheDocument()
+    expect(
+      within(confidenceCard).getByText('② Cver · 证据可核验性核验'),
+    ).toBeInTheDocument()
+    expect(
+      within(confidenceCard).getByText('③ Cmod · 跨模态一致性（本地计算）'),
+    ).toBeInTheDocument()
+    // Cver 分区聚合核验 prompt 本体（常量名 + 文案），open 评审常量不混入
+    expect(within(confidenceCard).getByText('CLOSED_VERIFICATION_PROMPT')).toBeInTheDocument()
+    expect(within(confidenceCard).queryByText('REVIEW')).not.toBeInTheDocument()
+    // 三段组装说明常量名与其文案
+    expect(within(confidenceCard).getByText('CLOSED_CONFIDENCE_CCONS_NOTE')).toBeInTheDocument()
+    expect(within(confidenceCard).getByText('CLOSED_CONFIDENCE_CVER_NOTE')).toBeInTheDocument()
+    expect(within(confidenceCard).getByText('CLOSED_CONFIDENCE_CMOD_NOTE')).toBeInTheDocument()
+    expect(
+      within(confidenceCard).getByText(
+        /置信度 Cver 证据可核验性 · 原始资产插入位置/,
+        { exact: false },
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('registry 无 closed 组装条目：closed 卡与置信度内层卡静默跳过', async () => {
+    // 覆盖 fallback 语义：closed 组装说明与置信度卡整体缺席
+    mockApis({
+      registry: [
+        {
+          module: 'open_review',
+          title: '开放评审',
+          items: [{ name: 'REVIEW_PROMPT_VERSION', text: 'open-review-v8' }],
+        },
+      ],
+    })
+    render(<ModelConfig />)
+
+    expect(
+      await screen.findByText('Prompt 模板 · 封闭生成（closed）'),
+    ).toBeInTheDocument()
+    // 置信度卡整体不渲染：内层卡标题、分区标题与携带资产标注均缺席
+    expect(screen.queryByText('置信度计算 · 提示词（closed）')).not.toBeInTheDocument()
+    expect(screen.queryByText('① Ccons · 评分一致性重评')).not.toBeInTheDocument()
+    expect(screen.queryByText(/携带资产：Ccons 重评与 Cver 核验/, { exact: false })).not.toBeInTheDocument()
+    expect(screen.queryByText('CLOSED_ASSEMBLY_NOTE')).not.toBeInTheDocument()
   })
 })

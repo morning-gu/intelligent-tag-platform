@@ -29,6 +29,9 @@ from tagplatform.capabilities.prompts.open_review import (
     REVIEW_PROTOCOL_NOTE, REVIEW_RETRY_HINT,
 )
 from tagplatform.capabilities.prompts.templates import (
+    CLOSED_ASSEMBLY_NOTE, CLOSED_CONFIDENCE_ASSETS_NOTE,
+    CLOSED_CONFIDENCE_CCONS_NOTE,
+    CLOSED_CONFIDENCE_CMOD_NOTE, CLOSED_CONFIDENCE_CVER_NOTE,
     CLOSED_RETRY_HINT, CLOSED_TEMPLATE_TEXT, CLOSED_VERIFICATION_PROMPT,
     OPEN_TEMPLATE_TEXT,
 )
@@ -50,6 +53,15 @@ def list_prompt_registry() -> list[dict]:
                 {"name": "CLOSED_RETRY_HINT", "text": CLOSED_RETRY_HINT},
                 {"name": "CLOSED_VERIFICATION_PROMPT",
                  "text": CLOSED_VERIFICATION_PROMPT},
+                {"name": "CLOSED_ASSEMBLY_NOTE", "text": CLOSED_ASSEMBLY_NOTE},
+                {"name": "CLOSED_CONFIDENCE_ASSETS_NOTE",
+                 "text": CLOSED_CONFIDENCE_ASSETS_NOTE},
+                {"name": "CLOSED_CONFIDENCE_CCONS_NOTE",
+                 "text": CLOSED_CONFIDENCE_CCONS_NOTE},
+                {"name": "CLOSED_CONFIDENCE_CVER_NOTE",
+                 "text": CLOSED_CONFIDENCE_CVER_NOTE},
+                {"name": "CLOSED_CONFIDENCE_CMOD_NOTE",
+                 "text": CLOSED_CONFIDENCE_CMOD_NOTE},
             ],
         },
         {

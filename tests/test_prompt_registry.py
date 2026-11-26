@@ -64,6 +64,29 @@ def test_registry_closed_content(client):
     assert any("候选标签按目录分组" in t for t in closed_texts)      # CLOSED_TEMPLATE_TEXT 特征串
 
 
+def test_registry_closed_assembly_notes(client):
+    """组装说明常量（置信度配套展示）：closed 组 5 条说明逐一按特征串
+    钉死——说明文案与 services/generation 的实际组装行为对齐的守门。"""
+    groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
+    items = {i["name"]: i["text"] for i in groups["closed"]["items"]}
+    assert "原始资产插入位置" in items["CLOSED_ASSEMBLY_NOTE"]
+    assert "{content}" in items["CLOSED_ASSEMBLY_NOTE"]              # 插入位置标记
+    assert "关键帧" in items["CLOSED_ASSEMBLY_NOTE"]
+    # 置信度三环节携带资产总标注：Ccons/Cver 带资产 + 帧、Cmod 纯本地
+    assert "携带资产" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
+    assert "{content}" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]     # 插入位置标记
+    assert "关键帧" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
+    assert "spec.prompt_text" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
+    assert "不调用 LLM" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
+    assert "spec.prompt_text" in items["CLOSED_CONFIDENCE_CCONS_NOTE"]
+    assert "重复调用 2 次" in items["CLOSED_CONFIDENCE_CCONS_NOTE"]
+    assert "CLOSED_VERIFICATION_PROMPT" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
+    assert "{content}" in items["CLOSED_CONFIDENCE_CVER_NOTE"]       # 插入位置标记
+    assert "关键帧" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
+    assert "不调用 LLM" in items["CLOSED_CONFIDENCE_CMOD_NOTE"]
+    assert "0.5 占位" in items["CLOSED_CONFIDENCE_CMOD_NOTE"]
+
+
 def test_registry_mtg_items_match_constants(client):
     groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
     by_name = {i["name"]: i["text"] for i in groups["mtg"]["items"]}

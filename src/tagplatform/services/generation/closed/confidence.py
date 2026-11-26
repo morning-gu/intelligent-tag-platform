@@ -14,8 +14,10 @@
 三个分量的取材（与 producer 判定口径一一对应）：
 - Ccons 重评：复用 closed 生成契约——`spec.prompt_text + "\n\n##
   候选标签分组\n" + 组 JSON`（单标签成组），同 run_id 调 2 次，输出经
-  parse_closed_output 解析，每次按 evidence_scores 算 Sevi。Mock 端哈希
-  键含 run_id，同 run_id 重调 = 相同输出 → As = 0 → Ccons = 1.0。
+  parse_closed_output 解析，每次按 evidence_scores 算 Sevi。消息与
+  生成时同构：有帧带多模态 parts（与 Cver 核验同一组帧，用户口径
+  2026-11：三次判定同条件测量）。Mock 端哈希键含 run_id，同 run_id
+  重调 = 相同输出 → As = 0 → Ccons = 1.0。
 - Cver 核验：`spec.prompt_text + "\n\n" + CLOSED_VERIFICATION_PROMPT`
   （五级表在模板常量里），Cver 分支要求模型输出小 JSON {"score": N}；
   有帧时核验消息带与生成时相同的帧 parts（多模态对照）。
@@ -164,20 +166,25 @@ def _reconsistency_scores(
     tag: ProducedTag,
     llm,
     evi_weights: tuple[float, float, float],
+    frame_parts: list[dict] | None = None,
 ) -> list[float]:
     """Ccons 重评：同 run_id 再调 2 次单标签组判定，取每次的 Sevi。
 
     复用 closed 生成契约（组 JSON 拼法 + parse_closed_output），失败抛错
     由上层降级（原分补位）。返回 [Sevi_2, Sevi_3]（第 1 次为原判定，不
-    在此重调——原判定分数直接用 tag.confidence）。
+    在此重调——原判定分数直接用 tag.confidence）。消息与生成/Cver 同构：
+    有帧带多模态 parts（三次判定同条件，帧评分口径才可比）。
     """
     group_payload = _build_group_payload(spec, tag)
     prompt = (spec.prompt_text + "\n\n## 候选标签分组\n"
               + json.dumps(group_payload, ensure_ascii=False, indent=2))
+    parts = frame_parts or []
+    request = ([{"role": "user", "content": prompt}] if not parts else
+               [{"role": "user", "content": [
+                   {"type": "text", "text": prompt}, *parts]}])
     scores: list[float] = []
     for round_index in (2, 3):
-        resp = llm.complete(
-            [{"role": "user", "content": prompt}], spec.run_id)
+        resp = llm.complete(request, spec.run_id)
         if not resp.ok:
             raise RuntimeError(f"重评第 {round_index} 次 LLM 调用失败: "
                                f"{resp.raw.get('error')}")
@@ -420,7 +427,8 @@ def _compute_for_tag(
     # ---- Ccons ----
     base_sevi = tag.confidence if tag.confidence is not None else 0.5
     try:
-        re_scores = _reconsistency_scores(spec, tag, llm, evi_weights)
+        re_scores = _reconsistency_scores(spec, tag, llm, evi_weights,
+                                          frame_parts)
         result.sevi_scores = [base_sevi] + re_scores
     except Exception as exc:  # noqa: BLE001 —— 重评失败 → 原分补位
         logger.warning("标签 %s Ccons 重评失败（原分补位）：%s",
