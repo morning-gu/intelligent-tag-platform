@@ -266,6 +266,29 @@ def test_judge_section_aggregates_scores(tmp_path):
     assert report["warnings"] == []
 
 
+def test_judge_section_handles_weighted_float_value_scores(tmp_path):
+    payload = _audit_payload()
+    payload["verdicts"] = [
+        {"tag": "m1", "relevance": 4, "semantics": 3, "value": 3.65},
+        {"tag": "m2", "relevance": 3, "semantics": 3, "value": 2.40},
+        {"tag": "m3", "relevance": 1, "semantics": 2, "value": 1.50},
+        {"tag": "m4", "relevance": None, "semantics": 3, "value": None},
+    ]
+    audit_dir = tmp_path / "audit"
+    _dump(audit_dir / "ttA.json", payload)
+    m1 = _result("ttA", hits=[_hit("t1", review=_review(v=2.85))])
+    report = assemble_open_report([m1], _meta(done=1, total=1), audit_dir=audit_dir)
+    assert report["judge"]["scores"]["value"] == {
+        "n": 3,
+        "average": pytest.approx((3.65 + 2.40 + 1.50) / 3),
+        # 1.50 -> 2, 2.40 -> 2, 3.65 -> 4
+        "distribution": [0, 0, 2, 0, 1],
+        "null": 1,
+    }
+    md = render_open_report_md(report)
+    assert "| 2.85 |" in md
+
+
 def test_judge_section_missing_audit_warns(tmp_path):
     m1 = _result("ttA", hits=[_hit("t1")])
     report = assemble_open_report([m1], _meta(done=1, total=1),

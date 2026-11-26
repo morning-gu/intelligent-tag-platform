@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from contextlib import nullcontext
 
 from tagplatform.capabilities.prompts.open_review import (
@@ -10,6 +11,14 @@ from tagplatform.capabilities.prompts.open_review import (
 )
 from tagplatform.schemas import ContentJSON
 from tagplatform.services.generation.open.mtg.prompts import render_content
+from tagplatform.services.tags.value_scoring import (
+    VALUE_DIRECTIONS,
+    VALUE_DIRECTION_ALIASES,
+    VALUE_DIRECTION_LABELS,
+    aggregate_value_score,
+    normalize_tag_kind,
+    weights_dict_for_kind,
+)
 from tagplatform.settings import Settings
 
 # REVIEW_PROMPT_VERSION 从 capabilities/prompts.open_review 同驻 re-export：
@@ -70,13 +79,18 @@ def review_calibre(settings: Settings, llm, client=None) -> dict:
     }
 
 
-def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
-                      run_id: str, modalities=("script", "dialogue"),
-                      request_slot=None, trace: dict | None = None) -> list[dict]:
+def review_movie_tags(
+    client, content: ContentJSON, tag_rows: list[dict], *,
+    run_id: str, modalities=("script", "dialogue"),
+    request_slot=None, trace: dict | None = None,
+    value_weights: Mapping[str, tuple[float, float, float]] | None = None,
+) -> list[dict]:
     """整片评审，结构错误或截断时拆批，保留同片其余标签作上下文。
 
     整批格式失败可重试一次。拆分后的子批先各试一次，单条补试排在所有
     子批之后。最多 2 * 标签数 + 2 次调用，传输失败直接记录。
+    标签价值由模型分别对内容呈现/内容搜索/内容推荐打分，再按 target_type
+    对应的权重聚合为保留两位小数的 value.score，同时保留三方向明细分。
     """
     if not tag_rows:
         return []
@@ -85,8 +99,17 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
         raise ReviewRequestError("评审材料为空（modalities 未含 script）")
     scenes = {scene.scene_id for scene in content.content.scenes}
     labels = [{
-        "id": f"t{index}", "name": row.get("name"), "desc": row.get("desc"),
-        "level": row.get("level"), "scene_ids": row.get("scene_ids") or [],
+        "id": f"t{index}",
+        "name": row.get("name"),
+        "desc": row.get("desc"),
+        "level": row.get("level"),
+        "target_type": normalize_tag_kind(
+            row.get("target_type")
+            or ("scene" if row.get("level") == "scene" else "content")
+        ),
+        "dir_path": row.get("dir_path") or row.get("dir_name"),
+        "dir_description": row.get("dir_description"),
+        "scene_ids": row.get("scene_ids") or [],
     } for index, row in enumerate(tag_rows)]
     results: dict[int, dict] = {}
     errors: dict[int, str] = {}
@@ -198,8 +221,23 @@ def review_movie_tags(client, content: ContentJSON, tag_rows: list[dict], *,
                         reason += "。模型理由：" + relevance["reason"]
                     verdict["relevance"] = {"score": None, "reason": reason}
             verdict["evidence_scene_ids"] = sorted(cited)
-            if not (label["desc"] or "").strip():
+            if not (label["desc"] or "").strip() and verdict["semantics"]["score"] not in (0, 1):
                 verdict["semantics"] = {"score": None, "reason": "缺少释义"}
+            raw_value = verdict["value"]
+            tag_kind = label["target_type"]
+            dims = raw_value["dimensions"]
+            agg_score = aggregate_value_score(
+                {d: dims[d]["score"] for d in VALUE_DIRECTIONS},
+                tag_kind, weights=value_weights,
+            )
+            reason_text = raw_value.get("reason") or _summarize_value_reasons(dims)
+            verdict["value"] = {
+                "score": agg_score,
+                "reason": reason_text,
+                "tag_kind": tag_kind,
+                "weights": weights_dict_for_kind(tag_kind, value_weights),
+                "dimensions": dims,
+            }
             row.update(verdict, evaluated=True)
     if not results:
         raise ReviewRequestError("；".join(dict.fromkeys(errors.values())))
@@ -253,15 +291,19 @@ def _parse_reviews(raw: str, total: int) -> dict[int, dict]:
             continue
         seen.add(index)
         dimensions: dict[str, dict] = {}
-        for axis in _REVIEW_DIMENSIONS:
+        for axis in ("relevance", "semantics"):
             if axis not in item:  # 缺维度键 = 未完成（显式 null 才是无法判断）
                 break
             score, reason = _clean_dimension(item[axis])
             if score is _MISSING:
                 break
             dimensions[axis] = {"score": score, "reason": reason}
-        if len(dimensions) != len(_REVIEW_DIMENSIONS):
+        if len(dimensions) != 2:
             continue
+        value_payload = _clean_value_block(item)
+        if value_payload is _MISSING:
+            continue
+        dimensions["value"] = value_payload
         decision = item.get("pass")
         reason = item.get("reason")
         if ("pass" not in item or (decision is not None and not isinstance(decision, bool))
@@ -305,6 +347,50 @@ def _clean_dimension(value) -> tuple:
     if isinstance(score, int) and 0 <= score <= 4:
         return score, reason
     return _MISSING, ""
+
+
+def _clean_value_block(item: dict):
+    """解析 value 三方向（presentation / search / recommendation）评分对象。
+
+    接受 `item["value"]` 内含三方向对象（或 `item["value_scores"]` 兜底），
+    也容忍中文方向键名；任一方向缺失或分值非法返回 `_MISSING`（按漏判触发重试）。
+    """
+    raw = item.get("value")
+    if not isinstance(raw, dict):
+        raw = item.get("value_scores")
+    if not isinstance(raw, dict):
+        return _MISSING
+    normalized: dict[str, object] = {}
+    for key, val in raw.items():
+        canonical = (
+            VALUE_DIRECTION_ALIASES.get(str(key).strip().lower())
+            or VALUE_DIRECTION_ALIASES.get(str(key).strip())
+        )
+        if canonical and canonical not in normalized:
+            normalized[canonical] = val
+    dims: dict[str, dict] = {}
+    for direction in VALUE_DIRECTIONS:
+        if direction not in normalized:
+            return _MISSING
+        score, reason = _clean_dimension(normalized[direction])
+        if score is _MISSING:
+            return _MISSING
+        dims[direction] = {"score": score, "reason": reason}
+    summary_reason = raw.get("reason")
+    summary_reason = summary_reason.strip() if isinstance(summary_reason, str) else ""
+    return {"dimensions": dims, "reason": summary_reason}
+
+
+def _summarize_value_reasons(dims: dict[str, dict]) -> str:
+    """将三个价值方向的得分与理由汇总为单句可读文案。"""
+    parts = []
+    for direction in VALUE_DIRECTIONS:
+        entry = dims[direction]
+        label = VALUE_DIRECTION_LABELS[direction]
+        score = "null" if entry["score"] is None else str(entry["score"])
+        reason = entry.get("reason") or ""
+        parts.append(f"{label}({score})：{reason}" if reason else f"{label}({score})")
+    return "；".join(parts)
 
 
 def _loads_with_prose_fallback(text: str):

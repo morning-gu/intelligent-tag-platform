@@ -280,7 +280,11 @@ class _ReviewOkStub:
                     "reason": "场景检索有独立价值" if label["desc"] else "缺少释义，暂无法决定",
                     "relevance": {"score": 4, "reason": "场景有据"},
                     "semantics": {"score": 3, "reason": "名称清晰"},
-                    "value": {"score": 3, "reason": "有区分度"},
+                    "value": {
+                        "presentation": {"score": 3, "reason": "有内容看点"},
+                        "search": {"score": 3, "reason": "支持检索"},
+                        "recommendation": {"score": 3, "reason": "推荐可用"},
+                    },
                     "evidence_scene_ids": ["scene_001", "scene_002"]} for label in labels[:self._total]]
         return json.dumps({"reviews": reviews}, ensure_ascii=False)
 
