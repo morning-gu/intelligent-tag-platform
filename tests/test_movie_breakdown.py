@@ -20,6 +20,7 @@ import pytest
 from tagplatform.services.eval.closed_ranking import ClosedSample, evaluate_closed
 from tagplatform.services.eval.movie_breakdown import (
     breakdown_movie,
+    funnel_counts,
     pick_k,
     pick_theta,
     summarize_movies,
@@ -363,3 +364,111 @@ def test_split_theta_null_rules_independent():
     assert by_tt["null-p"]["p_at_k"] is None
     # 垫底键只看 p：p 非空的 m1 排在 p null 的 null-p 之前
     assert [r["tt"] for r in summary["rows"]] == ["m1", "null-p"]
+
+
+# ---------------------------------------------------------------- 管线追踪读侧（funnel trace）
+
+def _cand(tag_id, outcome, *, applicability=None, sf=None, batch=0,
+          recall=0.9, dir_id="d1"):
+    """手造一条 trace 候选行（ProduceTrace.snapshot 形状，outcome 五值枚举）。"""
+    return {"tag_id": tag_id, "tag_name": tag_id, "dir_id": dir_id,
+            "recall": recall, "batch": batch, "outcome": outcome,
+            "applicability": applicability, "sf": sf}
+
+
+def _trace(candidates, *, batches=None, fabricated=None, max_tags=10):
+    """手造一份 trace snapshot dict（Task 2 raw 行 "trace" 键落盘形状）。"""
+    return {"max_tags": max_tags, "candidates": list(candidates),
+            "batches": list(batches or []),
+            "fabricated": list(fabricated or [])}
+
+
+def test_funnel_counts_channels():
+    """十键逐通道对账：各 outcome 手工计数；trace=None → None（暂无≠0）；
+    形状残缺（空 dict）→ 不炸、十键全 0。"""
+    trace = _trace(
+        [_cand("k1", "kept", applicability=5, sf=0.9),
+         _cand("k2", "kept", applicability=4, sf=0.8, batch=1),
+         _cand("g1", "gate", applicability=2),
+         _cand("u1", "unmountable", applicability=5, sf=0.7, batch=1),
+         _cand("c1", "m_cap", applicability=4, sf=0.6),
+         _cand("n1", "unmentioned")],  # 未提及：applicability/sf 双 None
+        batches=[{"dir_id": "d1", "batch": 0, "n": 3, "parse_retried": False},
+                 {"dir_id": "d1", "batch": 1, "n": 2, "parse_retried": True},
+                 {"dir_id": "d2", "batch": 0, "n": 1, "parse_retried": True}],
+        fabricated=["fab1", "fab2"], max_tags=8)
+    assert funnel_counts(trace) == {
+        "n_recall": 6, "n_mentioned": 5,  # 提及 = applicability 非 None（n1 除外）
+        "n_kept": 2, "n_gate": 1, "n_unmountable": 1, "n_m_cap": 1,
+        "n_fabricated": 2, "n_batches": 3, "parse_retries": 2, "max_tags": 8}
+    assert funnel_counts(None) is None  # 老 run：暂无（None≠0）
+    assert funnel_counts({}) == {k: 0 for k in funnel_counts(trace)}
+
+
+def test_summarize_rows_carry_funnel():
+    """summary 行恒写 funnel 键：有 trace → 计数 dict；老行/失败片 → None；
+    既有排序键不动（失败置顶 → p 升序同分 tt 序）。"""
+    traced = _row("m1", {"r1": 0.9, "r2": 0.8}, [_prod("r1", 0.9)])
+    traced["trace"] = _trace(
+        [_cand("r1", "kept", applicability=5, sf=0.9),
+         _cand("r2", "gate", applicability=2),
+         _cand("x9", "unmentioned")],
+        fabricated=["fab"], max_tags=5)
+    old = _row("m2", {"o1": 0.9}, [_prod("o1", 0.9)])  # 老 run：无 trace 键
+    fail = _row("z9", {"f1": 0.9}, [], ok=False, error="e")
+    library_ids = {"r1", "r2", "o1", "f1"}
+
+    summary = summarize_movies([old, traced, fail], THETAS, KS, library_ids)
+    rows = summary["rows"]
+    assert [r["tt"] for r in rows] == ["z9", "m1", "m2"]  # 排序不受新键影响
+    assert all("funnel" in r for r in rows)  # 恒写键
+    assert rows[0]["funnel"] is None  # 失败片无 trace → None
+    assert rows[1]["funnel"] == funnel_counts(traced["trace"])
+    assert rows[1]["funnel"]["n_kept"] == 1
+    assert rows[2]["funnel"] is None  # 老 run → None
+
+
+def test_breakdown_trace_passthrough_and_lost_at():
+    """lost_at 四象限：不在候选 → unrecalled；在 → outcome 透传（gate/
+    unmentioned）；kept 却漏检属不自洽 → 防御 None；老 run（无 trace）→ None。
+    detail trace 组装：counts 与 funnel_counts 同数、候选行原样透传。"""
+    gt = {"gA": 0.81, "gB": 0.77, "gU": 0.75, "gK": 0.7, "gC": 0.61}
+    row = _row("m1", gt, [_prod("gC", 0.95)])
+    row["trace"] = _trace(
+        [_cand("gA", "gate", applicability=2),
+         _cand("gB", "unmentioned"),
+         _cand("gC", "kept", applicability=5, sf=0.95),
+         _cand("gK", "kept", applicability=4, sf=0.9)])  # kept 却漏检：不自洽
+    library_ids = set(gt)
+
+    detail = breakdown_movie([row], "m1", THETAS, KS, library_ids,
+                             {"gA": "Tag A"})
+    assert detail["trace"]["counts"] == funnel_counts(row["trace"])
+    assert detail["trace"]["candidates"] == row["trace"]["candidates"]  # 原样透传
+    assert detail["trace"]["batches"] == []
+    assert detail["trace"]["fabricated"] == []
+    assert detail["trace"]["max_tags"] == 10
+    lost = {m["tag_id"]: m["lost_at"] for m in detail["misses"]}
+    assert lost == {"gA": "gate", "gB": "unmentioned", "gU": "unrecalled",
+                    "gK": None}  # gC 已产出不算漏检
+    assert detail["misses"][0]["tag_name"] == "Tag A"  # 名称回填不丢
+
+    old = _row("m2", {"o1": 0.9}, [])  # 老 run：raw 行无 trace 键
+    d_old = breakdown_movie([old], "m2", THETAS, KS, {"o1"}, {})
+    assert d_old["trace"] is None  # trace 键恒在、值 None
+    assert [(m["tag_id"], m["lost_at"]) for m in d_old["misses"]] == [
+        ("o1", None)]  # lost_at 恒写键：暂无 → None
+
+
+def test_breakdown_failed_movie_trace_none():
+    """失败片：detail trace=None（组装只在成功片分支）、misses 恒空。"""
+    failed = _row("m-fail", {"f1": 0.9}, [], ok=False, error="boom")
+    detail = breakdown_movie([failed], "m-fail", THETAS, KS, {"f1"}, {})
+    assert detail["error"] == "boom"  # error 原样透传
+    assert detail["trace"] is None
+    assert detail["misses"] == []
+    # 防御：异常数据失败片竟带 trace 也不组装（Task 2 口径失败片不落 trace）
+    haunted = _row("m-haunt", {"h1": 0.9}, [], ok=False, error="x")
+    haunted["trace"] = _trace([_cand("h1", "kept", applicability=5, sf=0.9)])
+    assert breakdown_movie([haunted], "m-haunt", THETAS, KS, {"h1"},
+                           {})["trace"] is None

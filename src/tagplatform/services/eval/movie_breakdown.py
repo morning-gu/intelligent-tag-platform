@@ -12,6 +12,13 @@ sf），因此单片指标与网格格值可精确对账（test_reconciliation_w
 已知取舍：precision/recall 原语对空相关集记 0.0，本模块先判 θ-相关集为空
 → None、非空才调（None≠0）；计分清单与明细顺序防御性按 (-sf, tag_id) 重
 排，不信任输入序。
+管线追踪（2026-11-26，funnel trace）：closed 干跑的 raw 行可选带 "trace"
+键（ProduceTrace.snapshot 形状：max_tags/candidates/batches/fabricated，
+见 generation/trace.py）。读侧纪律：漏斗计数一律由候选行纯派生
+（funnel_counts——落盘只存逐候选行，单一事实源），trace 缺失（老 run/
+失败片）→ funnel/trace/lost_at 全 None（「暂无」，None≠0）且键恒在；
+misses 的 lost_at 与 trace 交叉定位丢失环节（unrecalled=不在候选，含
+dir_asset 召回口径剔除——本就不入册）。
 
 分层红线：只用标准库 + 上述两个 eval 模块，不 import fastapi / numpy /
 scipy（与 closed_ranking.py 同款约束）。
@@ -32,6 +39,7 @@ from tagplatform.services.eval.ranking import precision_at_k, recall_at_k
 
 __all__ = [
     "breakdown_movie",
+    "funnel_counts",
     "pick_k",
     "pick_theta",
     "summarize_movies",
@@ -110,6 +118,67 @@ def _movie_metrics(row: dict, gt_space: set[str], relevance: dict[str, float],
     return (p, r, sp)
 
 
+# ---------------------------------------------------------------- 管线追踪读侧（funnel trace）
+
+def funnel_counts(trace: dict | None) -> dict | None:
+    """从 trace snapshot 纯派生漏斗计数（十键全 int）；trace 缺失 → None。
+
+    None≠0「暂无」纪律：trace=None / 老行无键 → None（暂无），不是全 0；
+    trace 存在（哪怕空 dict）→ 十键恒在的计数 dict。形状残缺防御：候选/
+    批次/编造表缺键按空表、max_tags 缺键按 0 处理，不炸。
+
+    十键口径（候选行 = ProduceTrace.snapshot 形状）：
+    - n_recall：候选总数（召回在册，含各结局；dir_asset 目录剔除属召回
+      口径，本就不入册不计数）；
+    - n_mentioned：applicability 非 None 的候选数（模型给了适用度的才算
+      "提及"；unmentioned 候选 applicability/sf 双 None）；
+    - n_kept/n_gate/n_unmountable/n_m_cap：outcome 五值里四类丢弃/保留
+      分流的各自计数（unmentioned 不单设键，= n_recall − 其余四类）；
+    - n_fabricated：编造/越组 id 条数（trace 内按出现次序累积、不去重，
+      原样计数）；n_batches：批次数；parse_retries：批次里 parse_retried
+      真值计数；max_tags：全局输出上限 M（策略原值）。
+    """
+    if not isinstance(trace, dict):
+        return None
+    candidates = trace.get("candidates") or []
+    batches = trace.get("batches") or []
+    return {
+        "n_recall": len(candidates),
+        "n_mentioned": sum(1 for c in candidates
+                           if c.get("applicability") is not None),
+        "n_kept": sum(1 for c in candidates if c.get("outcome") == "kept"),
+        "n_gate": sum(1 for c in candidates if c.get("outcome") == "gate"),
+        "n_unmountable": sum(1 for c in candidates
+                             if c.get("outcome") == "unmountable"),
+        "n_m_cap": sum(1 for c in candidates
+                       if c.get("outcome") == "m_cap"),
+        "n_fabricated": len(trace.get("fabricated") or []),
+        "n_batches": len(batches),
+        "parse_retries": sum(1 for b in batches if b.get("parse_retried")),
+        "max_tags": int(trace.get("max_tags") or 0),
+    }
+
+
+def _lost_at(tag_id: str,
+             outcome_by_tag: dict[str, str | None] | None) -> str | None:
+    """漏检交叉：该 tag 死在漏斗哪一环（misses 行的 lost_at 口径）。
+
+    - outcome_by_tag=None（trace 缺失：老 run/失败片）→ None「暂无」，
+      不得与 unrecalled 混淆（没数据 ≠ 没召回）；
+    - tag 不在 trace 候选 → "unrecalled"（召回就没捞到，含 dir_asset
+      召回口径剔除——本就不入册）；
+    - 在候选 → outcome 原样透传（gate/unmountable/m_cap/unmentioned）；
+    - outcome 为 "kept" 却出现在漏检里属数据不自洽（kept 必产出），防御
+      性回 None，不让脏数据伪装成合法环节。
+    """
+    if outcome_by_tag is None:
+        return None
+    if tag_id not in outcome_by_tag:
+        return "unrecalled"
+    outcome = outcome_by_tag[tag_id]
+    return None if outcome == "kept" else outcome
+
+
 # ---------------------------------------------------------------- 公共入口
 
 def summarize_movies(rows: list[dict], thetas: Sequence[float],
@@ -123,7 +192,8 @@ def summarize_movies(rows: list[dict], thetas: Sequence[float],
       档（选择器选项源）；
     - 每片一行：指标（float | None，None=算不出；p 用 θ_p、r 用 θ_r）+
       n_produced（原始产出条数含空间外）+ n_relevant（gt∩库 ≥**θ_r**
-      计数，与漏检/命中分类同门；失败片也照数）；
+      计数，与漏检/命中分类同门；失败片也照数）+ funnel（漏斗计数 dict
+      或 None——funnel_counts 派生，恒写键，不参与排序）；
     - 排序：失败置顶 → p_at_k 非空升序 → null 垫底 → 同分按 tt 字典序
       （垫底键只看 p，θ_r 不参与排序）。
     """
@@ -150,6 +220,7 @@ def summarize_movies(rows: list[dict], thetas: Sequence[float],
             "elapsed_ms": row.get("elapsed_ms"),
             "n_produced": len(row.get("produced") or []),
             "n_relevant": sum(1 for s in relevance.values() if s >= theta_r),
+            "funnel": funnel_counts(row.get("trace")),
         })
     out.sort(key=lambda r: (r["ok"] is True, r["p_at_k"] is None,
                             r["p_at_k"] if r["p_at_k"] is not None else 0.0,
@@ -174,8 +245,14 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
     - `out_of_space`：produced 中不在 GT 空间的条目（不计分只列名，
       与 θ 无关）；
     - `misses`：相关（gt∩库 ≥θ_r）未产出标签，按 (-gt_score, tag_id) 排，
-      tag_name 从 library_names 回填（缺 → None）；
-    - 失败片三表全空、error 原样；未知 tt → None。
+      tag_name 从 library_names 回填（缺 → None）；每行附 `lost_at` 丢失
+      环节（与 trace 交叉派生，见 _lost_at：unrecalled / outcome 透传 /
+      trace 缺失或不自洽 → None，恒写键）；
+    - `trace`：管线追踪透出（raw 行 "trace" 键）——成功片且 trace 为
+      dict 才组装 {counts, candidates, batches, fabricated, max_tags}
+      （counts=funnel_counts 同数；候选行原样透传，服务端序=召回序），
+      老 run/失败片 → None（键恒在）；
+    - 失败片三表全空、error 原样、trace=None；未知 tt → None。
     """
     row = next((r for r in rows if r.get("tt") == tt), None)
     if row is None:
@@ -184,6 +261,12 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
                else theta_p)
     theta_r = (pick_theta(thetas, DEFAULT_THETA_R) if theta_r is None
                else theta_r)
+    trace = row.get("trace")
+    if not isinstance(trace, dict):
+        trace = None
+    outcome_by_tag = (None if trace is None else
+                      {c.get("tag_id"): c.get("outcome")
+                       for c in trace.get("candidates") or []})
     detail = {
         "tt": row["tt"],
         "title": row.get("title"),
@@ -197,9 +280,10 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
         "produced": [],
         "out_of_space": [],
         "misses": [],
+        "trace": None,
     }
     if not row.get("ok"):
-        return detail  # 失败片：三表全空、error 原样
+        return detail  # 失败片：三表全空、error 原样、trace=None
     gt = row.get("gt") or {}
     gt_space = _gt_space(rows)
     for entry in _scoring(row, gt_space):
@@ -227,5 +311,14 @@ def breakdown_movie(rows: list[dict], tt: str, thetas: Sequence[float],
         key=lambda m: (-m["gt_score"], m["tag_id"]))
     detail["misses"] = [{"tag_id": m["tag_id"],
                          "tag_name": library_names.get(m["tag_id"]),
-                         "gt_score": m["gt_score"]} for m in misses]
+                         "gt_score": m["gt_score"],
+                         "lost_at": _lost_at(m["tag_id"], outcome_by_tag)}
+                        for m in misses]
+    if trace is not None:
+        counts = funnel_counts(trace)  # trace 为 dict 时必非 None
+        detail["trace"] = {"counts": counts,
+                           "candidates": list(trace.get("candidates") or []),
+                           "batches": list(trace.get("batches") or []),
+                           "fabricated": list(trace.get("fabricated") or []),
+                           "max_tags": counts["max_tags"]}
     return detail
