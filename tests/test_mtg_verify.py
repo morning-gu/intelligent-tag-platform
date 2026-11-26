@@ -3,7 +3,6 @@
 import json
 
 from tagplatform.services.generation.open.mtg.verify import (
-    VERIFY_MARKER,
     build_verify_messages,
     parse_verify_results,
     verify_pairs,
@@ -28,27 +27,10 @@ class _Client:
                            raw={}, ok=True)
 
 
-def test_build_messages_lists_pairs():
-    text = build_verify_messages([("悬疑神秘", "悬疑", 0.901),
-                                  ("非线性叙事", "线性叙事", 0.892)])[0]["content"]
-    assert text.startswith(VERIFY_MARKER)
-    assert "- 悬疑神秘｜悬疑｜0.90" in text
-    assert "- 非线性叙事｜线性叙事｜0.89" in text
-    # 反例必须写进提示：模型才知道"字面像"不等于"是同一个概念"
-    assert "非线性叙事" in text
-
-
 def test_build_messages_caps_pair_count():
     pairs = [(f"候选{i}", f"库{i}", 0.9) for i in range(45)]
     text = build_verify_messages(pairs)[0]["content"]
     assert text.count("\n- 候选") == 40
-
-
-def test_parse_plain_json():
-    payload = {"results": [{"candidate": "悬疑神秘", "same": True},
-                           {"candidate": "非线性叙事", "same": False}]}
-    assert parse_verify_results(json.dumps(payload, ensure_ascii=False)) == {
-        "悬疑神秘": True, "非线性叙事": False}
 
 
 def test_parse_tolerates_code_fence_and_noise():

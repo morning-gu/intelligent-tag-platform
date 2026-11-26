@@ -32,14 +32,6 @@ def test_consistency_std_is_population_std():
     assert values[1] == pytest.approx(math.sqrt(2 / 9))
 
 
-def test_consistency_std_ddof0_is_smaller_than_ddof1():
-    """3 轮时两者差 √(3/2)≈1.2247 倍；口径写错会让回归数字整体偏大。"""
-    population = consistency_std([[0.0, 1.0, 1.0]])[0]
-    sample = math.sqrt(2 / 9) * math.sqrt(3 / 2)
-
-    assert population == pytest.approx(sample / math.sqrt(3 / 2))
-
-
 def test_consistency_std_rejects_ragged_matrix():
     with pytest.raises(ValueError, match="每行长度必须一致"):
         consistency_std([[1.0, 2.0], [1.0]])

@@ -82,6 +82,8 @@ class _TwoStageLLM:
 def test_is_general_accepts_dictionary_style():
     assert is_general("整体氛围宏大壮阔，具有史诗般的叙事格局")
     assert is_general("以愤世嫉俗、道德模糊、阴暗氛围为特征的犯罪题材类型")
+    # “主角”在库里是通用用法，不应被误判为剧情泄漏
+    assert is_general("主角因遭受不公或伤害而展开复仇行动的剧情母题")
 
 
 @pytest.mark.parametrize("text, names", [
@@ -96,25 +98,10 @@ def test_is_general_rejects_plot_specific(text, names):
     assert not is_general(text, names)
 
 
-def test_is_general_accepts_generic_protagonist_word():
-    """“主角”在库里是通用用法，不能当泄漏（否则会误杀成片定义）。"""
-    from tagplatform.capabilities.prompts.mtg import DESCRIPTION_TEMPLATE
-
-    assert is_general("主角因遭受不公或伤害而展开复仇行动的剧情母题")
-    assert "9-32 字" in DESCRIPTION_TEMPLATE
-    assert "主角" not in DESCRIPTION_TEMPLATE
-    assert "结尾" not in DESCRIPTION_TEMPLATE
-
-
 def test_clean_description_strips_wrappers():
     assert clean_description("  “以多线并行推进”  ") == "以多线并行推进"
     # 库内词条不带句末标点
     assert clean_description("以多线并行推进的叙事结构。") == "以多线并行推进的叙事结构"
-
-
-def test_content_names_collects_title(content_fixture):
-    names = content_names(content_fixture)
-    assert content_fixture.asset.title in names
 
 
 # ---- 补写 ----

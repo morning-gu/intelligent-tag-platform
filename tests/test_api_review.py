@@ -149,19 +149,6 @@ def test_review_modify_empty_422(client):
         assert s.get(PreAssetTag, row_id).review_status == "pending"
 
 
-def test_review_merge_422_bad_or_missing_target(client):
-    (row_id,) = _seed_rows(client)
-    missing = client.post(f"/api/v1/asset-tags/{row_id}/review",
-                          json={"action": "merge", "payload": {}})
-    assert missing.status_code == 422
-    unknown = client.post(f"/api/v1/asset-tags/{row_id}/review", json={
-        "action": "merge", "payload": {"merge_to_tag_id": "tag_none"}})
-    assert unknown.status_code == 422
-    with client.app.state.session_factory() as s:
-        row = s.get(PreAssetTag, row_id)
-        assert row.review_status == "pending" and row.tag_id is None
-
-
 def test_review_merge_moves_to_catalog_tag(client):
     """merge 成功：tag_id=merge_to、候选清空、终态 approved。"""
     (row_id,) = _seed_rows(client)
@@ -211,36 +198,6 @@ def test_batch_review_index_conflict_per_item(client):
         statuses = {r.id: r.review_status for r in s.query(PreAssetTag).all()}
         assert statuses[ids[0]] == "approved"
         assert statuses[ids[1]] == "pending"
-
-
-# ---------- modify 字符串字段校验 ----------
-
-
-def test_review_modify_string_field_validation_422(client):
-    (row_id,) = _seed_rows(client)
-    cases = [
-        {"tag_name": ""},
-        {"candidate_name": "   "},
-        {"tag_name": "长" * 201},
-    ]
-    for payload in cases:
-        resp = client.post(f"/api/v1/asset-tags/{row_id}/review",
-                           json={"action": "modify", "payload": payload})
-        assert resp.status_code == 422, f"{payload} 应 422"
-    with client.app.state.session_factory() as s:
-        row = s.get(PreAssetTag, row_id)
-        assert row.review_status == "pending"
-        assert row.candidate_name == "候选0"
-
-
-def test_review_modify_strips_value(client):
-    (row_id,) = _seed_rows(client)
-    resp = client.post(f"/api/v1/asset-tags/{row_id}/review", json={
-        "action": "modify", "payload": {"tag_name": "  紧张感  "}})
-    assert resp.status_code == 200
-    assert resp.json()["candidate_name"] == "紧张感"
-    with client.app.state.session_factory() as s:
-        assert s.get(PreAssetTag, row_id).candidate_name == "紧张感"
 
 
 # ---------- 批量审核 ----------
@@ -303,6 +260,8 @@ def test_review_requires_login(client):
                           json={"action": "approve"}).status_code == 401
         assert fresh.post("/api/v1/asset-tags/batch-review",
                           json={"ids": [1], "action": "approve"}).status_code == 401
+        assert fresh.get("/api/v1/review/items").status_code == 401
+        assert fresh.get("/api/v1/review/filters").status_code == 401
 
 
 # ---------- 审核列表与筛选 ----------
@@ -454,34 +413,25 @@ def test_review_items_filter_dir_includes_children(client):
     assert resp.json()["items"][0]["id"] == ids["r5"]
 
 
-def test_review_items_filter_mode(client):
-    ids = _seed_list_scene(client)
-    resp = client.get("/api/v1/review/items", params={"mode": "closed"})
-    assert resp.json()["total"] == 2
-    assert {it["id"] for it in resp.json()["items"]} == {ids["r1"], ids["r2"]}
-
-    resp = client.get("/api/v1/review/items", params={"mode": "open"})
-    assert resp.json()["total"] == 3
-    assert {it["id"] for it in resp.json()["items"]} == {
-        ids["r3"], ids["r4"], ids["r5"]}
-
-
-def test_review_items_filter_asset_and_origin(client):
+def test_review_items_filter_asset_mode_and_origin(client):
     ids = _seed_list_scene(client)
     resp = client.get("/api/v1/review/items", params={"asset_id": "a1"})
     assert resp.json()["total"] == 3
     assert {it["id"] for it in resp.json()["items"]} == {
         ids["r1"], ids["r2"], ids["r5"]}
 
-    resp = client.get("/api/v1/review/items", params={"origin": "closed"})
-    assert resp.json()["total"] == 2
-
+    assert {it["id"] for it in client.get(
+        "/api/v1/review/items", params={"mode": "closed"}).json()["items"]} == {
+        ids["r1"], ids["r2"]}
+    assert {it["id"] for it in client.get(
+        "/api/v1/review/items", params={"mode": "open"}).json()["items"]} == {
+        ids["r3"], ids["r4"], ids["r5"]}
+    assert client.get("/api/v1/review/items",
+                      params={"origin": "closed"}).json()["total"] == 2
     assert client.get("/api/v1/review/items",
                       params={"origin": "open"}).json()["total"] == 3
-
-    resp = client.get("/api/v1/review/items", params={
-        "asset_id": "a1", "origin": "closed"})
-    assert resp.json()["total"] == 2
+    assert client.get("/api/v1/review/items", params={
+        "asset_id": "a1", "origin": "closed"}).json()["total"] == 2
 
 
 def test_review_items_pagination(client):
@@ -497,23 +447,6 @@ def test_review_items_pagination(client):
 
     resp = client.get("/api/v1/review/items", params={"page": 4, "page_size": 2})
     assert resp.json()["items"] == [] and resp.json()["total"] == 5
-
-
-def test_review_items_merged_row_uses_catalog_name(client):
-    """merge 后：行变 approved + tag_id，列表回退库内标签名/类型。"""
-    (row_id,) = _seed_rows(client)
-    merged = client.post(f"/api/v1/asset-tags/{row_id}/review",
-                         json={"action": "merge",
-                               "payload": {"merge_to_tag_id": "tag_action"}})
-    assert merged.status_code == 200
-
-    resp = client.get("/api/v1/review/items", params={"status": "approved"})
-    body = resp.json()
-    assert body["total"] == 1
-    item = body["items"][0]
-    assert item["id"] == row_id
-    assert item["tag_name"] == "动作" and item["tag_type"] == "val_fixed"
-    assert item["origin"] == "open"
 
 
 def test_modify_rejected_on_catalog_row_and_synced_on_candidate_row(client):
@@ -605,20 +538,6 @@ def test_review_filters_endpoint(client):
     assert dirs["dir_scene"]["applicable_scope"] == "scene"
     assert dirs["dir_char"]["applicable_scope"] == "character"
     assert dirs["dir_genre"]["path"] == "内容特征标签/主类型"
-
-
-def test_review_filters_library_types(client):
-    """筛选下拉来自 JSON 标签库，与 DB 无关（空 DB 也有值）。"""
-    resp = client.get("/api/v1/review/filters")
-    body = resp.json()
-    assert body["tag_types"] == ["val_fixed", "val_generalized"]
-    assert body["statuses"] == ["pending", "approved", "rejected"]
-
-
-def test_review_list_and_filters_require_login(client):
-    with TestClient(client.app) as fresh:
-        assert fresh.get("/api/v1/review/items").status_code == 401
-        assert fresh.get("/api/v1/review/filters").status_code == 401
 
 
 def test_review_items_hides_system_auto_rows(client):

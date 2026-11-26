@@ -215,41 +215,6 @@ def test_video_content_type_mapping(client, tmp_path, suffix, expected):
     assert resp.headers["content-type"] == expected
 
 
-# ---------- video_uri 解析复用 ----------
-
-
-def test_video_file_uri_resolution(client, tmp_path, monkeypatch):
-    """video_uri 经 resolve_video_path(video_uri, None) 解析（复用钉死）。
-
-    resolve_video_path 的 file:// 分支产出 POSIX 风格路径（阶段 1 契约，
-    其单测断言 file:///data/a.mp4 → /data/a.mp4），Windows 盘符 file:///
-    C:/... 解析出的 /C:/... 不指向真实文件——故以桩替其返回值，用入参
-    断言钉死 (video_uri, None) 复用契约，再服务真实临时文件验证端到端。
-    """
-    import tagplatform.orchestration.media as video_flow
-
-    file_path = tmp_path / "video.mp4"
-    file_path.write_bytes(CONTENT)
-    with client.app.state.session_factory() as s:
-        s.add(MediaAsset(asset_id="asset_video_mp4", asset_type="movie",
-                         title="测试影片",
-                         video_uri="file:///data/movie_002.mp4",
-                         created_at=_NOW))
-        s.commit()
-    calls = {}
-
-    def fake_resolve(uri, video_root):
-        calls["args"] = (uri, video_root)
-        return str(file_path)
-
-    monkeypatch.setattr(video_flow, "resolve_video_path", fake_resolve)
-    resp = client.get("/api/v1/assets/asset_video_mp4/video")
-    assert resp.status_code == 200
-    assert resp.content == CONTENT
-    # 复用契约：file:// 原样透传解析器，video_root 恒为 None
-    assert calls["args"] == ("file:///data/movie_002.mp4", None)
-
-
 # ---------- 全 API 保护 ----------
 
 

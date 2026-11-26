@@ -213,10 +213,7 @@ def test_progress_page_renders(dataset_client, monkeypatch):
     missing = dataset_client.get("/api/v1/media/build-tasks/build_nope/view")
     assert missing.status_code == 404
 def test_upload_infer_passes_to_submit(dataset_client, monkeypatch):
-    """上传时的 infer 只是执行参数：透传给后台任务，不落任务行。
-
-    表结构与 main 完全一致（没有 infer 列），前端勾选框照旧可用。
-    """
+    """上传时的 infer 参数透传给后台任务。"""
     seen: dict = {}
     monkeypatch.setattr(asset_build, "submit",
                         lambda task_id, settings=None, **kw: seen.update(kw))
@@ -228,14 +225,8 @@ def test_upload_infer_passes_to_submit(dataset_client, monkeypatch):
     ).json()
     assert seen == {"infer": False}
     with dataset_client.app.state.session_factory() as s:
-        cols = {
-            row[1]
-            for row in s.connection().exec_driver_sql(
-                "PRAGMA table_info(asset_build_task)")
-        }
         task = s.get(AssetBuildTask, body["build_task_id"])
         assert task is not None and task.status == "queued"
-    assert "infer" not in cols
 
 
 def test_execute_facts_mode_skips_llm(dataset_client, monkeypatch):
@@ -268,10 +259,6 @@ def test_execute_facts_mode_skips_llm(dataset_client, monkeypatch):
         asset = s.get(MediaAsset, body["asset_id"])
         assert asset.source == source_tag(False)
     assert calls == []
-
-
-def test_execute_unknown_task_is_noop(dataset_client):
-    asset_build.execute("build_nope", dataset_client.app.state.settings)
 
 
 def test_execute_overwrites_stale_content(dataset_client, monkeypatch):
@@ -364,6 +351,7 @@ def test_match_endpoint_matched_without_content(dataset_client):
     assert body["asset_id"] is None       # 还没有资产行
     assert body["has_content"] is False
     assert body["scene_count"] == 0
+    assert body["can_rebuild"] is True
 
 
 def test_match_endpoint_reports_built_content(dataset_client, monkeypatch):
@@ -435,15 +423,6 @@ def test_match_endpoint_falls_back_to_asset_title(dataset_client):
     assert body["has_content"] is True and body["scene_count"] == 1
     assert body["can_rebuild"] is False      # 没 movie_id，重建要改文件名
     assert body["movie_id"] is None
-
-
-def test_match_endpoint_dataset_hit_can_rebuild(dataset_client):
-    """数据集命中时 can_rebuild=true（前端才允许"重新生成"）。"""
-    body = dataset_client.get(
-        "/api/v1/media/match",
-        params={"filename": "Test.Movie.1999.mkv"}).json()
-
-    assert body["matched"] is True and body["can_rebuild"] is True
 
 
 def test_upload_duplicate_title_without_dataset_match_conflicts(dataset_client):

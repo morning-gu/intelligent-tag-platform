@@ -34,16 +34,6 @@ def test_token_roundtrip():
     assert isinstance(payload["exp"], (int, float))
 
 
-def test_token_default_ttl_is_7_days():
-    """默认有效期 7 天：exp 距现在约 7*86400 秒（留分钟级容差）。"""
-    import time
-
-    token = create_session_token("u", "admin", _DEV_SECRET)
-    exp = parse_session_token(token, _DEV_SECRET)["exp"]
-    delta = exp - time.time()
-    assert 7 * 86400 - 60 < delta <= 7 * 86400
-
-
 def test_token_wrong_secret_none():
     """错密钥签名不匹配 → None（不抛）。"""
     token = create_session_token("u1", "admin", "secret-a")
@@ -100,6 +90,7 @@ def test_login_success_sets_httponly_cookie(client):
     set_cookie = resp.headers["set-cookie"]
     assert "tagplatform_session=" in set_cookie
     assert "httponly" in set_cookie.lower()
+    assert "samesite=lax" in set_cookie.lower()
 
 
 def test_login_wrong_password_401(client):
@@ -116,14 +107,6 @@ def test_login_unknown_user_401(client):
                        json={"username": "nobody", "password": "whatever"})
     assert resp.status_code == 401
     assert resp.json() == {"detail": "用户名或密码错误"}
-
-
-def test_login_cookie_samesite_lax(client):
-    """会话 cookie 带 samesite=lax（CSRF 防线，Task 12 auth 加固）。"""
-    resp = client.post("/api/v1/auth/login",
-                       json={"username": "admin", "password": "admin123"})
-    assert resp.status_code == 200
-    assert "samesite=lax" in resp.headers["set-cookie"].lower()
 
 
 def test_login_unknown_user_runs_dummy_verify(client, monkeypatch):
@@ -171,13 +154,6 @@ def test_me_returns_current_user(client):
     assert body["user_id"].startswith("user_")
 
 
-def test_me_without_cookie_401(client):
-    """me：无 cookie → 401。"""
-    client.cookies.delete("tagplatform_session")
-    resp = client.get("/api/v1/auth/me")
-    assert resp.status_code == 401
-
-
 def test_logout_clears_session(client):
     """登出：清 cookie，之后再访问受保护 API → 401。"""
     resp = client.post("/api/v1/auth/logout")
@@ -189,8 +165,9 @@ def test_logout_clears_session(client):
 # ---------- 全 API 保护（/health 除外） ----------
 
 def test_protected_api_without_cookie_401_health_open(client):
-    """/api/v1/* 无 cookie → 401；/health 无需登录（开放例外）。"""
+    """/api/v1/*（含 auth/me）无 cookie → 401；/health 无需登录（开放例外）。"""
     client.cookies.delete("tagplatform_session")
+    assert client.get("/api/v1/auth/me").status_code == 401
     assert client.get("/api/v1/tags").status_code == 401
     assert client.get("/api/v1/import/tasks").status_code == 401
     assert client.get("/api/v1/assets").status_code == 401

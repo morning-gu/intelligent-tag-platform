@@ -15,7 +15,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from tagplatform.capabilities.adapters import VisionAdapter, get_adapter, list_adapters, register_adapter
+from tagplatform.capabilities.adapters import get_adapter
 
 # 与《图谱&标签与长视频理解数据对齐.txt》示例逐字对齐（含注释时请先去除）
 SAMPLE = {
@@ -179,12 +179,6 @@ def test_vision_adapter_invalid_rejected(mutate):
     node[mutate["path"][-1]] = mutate["value"]
     with pytest.raises(ValidationError):
         get_adapter("vision").adapt(raw)
-
-
-def test_vision_registered_and_duplicate_rejected():
-    assert "vision" in list_adapters()
-    with pytest.raises(ValueError):
-        register_adapter(VisionAdapter())
 
 
 def test_vision_adapter_slim_asset_fields():

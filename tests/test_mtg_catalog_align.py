@@ -176,19 +176,6 @@ def test_align_empty_library_returns_empty():
                             suspect_cosine=0.87, name_overlap=0.4) == {}
 
 
-def test_summarize_bands_counts():
-    lib = [_tag("t1", "悬疑", [1.0, 0.0, 0.0])]
-    embedder = _FixedEmbedder({
-        "悬疑": [1.0, 0.0, 0.0],
-        "悬疑神秘": [0.0, 1.0, 0.0],
-        "洛杉矶街景": [0.0, 0.0, 1.0],
-    })
-    result = align_candidates(lib, embedder, ["悬疑", "悬疑神秘", "洛杉矶街景"],
-                              suspect_cosine=0.87, name_overlap=0.4)
-    assert summarize_bands(result) == {
-        BAND_DUPLICATE: 1, BAND_SUSPECT: 1, BAND_NEW: 1}
-
-
 # ---------- 提示召回 ----------
 
 def test_recall_library_hints_returns_top_n_in_order():

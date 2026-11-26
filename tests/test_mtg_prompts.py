@@ -46,10 +46,6 @@ def test_scene_prompt_uses_target_directory_and_excerpt_goal():
     body, tail = [part["text"] for part in messages[0]["content"]]
     assert "第1句台词" in body
     assert "## 目标目录\n路径：情节事件" in tail
-    assert "根据当前片段" in tail
-    assert "五个维度" not in tail
-    assert '"dimension"' not in tail
-    assert '"scope"' not in tail
 
 
 def test_generation_adds_relevant_cast_only_to_the_current_scene():

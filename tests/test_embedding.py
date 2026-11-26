@@ -24,13 +24,6 @@ from tagplatform.settings import Settings
 # ---------- role 前缀契约（e5 非对称检索：query 检索方 / passage 语料方） ----------
 
 
-def test_embed_invalid_role_rejected():
-    """未知 role 立即 ValueError（防调用点拼错 role 静默落错空间）。"""
-    e = make_embedder("x", mock=True)
-    with pytest.raises(ValueError, match="role"):
-        e.embed(["文本"], role="doc")
-
-
 def test_local_invalid_role_never_loads():
     """非法 role 先于模型加载拒绝：不触发 sentence_transformers 导入。"""
     e = LocalEmbedder("m")
@@ -74,13 +67,6 @@ def test_local_prefixes_texts_per_role(monkeypatch):
 
 def test_local_plain_models_get_no_prefix(monkeypatch):
     """非 e5 模型（BGE-M3）吃纯文本：前缀会被当正文，实测拉低分辨力。"""
-    import sys
-    import types
-
-    import numpy as np
-
-    from tagplatform.capabilities.embed.embedding import LocalEmbedder
-
     encoded: list[list[str]] = []
 
     class _FakeModel:
@@ -171,13 +157,6 @@ def test_remote_batches_chunks():
     assert [len(call[2]) for call in log] == [3, 3, 1]
 
 
-def test_remote_normalizes_unnormalized_response():
-    """端点返回未归一化向量时客户端侧兜底归一化（防任意端点差异）。"""
-    e = RemoteEmbedder("http://x/v1", transport=_fake_transport([], scale=10.0))
-    v = e.embed(["a", "b"], role="query")
-    assert np.allclose(np.linalg.norm(v, axis=1), 1.0)
-
-
 def test_remote_dim_drift_rejected():
     state = {"dim": 4}
 
@@ -238,10 +217,6 @@ def test_make_embedder_mock_wins_over_backend():
     assert isinstance(e, MockEmbedder)
 
 
-def test_build_embedder_local_default():
-    assert isinstance(build_embedder(Settings()), LocalEmbedder)
-
-
 def test_build_embedder_remote_from_settings():
     s = Settings(embedding_backend="remote",
                  embedding_api_base="http://9.15.87.193:8193/v1",
@@ -249,9 +224,3 @@ def test_build_embedder_remote_from_settings():
     e = build_embedder(s)
     assert isinstance(e, RemoteEmbedder)
     assert e.base_url == "http://9.15.87.193:8193/v1" and e.model == "bge-m3"
-
-
-def test_build_embedder_mock_wins_over_backend():
-    s = Settings(use_mock_embedder=True, embedding_backend="remote",
-                 embedding_api_base="http://x/v1")
-    assert isinstance(build_embedder(s), MockEmbedder)

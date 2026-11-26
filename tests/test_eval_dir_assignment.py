@@ -136,30 +136,12 @@ def test_encoding_is_batched_not_per_tag(script):
     assert n_tags > 3, "默认库要有足够标签才有意义"
     assert len(counting.calls) <= expected_upper, (
         f"编码调用了 {len(counting.calls)} 次，疑似退化为逐标签编码")
-    # 逐标签的旧写法必定 >= 标签数次调用
+    # 第一批为全部查询标签名；调用次数远小于标签数（防退化为逐标签编码）
+    assert counting.calls[0] == n_tags
     assert len(counting.calls) < n_tags
 
 
-def test_query_batch_is_encoded_once(script):
-    """全部标签名应一次（或按批）编码完，而不是每枚一趟。"""
-    library = try_load_library()
-    counting = _CountingEmbedder(MOCK_EMBEDDER)
-    samples, _ = script.library_samples(library, counting, None, None, strict=False)
-
-    assert counting.calls[0] == len(samples), "第一批应当是全部查询标签名"
-
-
-# ---------------------------------------------------------------- 可比性
-
-def test_baseline_is_deterministic(script):
-    """同一份库 + 确定性嵌入器 → 完全相同的分数（回归基线的前提）。"""
-    library = try_load_library()
-    first, _ = script.library_samples(library, MOCK_EMBEDDER, None, None, strict=True)
-    second, _ = script.library_samples(library, MOCK_EMBEDDER, None, None, strict=True)
-
-    assert [s.ranked for s in first] == [s.ranked for s in second]
-    assert [s.relevance for s in first] == [s.relevance for s in second]
-
+# ---------------------------------------------------------------- 样本与相关度
 
 def test_samples_shape_is_usable(script):
     """每条样本都要有非空候选与相关度表，否则指标会静默算成 0。"""

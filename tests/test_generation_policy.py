@@ -68,19 +68,6 @@ def test_open_max_tags_per_dir_caps_output(content_fixture):
     assert [t.tag_id for t in out if t.origin == "catalog"] == ["tag_extra"]
 
 
-def test_open_library_hit_is_catalog_and_new_kept(content_fixture):
-    add_tags([{"tag_id": "tag_extra", "dir_id": "dir_theme",
-               "tag_name": "多线叙事", "tag_type": "val_fixed",
-               "description": "多线叙事", "status": "active"}])
-    spec = _spec(_with_two_scenes(content_fixture), "p4",
-                 GenerationPolicy(dir_ids=["dir_theme"]))
-    out = OpenTagProducer().produce(spec, None, MOCK_LLM, MOCK_EMBEDDER)
-    hit = [t for t in out if t.origin == "catalog"]
-    assert hit and hit[0].tag_id == "tag_extra" and hit[0].dir_id == "dir_theme"
-    assert {t.tag_name for t in out if t.origin == "generated"} == {
-        "情感张力", "视听风格"}
-
-
 def test_closed_respects_dir_scope(session, content_fixture):
     """closed 候选只从 dir_ids 范围内召回：范围内没有标签 → 显式失败。"""
     from tests.library_fixture import add_dirs

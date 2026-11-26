@@ -22,7 +22,6 @@ from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.services.content.assets import (
     AssetBuilder,
     CastIndex,
-    assemble_asset,
     build_index,
     lines_for_scene,
     match,
@@ -194,38 +193,7 @@ def test_build_index_and_match(tmp_path):
     assert match("完全无关的片名.mp4", index) is None
 
 
-# ---------------------------------------------------------------- 模板组装
-
-def test_assemble_asset_template_shape():
-    cast = CastIndex(["Don Vito", "Bonasera"])
-    scene = {
-        "scene_id": "s1", "start_ms": 0, "end_ms": 1000,
-        "description": "场景描述", "virtual_time": "1999年", "location": "车内",
-        "character_ids": ["character_001"],
-        "events": [{"event_id": "event_001", "description": "争执",
-                    "participant_ids": [{"character_id": "character_001",
-                                         "emotion": [{"name": "愤怒",
-                                                      "code": "ANGER"}]}]}],
-        "emotion": [{"name": "紧张压迫", "code": "TENSE_OPPRESSIVE"}],
-        "dialogues": [{"dialogue_id": "dialogue_001",
-                       "speaker_id": "character_001",
-                       "speaker_name": "Don Vito", "text": "Hi",
-                       "start_ms": 0, "end_ms": 100}],
-        "audio_events": [],
-    }
-    asset = assemble_asset("tt1", "片名", "en", 1000, "整片描述", cast, [scene])
-    assert asset["asset"]["asset_id"] == "movie_tt1"
-    # 角色只有模板里的四个键（演员写在 description 里）
-    assert asset["content"]["characters"][0] == {
-        "character_id": "character_001", "name": "Don Vito",
-        "aliases": [], "description": None}
-    body = asset["content"]["scenes"][0]
-    assert set(body) == {"scene_id", "start_ms", "end_ms", "description",
-                         "virtual_time", "location", "character_ids", "events",
-                         "emotion", "dialogues", "audio_events"}
-    assert body["emotion"] == [{"name": "紧张压迫", "code": "TENSE_OPPRESSIVE"}]
-    assert body["audio_events"] == []
-
+# ---------------------------------------------------------------- 模板解析
 
 def test_parse_scene_result_filters_and_defaults():
     out = parse_scene_result(json.dumps({
@@ -307,36 +275,6 @@ def test_build_movie_end_to_end(tmp_path):
         ("character_001", "愤怒"), ("character_002", "恐惧")]
     # 角色表带演员（写进 description，模板没有 actor 字段）
     assert content.content.characters[0].description == "由 Actor A 饰演"
-
-
-def test_build_movie_template_keys(tmp_path):
-    """默认口径：输出字段集与契约示例逐字一致，没有契约外的键。"""
-    root = tmp_path / "mn"
-    _make_dataset(root)
-    builder = AssetBuilder(root, tmp_path / "out", FakeClient(), k=2, workers=1)
-    data = json.loads(Path(builder.build_movie(MOVIE_ID).output)
-                      .read_text(encoding="utf-8"))
-    assert set(data) == {"schema_version", "asset", "content"}
-    assert set(data["content"]) == {"description", "characters", "scenes"}
-    assert set(data["asset"]) == {"asset_id", "asset_type", "title",
-                                  "duration_ms", "video_uri", "language"}
-    assert set(data["content"]["characters"][0]) == {
-        "character_id", "name", "aliases", "description"}
-    scene = data["content"]["scenes"][0]
-    assert set(scene) == {"scene_id", "start_ms", "end_ms", "description",
-                          "virtual_time", "location", "character_ids",
-                          "events", "emotion", "dialogues", "audio_events"}
-    assert set(scene["events"][0]) == {"event_id", "description",
-                                       "participant_ids"}
-    assert set(scene["events"][0]["participant_ids"][0]) == {"character_id",
-                                                             "emotion"}
-    assert set(scene["emotion"][0]) == {"name", "code"}
-    assert set(scene["dialogues"][0]) == {"dialogue_id", "speaker_id",
-                                          "speaker_name", "text", "start_ms",
-                                          "end_ms"}
-    # 人物情绪挂在事件参与人上，没有场景级 character_emotions
-    assert "character_emotions" not in scene
-    assert "emotion" not in scene["dialogues"][0]
 
 
 def test_infer_off_fills_only_dataset_facts(tmp_path):

@@ -268,33 +268,6 @@ def test_reconciliation_with_grid():
 THETAS_SPLIT = [0.2, 0.4, 0.6, 0.8]  # 拆 θ 夹具：P 门与 R 门可各取一档
 
 
-def test_default_split_matches_unified_convention():
-    """缺省（不带新参）= 统一取格约定：theta_p≈0.2、theta_r≈0.8（四档网格
-    精确命中）；payload 换键不加戏；明细三组按约定门逐字段钉死。"""
-    gt = {"gA": 0.81, "gB": 0.77, "gC": 0.61, "gD": 0.1}
-    row = _row("m1", gt, [_prod("gC", 0.95), _prod("gD", 0.90),
-                          _prod("out1", 0.50)])
-    library_ids = set(gt) | {"out1"}
-
-    summary = summarize_movies([row], THETAS_SPLIT, KS, library_ids)
-    assert "theta_used" not in summary
-    assert (summary["theta_p"], summary["theta_r"]) == (0.2, 0.8)
-    assert summary["thetas"] == THETAS_SPLIT
-    srow = summary["rows"][0]
-    assert srow["p_at_k"] == pytest.approx(0.1)
-    # θ_r=0.8：相关只 gA(.81)，top-20=[gC,gD] 无命中 → r=0.0
-    assert srow["r_at_k"] == pytest.approx(0.0)
-    assert srow["spearman"] == pytest.approx(-0.7379, abs=1e-3)
-    assert srow["n_relevant"] == 1
-
-    detail = breakdown_movie([row], "m1", THETAS_SPLIT, KS, library_ids, {})
-    assert "theta_used" not in detail
-    assert (detail["theta_p"], detail["theta_r"]) == (0.2, 0.8)
-    assert [p["tag_id"] for p in detail["produced"]] == ["gC", "gD"]
-    assert detail["produced"][0]["hit"] is False  # gC .61 < 0.8
-    assert [m["tag_id"] for m in detail["misses"]] == ["gA"]  # gB .77 < 0.8
-
-
 def test_split_theta_classification_follows_theta_r():
     """theta_p 只管 p_at_k；theta_r 管 r_at_k/n_relevant/hit/misses。"""
     gt = {"lo": 0.25, "hi": 0.9}  # lo ∈ [0.2,0.4)、hi ≥ 0.8

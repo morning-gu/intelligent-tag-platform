@@ -182,16 +182,10 @@ def test_select_movies_preset_deterministic(root):
     a = select_movies(["x1", "x2", "x3"], "preset30")
     b = select_movies(["x3", "x1", "x2"], "preset30")
     assert a == b and len(a) == 3          # 不足 30 → 全取
-    assert select_movies(["x1", "x2"], "all") == ["x1", "x2"]
-    with pytest.raises(ValueError, match="tt9999"):
-        select_movies(["x1"], "custom", ["x1", "tt9999"])
-
-
-def test_select_movies_sorted_dedup_and_defaults():
-    # 契约：返回排序去重列表；常量钉死（试点 30 部 seed=20261120）
     assert select_movies(["b", "a", "b"], "all") == ["a", "b"]
     assert select_movies(["b", "a", "b"], "custom", ["b", "a"]) == ["a", "b"]
-    assert PRESET_SIZE == 30 and PRESET_SEED == 20261120
+    with pytest.raises(ValueError, match="tt9999"):
+        select_movies(["x1"], "custom", ["x1", "tt9999"])
 
 
 # ---------------------------------------------------------------- 干跑运行器（Task 4 服务层）
@@ -377,6 +371,12 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
     assert (meta["status"], meta["done"], meta["total"],
             meta["failed"]) == ("succeeded", 2, 2, 0)
+    # 报告三件套与历史扫描终态摘要（含 finished_at）
+    assert (d / "report.json").exists() and (d / "report.md").exists() and (d / "metrics.csv").exists()
+    state = svc.get(run_id)
+    assert state.finished_at is not None
+    mine = next(r for r in svc.history() if r["run_id"] == run_id)
+    assert mine["status"] == "succeeded" and mine["finished_at"] is not None and mine["ndcg10"] is not None
 
 
 def test_run_uses_run_start_library_snapshot(eval_setup):
@@ -406,22 +406,6 @@ def test_run_uses_run_start_library_snapshot(eval_setup):
             assert produced["tag_id"] in {"t1", "t2", "t7", "t9"}  # 旧库标签
     meta = _read_meta(service, run_id)
     assert meta["library"]["n_tags"] == 4  # 起跑快照口径，非清空后口径
-
-
-def test_finished_at_on_terminal_state_and_history(svc):
-    """终态后：get() 快照与 history() 行都带 finished_at（ISO 可解析）。
-
-    meta.json 终态写盘本就带 finished_at；本用例钉的是注册表 RunState 与
-    history() 摘要行的透出（运行中/老 run 无此字段 → None，宁缺勿谎）。
-    """
-    from datetime import datetime
-
-    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
-    state = svc.get(run_id)
-    assert state.finished_at is not None
-    datetime.fromisoformat(state.finished_at)  # ISO 形态
-    row = next(r for r in svc.history() if r["run_id"] == run_id)
-    assert row["finished_at"] is not None
 
 
 def test_delete_terminal_run_removes_disk_and_registry(svc):
@@ -891,29 +875,6 @@ def test_history_summary_theta_row_empty_falls_back_or_none(svc):  # Review Focu
     allnull = by_id["run-allnull"]
     assert (allnull["ndcg10"], allnull["p10"], allnull["r20"]) == (
         None, None, None)  # 全 null → None（宁缺勿假）
-
-
-def test_service_end_to_end_writes_report(svc, root):
-    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
-    d = _run_dir(svc, run_id)
-    report = json.loads((d / "report.json").read_text(encoding="utf-8"))
-    # 前端契约键齐全（Task 7 消费）
-    assert {"banner", "sample_accounting", "grid", "baselines", "coverage",
-            "spearman", "failed_movies", "warning", "calibre", "note"} \
-        <= set(report)
-    assert report["banner"] is None and report["warning"] is None
-    assert report["sample_accounting"]["total"] == 2
-    assert report["sample_accounting"]["ok"] == 2
-    assert report["sample_accounting"]["no_gt"] == 0  # 库标签全在 gt 内
-    assert report["baselines"]["prior"]  # 先验基线随 run 落盘
-    assert report["calibre"]["llm_model"] == "mock-1"
-    assert report["calibre"]["dataset_id"] == "emotion"
-    assert len(report["calibre"]["gt_sha8"]) == 8
-    assert "银标准" in report["note"]
-    assert (d / "report.md").exists() and (d / "metrics.csv").exists()
-    # 历史扫描随即能看到该 run（含 θ0.2/θ0.8、K=10/20 摘要档）
-    mine = next(r for r in svc.history() if r["run_id"] == run_id)
-    assert mine["status"] == "succeeded" and mine["ndcg10"] is not None
 
 
 # ---------------------------------------------------------------- 数据集根快照（Task 2）

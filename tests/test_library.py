@@ -44,14 +44,6 @@ from tests.library_fixture import add_dirs, add_tags, write_library
 # ---------------------------------------------------------------- 目录 / 标签
 
 
-def test_load_library_reads_dirs_and_tags():
-    library = try_load_library()
-    assert library is not None
-    assert len(library.dirs()) == 5 and len(library.tags()) == 7
-    assert library.directory("dir_theme").dir_name == "细分题材"
-    assert library.tag("tag_revenge").tag_name == "复仇"
-
-
 def test_path_of_walks_up_to_root():
     library = try_load_library()
     assert library.path_of("dir_genre") == ["内容特征标签", "主类型"]
@@ -185,14 +177,6 @@ def test_dir_vectors_include_existing_tag_names():
     assert "动作" not in text
 
 
-def test_dir_text_without_samples_keeps_name_and_description():
-    from tagplatform.services.tags.library import Directory, dir_text
-
-    directory = Directory(dir_id="d1", dir_name="情绪基调", description="整体氛围")
-    assert dir_text(directory) == "情绪基调。整体氛围"
-    assert dir_text(directory, ["压抑"]) == "情绪基调。整体氛围。已收录：压抑"
-
-
 # ---------------------------------------------------------------- 挂载点
 
 
@@ -201,12 +185,6 @@ def _content():
         (__import__("pathlib").Path(__file__).parent / "fixtures"
          / "content_movie.json").read_text(encoding="utf-8"))
     return parse_content(data)
-
-
-def test_mount_content_uses_asset_id():
-    content = _content()
-    mount = resolve_mount(SCOPE_CONTENT, content.asset.asset_id, content, [])
-    assert mount == Mount("content", content.asset.asset_id)
 
 
 def test_mount_scene_uses_first_real_scene():

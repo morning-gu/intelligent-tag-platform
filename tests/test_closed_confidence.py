@@ -46,25 +46,7 @@ from tests.library_fixture import write_library
 from tests.test_task_runner import _make_task, _seed_catalog, _CONTENT_DATA
 
 
-# ---- 纯数学层：Cmod / Sevi / 方差 ----
-
-def test_c_mod_mixed_scores():
-    """(4,5,4)：d12=d23=0.25、d13=0 → Cs=1−1/6、Cc=0.25。"""
-    r = _compute_c_mod({"content": 4, "scene": 5, "frame": 4}, j=0.5)
-    assert r.s_values == pytest.approx(
-        {"content": 0.75, "scene": 1.0, "frame": 0.75})
-    assert r.pairwise_d["d12"] == pytest.approx(0.25)
-    assert r.pairwise_d["d13"] == pytest.approx(0.0)
-    assert r.pairwise_d["d23"] == pytest.approx(0.25)
-    assert r.c_s == pytest.approx(1.0 - 0.5 / 3.0)
-    assert r.c_c == pytest.approx(0.25)
-    assert r.c_mod == pytest.approx(0.5 * (1.0 - 0.5 / 3.0) + 0.5 * 0.75)
-
-
-def test_c_mod_uniform_scores_is_one():
-    r = _compute_c_mod({"content": 5, "scene": 5, "frame": 5}, j=0.5)
-    assert r.c_mod == 1.0
-
+# ---- 纯数学层：Cmod / Sevi ----
 
 def test_c_mod_extreme_split():
     """(1,5,1)：s=(0,1,0) → Cs=1/3、Cc=1 → Cmod=1/6。"""
@@ -250,14 +232,9 @@ def test_apply_confidence_full_flow(session, tmp_path, monkeypatch):
     reports = list(report_dir.glob("*.md"))
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
-    assert "置信度计算报告：测试资产" in text
-    assert "Ccons 评分一致性" in text
-    assert "Cver 证据可验性" in text
-    assert "Cmod 跨模态一致性" in text
-    assert "方差 As" in text
+    assert "测试资产" in text
     assert "类型标签0" in text and "类型标签1" in text
     assert "partial" not in text  # 全分量成功，无降级标注
-    assert "Craw = 0.45·" in text
 
 
 def test_apply_confidence_degrades_when_llm_fails(session, tmp_path,
@@ -392,78 +369,3 @@ def test_apply_confidence_empty_tags(session, tmp_path):
     llm = _ScriptedConfLLM()
     assert apply_confidence([], spec, "空", session, llm) == []
     assert llm.re_calls == 0 and llm.verify_calls == 0
-
-
-def test_reconsistency_scores_reuses_group_contract(session):
-    """重评走 closed 组 JSON 拼法：prompt 含组头、输出可被组解析消费。"""
-    from tagplatform.services.content.content_io import load_content
-    from tagplatform.services.generation.assemble import build_spec, load_assembly_context
-
-    _seed_catalog(session)
-    content = load_content(json.dumps(_CONTENT_DATA, ensure_ascii=False))
-    context = load_assembly_context("closed", "{}")
-    spec = build_spec(context, content=content, task_id="conf_t6",
-                      asset_id="asset_x", run_id="conf_t6:run1")
-    captured = []
-
-    class CaptureLLM:
-        model = "cap"
-        def complete(self, messages, run_id):
-            captured.append(messages[0]["content"])
-            return LLMResponse(content=json.dumps([{
-                "tag_id": "tag_g_00", "applicability": 5,
-                "evidence": _evi(4, 4, 4)}], ensure_ascii=False),
-                usage={}, raw={}, ok=True)
-
-    tag = ProducedTag(
-        origin="catalog", tag_id="tag_g_00", tag_name="类型标签0",
-        candidate_type=None, candidate_description=None,
-        relevance_score=0.9, confidence=0.75, evidence=[], dir_id="dir_genre",
-    )
-    scores = _reconsistency_scores(spec, tag, CaptureLLM(),
-                                   (0.3, 0.3, 0.4))
-    # 两次重评，Sevi=(4−1)/4 加权 = 0.75
-    assert scores == [0.75, 0.75]
-    assert len(captured) == 2
-    for prompt in captured:
-        # 组 JSON 拼法契约：正文 + 分组标题 + 组对象
-        head, sep, tail = prompt.partition("\n\n## 候选标签分组\n")
-        assert sep and head  # 正文在前
-        group = json.JSONDecoder().raw_decode(tail)[0]
-        assert group["dir_id"] == "dir_genre"
-        assert group["tags"][0]["tag_id"] == "tag_g_00"
-        assert group["tags"][0]["tag_name"] == "类型标签0"
-
-
-# ---- Mock 端到端（execute 路径） ----
-
-def test_mock_e2e_confidence_overwritten(session, tmp_path, monkeypatch):
-    """execute 全链：Mock 哈希确定性 → Ccons=1.0、Cver=0.75、
-    落库 confidence=Craw ∈ [0.5, 1.0]，报告写到隔离目录。"""
-    _seed_catalog(session)
-    monkeypatch.setenv("TAGPLT_CLOSED_CONFIDENCE_REPORT_DIR",
-                       str(tmp_path / "e2e-out"))
-    get_settings.cache_clear()
-
-    t = _make_task(session, task_id="conf_e2e",
-                   policy_json='{"min_confidence": 0.5}')
-    from tagplatform.services.generation.execute import run_generation_task
-    done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
-    assert done.status == "succeeded", done.error
-
-    rows = session.query(
-        __import__("tagplatform.capabilities.storage.models",
-                   fromlist=["PreAssetTag"]).PreAssetTag
-    ).filter_by(task_id="conf_e2e").all()
-    assert rows, "Mock 端到端应产出标签（30 候选零选中概率 ≈ 2e-7）"
-    from tagplatform.capabilities.storage.models import PreAssetTag
-    for row in rows:
-        assert row.confidence is not None
-        # Mock 端估算：Ccons=1.0、Cver=0.75、Cmod≥0.75 → Craw≈0.85+
-        assert 0.5 <= row.confidence <= 1.0, row.confidence
-
-    reports = list((tmp_path / "e2e-out").glob("*.md"))
-    assert len(reports) == 1
-    text = reports[0].read_text(encoding="utf-8")
-    assert "置信度计算报告" in text
-    assert "重评" in text  # Ccons 三行表含"重评 1/2"

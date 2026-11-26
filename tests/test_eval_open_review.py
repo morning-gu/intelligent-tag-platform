@@ -328,12 +328,6 @@ def test_duplicate_id_never_accepted_even_if_it_appears_three_times():
         review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
 
 
-def test_all_transport_failure_raises():
-    with pytest.raises(ReviewRequestError, match="评审调用失败"):
-        review_movie_tags(StubClient(default=RuntimeError("端点宕机")),
-                          _content(), _rows(), run_id="r1:m1")
-
-
 def test_truncated_single_tag_missed():
     client = StubClient(handler=lambda i, m: LLMResponse(
         "", {}, {"choices": [{"finish_reason": "length"}]}, ok=True))
@@ -387,7 +381,7 @@ def test_partial_verdicts_resend_only_the_missing_labels():
 
 def test_transport_failure_never_splits():
     client = StubClient(default=RuntimeError("端点宕机"))
-    with pytest.raises(ReviewRequestError):
+    with pytest.raises(ReviewRequestError, match="评审调用失败"):
         review_movie_tags(client, _content(), _rows(4), run_id="r1:m1")
     assert len(client.calls) == 1
 

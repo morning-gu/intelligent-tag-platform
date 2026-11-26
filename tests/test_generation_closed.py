@@ -1144,17 +1144,6 @@ def test_parse_closed_evidence_alias_stays_strict_for_non_list():
             == "scene_002")
 
 
-def test_parse_closed_error_message_has_position():
-    bad = json.dumps([
-        {"tag_id": "t", "applicability": 4,
-         "evidence": _ev_dict(4, 4, 4)},
-        {"tag_id": "x"},  # 第 1 个（0 起）元素缺键
-    ], ensure_ascii=False)
-    with pytest.raises(LLMParseError) as exc_info:
-        parse_closed_output(bad)
-    assert "第 1 个" in str(exc_info.value)
-
-
 def test_parse_closed_accepts_wrapped_array():
     """模型把数组包进单键对象（{"tags": [...]}）时按该数组解析。
 

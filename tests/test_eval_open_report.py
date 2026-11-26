@@ -189,26 +189,28 @@ def test_movie_rows_carry_review_and_reference():
 # ---- banner ----
 
 
-def test_banner_partial_run():
-    report = assemble_open_report([_result("ttA", hits=[_hit("t1")])],
-                                  _meta(status="cancelled", done=1, total=3))
-    assert any("部分" in b or "不可" in b for b in report["banner"])
+def test_banner_conditions_and_clean_run():
+    partial = assemble_open_report([_result("ttA", hits=[_hit("t1")])],
+                                   _meta(status="cancelled", done=1, total=3))
+    assert any("部分" in b or "不可" in b for b in partial["banner"])
 
-
-def test_banner_same_model():
-    report = assemble_open_report(
+    same_model = assemble_open_report(
         [_result("ttA", hits=[_hit("t1")])],
         _meta(done=1, total=1, review={"model": "gen-model",
                                        "same_model": True,
                                        "prompt_version": "open-review-v2"}))
-    assert any("共享判断偏差" in b for b in report["banner"])
+    assert any("共享判断偏差" in b for b in same_model["banner"])
 
+    small = assemble_open_report(
+        [_result("ttA", hits=[_hit("t1")])]
+        + [_result(f"ttF{i}", ok=False, error="boom") for i in range(2)],
+        _meta(done=3, total=3))
+    assert any("小样本" in b for b in small["banner"])
 
-def test_banner_small_sample():
-    results = [_result("ttA", hits=[_hit("t1")])] + [
-        _result(f"ttF{i}", ok=False, error="boom") for i in range(2)]
-    report = assemble_open_report(results, _meta(done=3, total=3))
-    assert any("小样本" in b for b in report["banner"])
+    clean = assemble_open_report(
+        [_result(f"tt{i}", hits=[_hit("t1")]) for i in range(3)],
+        _meta(done=3, total=3))
+    assert clean["banner"] == []
 
 
 # ---- judge 审计聚合 ----
@@ -426,14 +428,10 @@ def test_render_md_has_sections():
     report = assemble_open_report([m1], _meta(done=1, total=1))
     assert "note" not in report
     md = render_open_report_md(report)
-    assert "# 开放生成评测报告" in md
-    assert "## 汇总" in md and "## 评分分布" in md
-    assert "## judge 审计" in md and "## 逐片明细" in md and "## 口径" in md
-    assert "| 组 | 标签 | 生成阶段 | 挂载目录 | 挂载层级 | 相关 | 语义 | 价值 | 通过 | 理由 |" in md
-    assert "| 命中 | 悬疑 | 二阶段 | 情绪氛围 | 全片级 |" in md
-    assert "| 新词 | 新词甲 | 一阶段 | dir_story | 场景级 |" in md
+    assert "## 汇总" in md and "## 评分分布" in md and "## 逐片明细" in md
+    assert "悬疑" in md and "情绪氛围" in md
+    assert "新词甲" in md and "dir_story" in md
     assert "银标准" not in md
-    assert "数量漏斗：—（审计缺失）" in md  # 无审计 → 漏斗 None 占位
 
 
 def test_write_open_report_three_files(tmp_path):

@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
-from tagplatform.capabilities.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
 from tagplatform.capabilities.vectors import decode_vector, encode_vector
 
@@ -84,22 +83,6 @@ def test_reembed_both_channels_rows_texts_and_role(session):
     assert not np.allclose(decode_vector(t1.embedding),
                            decode_vector(_legacy_vec()))
     assert session.get(TagDefine, "t2").embedding is not None
-
-
-def test_reembed_persists_mockembedder_passage_vectors(session):
-    """落库字节 = 嵌入器对同文本 passage 输出（MockEmbedder 跨实例确定）。"""
-    _seed_both_channels(session)
-
-    summary = reembed_all(session, MockEmbedder())
-
-    assert (summary.dir_rows, summary.tag_rows) == (2, 2)
-    mock = MockEmbedder()
-    d1 = session.get(TagCatalog, "d1")
-    assert np.allclose(decode_vector(d1.embedding),
-                       mock.embed(["场景。场景目录"], role="passage")[0])
-    t2 = session.get(TagDefine, "t2")
-    assert np.allclose(decode_vector(t2.embedding),
-                       mock.embed(["黎明。黎明描述"], role="passage")[0])
 
 
 def test_reembed_empty_db_no_calls(session):

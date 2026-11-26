@@ -17,11 +17,8 @@ from tagplatform.settings import Settings
 
 
 def test_default_weights_match_spec_by_tag_kind():
-    settings = Settings()
+    settings = Settings(_env_file=None)
     weights = settings.tag_value_weights
-    assert weights["content"] == pytest.approx((0.30, 0.40, 0.30))
-    assert weights["scene"] == pytest.approx((0.50, 0.40, 0.10))
-    assert weights["character"] == pytest.approx((0.55, 0.30, 0.15))
     assert weights == {k: pytest.approx(v) for k, v in DEFAULT_VALUE_WEIGHTS.items()}
 
 

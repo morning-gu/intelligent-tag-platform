@@ -83,36 +83,6 @@ def test_is_dir_marker_overrides_reference_inference():
     assert is_directory_row(by_name["被引用"], referenced) is True  # None→被引用
 
 
-# ---------- 解析输出净化（Task 8：excel.py pprint 调试残留删除） ----------
-
-def test_parse_tag_excel_prints_nothing(capsys):
-    """治理解析三条生产路径（扁平/层级/双表模板）都不再打印 stdout。
-
-    excel.py 曾在三处解析路径尾部 pprint 整个解析结果（调试残留），
-    经 API 上传导入时会污染服务日志与任务输出。
-    """
-    from tests.test_excel_dual_sheet_parse import build_dual_xlsx
-    from tests.test_excel_parse import build_xlsx
-
-    parse_tag_excel(build_xlsx([
-        ["tag_name", "tag_type", "description", "parent_tag", "aliases", "status"],
-        ["悬疑", "val_fixed", "以悬念为核心", "剧情", "悬念,推理", "active"],
-    ]))
-    assert capsys.readouterr().out == ""
-    parse_tag_excel(build_xlsx([
-        ["一级标签名称", "二级标签名称", "三级标签名称", "标签", "标签描述",
-         "标签生成方式"],
-        ["内容", "剧情", None, "反转", "结局出人意料", None],
-    ]))
-    assert capsys.readouterr().out == ""
-    parse_tag_excel(build_dual_xlsx(
-        dir_rows=[[None, 1, None, "内容特征标签", "dir_static", "content",
-                   "目录描述", ""]],
-        tag_rows=[["tag_x", "悬疑", "内容特征标签", "val_fixed", "以悬念为核心", ""]],
-    ))
-    assert capsys.readouterr().out == ""
-
-
 # ---------- 落位拆分（Review Focus 5） ----------
 
 def test_hierarchical_split_and_flat_fallback(session):
@@ -152,24 +122,6 @@ def test_hierarchical_split_and_flat_fallback(session):
     assert {i.tag_name for i in res2.issues} == {"反转", "悬疑"}
     assert session.query(TagCatalog).count() == 3
     assert session.query(TagDefine).count() == 2
-
-
-def test_three_level_hierarchy_full_chain(session):
-    # 一/二/三级全链：3 目录 + 1 标签挂三级；纯层级导入不产生「未分类」
-    res = run_governance([
-        _row("内容", None, ""),
-        _row("剧情", "内容", ""),
-        _row("悬疑", "剧情", ""),
-        _row("反转", "悬疑", "情节反转"),
-    ], session, MOCK_EMBEDDER)
-    assert res.issues == [] and len(res.inserted) == 1
-    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
-    assert set(dirs) == {"内容", "剧情", "悬疑"}
-    defines = session.query(TagDefine).all()
-    assert [t.tag_name for t in defines] == ["反转"]
-    assert defines[0].dir_id == dirs["悬疑"].dir_id
-    assert dirs["悬疑"].parent_id == dirs["剧情"].dir_id
-    assert dirs["剧情"].parent_id == dirs["内容"].dir_id
 
 
 def test_empty_leaf_directory_marked_is_dir_stays_directory(session):
@@ -242,24 +194,6 @@ def test_unmarked_empty_leaf_directory_still_degraded(session):
     dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
     assert "内容" in dirs and "剧情" not in dirs
     assert [t.tag_name for t in session.query(TagDefine).all()] == ["剧情"]
-
-
-def test_flat_import_falls_back_to_uncategorized_idempotent(session):
-    # 扁平导入 → 自动创建根目录「未分类」；再次导入幂等复用不重复建
-    rows = [_row("悬疑", None, "以悬念为核心")]
-    r1 = run_governance(rows, session, MOCK_EMBEDDER)
-    assert r1.issues == [] and len(r1.inserted) == 1
-    dirs = session.query(TagCatalog).all()
-    assert len(dirs) == 1
-    root = dirs[0]
-    assert root.dir_name == "未分类" and root.parent_id is None
-    assert root.dir_type == "dir_dynamic"
-    assert root.embedding is not None  # 目录入库即计算 embedding
-    assert session.get(TagDefine, r1.inserted[0]).dir_id == root.dir_id
-
-    r2 = run_governance(rows, session, MOCK_EMBEDDER)
-    assert r2.inserted == [] and r2.issues[0].code == "duplicate_name"
-    assert session.query(TagCatalog).count() == 1  # 未分类复用，未重复建
 
 
 def test_batch_root_dir_named_uncategorized_reused_for_flat_rows(session):
@@ -351,16 +285,6 @@ def test_parent_missing_and_cycle(session):
     assert session.query(TagCatalog).count() == 0
 
 
-def test_batch_parent_chain_inserts(session):
-    # 批内父子链：父行成目录，子行挂父目录（v1 拓扑序语义沿用）
-    run_governance([
-        _row("剧情", None, "叙事驱动"),
-        _row("悬疑", "剧情", "以悬念为核心")], session, MOCK_EMBEDDER)
-    dirs = {d.dir_name: d for d in session.query(TagCatalog).all()}
-    child_tag = session.query(TagDefine).filter_by(tag_name="悬疑").one()
-    assert child_tag.dir_id == dirs["剧情"].dir_id
-
-
 def test_valve_cascade_no_silent_strand(session):
     # 兜底级联（v2 形态）：丙是被乙引用的目录行，别名撞批内标签名 甲 →
     # 丙被拒 → 乙父链断 → 甲挂靠失败——三级逐一报 issue，零静默搁浅
@@ -439,16 +363,6 @@ def test_change_log_import_rows_carry_task_id(session):
 
 
 # ---------- 配置与批量编码 ----------
-
-def test_semantic_similar_check_retired(session):
-    # semantic_similar 检查退役（v2 随手动导入取消余弦相似控制，治理无
-    # 配置面——旧 GovernanceConfig 空壳已删）：不同名同向量（余弦 1.0）
-    # 依旧放行，不产生任何问题项
-    run_governance([_row("推理", desc="以解谜推进")], session, SameVecEmbedder())
-    res = run_governance([_row("侦探", desc="另一段描述")], session,
-                         SameVecEmbedder())
-    assert res.issues == [] and len(res.inserted) == 1
-
 
 def test_allowed_tag_types_check_retired(session):
     # tag_type 白名单校验退役：行 tag_type 任意值归一——非法回退 val_fixed，

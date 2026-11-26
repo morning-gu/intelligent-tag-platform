@@ -189,27 +189,6 @@ def test_orphan_running_reset(session):
     assert reset_orphan_running(session) == 0  # 幂等：无 running 可再清
 
 
-class _PartialPersistLLM:
-    """桩 LLM：返回一枚合法 + 一枚库外 tag_id 的目录标签。
-
-    第一枚在 persist 中已 add 未提交，第二枚在 persist 契约校验处抛
-    ValueError——验证 runner 异常路径把半截写入一并回滚。
-    """
-
-    model = "stub-1"
-
-    def complete(self, messages, run_id):
-        sections = {m: {"evidence_strength": 5, "evidences": []}
-                    for m in ("content", "scene", "frame")}
-        content = json.dumps([
-            {"tag_id": "tag_g_00", "applicability": 5,
-             "evidence": sections},
-            {"tag_id": "unknown-tag", "applicability": 5,
-             "evidence": {k: dict(v) for k, v in sections.items()}},
-        ], ensure_ascii=False)
-        return LLMResponse(content=content, usage={}, raw={}, ok=True)
-
-
 def test_run_task_persist_failure_rolls_back_partial_writes(session, monkeypatch):
     """persist 抛错：任务 failed，且 persist 里已 add 的行随事务回滚。
 

@@ -87,15 +87,10 @@ def test_ndcg_perfect_ranking_is_one():
     assert ndcg_at_k(("d1", "d2", "d3"), relevance, 3) == pytest.approx(1.0)
 
 
-def test_ndcg_second_position_uses_log2_discount():
-    relevance = {"d1": EXACT, "d2": 0}
-    # 唯一相关项排在第 2：DCG = 2/log2(3)
-    assert ndcg_at_k(("d2", "d1"), relevance, 2) == pytest.approx(1 / math.log2(3))
-
-
-def test_ndcg_third_position_uses_log2_discount():
-    relevance = {"d1": EXACT}
-    assert ndcg_at_k(("x", "y", "d1"), relevance, 3) == pytest.approx(0.5)
+def test_ndcg_position_uses_log2_discount():
+    # 唯一相关项排在第 2 位：DCG/IDCG = 1/log2(3)；排在第 3 位：1/log2(4) = 0.5
+    assert ndcg_at_k(("d2", "d1"), {"d1": EXACT, "d2": 0}, 2) == pytest.approx(1 / math.log2(3))
+    assert ndcg_at_k(("x", "y", "d1"), {"d1": EXACT}, 3) == pytest.approx(0.5)
 
 
 def test_ndcg_graded_relevance_gives_partial_credit():
@@ -137,24 +132,20 @@ def test_lift_against_baseline():
 
 # ---------------------------------------------------------------- 随机基线
 
-def test_random_baseline_hit_rate_when_all_candidates_relevant():
-    """候选全是相关的极端情形：任何随机排序都必然命中。"""
-    relevance = {"d1": EXACT, "d2": EXACT}
-    assert random_baseline(2, relevance, 1)["hit_rate"] == pytest.approx(1.0)
+def test_random_baseline_hit_rate_and_exact_expectations():
+    """解析期望：全相关必命中；n 中 1 相关时 E[HR@k]=k/n、E[NDCG@3]、E[MRR] 精确对齐。"""
+    assert random_baseline(2, {"d1": EXACT, "d2": EXACT}, 1)["hit_rate"] == pytest.approx(1.0)
 
-
-def test_random_baseline_hit_rate_single_relevant():
-    """n 个候选、1 个相关：P(首位命中) = 1/n，P(前 k 命中) = k/n。"""
     relevance = {"d1": EXACT, "d2": 0, "d3": 0, "d4": 0}
     assert random_baseline(4, relevance, 1)["hit_rate"] == pytest.approx(0.25)
     assert random_baseline(4, relevance, 2)["hit_rate"] == pytest.approx(0.5)
     assert random_baseline(4, relevance, 4)["hit_rate"] == pytest.approx(1.0)
 
-
-def test_random_baseline_ndcg_is_below_perfect():
-    relevance = {"d1": EXACT, "d2": 0, "d3": 0}
-    baseline = random_baseline(3, relevance, 3)
-    assert 0.0 < baseline["ndcg"] < 1.0
+    baseline = random_baseline(3, {"d1": EXACT, "d2": 0, "d3": 0}, 3)
+    expected_ndcg = (1.0 + 1.0 / math.log2(3) + 1.0 / math.log2(4)) / 3
+    expected_mrr = (1.0 + 0.5 + 1.0 / 3) / 3
+    assert baseline["ndcg"] == pytest.approx(expected_ndcg)
+    assert baseline["mrr"] == pytest.approx(expected_mrr)
 
 
 def test_random_baseline_empty():

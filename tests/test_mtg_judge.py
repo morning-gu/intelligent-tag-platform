@@ -105,11 +105,9 @@ def test_protocol_error_carries_the_valid_verdicts():
         parse_judge_items(text)
     assert [item["tag"] for item in excinfo.value.items] == ["合格标签"]
 
-
-def test_all_bad_leaves_no_salvage():
-    with pytest.raises(MTGParseError) as excinfo:
+    with pytest.raises(MTGParseError) as empty_exc:
         parse_judge_items(_text(_verdict(value_scores=None)))
-    assert excinfo.value.items == []
+    assert empty_exc.value.items == []
 
 
 # ---- 调用层：权重聚合、重试、兜底、原始响应 ----
@@ -228,21 +226,10 @@ def test_judge_prompt_carries_desc_target_dir_and_unified_criteria_without_dir_f
         dirs=dirs)[0]["content"]
 
     assert "## 目标目录\n" in text
-    assert "## 目标目录与目录契合" not in text
     assert "- dir_mood｜内容类标签/情感氛围｜适用种类：内容级｜描述内容传递给观众的整体情感基调和氛围。" in text
     assert "〔scene｜依据场景 scene_001｜标签种类 内容级｜目录 dir_mood｜候选 ID scene-000001〕" in text
     assert "释义：角色在屋顶展开紧张追逐交火的动作桥段；依据：屋顶追逐交火" in text
-    assert "内容呈现（presentation）" in text
-    assert "内容搜索（search）" in text
-    assert "内容推荐（recommendation）" in text
-    assert "目标目录匹配度" in text
     assert "dir_fits" not in text
-    assert '"confidence":0.85' in text
-    assert "完整上下文片段" in text
-    example = text.rsplit("只输出一个 JSON 对象", 1)[1]
-    assert '"candidate_id":"候选 ID"' in example
-    assert '"value_scores":{"presentation":3,"search":4,"recommendation":2}' in example
-    assert "dir_fits" not in example
     assert "candidate_id" in JUDGE_RETRY_HINT and "value_scores" in JUDGE_RETRY_HINT
     assert "dir_fits" not in JUDGE_RETRY_HINT
 

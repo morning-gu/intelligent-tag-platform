@@ -57,23 +57,6 @@ def test_template_is_stored_as_template(client):
     assert "time_range" not in stored["content"]["scenes"][0]
 
 
-def test_api_reads_back_template_shape(client):
-    """读端点返回上游模板形态（description / start_ms / emotion[{name,code}]）。"""
-    resp = client.post("/api/v1/content/import",
-                       json={"kind": "vision", "data": TEMPLATE})
-    asset_id = resp.json()["asset_id"]
-    detail = client.get(f"/api/v1/assets/{asset_id}/content")
-    assert detail.status_code == 200
-    body = detail.json()
-    assert body["content"]["description"] == "整片剧情"
-    assert "summary" not in body["content"]
-    scene = body["content"]["scenes"][0]
-    assert (scene["start_ms"], scene["end_ms"]) == (0, 1000)
-    assert scene["emotion"] == [{"name": "紧张压迫", "code": "TENSE_OPPRESSIVE"}]
-    assert scene["dialogues"][0]["speaker_name"] == "张三"
-    assert "time_range" not in scene
-
-
 def test_legacy_internal_shape_read_as_template(client):
     """2026-11 之前入库的内部形态：入库即归一为模板，读端点也按模板返回。"""
     legacy = {

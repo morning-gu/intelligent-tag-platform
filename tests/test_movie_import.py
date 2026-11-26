@@ -177,13 +177,6 @@ def test_plan_scene_frames_uses_local_frames(movies):
         "scene_001_frame_1.jpg", "scene_001_frame_2.jpg"]
 
 
-def test_plan_scene_frames_without_local_root_falls_back(movies):
-    content = to_content_json(parse_upstream(PAYLOAD))
-    # 既无本地帧、也没有数据集 → 空字典（退化为纯文本 prompt，不报错）
-    assert keyframes.plan_scene_frames(
-        content, str(movies / "no_dataset"), movie_asset_root=None) == {}
-
-
 def test_api_scan_and_bulk(client, movies):
     _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
 
@@ -277,7 +270,10 @@ def test_api_browse_and_import_with_root(client, movies):
 
     again = client.get("/api/v1/content/import/browse",
                        params={"path": str(nested)})
-    assert again.json()["entries"][0]["exists"] is True
+    row = again.json()["entries"][0]
+    assert row["exists"] is True
+    assert row["matched_by"] == "asset_id"
+    assert row["existing_asset_id"] == row["asset_id"] == "movie_tt1234567"
 
 
 def test_api_browse_missing_path(client):
@@ -340,20 +336,6 @@ def test_import_writes_into_matched_upload_asset(session, movies):
         "asset_deadbeef::scene_001", "asset_deadbeef::scene_002"}
 
 
-def test_api_browse_reports_matched_by_asset_id(client, movies):
-    """导入后回看：exists=True 且 matched_by 说明是靠 asset_id 认出来的。"""
-    _write_movie(movies, "Rear Window--tt0047396", PAYLOAD)
-    client.post("/api/v1/content/import/movie-bulk",
-                json={"root": str(movies), "dir_names": ["Rear Window--tt0047396"]})
-
-    body = client.get("/api/v1/content/import/browse",
-                      params={"path": str(movies)}).json()
-    row = body["entries"][0]
-    assert row["exists"] is True
-    assert row["matched_by"] == "asset_id"
-    assert row["existing_asset_id"] == row["asset_id"] == "movie_tt1234567"
-
-
 def test_import_many_reports_unknown_names(session, movies):
     """名字对不上（例如前端误传路径）必须报失败，不能静默 0 成功。"""
     _write_movie(movies, "Rear Window--tt1234567", PAYLOAD)
@@ -362,14 +344,6 @@ def test_import_many_reports_unknown_names(session, movies):
     assert outcome.imported == [] and outcome.skipped == []
     assert len(outcome.failed) == 1
     assert "没有名为" in (outcome.failed[0].reason or "")
-
-
-def test_import_many_unknown_root_level_name(session, tmp_path, movies):
-    """在上一层选片（名字不在这一层）同样要报失败而不是 0 条。"""
-    _write_movie(movies, "Rear Window--tt1234567", PAYLOAD)
-    outcome = movie_import.import_many(
-        session, tmp_path, ["Rear Window--tt1234567"])
-    assert len(outcome.failed) == 1 and not outcome.imported
 
 
 def test_find_movie_dir_by_asset_id_when_name_changed(tmp_path):

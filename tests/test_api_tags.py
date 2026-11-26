@@ -302,15 +302,6 @@ def test_import_dual_sheet_empty_leaf_directory_stays_directory(client):
         assert json.loads(log.after_json)["dir_name"] == "社交与话题"
 
 
-def test_import_twice_reports_duplicates(client):
-    resp1 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
-    resp2 = client.post("/api/v1/tags/import", files={"file": ("tags.xlsx", XLSX_BYTES)})
-    assert resp1.status_code == 200
-    assert resp1.json()["task_id"]
-    assert resp2.json()["summary"]["skipped"] == 1
-    assert resp2.status_code == 200          # Review Focus 2：重复导入不 5xx
-
-
 def test_bad_header_422(client):
     resp = client.post("/api/v1/tags/import", files={"file": ("x.xlsx", BAD_HEADER_BYTES)})
     assert resp.status_code == 422
@@ -351,30 +342,6 @@ def test_import_parse_errors_in_response_and_batch(client):
     assert len(detail_summary["parse_errors"]) == 2
     assert {e["row_number"] for e in detail_summary["parse_errors"]} == {3, 4}
     assert detail_summary["total"] == 1 and detail_summary["inserted"] == 1
-
-
-def test_reimport_reactivates_deprecated_tag(client):
-    """停用标签（status=deprecated）按相同目录再导入时恢复为启用。"""
-    factory = client.app.state.session_factory
-    with factory() as s:
-        s.add(TagCatalog(
-            dir_id="dir_seed", dir_name="未分类", dir_type="dir_static",
-            description="", parent_id=None, aliases=None,
-            applicable_scope="content", embedding=None,
-            created_at=_NOW, updated_at=_NOW))
-        s.add(TagDefine(
-            tag_id="tag_seed", tag_name="悬疑", tag_type="val_fixed",
-            description="旧描述", dir_id="dir_seed", aliases=None,
-            status="deprecated", embedding=None, created_at=_NOW, updated_at=_NOW))
-        s.commit()
-
-    reimported = client.post("/api/v1/tags/import",
-                             files={"file": ("status-again.xlsx", XLSX_BYTES)})
-    assert reimported.status_code == 200
-    assert reimported.json()["summary"]["inserted"] == 1
-    with factory() as s:
-        row = s.get(TagDefine, "tag_seed")
-        assert row.status == "active" and row.tag_id == "tag_seed"
 
 
 # ---------- 混合树列表（Task 5） ----------

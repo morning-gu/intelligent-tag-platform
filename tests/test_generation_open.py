@@ -154,7 +154,7 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
 
     # 单场不具备全片级标签的跨场证据条件。
     report = json.loads((tmp_path / "audit" / "t-r1.json").read_text(encoding="utf-8"))
-    assert report["version"] == "mtg-v13-aligned-criteria"
+    assert report["version"] == OpenTagProducer.prompt_version
     assert [run["scope"] for run in report["runs"]] == ["scene"]
     assert {m["runs"] for m in report["merged"]} == {1}
     assert {tag.level for tag in out} == {"scene"}

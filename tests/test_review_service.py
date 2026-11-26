@@ -64,20 +64,20 @@ def test_approve_sets_status_and_reviewer(session):
     assert returned.review_comment == "证据充分"
     assert returned.updated_at is not None
 
+    row2 = _seed_row(session, candidate_name="无备注词")
+    assert apply_review(session, row2.id, "approve", "alice", None).review_comment is None
+
 
 def test_reject_sets_status_and_comment(session):
+    from tagplatform.capabilities.storage.models import AssetTag
+
     row = _seed_row(session)
     returned = apply_review(session, row.id, "reject", "bob",
                             {"comment": "证据不足"})
     assert returned.review_status == "rejected"
     assert returned.reviewer_id == "bob"
     assert returned.review_comment == "证据不足"
-
-
-def test_review_without_comment_keeps_column_empty(session):
-    row = _seed_row(session)
-    returned = apply_review(session, row.id, "approve", "alice", None)
-    assert returned.review_comment is None
+    assert session.query(AssetTag).count() == 0
 
 
 # ---------- modify ----------
@@ -344,15 +344,6 @@ def test_approve_catalog_row_mounts_and_records_alias(session):
     mount = session.query(AssetTag).one()
     assert mount.tag_id == "tag_revenge"
     assert mount.tag_name == target.tag_name
-
-
-def test_reject_writes_no_mount(session):
-    """驳回不挂载：asset_tag 保持为空。"""
-    from tagplatform.capabilities.storage.models import AssetTag
-
-    row = _seed_row(session)
-    apply_review(session, row.id, "reject", "bob", {"comment": "证据不足"})
-    assert session.query(AssetTag).count() == 0
 
 
 def test_mount_is_idempotent(session):

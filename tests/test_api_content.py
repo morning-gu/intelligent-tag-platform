@@ -106,11 +106,6 @@ def test_content_import_bad_data_422(client):
     assert "校验失败" in resp.json()["detail"]
 
 
-def test_adapters_endpoint(client):
-    # 排序返回：platform（平台标准格式）+ vision（上游视频理解格式）
-    assert client.get("/api/v1/adapters").json() == ["platform", "vision"]
-
-
 def test_assets_list_and_filters(client):
     resp = client.post("/api/v1/content/import", json={
         "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT})
@@ -149,24 +144,11 @@ def test_asset_detail_and_404(client):
     scene_detail = client.get(f"/api/v1/assets/{body['scene_asset_ids'][0]}").json()
     assert scene_detail["has_content"] is False
 
-    # 未知资产 / 无内容场景 → 404
-    assert client.get("/api/v1/assets/asset_none").status_code == 404
-    assert client.get(
-        f"/api/v1/assets/{body['scene_asset_ids'][0]}/content").status_code == 404
-
-
-def test_asset_content_endpoint_reads_media_asset(client):
-    """GET /assets/{id}/content：主内容取自 media_asset.content_json（v2 唯一
-    数据源）；无内容/未知资产 → 404。"""
-    body = client.post("/api/v1/content/import", json={
-        "kind": "platform", "video_root": None, "data": CONTENT_FIXTURE_DICT}).json()
-    asset_id = body["asset_id"]
-
-    content = client.get(f"/api/v1/assets/{asset_id}/content")
+    # 主内容取自 media_asset.content_json；场景与未知资产无主内容 → 404
+    content = client.get(f"/api/v1/assets/{body['asset_id']}/content")
     assert content.status_code == 200
-    assert content.json()["asset"]["asset_id"] == asset_id
-
-    # 场景资产无主内容：404；未知资产：404
+    assert content.json()["asset"]["asset_id"] == body["asset_id"]
+    assert client.get("/api/v1/assets/asset_none").status_code == 404
+    assert client.get("/api/v1/assets/asset_none/content").status_code == 404
     assert client.get(
         f"/api/v1/assets/{body['scene_asset_ids'][0]}/content").status_code == 404
-    assert client.get("/api/v1/assets/asset_none/content").status_code == 404

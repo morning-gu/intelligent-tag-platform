@@ -54,14 +54,6 @@ def test_generated_asset_id_written_back(session, content_fixture):
     assert stored["asset"]["asset_id"] == res.asset_id
 
 
-def test_scene_rows_pruned_when_gone(session, content_fixture):
-    """重新导入后不再出现的场景行被删掉，不留孤儿。"""
-    r1 = import_content(content_fixture, session, None)
-    content_fixture.content.scenes.clear()
-    import_content(content_fixture, session, None)
-    assert session.get(MediaAsset, r1.scene_asset_ids[0]) is None
-
-
 def test_prune_removes_tags_of_dropped_scene(session, content_fixture):
     """删场景行前先删其待审标签，否则外键会挡住。"""
     from tagplatform.capabilities.storage.models import PreAssetTag

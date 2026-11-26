@@ -17,6 +17,7 @@ from tagplatform.capabilities.adapters import get_adapter
 from tagplatform.services.content.content_import import import_content
 from tagplatform.capabilities.storage.models import MediaAsset, PreAssetTag, TagGenerationTask
 from tagplatform.services.generation.execute import run_generation_task
+from tagplatform.services.generation.open.producer import OpenTagProducer
 
 UPSTREAM = {
     "schema_version": "1.0",
@@ -85,7 +86,7 @@ def test_upstream_to_pending_tags(session):
     run_generation_task(task.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     session.refresh(task)
     assert task.status == "succeeded", task.error
-    assert task.prompt_version == "mtg-v13-aligned-criteria"
+    assert task.prompt_version == OpenTagProducer.prompt_version
 
     # 3. 产出是待审核行（人工审核入口可见），不是已定终态
     rows = session.query(PreAssetTag).filter(

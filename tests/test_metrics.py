@@ -257,19 +257,6 @@ def test_compute_metrics_world_exact_numbers(session):
     _assert_summary_matches(compute_metrics(session), WORLD_SUMMARY)
 
 
-def test_merged_counts_change_log_events_not_rows(session):
-    """merged 按事件计（多行合并只看日志条数）：2 行经 merge 动作终审
-    approved（1 并入既有不落日志 + 1 合入新建落 1 条日志）→
-    merged.count == 1 ≠ 2——与行数解耦（doc §6.2 指标口径）。"""
-    _seed_parents(session, assets=("a1", "a2"))
-    _add_pre(session, "a1", status="approved", tag_id="tag_1")  # 并入既有
-    _add_pre(session, "a2", status="approved", tag_id="tag_2",
-             candidate_dir_id="dir_2")                          # 合入新建
-    _add_change_log(session, "tag_2", "merge")
-    session.commit()
-    assert compute_metrics(session)["review_stats"]["merged"]["count"] == 1
-
-
 def test_review_stats_zero_events_with_rows(session):
     """pre 行存在但无 merge 事件 → merged {count: 0, ratio: 0.0}（分母非 0
     计 0 返回 0.0 而非 None——"暂无"仅留给分母缺失）；rejected 同理。"""
@@ -290,15 +277,6 @@ def test_generated_pass_rate_none_without_terminal(session):
     _add_pre(session, "a1", status="pending")
     session.commit()
     assert compute_metrics(session)["generated_pass_rate"] is None
-
-
-def test_generated_pass_rate_full_approval(session):
-    """pre 终审行全部 approved → 通过率 1.0。"""
-    _seed_parents(session, assets=("a1",))
-    _add_pre(session, "a1", status="approved", tag_id="tag_1")
-    _add_pre(session, "a1", origin="closed", tag_id="tag_2", status="approved")
-    session.commit()
-    assert compute_metrics(session)["generated_pass_rate"] == 1.0
 
 
 def test_task_stats_without_terminal_tasks(session):

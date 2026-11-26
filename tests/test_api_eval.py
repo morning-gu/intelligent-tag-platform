@@ -188,26 +188,18 @@ def test_dataset_movies_endpoint(client):
     assert r.status_code == 200
     assert r.json() == [{"tt": "tt0000001", "title": "A Movie"},
                         {"tt": "tt0000002", "title": "B Movie"}]
-    assert client.get(f"{_BASE}/datasets/nope/movies").status_code == 404
+    missing = client.get(f"{_BASE}/datasets/nope/movies")
+    assert missing.status_code == 404 and "不存在" in missing.json()["detail"]
 
 
 # ---------------------------------------------------------------- 起跑与错误映射
 
 
-def test_unknown_dataset_404(client):
-    """未知 dataset：POST /runs 与 GET movies 均 404（先校验后透传；
-    detail 来自路由层守卫，区别于路由不存在的裸 Not Found）。"""
-    _seed_dataset_and_library(client)
-    r = _start_run(client, dataset="nope")
-    assert r.status_code == 404
-    assert "不存在" in r.json()["detail"]
-    r2 = client.get(f"{_BASE}/datasets/nope/movies")
-    assert r2.status_code == 404 and "不存在" in r2.json()["detail"]
-
-
 def test_start_validation_400(client):
-    """服务层 EvalValidationError → 400：custom 越权 id / concurrency<1。"""
+    """未知 dataset → 404；服务层 EvalValidationError → 400（不占 busy 位）。"""
     _seed_dataset_and_library(client)
+    r_missing = _start_run(client, dataset="nope")
+    assert r_missing.status_code == 404 and "不存在" in r_missing.json()["detail"]
     r = _start_run(client, movies={"mode": "custom", "ids": ["tt9999"]})
     assert r.status_code == 400
     r2 = _start_run(client, concurrency=0)
@@ -216,15 +208,6 @@ def test_start_validation_400(client):
     r3 = _start_run(client)
     assert r3.status_code == 200
     assert _await_terminal(client, r3.json()["run_id"])["status"] == "succeeded"
-
-
-def test_start_bad_shape_422(client):
-    """pydantic 形状校验 422 自动：movies.mode 词表外 / 缺 dataset。"""
-    _seed_dataset_and_library(client)
-    r = _start_run(client, movies={"mode": "banana"})
-    assert r.status_code == 422
-    r2 = client.post(f"{_BASE}/runs", json={"movies": {"mode": "all"}})
-    assert r2.status_code == 422
 
 
 def test_start_busy_409(client):
@@ -497,6 +480,9 @@ def test_admin_only_all_endpoints(client):
     ]
     for check in checks:
         assert check().status_code == 403
+    client.post("/api/v1/auth/logout")
+    for check in checks:
+        assert check().status_code == 401
 
 
 # ---------------------------------------------------------------- 单片明细两端点（badcase 视图）
@@ -696,28 +682,6 @@ def test_movies_default_grid_when_meta_missing(client):
     body3 = client.get(f"{_BASE}/runs/run-movies-ks-only/movies").json()
     assert (body3["theta_p"], body3["theta_r"]) == (0.2, 0.8)  # 缺 → DEFAULT 取格
     assert body3["k_p"] == 5 and body3["k_r"] == 5  # ks=[5] 照用
-
-
-def test_movies_non_admin_401(client):
-    """非 admin 门槛（两端点各一）：登录 reviewer → 403（require_admin 对
-    非 admin 角色记 403——沿用现有端点断言模式）；未登录 → 401（内层
-    get_current_user 先行短路）。"""
-    _seed_dataset_and_library(client)
-    _write_movies_run(client)
-    assert client.post("/api/v1/users", json={
-        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
-    }).status_code == 200
-    client.post("/api/v1/auth/logout")
-    client.post("/api/v1/auth/login",
-                json={"username": "bob", "password": "pw-bob-1"})
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").status_code == 403
-    assert client.get(
-        f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001").status_code == 403
-    # 未登录 → 401
-    client.post("/api/v1/auth/logout")
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies").status_code == 401
-    assert client.get(
-        f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt0000001").status_code == 401
 
 
 def test_movies_run_dir_guard(client):

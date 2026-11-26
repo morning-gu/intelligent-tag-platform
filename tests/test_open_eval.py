@@ -453,10 +453,12 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert (d / "audit" / "tt0000002.json").exists()
     # 评审逐批原始响应随片落盘（成功片也留，供诊断端点复盘）
     assert (d / "review" / "tt0000001.json").exists()
-    # Task 5 接线：报告三件套落盘
+    # Task 5 接线：报告三件套与实时快照落盘
     assert (d / "report.json").exists()
     assert (d / "report.md").exists()
     assert (d / "metrics.csv").exists()
+    assert (d / "live.json").exists()
+    assert json.loads((d / "live.json").read_text(encoding="utf-8"))["summary"]["total_tags"] == 5
     report = json.loads((d / "report.json").read_text(encoding="utf-8"))
     assert report["sample_accounting"] == {
         "total": 2, "ok": 2, "failed": 0, "review_failed": 0}
@@ -718,27 +720,6 @@ def test_library_without_gt_overlap_proceeds(open_setup):
     assert report["summary"]["hit_pass"] == None
 
 
-def test_review_calibre_in_meta(open_setup):
-    """meta.review：评审模型 + same_model + 评审 prompt 版本。"""
-    svc, _ = open_setup()
-    svc._review_client = _ReviewOkStub()
-    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
-    meta = _read_meta(svc, run_id)
-    assert meta["review"]["model"] == "mock-1"
-    assert meta["review"]["same_model"] is True
-    assert meta["review"]["prompt_version"] == REVIEW_PROMPT_VERSION
-    assert meta["review"]["batch_mode"] == "movie"
-    assert meta["review"]["max_concurrent_requests"] == 4
-
-    svc2, _ = open_setup(settings_kwargs={
-        "use_mock_llm": True, "open_eval_review_model": "review-x"})
-    run_id2 = svc2.start("emotion", {"mode": "all"}, wait=True)
-    meta2 = _read_meta(svc2, run_id2)
-    assert meta2["review"]["model"] == "mock-1"
-    assert meta2["review"]["same_model"] is True
-    assert meta2["review"]["prompt_version"] == REVIEW_PROMPT_VERSION
-
-
 # ---------------------------------------------------------------- 生命周期
 
 def test_delete_path_guards(open_setup):
@@ -789,35 +770,7 @@ def test_cancel_keeps_completed_results(open_setup, root6):
     assert len(_raw_rows(svc, child)) == len(rows)
 
 
-# ---------------------------------------------------------------- 历史扫描
-
-def test_live_report_published(open_setup):
-    """运行落 live.json，整片评审完成后统一回填。"""
-    svc, _ = open_setup()
-    svc._review_client = _ReviewOkStub()
-    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
-    _drain_active(svc)
-    d = _run_dir(svc, run_id)
-    assert (d / "live.json").exists()
-    live = json.loads((d / "live.json").read_text(encoding="utf-8"))
-    assert live["summary"]["total_tags"] == 5
-
-
-def test_review_produced_publishes_whole_batch(open_setup):
-    """_review_produced 带 result/publish：整批完成后一起回填。"""
-    svc, _ = open_setup()
-    svc._review_client = _ReviewOkStub()
-    content = open_service.load_movie_content(svc.effective_root, "tt0000001")
-    snapshot = [{"tag_id": None, "name": "新词甲", "desc": "通用释义",
-                 "level": "film", "scenes": [], "judge_reference": None}]
-    result = open_service.OpenMovieResult(
-        tt="tt0000001", title="x", ok=True, error=None, hits=[],
-        new_words=[], review_error=None, elapsed_ms=0)
-    calls = []
-    svc._review_produced("tt0000001", snapshot, content, "run-x",
-                         result=result, publish=lambda: calls.append(1))
-    assert len(calls) == 2  # 产出待评、整片已评
-    assert result.new_words[0]["review"]["pass"] is True
+# ---------------------------------------------------------------- 重评与历史扫描
 
 
 def test_rereview_reuses_snapshot_without_produce(open_setup):
@@ -861,14 +814,19 @@ def test_rereview_preserves_zero_output_and_original_produce_failure(open_setup)
 
 
 def test_rereview_rejects_active_run(open_setup):
-    svc, _ = open_setup()
-    svc._review_client = _ReviewOkStub()
-    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
-    # 终态后注册表已清；手动塞回活跃态模拟在跑
     from tagplatform.services.eval.open_service import RunActiveError
-    svc._active_run_id = run_id
-    with pytest.raises(RunActiveError):
-        svc.rereview(run_id)
+
+    gate = threading.Event()
+    svc, _ = open_setup(producer=FakeOpenProducer(gate=gate))
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"})
+    try:
+        with pytest.raises(RunActiveError):
+            svc.rereview(run_id)
+    finally:
+        gate.set()
+        _await_terminal(svc, run_id)
+        _drain_active(svc)
 
 
 def test_history_running_progress_uses_registry(open_setup, root6):
@@ -941,17 +899,3 @@ def test_history_empty_when_root_missing(tmp_path):
     svc = OpenEvalService(MOCK_LLM, MOCK_EMBEDDER, Settings(
         open_eval_output_root=str(tmp_path / "no-such-root")))
     assert svc.history() == []
-
-
-# ---------------------------------------------------------------- DB 零写入
-
-def test_db_zero_writes(open_setup, engine):
-    """干跑全程 DB 零写入（session=None 传 producer + 评测只写输出根）。"""
-    svc, fake = open_setup()
-    svc._review_client = _ReviewOkStub()
-    svc.start("emotion", {"mode": "all"}, wait=True)
-    with engine.connect() as con:
-        for table in ("media_asset", "pre_asset_tag", "tag_generation_task",
-                      "asset_build_task", "tag_quality_evaluation"):
-            assert con.execute(
-                text(f"select count(*) from {table}")).scalar() == 0

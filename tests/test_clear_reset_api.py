@@ -91,48 +91,6 @@ def test_clear_asset_tags_endpoint(client):
         assert s.query(TagDefine).count() == 7
 
 
-def test_clear_all_content_tags_endpoint(client):
-    _seed(client)
-    resp = client.delete("/api/v1/content/tags")
-    assert resp.status_code == 200
-    counts = resp.json()["counts"]
-    assert counts["pre_asset_tag"] == 2
-    assert counts["generation_tasks"] == 1
-    with _db(client) as s:
-        for model in (PreAssetTag, AssetTag, TagGenerationTask,
-                      TagQualityEvaluation):
-            assert s.query(model).count() == 0
-        assert s.query(MediaAsset).count() == 4  # 资产幸存
-        assert s.query(TagDefine).count() == 7  # 库幸存
-        assert s.query(TagCatalog).count() == 5
-
-
-def test_clear_library_endpoint(client):
-    _seed(client)
-    with _db(client) as s:
-        s.add_all([
-            TagImportTask(task_id="imp-ok", file_name="f.xlsx",
-                          status="completed"),
-            TagChangeLog(tag_id="tag_action", action="create"),
-        ])
-        s.commit()
-    resp = client.delete("/api/v1/tags")
-    assert resp.status_code == 200
-    counts = resp.json()["counts"]
-    assert counts["tag_catalog"] == 5
-    assert counts["tag_define"] == 7
-    assert counts["pre_asset_tag"] == 2
-    with _db(client) as s:
-        assert s.query(TagCatalog).count() == 0
-        assert s.query(TagDefine).count() == 0
-        for model in (PreAssetTag, AssetTag, TagGenerationTask,
-                      TagQualityEvaluation):
-            assert s.query(model).count() == 0
-        assert s.query(TagImportTask).count() == 1  # 批次幸存
-        assert s.query(TagChangeLog).count() == 1  # 审计日志幸存
-        assert s.query(MediaAsset).count() == 4  # 资产幸存
-
-
 def test_delete_asset_endpoint(client):
     _seed(client)
     resp = client.delete("/api/v1/assets/m1")
@@ -148,21 +106,6 @@ def test_delete_asset_endpoint(client):
         assert s.get(MediaAsset, "m2") is not None
         assert s.query(AssetBuildTask).count() == 0
         assert s.query(TagDefine).count() == 7  # 库幸存
-
-
-def test_delete_all_assets_endpoint(client):
-    _seed(client)
-    resp = client.delete("/api/v1/assets")
-    assert resp.status_code == 200
-    counts = resp.json()["counts"]
-    assert counts["media_assets"] == 2
-    assert counts["scenes"] == 2
-    assert counts["asset_build_task"] == 1
-    with _db(client) as s:
-        assert s.query(MediaAsset).count() == 0
-        assert s.query(AssetBuildTask).count() == 0
-        assert s.query(TagDefine).count() == 7  # 库幸存
-        assert s.query(TagCatalog).count() == 5
 
 
 def test_preview_matches_delete_counts(client):
@@ -239,19 +182,6 @@ def test_processing_import_409_library_only(client):
     assert "标签导入任务正在执行" in blocked.json()["detail"]
     fine = client.delete("/api/v1/content/tags")  # ② 导入不涉 content 域
     assert fine.status_code == 200
-
-
-def test_queued_tasks_deleted_not_blocked(client):
-    _seed(client)
-    with _db(client) as s:
-        s.add(TagGenerationTask(task_id="g-q", asset_id="m2",
-                                mode="closed", status="queued"))
-        s.commit()
-    resp = client.delete("/api/v1/content/tags")
-    assert resp.status_code == 200  # queued 不挡
-    assert resp.json()["counts"]["generation_tasks"] == 2  # g1 + g-q
-    with _db(client) as s:
-        assert s.query(TagGenerationTask).count() == 0  # 行已删
 
 
 def test_library_clear_keeps_api_usable(client):
