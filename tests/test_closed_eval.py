@@ -29,6 +29,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -957,3 +958,114 @@ def test_root_switch_mid_run_uses_snapshot(tmp_path, eval_setup):
     blob = "".join(llm.prompts)
     assert "MARKER_A" in blob
     assert "MARKER_B" not in blob
+
+
+# ---------------------------------------------------------------- 管线追踪落盘（管线追踪 Task 2）
+
+
+class _FailFirstCallLLM(MockLLMClient):
+    """有状态 LLM：每片（spec.run_id = `{run_id}:{tt}`）首次 complete 抛错，
+    其后委托 MOCK_LLM（mock 判定零网络，委托即成功路径）。
+
+    末次成功 attempt 语义的注入桩：_run_movie 首次 attempt 在该片的第
+    一个 LLM 调用上抛错（该 attempt 的 ProduceTrace 随失败整体丢弃），
+    第二次 attempt 才成功。calls() 按片计数供断言「批次行数 = 成功调用
+    数」——失败尝试的采集不得并入 trace。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._calls: dict[str, int] = {}
+
+    def calls(self, run_id: str) -> int:
+        with self._lock:
+            return self._calls.get(run_id, 0)
+
+    def complete(self, messages, run_id):
+        with self._lock:
+            n = self._calls.get(run_id, 0) + 1
+            self._calls[run_id] = n
+        if n == 1:
+            raise RuntimeError(f"注入首败：{run_id}")
+        return super().complete(messages, run_id)
+
+
+def test_run_writes_trace_and_llm_raw(svc, root):
+    """成功 run 三处落盘：raw_results 正典行带 trace、progress 增量行带
+    trace、llm_raw/{tt}.json 每片原始输出（行含 content=成功份全文）。"""
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    rows = _raw_rows(svc, run_id)
+    for r in rows:                                   # 成功片：trace 键 + 结构
+        assert {"max_tags", "candidates", "batches", "fabricated"} <= set(r["trace"])
+        assert all(c["outcome"] in ("kept", "unmentioned", "gate",
+                                    "unmountable", "m_cap")
+                   for c in r["trace"]["candidates"])
+    lines = (_run_dir(svc, run_id) / "progress.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    assert all("trace" in json.loads(line) for line in lines)   # 增量行带 trace
+    raw = json.loads((_run_dir(svc, run_id) / "llm_raw" / "tt0000001.json")
+                     .read_text(encoding="utf-8"))
+    assert raw and all({"dir_id", "batch", "n", "parse_retried", "content"}
+                       <= set(e) for e in raw)
+
+
+def test_failed_movie_has_no_trace(eval_setup):
+    """失败片三处全不落（None≠0「暂无」纪律）：raw 正典行与 progress 增量
+    行都无 trace 键、llm_raw/ 无该 tt 文件；成功片对照三处照常落。"""
+    service = eval_setup(_FailMovieLLM("tt0000002"))
+    run_id = service.start("emotion", {"mode": "all"}, wait=True)
+    assert service.get(run_id).failed == 1
+    rows = _raw_rows(service, run_id)
+    bad = next(r for r in rows if r["tt"] == "tt0000002")
+    assert bad["ok"] is False and "trace" not in bad
+    good = next(r for r in rows if r["tt"] == "tt0000001")
+    assert good["ok"] is True and "trace" in good          # 对照：成功片照常带
+    entries = [json.loads(line) for line in
+               (_run_dir(service, run_id) / "progress.jsonl")
+               .read_text(encoding="utf-8").splitlines()]
+    assert "trace" not in next(e for e in entries if e["tt"] == "tt0000002")
+    llm_raw = _run_dir(service, run_id) / "llm_raw"
+    assert not (llm_raw / "tt0000002.json").exists()
+    assert (llm_raw / "tt0000001.json").exists()
+
+
+def test_retry_keeps_only_last_success(eval_setup):
+    """首败重试成功：该片 trace 非 None 且为末次成功 attempt 的 snapshot
+    ——批次行数 = 该片成功 LLM 调用数（失败 attempt 的 sink 整体丢弃，
+    半截采集不得并入）；llm_raw 与一次成功片无差别落盘。"""
+    llm = _FailFirstCallLLM()
+    service = eval_setup(llm)
+    run_id = service.start("emotion", {"mode": "all"}, wait=True)
+    state = service.get(run_id)
+    assert state.status == "succeeded" and state.failed == 0
+    for r in _raw_rows(service, run_id):
+        assert r["ok"] is True
+        assert {"max_tags", "candidates", "batches", "fabricated"} <= set(r["trace"])
+        # 每片调用数 = 1（首败 attempt 的唯一调用）+ 成功 attempt 批次数
+        n_calls = llm.calls(f"{run_id}:{r['tt']}")
+        assert n_calls >= 2 and len(r["trace"]["batches"]) == n_calls - 1
+    assert (_run_dir(service, run_id) / "llm_raw" / "tt0000001.json").exists()
+
+
+def test_write_llm_raw_skips_unsafe_tt(tmp_path):
+    """单元直调 _write_llm_raw：tt 进文件名前过白名单正则——../ 路径穿越
+    / 空串 / 超 64 字符不过 → 不落任何文件不抛错；rows 为空同样直接
+    return；合法 tt 正控照常落（防「恒跳过」假绿）。"""
+    from tagplatform.settings import Settings
+
+    service = ClosedEvalService(MOCK_LLM, MOCK_EMBEDDER,
+                                Settings(eval_output_root=str(tmp_path / "out")))
+    run_dir = tmp_path / "out" / "run-unit"
+    run_dir.mkdir(parents=True)  # 生产时序：run 目录骨架在 start 即建好
+    job = SimpleNamespace(run_id="run-unit")  # _write_llm_raw 只消费 job.run_id
+    rows = [{"dir_id": "dir_eval", "batch": 0, "n": 1,
+             "parse_retried": False, "content": "{}"}]
+    for tt in ("../evil", "", "a" * 65):   # 非法 tt：零文件零异常
+        service._write_llm_raw(job, tt, rows)
+    assert not (run_dir / "llm_raw").exists()
+    service._write_llm_raw(job, "tt0000001", [])   # rows 为空：同样直接 return
+    assert not (run_dir / "llm_raw").exists()
+    service._write_llm_raw(job, "tt0000001", rows)  # 正控：合法 tt 照常落盘
+    assert json.loads((run_dir / "llm_raw" / "tt0000001.json")
+                      .read_text(encoding="utf-8")) == rows
