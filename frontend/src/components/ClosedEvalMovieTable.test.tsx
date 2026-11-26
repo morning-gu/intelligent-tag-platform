@@ -15,9 +15,13 @@
 // null 数值暂无）、漏检表丢失环节列（中文映射、null 暂无）、trace null 的
 // 老 run 说明文案（无踪迹表/漏斗条/下载）、llm-raw 下载 404 → message.error
 // 透出不崩视图（fetch mock，不用原生 <a> 直链——404 会开浏览器错误页）。
+// 整体漏斗块（增补 2026-11-26）：主表上方全 run 聚合（payload.rows 纯派生，
+// 十键逐键加总 funnel 非 null 行 + 差式派生门控过/挂载成 + 存活率 + 覆盖
+// 标注；老 run 全 null → 说明文案；失败片混入只计非 null 行；召回 0 片不进
+// 存活率；切 θ 重拉聚合值不漂移）。
 // 注意：antd Table 展开图标按钮无可访问名，查询一律走
 // .ant-table-row-expand-icon（与 GenerationTasks 测试同口径）。
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ClosedEvalMovieTable from './ClosedEvalMovieTable'
 import {
@@ -721,5 +725,229 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     await waitFor(() => expect(screen.getByText('P@10(θ0.4)')).toBeInTheDocument())
     await waitFor(() =>
       expect(screen.queryByTestId('theta-refetch-error')).not.toBeInTheDocument())
+  })
+
+  // ---------- 整体漏斗块（增补 2026-11-26） ----------
+
+  /** 老 run 摘要夹具：rows 全 funnel null（raw 行无 trace → 摘要行同 null）。 */
+  const SUMMARY_OLD_RUN: MovieSummaryPayload = {
+    ...SUMMARY,
+    rows: SUMMARY.rows.map((r) => ({ ...r, funnel: null })),
+  }
+
+  /** 召回 0 夹具（候选全灭）：funnel 非 null 仍计入聚合，但 n_kept/n_recall
+   * 分母为 0 不可算——存活率跳过该行（None≠0 不造 0）。 */
+  const FUNNEL_ZERO_RECALL: FunnelCounts = {
+    n_recall: 0,
+    n_mentioned: 0,
+    n_kept: 0,
+    n_gate: 0,
+    n_unmountable: 0,
+    n_m_cap: 0,
+    n_fabricated: 0,
+    n_batches: 1,
+    parse_retries: 0,
+    max_tags: 6,
+  }
+
+  it('整体漏斗块：Statistic 五值 + BarChart 五行 + 次要计数 + 存活率 + 覆盖标注', async () => {
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    const block = await screen.findByTestId('run-funnel')
+    expect(block).toBeInTheDocument()
+
+    // 五 Statistic（聚合值与差式派生精确相等）：召回 5+4=9、提及 4+4=8、
+    // 门控过 8−1=7、挂载成 7−1=6、产出 1+4=5
+    expect(screen.getByTestId('run-funnel-recall')).toHaveTextContent('召回9')
+    expect(screen.getByTestId('run-funnel-mentioned')).toHaveTextContent('提及8')
+    expect(screen.getByTestId('run-funnel-passed')).toHaveTextContent('门控过7')
+    expect(screen.getByTestId('run-funnel-mounted')).toHaveTextContent('挂载成6')
+    expect(screen.getByTestId('run-funnel-kept')).toHaveTextContent('产出5')
+
+    // BarChart 五行存在且数值对（同上五数）
+    const barValues = [
+      ['召回', '9'],
+      ['提及', '8'],
+      ['门控过', '7'],
+      ['挂载成', '6'],
+      ['产出', '5'],
+    ] as const
+    for (const [label, value] of barValues) {
+      const barRow = within(block).getByTestId(`bar-row-${label}`)
+      expect(within(barRow).getByText(value)).toBeInTheDocument()
+    }
+
+    // 次要计数行：门控丢弃/挂载失败/上限截断/编造/批次（解析重试）——
+    // 不含输出上限（聚合的 max_tags 无意义）
+    const secondary = screen.getByTestId('run-funnel-secondary')
+    expect(secondary).toHaveTextContent('门控丢弃 1')
+    expect(secondary).toHaveTextContent('挂载失败 1')
+    expect(secondary).toHaveTextContent('上限截断 1')
+    expect(secondary).toHaveTextContent('编造 1')
+    expect(secondary).toHaveTextContent('批次 3（解析重试 1）')
+    expect(secondary).not.toHaveTextContent('输出上限')
+
+    // 每片存活率（n_kept/n_recall：1/5=0.2、4/4=1；两片偶数 → 中位取均值 0.6）
+    expect(screen.getByTestId('run-funnel-survival')).toHaveTextContent(
+      '每片存活率 min 0.2 · 中位 0.6 · max 1',
+    )
+
+    // 覆盖标注：N=有解剖数据的片数（失败片不计），M=rows 总数
+    expect(screen.getByTestId('run-funnel-coverage')).toHaveTextContent('合计覆盖 2 部 / 共 3 部')
+  })
+
+  it('老 run：整体块渲染说明文案（rows 全 funnel null）', async () => {
+    mockedGetRunMovies.mockResolvedValue(SUMMARY_OLD_RUN)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000003')
+
+    expect(await screen.findByTestId('run-funnel-absent')).toHaveTextContent(
+      '本 run 早于管线追踪功能，无解剖数据',
+    )
+    // 不渲染统计内容（同 detail-trace-absent 口径：None≠0 不是全 0）
+    expect(screen.queryByTestId('run-funnel')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('run-funnel-recall')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('bar-row-召回')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('run-funnel-coverage')).not.toBeInTheDocument()
+  })
+
+  it('失败片混入：聚合只计非 null 行，覆盖 N/M 真实', async () => {
+    // 失败片 funnel null 混两片非 null（数值各异）：逐键加总只计两片
+    const MIXED: MovieSummaryPayload = {
+      ...SUMMARY,
+      rows: [
+        { ...SUMMARY.rows[0], funnel: null },
+        {
+          tt: 'tt0000010',
+          title: '甲片',
+          ok: true,
+          error: null,
+          spearman: 0.5,
+          p_at_k: 0.5,
+          r_at_k: 0.5,
+          elapsed_ms: 1000,
+          n_produced: 3,
+          n_relevant: 8,
+          funnel: {
+            n_recall: 8,
+            n_mentioned: 7,
+            n_kept: 4,
+            n_gate: 1,
+            n_unmountable: 1,
+            n_m_cap: 1,
+            n_fabricated: 2,
+            n_batches: 2,
+            parse_retries: 1,
+            max_tags: 6,
+          },
+        },
+        {
+          tt: 'tt0000011',
+          title: '乙片',
+          ok: true,
+          error: null,
+          spearman: null,
+          p_at_k: null,
+          r_at_k: null,
+          elapsed_ms: 2000,
+          n_produced: 5,
+          n_relevant: 5,
+          funnel: {
+            n_recall: 5,
+            n_mentioned: 5,
+            n_kept: 5,
+            n_gate: 0,
+            n_unmountable: 0,
+            n_m_cap: 0,
+            n_fabricated: 0,
+            n_batches: 3,
+            parse_retries: 2,
+            max_tags: 8,
+          },
+        },
+      ],
+    }
+    mockedGetRunMovies.mockResolvedValue(MIXED)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByTestId('run-funnel')
+
+    // 召回 8+5=13、提及 7+5=12、门控过 12−1=11、挂载成 11−1=10、产出 4+5=9
+    expect(screen.getByTestId('run-funnel-recall')).toHaveTextContent('召回13')
+    expect(screen.getByTestId('run-funnel-mentioned')).toHaveTextContent('提及12')
+    expect(screen.getByTestId('run-funnel-passed')).toHaveTextContent('门控过11')
+    expect(screen.getByTestId('run-funnel-mounted')).toHaveTextContent('挂载成10')
+    expect(screen.getByTestId('run-funnel-kept')).toHaveTextContent('产出9')
+    // 次要计数逐键加总：编造 2+0=2、批次 2+3=5（解析重试 1+2=3）
+    const secondary = screen.getByTestId('run-funnel-secondary')
+    expect(secondary).toHaveTextContent('编造 2')
+    expect(secondary).toHaveTextContent('批次 5（解析重试 3）')
+    // 存活率：甲片 4/8=0.5、乙片 5/5=1 → min 0.5 · 中位 0.75 · max 1
+    expect(screen.getByTestId('run-funnel-survival')).toHaveTextContent(
+      '每片存活率 min 0.5 · 中位 0.75 · max 1',
+    )
+    // 覆盖 N/M：2 部非 null / 共 3 行（失败片计入 M 不计入 N）
+    expect(screen.getByTestId('run-funnel-coverage')).toHaveTextContent('合计覆盖 2 部 / 共 3 部')
+  })
+
+  it('召回 0 的片不进存活率；全部召回 0 → 存活率「暂无」', async () => {
+    // 一片召回 0（候选全灭）+ 一片正常（2/4=0.5）：存活率只算正常片
+    mockedGetRunMovies.mockResolvedValue({
+      ...SUMMARY,
+      rows: [
+        { ...SUMMARY.rows[1], tt: 'tt0000020', title: '全灭片', funnel: FUNNEL_ZERO_RECALL },
+        {
+          ...SUMMARY.rows[1],
+          tt: 'tt0000021',
+          title: '正常片',
+          funnel: { ...FUNNEL, n_recall: 4, n_mentioned: 4, n_kept: 2, n_gate: 1, n_unmountable: 1, n_m_cap: 0, n_fabricated: 0, n_batches: 1, parse_retries: 0, max_tags: 6 },
+        },
+      ],
+    })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByTestId('run-funnel')
+    expect(screen.getByTestId('run-funnel-survival')).toHaveTextContent(
+      '每片存活率 min 0.5 · 中位 0.5 · max 0.5',
+    )
+
+    // 第二场景换夹具重挂载（同测试内双 render 需手动 cleanup 防重复节点）
+    cleanup()
+    mockedGetRunMovies.mockResolvedValue({
+      ...SUMMARY,
+      rows: [
+        { ...SUMMARY.rows[1], tt: 'tt0000030', funnel: FUNNEL_ZERO_RECALL },
+        { ...SUMMARY.rows[1], tt: 'tt0000031', funnel: FUNNEL_ZERO_RECALL },
+      ],
+    })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByTestId('run-funnel')
+    // 聚合仍在（召回 0 是真实求和 0，可渲染），存活率无 eligible → 「暂无」
+    expect(screen.getByTestId('run-funnel-recall')).toHaveTextContent('召回0')
+    expect(screen.getByTestId('run-funnel-survival')).toHaveTextContent('每片存活率 暂无')
+  })
+
+  it('切 θ 重拉后整体块数值不变（payload.rows 纯派生，θ 不触碰聚合）', async () => {
+    // 第二份 payload：同 funnel、指标行不同（spearman/p_at_k/r_at_k 变）
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY_THETA)
+      .mockResolvedValueOnce({
+        ...SUMMARY_THETA,
+        theta_p: 0.4,
+        rows: SUMMARY_THETA.rows.map((r) =>
+          r.tt === 'tt0000001' ? { ...r, spearman: 0.9, p_at_k: 0.9, r_at_k: 0.9 } : r),
+      })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+    expect(screen.getByTestId('run-funnel-recall')).toHaveTextContent('召回9')
+
+    fireEvent.mouseDown(screen.getByTestId('theta-p-select'))
+    fireEvent.click(await screen.findByTitle('0.4'))
+    await waitFor(() => expect(screen.getByText('P@10(θ0.4)')).toBeInTheDocument())
+
+    // 重拉落地：聚合值不漂移（九键/派生/覆盖全同）
+    expect(screen.getByTestId('run-funnel-recall')).toHaveTextContent('召回9')
+    expect(screen.getByTestId('run-funnel-mentioned')).toHaveTextContent('提及8')
+    expect(screen.getByTestId('run-funnel-passed')).toHaveTextContent('门控过7')
+    expect(screen.getByTestId('run-funnel-mounted')).toHaveTextContent('挂载成6')
+    expect(screen.getByTestId('run-funnel-kept')).toHaveTextContent('产出5')
+    expect(screen.getByTestId('run-funnel-coverage')).toHaveTextContent('合计覆盖 2 部 / 共 3 部')
   })
 })

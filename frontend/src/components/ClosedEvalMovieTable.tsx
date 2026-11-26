@@ -26,10 +26,18 @@
 // 页）；trace null（老 run/失败片）渲染说明文案。misses 表加「丢失环节」列。
 // 结局/丢失环节后端原样透传，中文映射集中在本文件常量。θ 门/代际守卫/
 // 懒加载缓存零改动：trace 随 detail 一次拉回，不新增请求。
+// 整体漏斗块（增补 2026-11-26）：主表上方全 run 聚合——payload.rows 纯派生
+// （十键逐键加总 funnel 非 null 行，无任何非 null 行 → 「暂无」说明文案，
+// 同 detail-trace-absent 口径）：五 Statistic 主链（门控过/挂载成差式派生
+// 同 FunnelBar）+ BarChart 五行条形（显式 max=召回）+ 次要计数行（不含输出
+// 上限——聚合的 max_tags 无意义）+ 每片存活率（n_kept/n_recall，召回 0 的
+// 片跳过、偶数中位取中间两数均值）+ 覆盖标注（N 部有解剖数据 / 共 M 部）；
+// 不新增请求、θ 门/缓存逻辑零改动。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX, Key } from 'react'
-import { Alert, Button, Select, Spin, Table, Typography, message } from 'antd'
+import { Alert, Button, Select, Spin, Statistic, Table, Typography, message } from 'antd'
 import type { TableProps } from 'antd'
+import BarChart from './BarChart'
 import {
   getRunMovieDetail,
   getRunMovies,
@@ -105,6 +113,147 @@ function byNumber(
   field: 'n_produced' | 'n_relevant' | 'elapsed_ms',
 ): (a: MovieSummaryRow, b: MovieSummaryRow) => number {
   return (a, b) => a[field] - b[field]
+}
+
+// ---------- 整体漏斗块（主表上方全 run 聚合，增补 2026-11-26） ----------
+
+/** 全 run 漏斗聚合（纯函数）：十键逐键加总 funnel 非 null 行（失败片/老 run
+ * 行 null 不计入），n_movies 为非 null 行数；无任何非 null 行 → null——
+ * 老 run 是「算不出」不是全 0（None≠0），渲染层走「暂无」说明文案。 */
+export function aggregateFunnel(
+  rows: MovieSummaryRow[],
+): { counts: FunnelCounts; n_movies: number } | null {
+  const counts: FunnelCounts = {
+    n_recall: 0,
+    n_mentioned: 0,
+    n_kept: 0,
+    n_gate: 0,
+    n_unmountable: 0,
+    n_m_cap: 0,
+    n_fabricated: 0,
+    n_batches: 0,
+    parse_retries: 0,
+    max_tags: 0,
+  }
+  let nMovies = 0
+  for (const row of rows) {
+    const f = row.funnel
+    if (f === null) continue
+    nMovies += 1
+    counts.n_recall += f.n_recall
+    counts.n_mentioned += f.n_mentioned
+    counts.n_kept += f.n_kept
+    counts.n_gate += f.n_gate
+    counts.n_unmountable += f.n_unmountable
+    counts.n_m_cap += f.n_m_cap
+    counts.n_fabricated += f.n_fabricated
+    counts.n_batches += f.n_batches
+    counts.parse_retries += f.parse_retries
+    counts.max_tags += f.max_tags
+  }
+  return nMovies === 0 ? null : { counts, n_movies: nMovies }
+}
+
+/** 每片存活率统计（纯函数）：逐片 n_kept/n_recall（funnel null 或召回 0 的
+ * 片跳过——0/0 不可算，None≠0 不造 0）；升序取 min/中位/max，偶数个取中间
+ * 两数均值；无 eligible 片 → null（「暂无」）。 */
+export function survivalStats(
+  rows: MovieSummaryRow[],
+): { min: number; median: number; max: number } | null {
+  const rates: number[] = []
+  for (const row of rows) {
+    if (row.funnel === null || row.funnel.n_recall === 0) continue
+    rates.push(row.funnel.n_kept / row.funnel.n_recall)
+  }
+  if (rates.length === 0) return null
+  const sorted = [...rates].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2
+  return { min: sorted[0], median, max: sorted[sorted.length - 1] }
+}
+
+/** 整体漏斗条形图（RunFunnelSummary 内）：主链五阶段同 FunnelBar 差式口径
+ * （门控过 = 提及−门控丢弃、挂载成 = 门控过−挂载失败），显式 max=召回——
+ * 各阶段分母同为召回池，行间可比；复用既有 BarChart 纯 CSS 条形图。 */
+export function FunnelBars({ counts }: { counts: FunnelCounts }): JSX.Element {
+  const passedGate = counts.n_mentioned - counts.n_gate
+  const mountedOk = passedGate - counts.n_unmountable
+  return (
+    <BarChart
+      items={[
+        { label: '召回', value: counts.n_recall, max: counts.n_recall },
+        { label: '提及', value: counts.n_mentioned, max: counts.n_recall },
+        { label: '门控过', value: passedGate, max: counts.n_recall },
+        { label: '挂载成', value: mountedOk, max: counts.n_recall },
+        { label: '产出', value: counts.n_kept, max: counts.n_recall },
+      ]}
+    />
+  )
+}
+
+/** 整体漏斗块（主 return θ 控件与主表之间）：payload.rows 纯派生渲染，不
+ * 新增请求。aggregateFunnel null（老 run）→ 说明文案；否则五 Statistic 主链
+ * （聚合值与差式派生精确相等）+ FunnelBars + 次要计数行（门控丢弃/挂载失败/
+ * 上限截断/编造/批次（解析重试）——不含输出上限：聚合的 max_tags 无意义）+
+ * 每片存活率行（null → 「暂无」）+ 覆盖标注（N 部有解剖数据 / 共 M 部）。 */
+export function RunFunnelSummary({ rows }: { rows: MovieSummaryRow[] }): JSX.Element {
+  const agg = aggregateFunnel(rows)
+  if (agg === null) {
+    return (
+      <div data-testid="run-funnel-absent">
+        <Typography.Text type="secondary">
+          本 run 早于管线追踪功能，无解剖数据
+        </Typography.Text>
+      </div>
+    )
+  }
+  const passedGate = agg.counts.n_mentioned - agg.counts.n_gate
+  const mountedOk = passedGate - agg.counts.n_unmountable
+  const survival = survivalStats(rows)
+  return (
+    <div data-testid="run-funnel">
+      <Typography.Title level={5}>整体漏斗</Typography.Title>
+      <div style={{ display: 'flex', gap: 48, flexWrap: 'wrap' }}>
+        <div data-testid="run-funnel-recall">
+          <Statistic title="召回" value={agg.counts.n_recall} />
+        </div>
+        <div data-testid="run-funnel-mentioned">
+          <Statistic title="提及" value={agg.counts.n_mentioned} />
+        </div>
+        <div data-testid="run-funnel-passed">
+          <Statistic title="门控过" value={passedGate} />
+        </div>
+        <div data-testid="run-funnel-mounted">
+          <Statistic title="挂载成" value={mountedOk} />
+        </div>
+        <div data-testid="run-funnel-kept">
+          <Statistic title="产出" value={agg.counts.n_kept} />
+        </div>
+      </div>
+      <FunnelBars counts={agg.counts} />
+      <div>
+        <Typography.Text type="secondary" data-testid="run-funnel-secondary">
+          {`门控丢弃 ${agg.counts.n_gate} · 挂载失败 ${agg.counts.n_unmountable} · `
+            + `上限截断 ${agg.counts.n_m_cap} · 编造 ${agg.counts.n_fabricated} · `
+            + `批次 ${agg.counts.n_batches}（解析重试 ${agg.counts.parse_retries}）`}
+        </Typography.Text>
+      </div>
+      <div>
+        <Typography.Text type="secondary" data-testid="run-funnel-survival">
+          {survival === null
+            ? `每片存活率 ${NA}`
+            : `每片存活率 min ${survival.min} · 中位 ${survival.median} · max ${survival.max}`}
+        </Typography.Text>
+      </div>
+      <div>
+        <Typography.Text type="secondary" data-testid="run-funnel-coverage">
+          {`合计覆盖 ${agg.n_movies} 部 / 共 ${rows.length} 部`}
+        </Typography.Text>
+      </div>
+    </div>
+  )
 }
 
 /** 漏斗条（trace 非 null 的明细区首块，一行统计）：主链五阶段 召回→提及→
@@ -500,6 +649,7 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
           onChange={(v) => changeTheta('r', v)}
         />
       </div>
+      <RunFunnelSummary rows={payload.rows} />
       <Table<MovieSummaryRow>
         rowKey="tt"
         columns={columns}
