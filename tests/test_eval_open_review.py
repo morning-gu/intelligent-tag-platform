@@ -168,9 +168,13 @@ def test_redundancy_instruction_and_unified_criteria_in_prompt():
     assert "独立保留价值" in REVIEW_PROMPT
     assert '"evidence":' not in REVIEW_PROMPT
     assert "缺失时参考场景挂载点" not in REVIEW_PROMPT
-    # Judge 与开放评测必须共用完全一致的统一三维评价标准正文
+    # Judge 与开放评测必须共用完全一致的统一三维评价标准正文，且不含叠甲式负向说明或加权元信息
     assert UNIFIED_EVALUATION_CRITERIA in REVIEW_PROMPT
     assert UNIFIED_EVALUATION_CRITERIA in JUDGE_TEMPLATE
+    for prompt_text in (UNIFIED_EVALUATION_CRITERIA, JUDGE_TEMPLATE, REVIEW_PROMPT):
+        assert "不代表" not in prompt_text
+        assert "不需要自行加权" not in prompt_text
+        assert "自动聚合总分" not in prompt_text
 
 
 def test_review_forwards_directory_and_aggregates_value_by_tag_kind():
