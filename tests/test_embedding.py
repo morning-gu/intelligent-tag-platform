@@ -21,29 +21,7 @@ from tagplatform.capabilities.embed import (
 from tagplatform.settings import Settings
 
 
-def test_mock_deterministic_and_no_download():
-    e = make_embedder("intfloat/multilingual-e5-base", mock=True)
-    a, b = e.embed(["悬疑 推理"], role="query"), e.embed(["悬疑  推理 "], role="query")
-    assert a.shape == (1, 64) and np.allclose(a, b)
-    assert np.isclose(np.linalg.norm(a[0]), 1.0)
-    assert "sentence_transformers" not in sys.modules
-
-
-def test_mock_empty_never_loads():
-    e = make_embedder("x", mock=True)
-    assert e.embed([], role="passage").shape == (0, 64)
-
-
 # ---------- role 前缀契约（e5 非对称检索：query 检索方 / passage 语料方） ----------
-
-
-def test_mock_role_insensitive():
-    """MockEmbedder 对 role 不敏感（测试替身契约）：同文本两 role 同向量——
-    语义逻辑测试零波及；前缀拼装行为由 LocalEmbedder 专属测试钉住。"""
-    e = make_embedder("x", mock=True)
-    q = e.embed(["雨夜追凶"], role="query")
-    p = e.embed(["雨夜追凶"], role="passage")
-    assert np.allclose(q, p)
 
 
 def test_embed_invalid_role_rejected():

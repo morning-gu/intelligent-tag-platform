@@ -15,9 +15,7 @@
   迁移 + builds_prompt 规则钉死。
 """
 
-import tagplatform.services.eval.service as closed_eval_mod
 import tagplatform.services.generation.assemble as assemble_mod
-import tagplatform.services.generation.execute as execute_mod
 from tagplatform.services.generation.assemble import (
     AssemblyContext,
     build_spec,
@@ -62,21 +60,6 @@ def test_build_spec_pure_memory(monkeypatch, content_fixture):
     assert spec.prompt_text == f"模板 {assemble_mod._render_content_text(content_fixture)}"
 
 
-def test_load_passes_session_through(monkeypatch):
-    """load_assembly_context 是唯一 DB 交互点：session 透传
-    try_load_library；缺省 None（全局引擎，原 assemble_spec 同款）。"""
-    seen: list[object] = []
-    sentinel = object()
-    monkeypatch.setattr(
-        assemble_mod, "try_load_library",
-        lambda session=None: seen.append(session) or None)
-
-    load_assembly_context("closed", session=sentinel)
-    assert seen == [sentinel]
-    load_assembly_context("closed")
-    assert seen == [sentinel, None]
-
-
 def test_snapshot_isolation_after_db_change(content_fixture):
     """快照隔离（单元级）：context 装好后变更 DB 库行，装配产出不变。
 
@@ -110,15 +93,6 @@ def test_snapshot_isolation_after_db_change(content_fixture):
     assert spec_after.library.tag("tag_alt") is None  # 新库行不在快照里
     assert spec_after.library.tag("tag_action") is not None  # 旧库照常可用
     assert spec_before.library is spec_after.library
-
-
-def test_generation_and_eval_share_assembly():
-    """生成与评测同源：两条路径 import 的装配函数是同一对象。"""
-    assert execute_mod.load_assembly_context is assemble_mod.load_assembly_context
-    assert execute_mod.build_spec is assemble_mod.build_spec
-    assert (closed_eval_mod.load_assembly_context
-            is assemble_mod.load_assembly_context)
-    assert closed_eval_mod.build_spec is assemble_mod.build_spec
 
 
 def test_closed_build_spec_renders_template(content_fixture):

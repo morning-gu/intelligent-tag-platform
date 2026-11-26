@@ -196,8 +196,10 @@ def test_protected_api_without_cookie_401_health_open(client):
     assert client.get("/api/v1/assets").status_code == 401
     assert client.get("/api/v1/generation/tasks").status_code == 401
     assert client.get("/api/v1/prompts").status_code == 401
-    # health 例外：无 cookie 仍 200
-    assert client.get("/health").status_code == 200
+    # health 例外：无 cookie 仍 200 且返回 ok
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
 
 
 def test_tampered_session_cookie_401(client):

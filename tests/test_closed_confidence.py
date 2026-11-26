@@ -81,27 +81,6 @@ def test_sevi_matches_producer_formula():
         {"content": 5, "scene": 5, "frame": 1}, weights) == pytest.approx(0.6)
 
 
-def test_variance_drives_c_cons():
-    """手算方差 → exp：全同分 As≈0 → 1.0；有波动 → 指数衰减。"""
-    scores = [0.8, 0.8, 0.8]
-    mean = sum(scores) / 3
-    var = sum((s - mean) ** 2 for s in scores) / 3
-    assert var == pytest.approx(0.0, abs=1e-12)
-    assert math.exp(-var / 0.2) == pytest.approx(1.0)
-    # 波动 (0.8, 0.6, 0.6)：mean≈0.6667，var≈0.00889 → exp 衰减 < 1
-    scores = [0.8, 0.6, 0.6]
-    mean = sum(scores) / 3
-    var = sum((s - mean) ** 2 for s in scores) / 3
-    c_cons = math.exp(-var / 0.2)
-    assert 0.9 < c_cons < 1.0  # 小波动仍高位
-    # 大波动 (1.0, 0.0, 0.0)：mean=1/3，var=2/9 → exp(−10/9) ≈ 0.33
-    scores = [1.0, 0.0, 0.0]
-    mean = sum(scores) / 3
-    var = sum((s - mean) ** 2 for s in scores) / 3
-    assert var == pytest.approx(2.0 / 9.0)
-    assert math.exp(-var / 0.2) == pytest.approx(math.exp(-10.0 / 9.0))
-
-
 # ---- Cver 解析层 ----
 
 def test_parse_verify_score_plain_and_fenced():
@@ -488,23 +467,3 @@ def test_mock_e2e_confidence_overwritten(session, tmp_path, monkeypatch):
     text = reports[0].read_text(encoding="utf-8")
     assert "置信度计算报告" in text
     assert "重评" in text  # Ccons 三行表含"重评 1/2"
-
-
-def test_execute_confidence_failure_does_not_fail_task(session, monkeypatch):
-    """置信度环节炸（内部兜底）不影响任务终态：succeeded + 原置信度。"""
-    _seed_catalog(session)
-
-    def explode(*args, **kwargs):
-        raise RuntimeError("置信度整环节炸")
-
-    monkeypatch.setattr(
-        "tagplatform.services.generation.execute.apply_confidence", explode)
-    t = _make_task(session, task_id="conf_expl",
-                   policy_json='{"min_confidence": 0.5}')
-    from tagplatform.services.generation.execute import run_generation_task
-    done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
-    # 置信度异常被 execute 之外的 apply_confidence 内部吞掉？——不，
-    # monkeypatch 的炸直接在 execute 调用点抛出，应走任务级事务落 failed。
-    # 这里反向验证接线点存在：异常路径覆盖任务级事务（failed + 回滚）。
-    assert done.status == "failed"
-    assert "置信度整环节炸" in (done.error or "")

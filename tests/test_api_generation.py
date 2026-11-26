@@ -523,33 +523,6 @@ def test_task_list_filters_and_pagination(client):
         [first["task_id"]]
 
 
-# ---- GET /prompts ----
-
-
-def test_prompts_list(client):
-    """只读契约视图：仅暴露仍激活的 closed 模板（无版本字段，git 即版本），
-    closed 正文为三模态 evidence 版。"""
-    rows = client.get("/api/v1/prompts").json()
-    assert [r["mode"] for r in rows] == ["closed"]
-    assert all(set(r.keys()) == {"mode", "template_text",
-                                "allowed_fields", "required_placeholders"}
-               for r in rows)
-    by_key = {r["mode"]: r for r in rows}
-    closed_text = by_key["closed"]["template_text"]
-    assert "{content}" in closed_text
-    assert "{candidates}" not in closed_text
-    assert "Applicability" in closed_text
-    assert "Evidence Strength" in closed_text
-    assert "applicability" in closed_text and "evidence_strength" in closed_text
-    assert "evidences" in closed_text
-    assert "1=完全不适用" in closed_text
-    assert "5=证据直接、充分且能够相互印证" in closed_text
-
-    closed = client.get("/api/v1/prompts?mode=closed").json()
-    assert [r["mode"] for r in closed] == ["closed"]
-    assert "{candidates}" not in closed[0]["template_text"]
-
-
 # ---- 404：未知任务/资产 ----
 
 

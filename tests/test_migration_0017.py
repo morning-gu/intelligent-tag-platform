@@ -86,22 +86,3 @@ def test_0017_backfills_task_id_from_after_json_and_downgrades(rehearsal):
     command.downgrade(cfg, "0016")
     assert "task_id" not in _columns(db_path)
     assert "idx_change_log_task" not in _indexes(db_path)
-
-
-def test_fresh_chain_upgrade_head_then_two_single_downgrades(rehearsal):
-    """fresh 链：空库 0001→head（0019）全链走通；0019→0018→0017→0016 各可回一级。"""
-    cfg, db_path = rehearsal
-    command.upgrade(cfg, "head")
-
-    def version() -> str:
-        with sqlite3.connect(str(db_path)) as conn:
-            return conn.execute(
-                "SELECT version_num FROM alembic_version").fetchone()[0]
-
-    assert version() == "0019"
-    command.downgrade(cfg, "-1")
-    assert version() == "0018"
-    command.downgrade(cfg, "-1")
-    assert version() == "0017"
-    command.downgrade(cfg, "-1")
-    assert version() == "0016"

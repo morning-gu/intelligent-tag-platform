@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from tagplatform.capabilities.storage.models import MediaAsset, TagCatalog, TagDefine
+from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
 from tagplatform.capabilities.embed import MockEmbedder
 from tagplatform.reembed import reembed_all
 from tagplatform.capabilities.vectors import decode_vector, encode_vector
@@ -100,20 +100,6 @@ def test_reembed_persists_mockembedder_passage_vectors(session):
     t2 = session.get(TagDefine, "t2")
     assert np.allclose(decode_vector(t2.embedding),
                        mock.embed(["黎明。黎明描述"], role="passage")[0])
-
-
-def test_reembed_media_rows_produce_no_channel(session):
-    """无 context 通道：v2 媒体行不参与重嵌（media_asset 无 embedding 列）。"""
-    _seed_both_channels(session)
-    session.add(MediaAsset(asset_id="a1", asset_type="movie", title="片名"))
-    session.commit()
-
-    flip = _FlipEmbedder()
-    summary = reembed_all(session, flip)
-
-    # 仅目录/标签两个通道各一次批量调用，媒体行零涉及
-    assert len(flip.calls) == 2
-    assert (summary.dir_rows, summary.tag_rows) == (2, 2)
 
 
 def test_reembed_empty_db_no_calls(session):

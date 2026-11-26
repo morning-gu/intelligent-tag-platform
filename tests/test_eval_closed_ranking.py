@@ -15,8 +15,6 @@ from __future__ import annotations
 import pytest
 
 from tagplatform.services.eval.closed_ranking import (
-    DEFAULT_KS,
-    DEFAULT_THETAS,
     ClosedSample,
     evaluate_closed,
     random_precision_recall,
@@ -130,7 +128,3 @@ def test_bootstrap_ci_constant_samples():
     assert gp.precision_ci == pytest.approx((0.6, 0.6))
     assert gp.recall_ci == pytest.approx((1.0, 1.0))
     assert gp.ndcg_ci == pytest.approx((1.0, 1.0))
-
-
-def test_default_constants():
-    assert DEFAULT_THETAS == (0.2, 0.4, 0.6, 0.8) and DEFAULT_KS == (5, 10, 20, 40)

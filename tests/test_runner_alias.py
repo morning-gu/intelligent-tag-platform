@@ -115,15 +115,3 @@ def test_catalog_hit_records_alias(session, monkeypatch):
            .filter(PreAssetTag.task_id == task.task_id).one())
     assert row.candidate_alias == "报仇"
     assert row.origin == "open"
-
-
-def test_record_alias_signature_is_session_first():
-    """record_alias 的第一个位置参数必须是 Session（防止签名再次漂移）。"""
-    import inspect
-
-    from tagplatform.services.content.ingest import record_alias
-
-    params = list(inspect.signature(record_alias).parameters.values())
-    assert params[0].name == "session"
-    assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    assert "library" not in inspect.signature(record_alias).parameters

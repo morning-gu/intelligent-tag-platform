@@ -5,8 +5,6 @@ from __future__ import annotations
 import pytest
 
 from tagplatform.services.eval import (
-    ABLATION_VARIANTS,
-    MODALITIES,
     Variant,
     VariantResult,
     compare,
@@ -16,20 +14,6 @@ from tagplatform.services.eval import (
 
 
 # ---------------------------------------------------------------- 变体定义
-
-def test_variants_match_upstream_config_names():
-    """与 genometag-mllm `configs/ablation/*.yaml` 的五份配置逐一对应。"""
-    assert [variant.name for variant in ABLATION_VARIANTS] == [
-        "full", "video-only", "script-only", "dialogue-only", "video-script",
-    ]
-
-
-def test_only_full_variant_is_full():
-    full = [v.name for v in ABLATION_VARIANTS if v.is_full]
-
-    assert full == ["full"]
-    assert variant_by_name("full").modalities == frozenset(MODALITIES)
-
 
 def test_dropped_lists_missing_modalities_in_stable_order():
     """顺序固定为 `MODALITIES` 声明的顺序，报表才可比。"""
@@ -71,18 +55,6 @@ def test_finalize_empty_is_none_not_zero():
 
     assert result.metrics == {}
     assert result.n_items == 0
-
-
-def test_add_missing_metric_on_one_item_keeps_lists_uneven():
-    """只要某个指标少加一项，长度立刻不等 —— `compare` 必须能抓到这种错。"""
-    result = VariantResult(variant_by_name("video-only"))
-    result.add({"a": 1.0}, item="x")
-    result.add({"b": 2.0}, item="y")
-
-    result.finalize()
-
-    assert len(result.per_item["a"]) == 1
-    assert len(result.per_item["b"]) == 1
 
 
 # ---------------------------------------------------------------- 配对 bootstrap

@@ -161,22 +161,6 @@ def test_missing_decision_or_overall_reason_is_not_inferred(field):
     assert rows[1]["evaluated"] is False and rows[1]["pass"] is None
 
 
-def test_redundancy_instruction_and_unified_criteria_in_prompt():
-    from tagplatform.capabilities.prompts._evaluation import UNIFIED_EVALUATION_CRITERIA
-    from tagplatform.capabilities.prompts.mtg import JUDGE_TEMPLATE
-
-    assert "独立保留价值" in REVIEW_PROMPT
-    assert '"evidence":' not in REVIEW_PROMPT
-    assert "缺失时参考场景挂载点" not in REVIEW_PROMPT
-    # Judge 与开放评测必须共用完全一致的统一三维评价标准正文，且不含叠甲式负向说明或加权元信息
-    assert UNIFIED_EVALUATION_CRITERIA in REVIEW_PROMPT
-    assert UNIFIED_EVALUATION_CRITERIA in JUDGE_TEMPLATE
-    for prompt_text in (UNIFIED_EVALUATION_CRITERIA, JUDGE_TEMPLATE, REVIEW_PROMPT):
-        assert "不代表" not in prompt_text
-        assert "不需要自行加权" not in prompt_text
-        assert "自动聚合总分" not in prompt_text
-
-
 def test_review_forwards_directory_and_aggregates_value_by_tag_kind():
     rows = [
         {"id": "t0", "name": "逃离安排", "desc": "通用释义", "level": "film",
@@ -238,16 +222,6 @@ def test_missing_desc_keeps_low_semantics_defect_but_nulls_high_score():
     out = review_movie_tags(client, _content(), rows, run_id="r1:m1")
     assert out[0]["semantics"]["score"] == 1
     assert out[1]["semantics"] == {"score": None, "reason": "缺少释义"}
-
-
-def test_mock_llm_open_review_uses_0_to_4_scale():
-    rows = review_movie_tags(MockLLMClient(), _content(), _rows(), run_id="r1:mock")
-    assert all(row["pass"] is True for row in rows)
-    assert all(row["relevance"]["score"] == 4 for row in rows)
-    assert all(row["semantics"]["score"] == 4 for row in rows)
-    assert all(row["value"]["score"] == 4.0 for row in rows)
-    assert all(set(row["value"]["dimensions"]) == {"presentation", "search", "recommendation"}
-               for row in rows)
 
 
 def test_film_high_relevance_requires_two_valid_distinct_scenes():

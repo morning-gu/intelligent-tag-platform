@@ -150,6 +150,28 @@ def test_tag_catalog_dir_type_enum(session):
         session.commit()
 
 
+def test_media_asset_and_build_task_checks_reject_invalid_enums(session):
+    """media_asset.asset_type 与 asset_build_task.status 的 CHECK 约束真实拦截非法值。"""
+    from tagplatform.capabilities.storage.models import AssetBuildTask
+
+    session.add(MediaAsset(asset_id="a_bad", asset_type="film", title="x"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    session.add(MediaAsset(asset_id="a_ok", asset_type="movie", title="x"))
+    session.flush()
+    session.add(AssetBuildTask(task_id="t_bad", asset_id="a_ok", movie_id="m", status="done"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    session.add(MediaAsset(asset_id="a_ok", asset_type="movie", title="x"))
+    session.flush()
+    session.add(AssetBuildTask(task_id="t_ok", asset_id="a_ok", movie_id="m", status="queued"))
+    session.commit()
+
+
 def test_alembic_upgrade(tmp_path):
     """子进程执行 alembic upgrade head，升级后 sqlite_master 中核心表齐备。"""
     db_path = tmp_path / "m.db"

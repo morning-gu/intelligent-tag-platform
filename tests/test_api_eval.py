@@ -807,27 +807,6 @@ def test_movie_detail_theta_query(client):
     assert [m["tag_id"] for m in mid["misses"]] == ["t7"]
 
 
-def test_movies_theta_non_admin_401(client):
-    """θ 参数不影响门禁：带参访问仍 403（reviewer）/ 401（未登录）。"""
-    _seed_dataset_and_library(client)
-    _write_movies_run(client, rows=_theta_split_rows(), thetas=_THETA_GRID)
-    assert client.post("/api/v1/users", json={
-        "username": "bob", "password": "pw-bob-1", "role": "reviewer"
-    }).status_code == 200
-    client.post("/api/v1/auth/logout")
-    client.post("/api/v1/auth/login",
-                json={"username": "bob", "password": "pw-bob-1"})
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
-                      params={"theta_p": 0.2}).status_code == 403
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
-                      params={"theta_r": 0.8}).status_code == 403
-    client.post("/api/v1/auth/logout")
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies",
-                      params={"theta_p": 0.2}).status_code == 401
-    assert client.get(f"{_BASE}/runs/{_MOVIES_RUN}/movies/tt-split",
-                      params={"theta_r": 0.8}).status_code == 401
-
-
 # ---------------------------------------------------------------- 开放评测端点族（open-eval Task 6）
 
 # open 端点族前缀（本节用例共用；dataset 三别名与 closed 共享 override 状态）

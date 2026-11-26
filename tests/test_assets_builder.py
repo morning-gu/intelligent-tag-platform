@@ -20,7 +20,6 @@ import pytest
 
 from tagplatform.capabilities.adapters.vision import to_content_json
 from tagplatform.services.content.assets import (
-    ASSET_BUILDER_VERSION,
     AssetBuilder,
     CastIndex,
     assemble_asset,
@@ -34,7 +33,6 @@ from tagplatform.services.content.assets import (
     parse_summary_result,
     pick_keyframes,
     plan_scenes,
-    source_tag,
 )
 from tagplatform.services.content.assets.subtitles import SubtitleLine
 from tagplatform.capabilities.llm import LLMResponse
@@ -371,14 +369,6 @@ def test_infer_off_fills_only_dataset_facts(tmp_path):
         "character_id": "character_001", "name": "Don Vito",
         "aliases": [], "description": "由 Actor A 饰演"}
 
-
-def test_source_tag_two_modes():
-    """推断 / 纯事实两种口径的 source 标识不同（写进 media_asset.source）。
-
-    编码与 main 分支一致：`asset_builder:<版本>-<模式>`。
-    """
-    assert source_tag(True) == f"asset_builder:{ASSET_BUILDER_VERSION}-infer"
-    assert source_tag(False) == f"asset_builder:{ASSET_BUILDER_VERSION}-facts"
 
 def test_build_movie_without_subtitles(tmp_path):
     """没有字幕的片：dialogues 为空，其余照常。"""

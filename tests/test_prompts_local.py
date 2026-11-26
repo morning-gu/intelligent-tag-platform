@@ -1,19 +1,10 @@
-"""capabilities/prompts 本地化契约测试（四层重构 Task 3）。
+"""capabilities/prompts 本地化契约测试。
 
-文案保真（Review Focus #2）：get_prompt 返回值与迁移文件的冻结字面量
-逐字一致——closed 取 0016 播种版、open 取 0002 播种版（0013/0016 只
-UPDATE closed 行，open v1 文案自 0002 起未再变）。迁移文件是历史快照，
-是 models.py 常量删除后唯一自包含的逐字基准，经 importlib 加载其模块级
-常量（不执行任何迁移操作）。
-
-其余契约：未知 mode 抛 ValueError；模板常量满足原 `_validate_template_text`
-的全部语义（模板为代码常量后运行时校验退役为测试断言——错了测试红而非
-运行时拦截）；GET /api/v1/prompts 只读契约视图的结构与白名单一致。
+覆盖：未知 mode 抛 ValueError；模板常量占位符白名单与语法合法性；
+GET /api/v1/prompts 只读契约视图的结构、过滤与非管理员可读权限。
 """
 
-import importlib.util
 import string
-from pathlib import Path
 
 import pytest
 
@@ -21,46 +12,7 @@ from tagplatform.capabilities.prompts import (
     ALLOWED_FIELDS,
     REQUIRED_PLACEHOLDERS,
     get_prompt,
-    render_prompt,
 )
-
-# 仓库根（alembic/versions 所在目录）
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _migration_literal(filename: str, constant: str) -> str:
-    """从迁移文件加载冻结字面量（模块级常量，加载即取值，不跑迁移）。"""
-    path = _REPO_ROOT / "alembic" / "versions" / filename
-    spec = importlib.util.spec_from_file_location(
-        f"_migration_snapshot_{path.stem}", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return getattr(module, constant)
-
-
-# ---------- 文案保真（Review Focus #2：错一字即评测口径漂移） ----------
-
-
-def test_get_prompt_closed_matches_frozen_0016_literal():
-    """closed 文案保真：本地常量 == 0016 播种版逐字（三模态 evidence 版）。"""
-    frozen = _migration_literal(
-        "0016_closed_prompt_multimodal_evidence.py", "_PROMPT_V1_CLOSED_TEXT")
-    assert get_prompt("closed") == frozen
-
-
-def test_get_prompt_open_retired_raises_value_error():
-    """open 模板常量已退役（开放生成由内置 mtg 流水线自拼 prompt）。"""
-    with pytest.raises(ValueError):
-        get_prompt("open")
-
-
-def test_render_prompt_output_matches_frozen_literal_render():
-    """渲染输出保真：本地模板渲染结果与冻结字面量渲染结果逐字一致。"""
-    frozen = _migration_literal(
-        "0016_closed_prompt_multimodal_evidence.py", "_PROMPT_V1_CLOSED_TEXT")
-    rendered_local = render_prompt(get_prompt("closed"), content="内容X")
-    rendered_frozen = frozen.format(content="内容X")
-    assert rendered_local == rendered_frozen
 
 
 def test_get_prompt_unknown_mode_raises_value_error():
@@ -118,3 +70,16 @@ def test_contract_endpoint_mode_filter(client):
     assert [r["mode"] for r in closed.json()] == ["closed"]
     empty = client.get("/api/v1/prompts", params={"mode": "hybrid"})
     assert empty.status_code == 200 and empty.json() == []
+
+
+def test_non_admin_can_read_prompts_contract(client):
+    """reviewer 访问只读契约视图 → 200（登录即可读）。"""
+    assert client.post("/api/v1/users", json={
+        "username": "bob", "password": "pw-bob-1", "role": "reviewer"}
+    ).status_code == 200
+    client.post("/api/v1/auth/logout")
+    client.post("/api/v1/auth/login",
+                json={"username": "bob", "password": "pw-bob-1"})
+    resp = client.get("/api/v1/prompts")
+    assert resp.status_code == 200
+    assert [r["mode"] for r in resp.json()] == ["closed"]

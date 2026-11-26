@@ -1,19 +1,10 @@
 """情绪词表测试：中文名 ↔ 大写码，词表外的词一律丢弃。"""
-import pytest
-
 from tagplatform.services.content.assets.emotions import (
     FEELINGS,
     MOODS,
-    prompt_catalog,
     to_emotion,
     to_emotions,
 )
-
-
-def test_catalog_codes_are_unique_and_uppercase():
-    codes = [code for _, code in FEELINGS + MOODS]
-    assert len(codes) == len(set(codes))
-    assert all(code == code.upper() and " " not in code for code in codes)
 
 
 def test_to_emotion_by_name_or_code():
@@ -41,9 +32,3 @@ def test_to_emotions_dedupes_and_limits():
     assert out == [{"name": "愤怒", "code": "ANGER"},
                    {"name": "恐惧", "code": "FEAR"}]
     assert to_emotions("不是列表", FEELINGS) == []
-
-
-def test_prompt_catalog_lists_name_and_code():
-    text = prompt_catalog(FEELINGS)
-    assert "愤怒(ANGER)" in text and "恐惧(FEAR)" in text
-    assert text.count("(") == len(FEELINGS)

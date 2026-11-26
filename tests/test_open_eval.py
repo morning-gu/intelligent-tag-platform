@@ -405,16 +405,6 @@ def _drain_active(service, timeout=15.0):
         time.sleep(0.01)
 
 
-# ---------------------------------------------------------------- 契约常量
-
-def test_runner_constants():
-    # 契约钉死：默认并发 / 每片重试 / produce 熔断阈值（沿用闭环语义）/ 评审独立熔断
-    assert DEFAULT_CONCURRENCY == 4
-    assert RETRY_PER_MOVIE == 2
-    assert ABORT_CONSECUTIVE == 5
-    assert ABORT_REVIEW_CONSECUTIVE == 5
-
-
 # ---------------------------------------------------------------- 起跑校验
 
 def test_start_validation_order(open_setup):

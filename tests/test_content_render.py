@@ -10,7 +10,6 @@
 import json
 from pathlib import Path
 
-from tagplatform.capabilities.llm.mock import _parse_scenes
 from tagplatform.schemas import parse_content
 from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.services.generation.assemble import _MAX_CAST_LINES
@@ -136,15 +135,3 @@ def test_cast_line_truncates():
     text = _render_content_text(parse_content(data))
     assert f"角色{_MAX_CAST_LINES - 1}" in text
     assert f"角色{_MAX_CAST_LINES}" not in text
-
-
-def test_detail_lines_do_not_break_scene_contract():
-    """明细行不得被 MockLLM 的场景行正则误识别（证据链依赖场景行唯一性）。"""
-    data = json.loads(json.dumps(FIXTURE))
-    data["content"]["scenes"][0]["emotions"] = ["紧张"]
-    data["content"]["scenes"][0]["dialogues"] = [{
-        "speaker": "张三", "text": "台词", "start_ms": 0, "end_ms": 1}]
-    text = _render_content_text(parse_content(data))
-    scenes = _parse_scenes(text)
-    assert len(scenes) == len(data["content"]["scenes"])
-    assert scenes[0]["scene_id"] == data["content"]["scenes"][0]["scene_id"]

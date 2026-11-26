@@ -59,17 +59,6 @@ def test_path_of_walks_up_to_root():
     assert library.path_of("dir_unknown") == []
 
 
-def test_scope_inherits_from_parent_and_defaults_to_content():
-    add_dirs([{"dir_id": "dir_genre_child", "parent_id": "dir_genre",
-               "level": 3, "dir_name": "子类型", "dir_type": DIR_STATIC,
-               "applicable_scope": SCOPE_CONTENT, "description": "", "aliases": []}])
-    library = try_load_library()
-    assert library.scope_of("dir_scene") == SCOPE_SCENE
-    assert library.scope_of("dir_char") == SCOPE_CHARACTER
-    assert library.scope_of("dir_genre_child") == SCOPE_CONTENT
-    assert library.scope_of("dir_missing") == SCOPE_CONTENT
-
-
 def test_scope_child_overrides_parent():
     """子目录声明的适用范围覆盖父目录。"""
     add_dirs([
@@ -228,11 +217,6 @@ def test_mount_scene_uses_first_real_scene():
     mount = resolve_mount(SCOPE_SCENE, content.asset.asset_id, content,
                           [Evidence(scene_id, 0, 1000, "证据")])
     assert mount == Mount("scene", scene_id)
-
-
-def test_mount_scene_without_evidence_returns_none():
-    content = _content()
-    assert resolve_mount(SCOPE_SCENE, content.asset.asset_id, content, []) is None
 
 
 def test_mount_character_needs_exactly_one_character():

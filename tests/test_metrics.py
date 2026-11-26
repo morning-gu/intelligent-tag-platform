@@ -501,13 +501,6 @@ def test_dir_coverage_endpoint(client):
     assert resp.json() == DIR_COVERAGE_EXPECTED
 
 
-def test_tag_type_coverage_endpoint_retired_404(client):
-    """旧端点 /metrics/tag-type-coverage 随 tag_type 维度退役 → 404
-    （路由表无旧路径残留）。"""
-    resp = client.get("/api/v1/metrics/tag-type-coverage")
-    assert resp.status_code == 404
-
-
 def test_metrics_endpoints_require_login(client):
     """未登录 401：新 TestClient 不带 cookie（protected_deps 统一挂载覆盖
     metrics router）。"""

@@ -17,30 +17,6 @@ EXPECTED_KEYS = {
 }
 
 
-def test_config_returns_all_fields(client):
-    """字段集合精确相等，取值与 conftest client fixture 的 Settings 一致。"""
-    resp = client.get("/api/v1/config")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert set(body.keys()) == EXPECTED_KEYS
-    # 默认值（fixture 只覆盖 mock 开关/workers/库路径）
-    assert body["llm_model"] == "qwen3.7-plus"
-    assert body["llm_temperature"] == 0.7
-    # 模型视图增补字段（夹具钉死默认值，见 conftest client fixture）
-    assert body["mtg_judge_model"] == "deepseek-v4.1-flash"
-    assert body["mtg_judge_enabled"] is True
-    assert body["embedding_backend"] == "local"
-    assert body["embedding_model"] == "BAAI/bge-m3"
-    assert body["open_eval_review_model"] == ""  # 空 = 回落主 LLM
-    assert body["recall_top_k_per_type"] == 50
-    assert body["open_library_suspect_cosine"] == 0.75
-    assert body["open_library_name_overlap"] == 0.4
-    assert body["generation_workers"] == 0  # fixture 钉死同步执行
-    assert body["use_mock_llm"] is True
-    assert body["use_mock_embedder"] is True
-    assert body["database_path"].endswith("tagplatform.db")  # fixture 临时库
-
-
 def test_config_reports_effective_remote_embedding_model():
     """embedding_backend=remote 时，embedding_model 返回实际生效的 embedding_api_model。"""
     from tagplatform.orchestration.config import get_config
@@ -56,11 +32,13 @@ def test_config_reports_effective_remote_embedding_model():
 
 
 def test_config_contains_no_secrets(client):
-    """机密不外泄：无 session_secret/admin_password 键，值中无默认密钥串。"""
-    body = client.get("/api/v1/config").json()
+    """只读字段集合精确匹配契约，机密不外泄（无密钥键且无默认密钥值）。"""
+    resp = client.get("/api/v1/config")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == EXPECTED_KEYS
     assert "session_secret" not in body
     assert "admin_password" not in body
-    # 兜底：默认会话密钥值（dev-secret）不得出现在任何序列化值中
     assert "dev-secret" not in json.dumps(body)
 
 

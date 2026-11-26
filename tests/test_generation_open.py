@@ -138,13 +138,6 @@ class _FixedGenLLM:
 # ---- 主链路 ----
 
 
-def test_open_producer_declares_self_built_prompt():
-    producer = OpenTagProducer()
-    assert producer.mode == "open"
-    assert producer.builds_prompt is True
-    assert producer.prompt_version == "mtg-v13-aligned-criteria"
-
-
 def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
     """单场资产只生成场景级标签，judge 全过后输出带证据的候选。"""
     spec = _build_spec(session, content_fixture, run_id="r1")

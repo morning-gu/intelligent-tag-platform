@@ -26,12 +26,6 @@ def _load_fixture() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def test_spec_example_valid():
-    data = json.loads(Path("tests/fixtures/content_movie.json").read_text(encoding="utf-8"))
-    c = parse_content(data)
-    assert c.asset.asset_id == "movie_001" and c.content.scenes[0].dialogues[0].speaker == "角色A"
-
-
 @pytest.mark.parametrize("mutate", [
     {"path": ("content", "scenes", 0, "time_range", "end_ms"), "value": 1000},   # end<start
     {"path": ("asset", "duration_ms"), "value": -1},

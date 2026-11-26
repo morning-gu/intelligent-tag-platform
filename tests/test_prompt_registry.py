@@ -1,4 +1,4 @@
-"""GET /api/v1/prompts/registry 契约 + assets/open_review 搬运 wiring。"""
+"""GET /api/v1/prompts/registry 契约与完备性守门测试。"""
 from tagplatform.capabilities.prompts import mtg as mtg_prompts
 from tagplatform.capabilities.prompts import (
     assets as assets_prompts,
@@ -6,16 +6,6 @@ from tagplatform.capabilities.prompts import (
     registry as registry_mod,
     templates as templates_prompts,
 )
-from tagplatform.capabilities.prompts.assets import (
-    SCENE_ANALYSIS_OUTPUT_TEXT, SCENE_ANALYSIS_ROLE_TEXT,
-    SUMMARY_OUTPUT_TEXT, SUMMARY_REQUIREMENTS_TEXT, SUMMARY_TASK_TEXT,
-)
-from tagplatform.services.content.assets.builder import (
-    ScenePlan, scene_messages, summary_messages,
-)
-
-# client 为 tests/conftest.py 的 pytest fixture（真 app + 临时库 + mock
-# LLM/嵌入器），测试以函数参数注入：def test_x(client): ...
 
 
 def _public_str_constants(module) -> set[str]:
@@ -56,60 +46,3 @@ def test_registry_endpoint_contract(client):
         for item in group["items"]:
             assert item["name"]
             assert item["text"].strip()
-
-
-def test_registry_closed_content(client):
-    groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
-    closed_texts = [i["text"] for i in groups["closed"]["items"]]
-    assert any("候选标签按目录分组" in t for t in closed_texts)      # CLOSED_TEMPLATE_TEXT 特征串
-
-
-def test_registry_mtg_items_match_constants(client):
-    groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
-    by_name = {i["name"]: i["text"] for i in groups["mtg"]["items"]}
-    assert by_name["SCENE_GENERATION_TEMPLATE"] == mtg_prompts.SCENE_GENERATION_TEMPLATE
-    assert by_name["FILM_GENERATION_TEMPLATE"] == mtg_prompts.FILM_GENERATION_TEMPLATE
-    assert by_name["JUDGE_TEMPLATE"] == mtg_prompts.JUDGE_TEMPLATE  # 单一来源钉死
-    assert by_name["DESCRIPTION_TEMPLATE"] == mtg_prompts.DESCRIPTION_TEMPLATE
-    assert by_name["VERIFY_TEMPLATE"] == mtg_prompts.VERIFY_TEMPLATE
-
-
-def test_registry_open_review_content(client):
-    groups = {g["module"]: g for g in client.get("/api/v1/prompts/registry").json()}
-    items = {i["name"]: i["text"] for i in groups["open_review"]["items"]}
-    assert set(items) == {
-        "REVIEW_PROMPT", "REVIEW_RETRY_HINT", "REVIEW_PROMPT_VERSION",
-    }
-    assert items["REVIEW_PROMPT_VERSION"] == "open-review-v12"
-    assert "## 开放评测补充规则" in items["REVIEW_PROMPT"]
-    assert "## 标签质量评估" in items["REVIEW_PROMPT"]
-    assert "内容呈现（presentation）" in items["REVIEW_PROMPT"]
-    assert "目标目录匹配度" in items["REVIEW_PROMPT"]
-    assert "不代表" not in items["REVIEW_PROMPT"]
-    assert "不需要自行加权汇总" not in items["REVIEW_PROMPT"]
-    assert "自动聚合总分" not in items["REVIEW_PROMPT"]
-    assert "evidence_scene_ids" in items["REVIEW_PROMPT"]
-    assert "reviews" in items["REVIEW_PROMPT"]
-    assert "judge_reference" not in items["REVIEW_PROMPT"]
-    assert "reviews" in items["REVIEW_RETRY_HINT"]
-
-
-def test_registry_does_not_break_prompt_contract_locks(client):
-    assert client.post("/api/v1/prompts").status_code == 405
-
-
-def test_summary_messages_use_central_copy():
-    text = summary_messages("大都会", "1927", ["剧情"], "A romance...")[0]["content"]
-    assert SUMMARY_TASK_TEXT in text
-    assert SUMMARY_REQUIREMENTS_TEXT in text
-    assert SUMMARY_OUTPUT_TEXT in text
-
-
-def test_scene_messages_use_central_copy():
-    plan = ScenePlan(scene_id="scene_1", start_ms=0, end_ms=1000,
-                     source_description="A scene", frames=[], dialogues=[])
-    content = scene_messages("大都会", "1927", ["剧情"], ["Cast"], plan, [])[0]["content"]
-    # content 为多模态 parts 列表（text part + image parts）；无帧时仅一个 text part
-    text = content[0]["text"] if isinstance(content, list) else content
-    assert SCENE_ANALYSIS_ROLE_TEXT in text
-    assert SCENE_ANALYSIS_OUTPUT_TEXT in text

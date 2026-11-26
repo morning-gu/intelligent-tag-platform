@@ -30,14 +30,11 @@ from tagplatform.services.generation.execute import run_generation_task
 from tagplatform.services.generation.filtering import (
     FilterContext,
     FilterOutcome,
-    list_filters,
     register_filter,
     run_filter_chain,
 )
 from tagplatform.services.generation.filtering.base import _CHAIN
-from tagplatform.services.generation.filtering.fence import InfoFenceFilter
-from tagplatform.services.generation.filtering.quality import QualityFilter
-from tagplatform.schemas import ContentJSON, parse_content
+from tagplatform.schemas import parse_content
 from tagplatform.capabilities.vectors import encode_vector
 
 _CONTENT_DATA = json.loads(
@@ -75,17 +72,7 @@ def restore_chain():
     _CHAIN.extend(saved)
 
 
-# ---- 注册表与默认链 ----
-
-
-def test_default_chain_order():
-    """默认链顺序即"先质量评估、后信息围栏"。"""
-    assert list_filters() == ["quality", "fence"]
-
-
-def test_default_chain_instances_registered():
-    assert isinstance(_CHAIN[0], QualityFilter)
-    assert isinstance(_CHAIN[1], InfoFenceFilter)
+# ---- 注册表与空链 ----
 
 
 def test_duplicate_name_raises(restore_chain):
@@ -107,20 +94,7 @@ def test_empty_chain_passes_through(restore_chain):
     assert reports == []
 
 
-# ---- 占位环节行为 ----
-
-
-def test_placeholder_stages_pass_through():
-    tags = [_tag("甲"), _tag("乙", tag_id="tag_y")]
-    kept, reports = run_filter_chain(tags, _ctx(), None)
-    assert kept == tags
-    assert [r.name for r in reports] == ["quality", "fence"]
-    assert all(r.kept == 2 and r.dropped == 0 for r in reports)
-    assert "未评估" in reports[0].note
-    assert "未围栏" in reports[1].note
-
-
-# ---- 自定义环节：丢弃 / 改写 / 抛错 ----
+# ---- 自定义环节：丢弃 / 抛错 ----
 
 
 class _DropAll:
@@ -162,47 +136,6 @@ def test_exception_propagates(restore_chain):
     register_filter(_Boom())
     with pytest.raises(RuntimeError, match="环节崩溃"):
         run_filter_chain([_tag("甲")], _ctx(), None)
-
-
-# ---- 日志输出（"标签去哪了"要能从日志里查出来） ----
-
-
-def test_chain_logs_start_stage_and_end(caplog):
-    tags = [_tag("甲"), _tag("乙", tag_id="tag_y")]
-    with caplog.at_level("INFO",
-                         logger="tagplatform.services.generation.filtering"):
-        run_filter_chain(tags, _ctx(), None)
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("过滤责任链开始" in m and "task_f" in m for m in messages)
-    assert any(
-        "过滤环节 [1/2] quality 完成" in m and "保留 2 条、丢弃 0 条" in m
-        for m in messages)
-    assert any("过滤环节 [2/2] fence 完成" in m for m in messages)
-    assert any("过滤责任链结束" in m and "2 条候选 → 2 条通过" in m
-               for m in messages)
-
-
-def test_stage_logs_input_tag_names(caplog):
-    """两个占位环节各自打出收到的候选名，便于排查丢在哪一步。"""
-    tags = [_tag("甲"), _tag("乙", tag_id="tag_y")]
-    with caplog.at_level("INFO",
-                         logger="tagplatform.services.generation.filtering"):
-        run_filter_chain(tags, _ctx(), None)
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("质量评估" in m and "收到 2 条候选" in m and "甲" in m
-               for m in messages)
-    assert any("信息围栏" in m and "收到 2 条候选" in m for m in messages)
-
-
-def test_dropped_detail_logged(restore_chain, caplog):
-    """有丢弃时打出被丢标签名（明细只进日志，不入库）。"""
-    register_filter(_DropNamed())
-    with caplog.at_level("INFO",
-                         logger="tagplatform.services.generation.filtering"):
-        run_filter_chain([_tag("甲"), _tag("乙", tag_id="tag_y")], _ctx(), None)
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("test_drop_named 丢弃明细" in m and "甲" in m
-               for m in messages)
 
 
 # ---- 执行序列集成（execute.run_generation_task 第 6.5 步） ----
@@ -270,22 +203,3 @@ def test_runner_filter_error_fails_task(session, restore_chain):
     assert done.status == "failed" and "围栏服务不可用" in done.error
     assert done.finished_at is not None
     assert session.query(PreAssetTag).count() == 0
-
-
-def test_runner_default_chain_keeps_all(session):
-    """默认占位链不影响既有产出（回归保护：加链不改变入库结果）。"""
-    _seed_catalog(session)
-    t = _make_task(session, task_id="task_filter_3")
-    done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
-    assert done.status == "succeeded"
-    assert session.query(PreAssetTag).filter(
-        PreAssetTag.task_id == t.task_id).count() >= 1
-
-
-def test_context_carries_task_and_content():
-    """FilterContext 形状：任务标识 + 内容（环节按需取用）。"""
-    ctx = _ctx()
-    assert ctx.task_id == "task_f" and ctx.asset_id == "movie_001"
-    assert ctx.mode == "closed"
-    assert isinstance(ctx.content, ContentJSON)
-    assert ctx.content.content.scenes  # 夹具内容可被环节读取

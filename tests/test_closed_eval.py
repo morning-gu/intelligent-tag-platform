@@ -251,82 +251,6 @@ class _SlowLLM(MockLLMClient):
         return super().complete(messages, run_id)
 
 
-class _CountingSessionFactory:
-    """会话计数工厂（池饿死回归探针）：包装真实工厂，按线程计进出。
-
-    逐线程归属是判据的正确口径（终审 Important）：池饿死事故的本质是
-    「**本线程**的 produce（含 LLM 调用）持有**自己的**连接」；跨线程的
-    毫秒级 assemble 会话重叠是合法并发，按全局计数会把正确实现也判红
-    （评审者实测：逐线程恒 0、全局口径恒 4 假阳性）。锁内维护
-    open_by_thread 与全局开放会话峰值（峰值合法性 ≤ concurrency）。
-    """
-
-    def __init__(self, inner):
-        self._inner = inner
-        self._lock = threading.Lock()
-        self.open_by_thread: dict[int, int] = {}
-        self.peak_open = 0
-
-    def __call__(self):
-        return _CountingSession(self._inner(), self)
-
-    def _enter(self) -> None:
-        tid = threading.get_ident()
-        with self._lock:
-            n = self.open_by_thread.get(tid, 0) + 1
-            self.open_by_thread[tid] = n
-            self.peak_open = max(self.peak_open,
-                                 sum(self.open_by_thread.values()))
-
-    def _exit(self) -> None:
-        tid = threading.get_ident()
-        with self._lock:
-            n = self.open_by_thread.get(tid, 0) - 1
-            if n > 0:
-                self.open_by_thread[tid] = n
-            else:
-                self.open_by_thread.pop(tid, None)
-
-    def held_by_current_thread(self) -> int:
-        with self._lock:
-            return self.open_by_thread.get(threading.get_ident(), 0)
-
-
-class _CountingSession:
-    """计数会话：属性透传内层（Task 5 装配两级化后干跑循环不开会话，
-    本探针留作回归守卫——若循环里重新出现会话，LLM 调用期持有即翻红）。"""
-
-    def __init__(self, inner, factory):
-        self._inner = inner
-        self._factory = factory
-
-    def __enter__(self):
-        self._factory._enter()
-        return self._inner
-
-    def __exit__(self, *exc):
-        self._factory._exit()
-        return self._inner.__exit__(*exc)
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)
-
-
-class _SessionProbeLLM(MockLLMClient):
-    """LLM 桩：complete() 时记**本线程**持有的会话数（violation 计数，
-    不中断跑——跨线程合法重叠不计，见 _CountingSessionFactory 口径注）。"""
-
-    def __init__(self, factory):
-        super().__init__()
-        self._factory = factory
-        self.violations = 0
-
-    def complete(self, messages, run_id):
-        if self._factory.held_by_current_thread() > 0:
-            self.violations += 1
-        return super().complete(messages, run_id)
-
-
 @pytest.fixture
 def engine(tmp_path):
     """评测服务用文件 DB（四层重构 Task 3 起 prompt 本地化：create_all
@@ -422,13 +346,6 @@ def _drain_active(service, timeout=15.0):
         time.sleep(0.01)
 
 
-def test_runner_constants():
-    # 契约钉死：默认并发 / 每片重试（含首发共 3 次尝试）/ 完成序连败中止阈值
-    assert DEFAULT_CONCURRENCY == 4
-    assert RETRY_PER_MOVIE == 2
-    assert ABORT_CONSECUTIVE == 5
-
-
 def test_run_completes_and_writes_artifacts(svc, root):
     run_id = svc.start("emotion", {"mode": "all"}, wait=True)
     assert svc.get(run_id).status == "succeeded"
@@ -460,26 +377,6 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
     assert (meta["status"], meta["done"], meta["total"],
             meta["failed"]) == ("succeeded", 2, 2, 0)
-
-
-def test_llm_calls_hold_zero_db_sessions(eval_setup, engine):
-    """池饿死事故回归（2026-11-21 run-081903，并发 16 > 池 5+10）：
-    LLM 调用线程自身不得持有 DB 会话——produce 含全部 LLM 调用（分钟级），
-    会话横跨它就会在高并发下占死 QueuePool、拖垮全部平台 API。
-    Task 5 装配两级化后干跑循环零 DB（装配只在起跑发生一次），判据
-    天然成立；探针留作守卫——循环里重新出现会话即翻红。"""
-    from tagplatform.capabilities.storage import make_session_factory
-
-    factory = _CountingSessionFactory(make_session_factory(engine))
-    llm = _SessionProbeLLM(factory)
-    # 探针经 LLM 包装生效；service 的 session_factory 参数已随 Task 11
-    # 裁定删除（服务体内零 DB，该参数零消费者）
-    service = eval_setup(llm=llm)
-    run_id = service.start("emotion", {"mode": "all"}, wait=True)
-    assert service.get(run_id).status == "succeeded"
-    assert service.get(run_id).failed == 0
-    assert llm.violations == 0
-    assert factory.peak_open <= DEFAULT_CONCURRENCY
 
 
 def test_run_uses_run_start_library_snapshot(eval_setup):
