@@ -1,4 +1,4 @@
-"""评测域编排（闭环 13 个 + 开放 7 个 admin 用例）——orchestration/eval 域。
+"""评测域编排（闭环 14 个 + 开放 7 个 admin 用例）——orchestration/eval 域。
 
 用例清单（原 api/routers/eval.py 的装配与读侧容错，Task 11 原样下沉；
 开放评测 7 用例随 open-eval Task 6 追加——错误映射与 `_run_dir` 守卫
@@ -20,6 +20,8 @@ tagplatform.services.eval.open_service.OpenEvalService（数据集扫描/
 - `get_run_file`         产物下载（白名单五件套）
 - `get_run_movies`       run 逐片摘要（badcase 视图主表，θ 门可拆）
 - `get_run_movie_detail` 单片明细（摘要行展开懒加载三表）
+- `get_run_movie_raw_file` 单片 LLM 原始输出下载（llm_raw/{tt}.json，
+                         三重守卫 404；不进 raw_results、不进 API 载荷）
 
 开放评测（open-eval Task 6，读侧走 settings.open_eval_output_root）：
 
@@ -64,6 +66,7 @@ from tagplatform.services.eval.open_service import (
     RunBusyError as OpenRunBusyError,
 )
 from tagplatform.services.eval.service import (
+    _TT_FILENAME_RE,  # 管线追踪 Task 4：llm_raw 文件名白名单（单一常量定义源）
     DEFAULT_CONCURRENCY,
     EvalValidationError,
     RunActiveError,
@@ -171,11 +174,34 @@ class OpenRunSummaryOut(BaseModel):
     three_high: float | None = None
 
 
+class FunnelCountsOut(BaseModel):
+    """漏斗十键计数（读侧由 trace 候选/批次行纯派生，与
+    movie_breakdown.funnel_counts 同数，全 int）：n_recall 召回在册、
+    n_mentioned 给过适用度、n_kept/n_gate/n_unmountable/n_m_cap 为四类
+    结局的分流计数（unmentioned 不单设键，= n_recall − 其余四类）、
+    n_fabricated 编造条数、n_batches 批次数、parse_retries 重试批次数、
+    max_tags 全局输出上限 M。trace 缺失（老 run）→ 整体 None「暂无」
+    （None≠0），消费方（badcase 前端）按 null 渲染说明文案。"""
+
+    n_recall: int
+    n_mentioned: int
+    n_kept: int
+    n_gate: int
+    n_unmountable: int
+    n_m_cap: int
+    n_fabricated: int
+    n_batches: int
+    parse_retries: int
+    max_tags: int
+
+
 class MovieSummaryRowOut(BaseModel):
     """单片摘要行（badcase 视图主表行）：指标 float | None（None=算不出，
     前端「暂无」——θ-空相关集/无交集/失败片）；n_produced 为原始产出条数
-    含空间外；n_relevant 为 gt∩库 ≥θ 计数（失败片也照数）。行序由服务层
-    给出：失败置顶 → p_at_k 升序 → null 垫底 → 同分按 tt。"""
+    含空间外；n_relevant 为 gt∩库 ≥θ 计数（失败片也照数）；funnel 为漏斗
+    十键计数（FunnelCountsOut）或 None——raw 行无 trace（老 run）→ None
+    「暂无」（None≠0），键恒在。行序由服务层给出：失败置顶 → p_at_k 升序
+    → null 垫底 → 同分按 tt。"""
 
     tt: str
     title: str | None = None
@@ -187,6 +213,7 @@ class MovieSummaryRowOut(BaseModel):
     elapsed_ms: int | None = None
     n_produced: int
     n_relevant: int
+    funnel: FunnelCountsOut | None = None
 
 
 class MovieSummaryOut(BaseModel):
@@ -226,19 +253,66 @@ class OutOfSpaceTagOut(BaseModel):
     sf: float | None = None
 
 
+class TraceCandidateOut(BaseModel):
+    """召回候选追踪行（ProduceTrace.snapshot 形原样透传，服务端序=召回
+    序）：身份/目录/召回分/批次序入册定死；结局三字段 resolve 回填——
+    unmentioned 候选的 applicability/sf 双 None（「未提及」无显式上报
+    点）。消费方（前端踪迹表）按 outcome 五值枚举渲染。"""
+
+    tag_id: str
+    tag_name: str | None = None
+    dir_id: str
+    recall: float | None = None
+    batch: int | None = None
+    outcome: str
+    applicability: int | None = None
+    sf: float | None = None
+
+
+class TraceBatchOut(BaseModel):
+    """批次追踪行（解析成功一批记一次）：parse_retried=首败重试成功；
+    原始输出不在此行（只存 llm_raw 文件、走专用下载端点，不进 API
+    载荷）。"""
+
+    dir_id: str
+    batch: int
+    n: int
+    parse_retried: bool
+
+
+class MovieTraceOut(BaseModel):
+    """单片管线追踪包层（raw 行 "trace" 键的 API 透出口）：counts=漏斗
+    十键（funnel_counts 同数）；candidates 服务端序=召回序；batches 批次
+    序；fabricated 按判定出现次序累积不去重；max_tags 全局输出上限 M
+    （counts.max_tags 同值冗余透出——服务层组装形状如此）。老 run/失败
+    片 → 整体 None「暂无」（None≠0），消费方按 null 渲染说明文案。"""
+
+    counts: FunnelCountsOut
+    candidates: list[TraceCandidateOut]
+    batches: list[TraceBatchOut]
+    fabricated: list[str]
+    max_tags: int
+
+
 class MissTagOut(BaseModel):
     """漏检条目：相关（gt∩库 ≥θ）未产出，按 gt 分降序；tag_name 从当前
-    标签库回填（库缺该标签 → None）。"""
+    标签库回填（库缺该标签 → None）；lost_at 为丢失环节（unrecalled /
+    gate / unmountable / m_cap / unmentioned）或 None——trace 缺失（老
+    run）「暂无」与 kept-却-漏检的不自洽防御同走 None（None≠0，没数据
+    ≠没召回），消费方按 null 显示「—」。"""
 
     tag_id: str
     tag_name: str | None = None
     gt_score: float
+    lost_at: str | None = None
 
 
 class MovieDetailOut(BaseModel):
     """单片明细（摘要行展开懒加载）：produced/out_of_space/misses 三表；
     失败片三表全空、error 原样；theta_p/theta_r 与摘要包层同源（明细侧
-    hit/misses 分类跟 theta_r，theta_p 只回显）。"""
+    hit/misses 分类跟 theta_r，theta_p 只回显）；trace 为管线追踪包层
+    （MovieTraceOut）或 None——成功片且 raw 行带 trace 才组装，老 run/
+    失败片 → None（「暂无」，None≠0），键恒在。"""
 
     tt: str
     title: str | None = None
@@ -252,6 +326,7 @@ class MovieDetailOut(BaseModel):
     produced: list[ProducedTagOut]
     out_of_space: list[OutOfSpaceTagOut]
     misses: list[MissTagOut]
+    trace: MovieTraceOut | None = None
 
 
 # ---------------------------------------------------------------- 内部装配
@@ -563,6 +638,33 @@ def get_run_movie_detail(
         raise HTTPException(status_code=404,
                             detail=f"影片不在该 run 明细中：{tt!r}")
     return MovieDetailOut(**detail)
+
+
+def get_run_movie_raw_file(settings: Settings, run_id: str,
+                           tt: str) -> FileResponse:
+    """单片 LLM 原始输出下载（llm_raw/{tt}.json，FileResponse 直下——原始
+    输出不进 raw_results、不进 API 载荷）。守卫序镜像 get_run_file /
+    get_run_movie_detail：run 目录越界（_run_dir）→ tt 过 `_TT_FILENAME_RE`
+    白名单（Task 2 写侧同源常量，单一事实源）→ `_movies_read` 取行（复用
+    其 404 口径：raw 缺失/截断即 404）→ tt 须在 raw 行内 → 文件须存在；
+    任一不过 404「该 run 无此影片的原始输出」（不 500——写侧本就跳过非法
+    tt/失败片的 raw 文件，404 是既定语义不是异常）。"""
+    run_dir = _run_dir(settings, run_id)
+    if run_dir is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该 run 无此影片的原始输出：{run_id!r}")
+    if not _TT_FILENAME_RE.fullmatch(tt):
+        raise HTTPException(status_code=404,
+                            detail=f"该 run 无此影片的原始输出：{tt!r}")
+    rows, _, _ = _movies_read(settings, run_id)
+    if not any(row.get("tt") == tt for row in rows):
+        raise HTTPException(status_code=404,
+                            detail=f"该 run 无此影片的原始输出：{tt!r}")
+    path = run_dir / "llm_raw" / f"{tt}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404,
+                            detail=f"该 run 无此影片的原始输出：{tt!r}")
+    return FileResponse(path, filename=f"{tt}.json")
 
 
 # ---------------------------------------------------------------- 开放评测用例（open-eval Task 6）

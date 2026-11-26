@@ -1,4 +1,4 @@
-"""评测 admin API 薄路由：闭环 `/api/v1/eval/closed`（13 端点）+ 开放
+"""评测 admin API 薄路由：闭环 `/api/v1/eval/closed`（14 端点）+ 开放
 `/api/v1/eval/open`（11 端点，open-eval Task 6），全部仅 admin。
 
 接入层只做协议转换：请求模型声明校验（mode 词表外 / 类型不符 → 422 自动）
@@ -226,6 +226,18 @@ def get_run_movie_detail(
 ) -> MovieDetailOut:
     """单片明细（摘要行展开懒加载）：计分清单 + 空间外 + 漏检三表。"""
     return eval_orch.get_run_movie_detail(settings, run_id, tt, theta_p, theta_r)
+
+
+@router.get("/runs/{run_id}/movies/{tt}/llm-raw")
+def get_run_movie_raw_file(
+    run_id: str,
+    tt: str,
+    _admin: UserAccount = Depends(require_admin),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """单片 LLM 原始输出下载（llm_raw/{tt}.json；三重守卫 404，FileResponse
+    直下——不进 raw_results、不进 API 载荷）。"""
+    return eval_orch.get_run_movie_raw_file(settings, run_id, tt)
 
 
 # ---------------------------------------------------------------- 开放评测端点（open-eval Task 6）
