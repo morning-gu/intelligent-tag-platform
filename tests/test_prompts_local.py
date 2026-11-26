@@ -48,11 +48,10 @@ def test_get_prompt_closed_matches_frozen_0016_literal():
     assert get_prompt("closed") == frozen
 
 
-def test_get_prompt_open_matches_frozen_0002_literal():
-    """open 文案保真：本地常量 == 0002 播种版逐字。"""
-    frozen = _migration_literal("0002_prompt_templates.py",
-                                "_PROMPT_V1_OPEN_TEXT")
-    assert get_prompt("open") == frozen
+def test_get_prompt_open_retired_raises_value_error():
+    """open 模板常量已退役（开放生成由内置 mtg 流水线自拼 prompt）。"""
+    with pytest.raises(ValueError):
+        get_prompt("open")
 
 
 def test_render_prompt_output_matches_frozen_literal_render():
@@ -73,15 +72,15 @@ def test_get_prompt_unknown_mode_raises_value_error():
 # ---------- 模板常量契约（原 _validate_template_text 语义转测试断言） ----------
 
 
-@pytest.mark.parametrize("mode", ["closed", "open"])
+@pytest.mark.parametrize("mode", ["closed"])
 def test_template_constant_required_placeholders(mode):
-    """模板含该 mode 全部必需占位符（closed/open 均为 {content}）。"""
+    """模板含该 mode 全部必需占位符（closed 为 {content}）。"""
     text = get_prompt(mode)
     for placeholder in REQUIRED_PLACEHOLDERS[mode]:
         assert placeholder in text
 
 
-@pytest.mark.parametrize("mode", ["closed", "open"])
+@pytest.mark.parametrize("mode", ["closed"])
 def test_template_constant_no_illegal_fields(mode):
     """占位符白名单：format 解析出的字段只允许 content（字面花括号须双写
     转义——parse 对转义段返回 None，不受白名单约束）；format 语法合法
@@ -103,7 +102,7 @@ def test_contract_endpoint_readonly_structure(client):
     resp = client.get("/api/v1/prompts")
     assert resp.status_code == 200
     rows = resp.json()
-    assert [r["mode"] for r in rows] == ["closed", "open"]
+    assert [r["mode"] for r in rows] == ["closed"]
     for row in rows:
         assert set(row.keys()) == {"mode", "template_text",
                                    "allowed_fields", "required_placeholders"}

@@ -18,7 +18,7 @@ from collections.abc import Iterable, Sequence
 
 from tagplatform.capabilities.llm.usage import accumulate_usage
 from tagplatform.capabilities.prompts.mtg import (
-    DESCRIPTION_INSTRUCTIONS, DESCRIPTION_RETRY_HINT,
+    DESCRIPTION_RETRY_HINT, DESCRIPTION_TEMPLATE,
 )
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import MTGParseError, extract_json_array
@@ -95,7 +95,7 @@ def build_description_messages(items: Sequence[dict]) -> list[dict]:
     )
     return [{
         "role": "user",
-        "content": DESCRIPTION_INSTRUCTIONS + lines,
+        "content": DESCRIPTION_TEMPLATE.replace("{items}", lines),
     }]
 
 

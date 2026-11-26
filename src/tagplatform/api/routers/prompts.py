@@ -44,7 +44,7 @@ class RegistryItemOut(BaseModel):
 
 
 class RegistryGroupOut(BaseModel):
-    """全量文案清单组：按流水线分组（closed/mtg/assets/quality）。"""
+    """全量文案清单组：按流水线分组（closed/mtg/assets/open_review）。"""
 
     module: str
     title: str
@@ -72,7 +72,7 @@ def list_prompts(mode: str | None = Query(None)) -> list[PromptContractOut]:
 def prompt_registry() -> list[dict]:
     """全量 Prompt 文案只读清单（2026-11-22 文案集中新增）。
 
-    四组（closed/mtg/assets/quality），条目 = 常量名 + 文案本体；与
+    四组（closed/mtg/assets/open_review），条目 = 常量名 + 文案本体；与
     capabilities/prompts 各模块常量单一来源（registry 静态聚合，无第二份
     拷贝）。只读：文案是代码常量，git 即版本，无写端点。
     """

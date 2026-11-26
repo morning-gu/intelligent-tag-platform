@@ -70,41 +70,22 @@ def test_scope_inherits_from_parent_and_defaults_to_content():
     assert library.scope_of("dir_missing") == SCOPE_CONTENT
 
 
-def test_scope_of_parses_combination_value():
-    """组合值目录：scope_of 解析出三值组合，不再静默降级。
-
-    治理导入主路径默认写组合值（content,scene,character）——修复前 scope_of
-    只认单值，组合值目录沿父链回退、根目录落到 content，粒度校验与挂载
-    全部静默降级（Review Focus #3）。
-    """
-    add_dirs([{"dir_id": "dir_combo", "level": 1, "dir_name": "组合粒度",
-               "dir_type": DIR_DYNAMIC,
-               "applicable_scope": "content,scene,character",
-               "description": "", "aliases": []}])
-    library = try_load_library()
-    assert library.scope_of("dir_combo") == "content,scene,character"
-
-
-def test_scope_combination_overrides_parent():
-    """子目录声明组合值覆盖父目录（"子目录覆盖父目录"语义对组合值生效）。"""
+def test_scope_child_overrides_parent():
+    """子目录声明的适用范围覆盖父目录。"""
     add_dirs([
-        {"dir_id": "dir_combo_parent", "parent_id": None, "level": 1,
-         "dir_name": "组合父目录", "dir_type": DIR_DYNAMIC,
+        {"dir_id": "dir_scope_parent", "parent_id": None, "level": 1,
+         "dir_name": "父目录", "dir_type": DIR_DYNAMIC,
          "applicable_scope": SCOPE_CONTENT, "description": "", "aliases": []},
-        {"dir_id": "dir_combo_child", "parent_id": "dir_combo_parent",
-         "level": 2, "dir_name": "组合子目录", "dir_type": DIR_DYNAMIC,
-         "applicable_scope": "scene,character", "description": "", "aliases": []},
+        {"dir_id": "dir_scope_child", "parent_id": "dir_scope_parent",
+         "level": 2, "dir_name": "子目录", "dir_type": DIR_DYNAMIC,
+         "applicable_scope": SCOPE_SCENE, "description": "", "aliases": []},
     ])
     library = try_load_library()
-    assert library.scope_of("dir_combo_child") == "scene,character"
+    assert library.scope_of("dir_scope_child") == SCOPE_SCENE
 
 
 def test_scope_of_invalid_value_still_falls_back_to_parent_chain():
-    """无效单值（非法枚举）不采纳：沿父链回退，最后按 content（原语义保持）。
-
-    DB 侧 ck_tag_catalog_applicable_scope 只放行 7 个规范值，非法枚举进
-    不了库——本用例用内存库钉住 scope_of 对非法/空白声明的防御语义。
-    """
+    """无效值不采纳：沿父链回退，最后按 content。"""
     library = TagLibrary(
         [Directory(dir_id="parent", dir_name="父", parent_id=None,
                    applicable_scope=SCOPE_SCENE),
@@ -116,34 +97,6 @@ def test_scope_of_invalid_value_still_falls_back_to_parent_chain():
     assert library.scope_of("child") == SCOPE_SCENE
     assert library.scope_of("blank") == SCOPE_CONTENT
     assert library.scope_of("missing") == SCOPE_CONTENT
-
-
-def test_scope_of_partial_combination_keeps_valid_subset():
-    """组合值含非法词/空段：保留合法子集（按规范序重组）。
-
-    同样走内存库（DB CHECK 只放行规范值，含非法词的组合只可能来自内存
-    构造或历史数据）。
-    """
-    library = TagLibrary(
-        [Directory(dir_id="partial", dir_name="部分合法",
-                   applicable_scope="character,garbage,content"),
-         Directory(dir_id="spaced", dir_name="空格段",
-                   applicable_scope="content, , scene")],
-        [])
-    assert library.scope_of("partial") == "content,character"
-    assert library.scope_of("spaced") == "content,scene"
-
-
-def test_parse_scope_tolerates_mixed_separators():
-    """parse_scope：与治理 _normalize_scope 同一套分隔符（中英文逗号/分号/竖线）。"""
-    from tagplatform.services.tags.library import parse_scope
-
-    assert parse_scope("content，scene；character|content") == (
-        SCOPE_CONTENT, SCOPE_SCENE, SCOPE_CHARACTER)
-    assert parse_scope(" scene ") == (SCOPE_SCENE,)
-    assert parse_scope(None) == ()
-    assert parse_scope("") == ()
-    assert parse_scope("garbage") == ()
 
 
 def test_only_dynamic_dirs_allow_new_tags():
@@ -307,49 +260,12 @@ def test_mount_character_needs_exactly_one_character():
                          evidence) is None
 
 
-def test_mount_combination_scope_resolves_finest_supported():
-    """组合值目录的挂载不再静默降级：按证据解析目录支持的最细可用粒度。
-
-    修复前组合值既不等于 scene 也不等于 character，直接落到 content 兜底
-    ——scene 证据在手的候选被挂成整片。组合解析序：character（证据场景
-    唯一角色）> scene（首个证据场景）> content（整片）；单值目录语义
-    保持逐字节不变（scene 解析不出且不含 content → None）。
-    """
-    from tagplatform.services.generation.base import Evidence
-
+def test_mount_scene_without_evidence_returns_none():
+    """scene 目录缺有效场景证据时不回落 content，直接返回 None。"""
     content = _content()
-    scene_id = content.content.scenes[0].scene_id
-    evidence = [Evidence(scene_id, 0, 1000, "证据")]
-    combo = "content,scene,character"
-    assert resolve_mount(combo, content.asset.asset_id, content,
-                         evidence) == Mount("scene", scene_id)
-    # 无场景证据但目录允许整片 → content（合法粒度，非降级）
-    assert resolve_mount(combo, content.asset.asset_id, content, []) == Mount(
-        "content", content.asset.asset_id)
-    # 单值目录原语义：scene 解析不出 → None（不回落 content）
     assert resolve_mount(SCOPE_SCENE, content.asset.asset_id, content, []) is None
-
-
-def test_mount_combination_scope_prefers_unique_character():
-    """组合值目录证据场景恰有唯一角色 → character 挂载（最细粒度优先）。"""
-    from tagplatform.services.generation.base import Evidence
-
-    data = json.loads(
-        (__import__("pathlib").Path(__file__).parent / "fixtures"
-         / "content_movie.json").read_text(encoding="utf-8"))
-    data.setdefault("content", {})["characters"] = [
-        {"character_id": "char_001", "name": "甲"},
-    ]
-    data["content"]["scenes"] = [{
-        "scene_id": "scene_001",
-        "time_range": {"start_ms": 0, "end_ms": 1000},
-        "description": "两人对峙",
-        "character_ids": ["char_001"],
-    }]
-    content = parse_content(data)
-    evidence = [Evidence("scene_001", 0, 1000, "对峙")]
-    assert resolve_mount("content,scene,character", content.asset.asset_id,
-                         content, evidence) == Mount("character", "char_001")
+    assert resolve_mount(SCOPE_CONTENT, content.asset.asset_id, content, []) == Mount(
+        "content", content.asset.asset_id)
 
 
 # ---------------------------------------------------------------- 入库（写 tag_define）
@@ -379,6 +295,22 @@ def test_record_tag_definition_writes_row_and_is_idempotent(session):
     assert log.operator == "alice"
     # 库里真正多了一条：再载入标签库能看到
     assert try_load_library(session).tag(first["tag_id"]).tag_name == "时间循环"
+
+
+def test_record_tag_definition_persists_embedding_with_unified_text(session):
+    """传 embedder 时同步按“标签名。描述”（passage）写入 tag_define.embedding。"""
+    from tagplatform.capabilities.storage.models import TagDefine
+    from tagplatform.capabilities.vectors import decode_vector
+
+    library = try_load_library(session)
+    created = record_tag_definition(
+        session, library, tag_name="时间循环", dir_id="dir_theme",
+        description="同一段时间反复重来", embedder=MOCK_EMBEDDER)
+    session.commit()
+    row = session.get(TagDefine, created["tag_id"])
+    assert row is not None and row.embedding is not None
+    expected = MOCK_EMBEDDER.embed(["时间循环。同一段时间反复重来"], role="passage")[0]
+    assert np.allclose(decode_vector(row.embedding), expected)
 
 
 def test_record_tag_definition_rejects_unknown_dir(session):

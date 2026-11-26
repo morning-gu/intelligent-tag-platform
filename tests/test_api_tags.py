@@ -196,7 +196,7 @@ def test_import_dual_sheet_template_via_api(client):
     dir_sheet.append(["目录ID\n(dir_id)", "目录层级", "上级目录名称",
                       "目录名称\n(dir_name)", "目录类型\n(dir_type)",
                       "适用范围", "目录描述", "别名"])
-    dir_sheet.append([None, 1, None, "内容", "dir_static", "content,scene", "根目录", None])
+    dir_sheet.append([None, 1, None, "内容", "dir_static", "content", "根目录", None])
     dir_sheet.append([None, 2, "内容", "主类型", "dir_dynamic", None, None, "剧情类"])
 
     tag_sheet = workbook.create_sheet("标签定义")

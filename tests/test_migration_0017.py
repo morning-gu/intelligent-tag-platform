@@ -89,7 +89,7 @@ def test_0017_backfills_task_id_from_after_json_and_downgrades(rehearsal):
 
 
 def test_fresh_chain_upgrade_head_then_two_single_downgrades(rehearsal):
-    """fresh 链：空库 0001→0018 全链走通；0018→0017→0016 各可回一级。"""
+    """fresh 链：空库 0001→head（0019）全链走通；0019→0018→0017→0016 各可回一级。"""
     cfg, db_path = rehearsal
     command.upgrade(cfg, "head")
 
@@ -98,6 +98,8 @@ def test_fresh_chain_upgrade_head_then_two_single_downgrades(rehearsal):
             return conn.execute(
                 "SELECT version_num FROM alembic_version").fetchone()[0]
 
+    assert version() == "0019"
+    command.downgrade(cfg, "-1")
     assert version() == "0018"
     command.downgrade(cfg, "-1")
     assert version() == "0017"

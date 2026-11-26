@@ -25,11 +25,8 @@ class Settings(BaseSettings):
     # 句向量模型（1024 维）。2026-11-05 由 e5-base 换到 BGE-M3：
     # 同一批 87 条人工标注上 AUC 0.903→0.928，且"重复 vs 新词"的分差
     # 0.028→0.187（e5 把所有中文短词挤在 0.85-0.95，阈值只能在噪声里切）。
-    # 换模型必须重灌 tag_catalog.embedding（python -m tagplatform.reembed）。
+    # 换模型必须重灌 tag_catalog.embedding / tag_define.embedding（python -m tagplatform.reembed）。
     embedding_model: str = "BAAI/bge-m3"
-    # 导入校验：与库内标签余弦 ≥ 该值判"疑似重复"（含等于）。
-    # e5 时代是 0.90；换 BGE-M3 后 0.90 只对几乎逐字相同的对子触发，下调到 0.85。
-    semantic_similar_threshold: float = 0.85
     # True 时用确定性 MockEmbedder（测试专用，绝不触发模型下载）
     use_mock_embedder: bool = False
     # 嵌入后端：local（默认，sentence-transformers 本地加载）/ remote
@@ -43,8 +40,6 @@ class Settings(BaseSettings):
     # 大目录分批请求上限（551 条目录标签 ≈ 18 批）
     embedding_api_batch: int = 32
     embedding_api_timeout: float = 60.0
-    # 标签类型逗号分隔白名单；空 = 不校验
-    allowed_tag_types: str = ""
 
     # ---------- 阶段 2：智能标签生产（LLM 客户端与生成流水线） ----------
 
@@ -74,8 +69,6 @@ class Settings(BaseSettings):
     # 融合分 Sevi = Σ w_m×(S_m−1)/4。权重和会归一化处理，3:3:4 写成
     # "0.3,0.3,0.4" 或 "3,3,4" 均可（TAGPLT_CLOSED_EVI_WEIGHTS 可覆盖）
     closed_evi_weights: str = "0.3,0.3,0.4"
-    # 模式 B 归一匹配阈值：与库内标签相似度 >= 该值（含等于）归入 catalog
-    open_match_threshold: float = 0.85
     # ---------- 阶段 2.5：closed 产出的置信度计算（2026-12） ----------
     # 置信度 Craw = w1·Ccons + w2·Cver + w3·Cmod（评分一致性 / 证据可验性 /
     # 跨模态一致性）。逗号分隔，顺序固定 (Ccons, Cver, Cmod)，权重和归一化
@@ -137,15 +130,7 @@ class Settings(BaseSettings):
     # 每个场景取几张关键帧 / 全片最多几张（超出按场景轮转截断）
     mtg_frames_per_scene: int = 2
     mtg_max_frames: int = 24
-    # 跨轮语义合并阈值（complete-link）。换 BGE-M3 后按"e5 0.90 会合掉的对子"
-    # 反推：同一批候选里 e5≥0.90 有 31 对，BGE-M3 上对应 0.75（13 对）——
-    # 刻意偏保守，宁可留两条相似候选让人看，也不要把不同的词合掉。
-    mtg_merge_threshold: float = 0.75
-    # 生成预算上限，用于计算给全片综合轮的候选数（兼容已有环境变量）
-    mtg_max_candidates_per_run: int = 20
-    # judge 通过后的最终产出上限（用户口径 10-15 条）
-    mtg_max_final_tags: int = 15
-    # judge：模型与开关（关掉则只做合并，不过滤）
+    # judge：模型与开关（关掉则不过滤）
     mtg_judge_model: str = "deepseek-v4.1-flash"
     mtg_judge_enabled: bool = True
     mtg_judge_temperature: float = 0.0
@@ -234,8 +219,6 @@ class Settings(BaseSettings):
     open_library_verify_max_tokens: int = 8192
     # 替换总开关：关掉则只标记不替换（回到"只标记"口径）
     open_library_replace_enabled: bool = True
-    # 兼容旧的多目录提示入口。逐目录开放生成按任务范围遍历全部可扩展目录。
-    open_dir_hint_max: int = 60
 
     # ---------- 阶段 8：闭环评测（2026-11） ----------
     # MovieTags 基准数据集根（gt/*.csv 三列 movieId,tagId,relevance +

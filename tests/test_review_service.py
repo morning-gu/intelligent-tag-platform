@@ -95,16 +95,16 @@ def test_modify_fields_and_approves(session):
     assert returned.review_comment == "措辞修正"
 
 
-def test_modify_catalog_row_maps_display_keys(session):
-    """库内行按展示别名改行内字段，不触碰共享 tag_catalog 字典。"""
+def test_modify_catalog_row_raises_value_error(session):
+    """库内已有标签行（tag_id 非空）禁止审核修改，避免出现候选名与正式库名分裂。"""
     row = _seed_row(session, origin="closed", tag_id="tag_action")
-    returned = apply_review(session, row.id, "modify", "alice", {
-        "tag_name": "动作改", "description": "新定义", "dir_id": "dir_theme"})
-    assert returned.candidate_name == "动作改"
-    assert returned.candidate_description == "新定义"
-    assert returned.candidate_dir_id == "dir_theme"
-    assert returned.tag_id == "tag_action"  # 挂载关系不动
-    assert returned.review_status == "approved"
+    with pytest.raises(ValueError, match="库内已有标签不支持审核修改"):
+        apply_review(session, row.id, "modify", "alice", {
+            "tag_name": "动作改", "description": "新定义", "dir_id": "dir_theme"})
+    fresh = session.get(PreAssetTag, row.id)
+    assert fresh.review_status == "pending"
+    assert fresh.tag_id == "tag_action"
+    assert fresh.candidate_name is None
 
 
 def test_modify_without_mappable_field_raises(session):
@@ -241,6 +241,22 @@ def test_approve_new_word_writes_tag_define(session):
     assert log.operator == "alice"
     assert '"reviewer": "alice"' in (log.after_json or "")
     assert f'"pre_asset_tag_id": {row.id}' in (log.after_json or "")
+
+
+def test_approve_new_word_writes_tag_define_embedding(session):
+    """审核通过新词且传入 embedder → 同步写入统一口径的 tag_define.embedding。"""
+    import numpy as np
+    from conftest import MOCK_EMBEDDER
+    from tagplatform.capabilities.storage.models import TagDefine
+    from tagplatform.capabilities.vectors import decode_vector
+
+    row = _seed_row(session, candidate_name="时间循环")
+    apply_review(session, row.id, "approve", "alice", None, embedder=MOCK_EMBEDDER)
+    created = (session.query(TagDefine)
+               .filter_by(dir_id="dir_theme", tag_name="时间循环").one())
+    assert created.embedding is not None
+    expected = MOCK_EMBEDDER.embed(["时间循环。候选描述"], role="passage")[0]
+    assert np.allclose(decode_vector(created.embedding), expected)
 
 
 def test_approve_new_word_in_static_dir_raises(session):

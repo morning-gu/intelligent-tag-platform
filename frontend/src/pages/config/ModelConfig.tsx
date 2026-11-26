@@ -5,7 +5,7 @@
 //   （P0 #4 根治：提示文案不再手写）。无新建版本/激活入口——写端点已删
 //   （POST /prompts → 405、/prompts/{id}/activate → 404，契约锁定见
 //   api/prompts.test.ts 与后端 test_api_prompts_admin）。
-// ②当前运行配置：Descriptions 只读卡（GET /config 十三字段，布尔用是/否 Tag）
+// ②当前运行配置：Descriptions 只读卡（GET /config 十四字段，布尔用是/否 Tag）
 //   + 说明文案——修改走环境变量 + 重启服务，页面不提供写配置入口。
 // ③流水线文案（2026-11-22 文案集中新增）：GET /prompts/registry 四组只读
 //   清单（closed/mtg/assets/open_review），按流水线分组折叠展示常量名与文案
@@ -229,11 +229,14 @@ export default function ModelConfig() {
                 ? '同生成模型（空值回落）'
                 : config.open_eval_review_model}
             </Descriptions.Item>
-            <Descriptions.Item label="每类型召回 Top-K">
+            <Descriptions.Item label="全局召回 Top-K">
               {config.recall_top_k_per_type}
             </Descriptions.Item>
-            <Descriptions.Item label="开放匹配阈值">
-              {config.open_match_threshold}
+            <Descriptions.Item label="开放疑似余弦阈值">
+              {config.open_library_suspect_cosine}
+            </Descriptions.Item>
+            <Descriptions.Item label="开放字面重合阈值">
+              {config.open_library_name_overlap}
             </Descriptions.Item>
             <Descriptions.Item label="生成并发数">{config.generation_workers}</Descriptions.Item>
             <Descriptions.Item label="Mock LLM">{renderBool(config.use_mock_llm)}</Descriptions.Item>

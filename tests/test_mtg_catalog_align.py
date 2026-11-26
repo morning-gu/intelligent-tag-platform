@@ -18,7 +18,11 @@ import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
 
 from tagplatform.capabilities.storage.models import TagCatalog, TagDefine
-from tagplatform.services.tags.library import try_load_library
+from tagplatform.services.tags.library import (
+    library_from_session,
+    library_index,
+    try_load_library,
+)
 from tests.library_fixture import add_tags
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
@@ -28,7 +32,6 @@ from tagplatform.services.generation.open.mtg.catalog_align import (
     BAND_SUSPECT,
     LibraryTag,
     align_candidates,
-    load_library_index,
     recall_library_hints,
     summarize_bands,
 )
@@ -56,32 +59,41 @@ def _tag(tag_id: str, name: str, vector: list[float]) -> LibraryTag:
 
 
 def _add_catalog(session, tag_id, name, *, dir_id="dir_1", status="active",
-                 embedding=True):
+                 description="", embedding=True):
     """插一行 tag_define（v2 标签本体）；embedding=False 模拟"没算过向量"的历史行。"""
     if session.get(TagCatalog, dir_id) is None:
         session.add(TagCatalog(dir_id=dir_id, dir_name="类型", dir_type="dir_static",
                                description="d", applicable_scope="content"))
         session.flush()
     session.add(TagDefine(
-        tag_id=tag_id, tag_name=name, tag_type="val_fixed", description="",
+        tag_id=tag_id, tag_name=name, tag_type="val_fixed", description=description,
         dir_id=dir_id, status=status,
-        embedding=(encode_vector(MOCK_EMBEDDER.embed([name], role="passage")[0])
+        embedding=(encode_vector(MOCK_EMBEDDER.embed([f"{name}。{description}"], role="passage")[0])
                    if embedding else None),
     ))
 
 
 # ---------- 索引 ----------
 
-def test_load_library_index_keeps_tags_only(session):
-    """目录行不进索引；废弃行与无向量行都不参与对齐。"""
-    # 目录树节点（tag_catalog）不是标签，天然不进索引
-    _add_catalog(session, "tag_leaf", "悬疑")
+def test_library_index_reuses_persisted_embeddings_and_skips_invalid(session):
+    """有效持久化向量直接复用（零重嵌）；废弃行与模板占位行不进索引。"""
+    _add_catalog(session, "tag_leaf", "悬疑", description="制造悬念的氛围")
     _add_catalog(session, "tag_dep", "废弃标签", status="deprecated")
-    _add_catalog(session, "tag_noemb", "没向量", embedding=False)
+    _add_catalog(session, "tag_bad", "按 YYYY-MM-DD 填写")
     session.commit()
 
-    index = load_library_index(session)
+    class _NoCallEmbedder:
+        name = "nocall"
+        dim = MOCK_EMBEDDER.dim
+
+        def embed(self, texts, *, role):
+            raise AssertionError(f"不应重新嵌入：{texts}")
+
+    library = library_from_session(session)
+    index = library_index(library, _NoCallEmbedder(), dir_ids=["dir_1"])
     assert [t.name for t in index] == ["悬疑"]
+    expected = MOCK_EMBEDDER.embed(["悬疑。制造悬念的氛围"], role="passage")[0]
+    assert np.allclose(index[0].vector, expected)
 
 
 # ---------- 分档 ----------
@@ -267,41 +279,31 @@ def test_pipeline_ranks_library_and_generated_items_under_same_stage_quota(
                for row in report["library"]["truncated"])
 
 
-def _seed_library(session, tag_id: str, name: str) -> None:
-    vec = MOCK_EMBEDDER.embed([name], role="passage")[0]
-    if session.get(TagCatalog, "dir_1") is None:
-        session.add(TagCatalog(dir_id="dir_1", dir_name="叙事", dir_type="dir_static",
-                               description="d", applicable_scope="content"))
-        session.flush()
-    session.add(TagDefine(tag_id=tag_id, tag_name=name, tag_type="val_fixed",
-                          description=name, dir_id="dir_1", status="active",
-                          embedding=encode_vector(vec)))
-    session.commit()
-
-
-def test_library_index_skips_template_placeholder(session):
-    """模板占位行（实测库里有一条"按 YYYY-MM-DD 填写"）不进索引。"""
-    _seed_library(session, "tag_ok", "复仇")
-    _seed_library(session, "tag_bad", "按 YYYY-MM-DD 填写")
-
-    index = load_library_index(session)
-
-    names = {tag.name for tag in index}
-    assert names == {"复仇"}
-
-
-def test_library_index_skips_vectors_of_wrong_dimension(session):
-    """换模型忘了重灌 → 维度不符的行跳过，任务照常出标签（不是崩）。"""
-    _seed_library(session, "tag_ok", "复仇")
-    _seed_library(session, "tag_old", "背叛")
+def test_library_index_backfills_missing_and_wrong_dimension_embeddings(session):
+    """缺失或维度不符的向量按统一文本口径（名。描述，passage）补算，有效行直接复用。"""
+    _add_catalog(session, "tag_ok", "复仇", description="复仇母题")
+    _add_catalog(session, "tag_noemb", "没向量", description="缺失向量", embedding=False)
+    _add_catalog(session, "tag_old", "背叛", description="旧维度向量")
     row = session.get(TagDefine, "tag_old")
     row.embedding = encode_vector(np.zeros(3, dtype="float32") + 0.5)
     session.commit()
 
-    index = load_library_index(session, dim=len(
-        MOCK_EMBEDDER.embed(["x"], role="passage")[0]))
+    calls: list[tuple[str, list[str]]] = []
 
-    assert {tag.name for tag in index} == {"复仇"}
+    class _TrackingEmbedder:
+        name = "tracking"
+        dim = MOCK_EMBEDDER.dim
+
+        def embed(self, texts, *, role):
+            calls.append((role, list(texts)))
+            return MOCK_EMBEDDER.embed(texts, role=role)
+
+    library = library_from_session(session)
+    index = library_index(library, _TrackingEmbedder(), dir_ids=["dir_1"])
+
+    assert {tag.name for tag in index} == {"复仇", "没向量", "背叛"}
+    assert all(tag.vector.shape == (MOCK_EMBEDDER.dim,) for tag in index)
+    assert calls == [("passage", ["没向量。缺失向量", "背叛。旧维度向量"])]
 
 
 class _VerifyClient:
@@ -392,6 +394,7 @@ def test_pipeline_switch_off_disables_library(
     spec = _build_spec(content_fixture, run_id="align3")
     out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
 
+    assert out
     assert all(t.origin == "generated" for t in out)
     report = json.loads(pathlib.Path(
         mtg_settings.mtg_report_dir, "t-align3.json").read_text(encoding="utf-8"))

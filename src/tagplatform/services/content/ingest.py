@@ -28,7 +28,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from tagplatform.capabilities.storage.models import TagChangeLog, TagDefine
-from tagplatform.services.tags.library import TagLibrary, parse_aliases
+from tagplatform.capabilities.vectors import encode_vector
+from tagplatform.services.tags.library import TagLibrary, parse_aliases, tag_embedding_text
 
 TAG_TYPES = ("val_fixed", "val_generalized")
 
@@ -87,11 +88,13 @@ def record_tag_definition(
     tag_type: str = "val_fixed",
     aliases: list[str] | None = None,
     source: dict | None = None,
+    embedder=None,
 ) -> dict:
     """新词入库：插一行 `tag_define`；同目录同名幂等返回既有行。
 
     调用方负责 commit（审核动作与结果行同事务）。`source` 里的 reviewer
-    会记进 `tag_change_log.operator`，便于追溯"谁批进来的"。
+    会记进 `tag_change_log.operator`，便于追溯"谁批进来的"。传入 `embedder`
+    时同步按 `f"{tag_name}。{description}"`（role="passage"）写入 `embedding`。
     """
     name = tag_name.strip()
     if not name:
@@ -108,14 +111,20 @@ def record_tag_definition(
                          source, created=False)
 
     alias_list = [a.strip() for a in (aliases or []) if a.strip()]
+    desc = (description or "").strip()
+    embedding = (
+        encode_vector(embedder.embed([tag_embedding_text(name, desc)], role="passage")[0])
+        if embedder is not None else None
+    )
     row = TagDefine(
         tag_id=_next_tag_id(session, dir_id, name),
         dir_id=dir_id,
         tag_name=name,
         tag_type=tag_type if tag_type in TAG_TYPES else "val_fixed",
-        description=(description or "").strip(),
+        description=desc,
         aliases=_dump(alias_list),
         status="active",
+        embedding=embedding,
         created_at=_now(),
         updated_at=_now(),
     )

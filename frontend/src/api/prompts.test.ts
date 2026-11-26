@@ -25,19 +25,13 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
-/** 与后端 PromptContractOut 同形的夹具（无任何版本字段）。 */
+/** 与后端 PromptContractOut 同形的夹具（无任何版本字段；仅 closed 使用外部模板）。 */
 const CONTRACT: PromptContractItem[] = [
   {
     mode: 'closed',
     template_text: '闭卷：{content}\n候选：{candidates}',
     allowed_fields: ['title', 'genres'],
     required_placeholders: ['{content}', '{candidates}'],
-  },
-  {
-    mode: 'open',
-    template_text: '开卷：{content}',
-    allowed_fields: ['title'],
-    required_placeholders: ['{content}'],
   },
 ]
 
@@ -62,7 +56,7 @@ describe('fetchPrompts 只读清单契约', () => {
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/prompts')
     expect(items).toEqual(CONTRACT)
-    expect(items.map((i) => i.mode)).toEqual(['closed', 'open'])
+    expect(items.map((i) => i.mode)).toEqual(['closed'])
     // 模板正文与占位符契约逐字透传（配置页只读渲染的数据源）
     expect(items[0]?.template_text).toBe('闭卷：{content}\n候选：{candidates}')
     expect(items[0]?.required_placeholders).toEqual(['{content}', '{candidates}'])

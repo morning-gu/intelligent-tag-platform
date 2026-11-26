@@ -6,7 +6,7 @@
 // ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考；
 //    内层「生产审计」再展开时懒加载候选去向，0 条产出的影片也有现场可看）
 // ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
-// ⑧ 银标准 note 恒渲染 + calibre 口径小字。null 一律「暂无」（None≠0）。
+// ⑧ calibre 口径小字。null 一律「暂无」（None≠0）。
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import FunnelChart from './FunnelChart'
@@ -392,7 +392,6 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
         </Space>
       </section>
 
-      <Alert type="warning" showIcon message={report.note} />
       <Typography.Text type="secondary">
         口径：数据集 {calibre.dataset_id ?? NA} · 生成 {calibre.llm_model || NA}
         （{calibre.prompt_version ?? NA}） · 评审 {calibre.review_model ?? NA}

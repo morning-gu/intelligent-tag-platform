@@ -28,12 +28,6 @@ const PROMPTS: PromptContractItem[] = [
     allowed_fields: ['title', 'genres'],
     required_placeholders: ['{content}', '{candidates}'],
   },
-  {
-    mode: 'open',
-    template_text: '开卷：{content}\n自由生成标签。',
-    allowed_fields: ['title'],
-    required_placeholders: ['{content}'],
-  },
 ]
 
 const CONFIG: RuntimeConfig = {
@@ -45,7 +39,8 @@ const CONFIG: RuntimeConfig = {
   embedding_model: 'BAAI/bge-m3',
   open_eval_review_model: 'review-x',
   recall_top_k_per_type: 20,
-  open_match_threshold: 0.55,
+  open_library_suspect_cosine: 0.75,
+  open_library_name_overlap: 0.4,
   generation_workers: 4,
   use_mock_llm: true,
   use_mock_embedder: false,
@@ -114,13 +109,10 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(
       await screen.findByText('Prompt 模板 · 封闭生成（closed）'),
     ).toBeInTheDocument()
-    expect(screen.getByText('Prompt 模板 · 开放生成（open）')).toBeInTheDocument()
     // 模板正文与 API 契约逐字一致（toHaveTextContent 对实际文本做空白
     // 归一化，换行折叠为空格——期望串按归一化口径书写）
     const closedPre = screen.getByText(/闭卷：\{content\}/)
     expect(closedPre).toHaveTextContent('闭卷：{content} 候选清单：{candidates} 只输出 JSON。')
-    const openPre = screen.getByText(/开卷：\{content\}/)
-    expect(openPre).toHaveTextContent('开卷：{content} 自由生成标签。')
     // 页头只读标识（Prompt 模板卡与流水线文案卡各一枚）
     expect(screen.getAllByText('只读 · 文案随代码版本')).toHaveLength(2)
   })
@@ -130,18 +122,15 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     render(<ModelConfig />)
 
     expect(await screen.findByText('必需占位符：{content}、{candidates}')).toBeInTheDocument()
-    expect(screen.getByText('必需占位符：{content}')).toBeInTheDocument()
   })
 
-  it('可用字段 Tag 动态来自契约（closed 两枚、open 一枚）', async () => {
+  it('可用字段 Tag 动态来自契约（closed 两枚）', async () => {
     mockApis()
     render(<ModelConfig />)
 
-    // "可用字段："标签逐 mode 卡各渲染一次
-    expect(await screen.findAllByText('可用字段：')).toHaveLength(2)
+    expect(await screen.findByText('可用字段：')).toBeInTheDocument()
     expect(screen.getByText('genres')).toBeInTheDocument()
-    // title 在 closed/open 两卡各渲染一次
-    expect(screen.getAllByText('title')).toHaveLength(2)
+    expect(screen.getByText('title')).toBeInTheDocument()
   })
 
   it('GET /api/v1/prompts 无 mode 过滤一次拉全（不再逐 Tab 拉版本清单）', async () => {
@@ -171,7 +160,7 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('当前运行配置卡：十三字段渲染，布尔以是/否 Tag 展示', async () => {
+  it('当前运行配置卡：十四字段渲染，布尔以是/否 Tag 展示', async () => {
     mockApis()
     render(<ModelConfig />)
 
@@ -188,8 +177,11 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(screen.getByText('BAAI/bge-m3')).toBeInTheDocument()
     expect(screen.getByText('开放评测评审模型')).toBeInTheDocument()
     expect(screen.getByText('review-x')).toBeInTheDocument()
-    expect(screen.getByText('每类型召回 Top-K')).toBeInTheDocument()
-    expect(screen.getByText('开放匹配阈值')).toBeInTheDocument()
+    expect(screen.getByText('全局召回 Top-K')).toBeInTheDocument()
+    expect(screen.getByText('开放疑似余弦阈值')).toBeInTheDocument()
+    expect(screen.getByText('0.75')).toBeInTheDocument()
+    expect(screen.getByText('开放字面重合阈值')).toBeInTheDocument()
+    expect(screen.getByText('0.4')).toBeInTheDocument()
     expect(screen.getByText('生成并发数')).toBeInTheDocument()
     expect(screen.getByText('Mock LLM')).toBeInTheDocument()
     expect(screen.getByText('Mock Embedder')).toBeInTheDocument()

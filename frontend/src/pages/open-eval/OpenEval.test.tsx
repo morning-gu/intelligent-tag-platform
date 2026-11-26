@@ -329,7 +329,6 @@ const REPORT: OpenEvalReport = {
   failed_movies: [{ tt: 'tt0000003', error: 'RuntimeError: produce 失败' }],
   review_failed_movies: [{ tt: 'tt0000002', review_error: 'ReviewRequestError: 评审端点超时' }],
   warnings: ['评审失败 1 部，已整体排除出通过率'],
-  note: 'genome relevance 是模型输出非人工标注',
 }
 
 // ---------- mock 装配与查询辅助 ----------
@@ -691,9 +690,9 @@ describe('OpenEval 开放评测页', () => {
     )
 
     expect(await screen.findByText(/评测报告：run-20261120-100000-ab12/)).toBeInTheDocument()
-    // 报告视图由 OpenEvalReport 组件接管：银标准 note 原文恒渲染 + banner 警示
+    // 报告视图由 OpenEvalReport 组件接管：banner 与 warnings 警示渲染
     expect(
-      await screen.findByText('genome relevance 是模型输出非人工标注'),
+      await screen.findByText('评审失败 1 部，已整体排除出通过率'),
     ).toBeInTheDocument()
     expect(
       screen.getByText('部分运行：cancelled/aborted/failed 或 done<total 的 run 不可与全量横比'),

@@ -19,7 +19,7 @@ import logging
 
 from tagplatform.capabilities.llm.usage import accumulate_usage
 from tagplatform.capabilities.prompts.mtg import (
-    VERIFY_INSTRUCTIONS, VERIFY_OUTPUT_FORMAT, VERIFY_RETRY_HINT,
+    VERIFY_RETRY_HINT, VERIFY_TEMPLATE,
 )
 
 VERIFY_MARKER = "## 相似度复核"
@@ -50,13 +50,7 @@ def _pair_line(candidate: str, library: str, score: str) -> str:
 
 
 def _verify_messages(lines: str) -> list[dict]:
-    text = (
-        f"{VERIFY_MARKER}\n"
-        f"{VERIFY_INSTRUCTIONS}"
-        f"{lines}\n"
-        f"{VERIFY_OUTPUT_FORMAT}"
-    )
-    return [{"role": "user", "content": text}]
+    return [{"role": "user", "content": VERIFY_TEMPLATE.replace("{pairs}", lines)}]
 
 
 def _loads(text: str) -> dict:

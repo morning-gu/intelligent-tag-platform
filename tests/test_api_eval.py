@@ -833,6 +833,30 @@ def test_movies_theta_non_admin_401(client):
 # open 端点族前缀（本节用例共用；dataset 三别名与 closed 共享 override 状态）
 _OPEN = "/api/v1/eval/open"
 
+# 开放评测需要至少一个可扩展目录（dir_dynamic），使逐目录开放生成实际触发 LLM 调用
+_OPEN_DYNAMIC_DIR = {
+    "dir_id": "dir_open_eval",
+    "parent_id": None,
+    "level": 1,
+    "dir_name": "开放评测目录",
+    "dir_type": "dir_dynamic",
+    "applicable_scope": "content",
+    "description": "开放评测单测用可扩展目录",
+    "aliases": [],
+}
+
+
+def _seed_open_dataset_and_library(client: TestClient) -> None:
+    """迷你 MovieTags + 含可扩展目录的评测库（兼顾 closed 跨服务互斥与 open 生成）。"""
+    from tests.library_fixture import library_root, write_library
+
+    _write_dataset(Path(client.app.state.settings.eval_dataset_root))
+    write_library(
+        library_root(),
+        dirs=[*_EVAL_DIRS, _OPEN_DYNAMIC_DIR],
+        tags=_EVAL_TAGS,
+    )
+
 
 def _open_start_run(client: TestClient, dataset: str = "emotion",
                     movies: dict | None = None, **extra) -> dict:
@@ -900,7 +924,7 @@ def test_open_start_busy_409_cross_service(client):
     """跨服务互斥双向（端点层）：closed 活跃 → open 起跑 409（detail 带
     对端 run_id）；反向 open 活跃 → closed 起跑 409。时间窗由闸门 LLM
     显式控制（镜像既有 closed busy 用例模式）。"""
-    _seed_dataset_and_library(client)
+    _seed_open_dataset_and_library(client)
     closed = client.app.state.closed_eval
     open_svc = client.app.state.open_eval
     # 方向一：closed 活跃（闸门 LLM 保持活跃）→ open 起跑 409
@@ -944,7 +968,7 @@ def test_open_run_end_to_end(client):
     """open 端到端一条龙：起跑 → 终态 succeeded（mock 评审不可用按 spec §6
     契约不算失败）→ 报告 200 → 白名单五件套 200 / 白名单外与 report.json
     404 → 历史一行（五摘要键位透出）。"""
-    _seed_dataset_and_library(client)
+    _seed_open_dataset_and_library(client)
     r = _open_start_run(client)
     assert r.status_code == 200
     run_id = r.json()["run_id"]
@@ -1083,7 +1107,7 @@ def test_open_cancel_and_delete(client):
     """cancel：受理 {ok:true} → cancelled 终态、重复取消 ok=false；运行中
     删除 → 409「不可删除」、运行中报告未落盘 → 404；终态删除 {ok:true} →
     详情 404 / 重复删除 404 / 历史不含。"""
-    _seed_dataset_and_library(client)
+    _seed_open_dataset_and_library(client)
     open_svc = client.app.state.open_eval
     gate = _GateLLM()
     gate.hold()

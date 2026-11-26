@@ -1,6 +1,6 @@
 # 智能标签系统数据库表结构设计 v2（SQLite 落地 / PostgreSQL 迁移目标）
 
-> 共 11 张表。**概念模型与语义规则为引擎中立定稿；当前按 SQLite 实现，后续迁移 PostgreSQL。**
+> 共 10 张现行表（另保留 1 张历史兼容表 `tag_quality_evaluation`；`prompt_template` 已于迁移 `0018` 移除）。**概念模型与语义规则为引擎中立定稿；当前按 SQLite 实现，后续迁移 PostgreSQL。**
 > v1（线上 @ 1f28eb9）→ v2 的动机：现结构冗余、定义不清——一个资产劈两表、目录/标签混一张表、审核状态两处、结果行身兼两职、挂载粒度隐式。
 
 ---
@@ -9,8 +9,8 @@
 
 | 决策点 | 结论 | 归属 |
 |---|---|---|
-| 存储引擎 | 概念模型照本文档定稿，SQLite 先落地，PostgreSQL 后续迁移；DDL 遵守引擎中立规矩（§8） | 拍板 |
-| 挂载粒度 | `target_type` 三粒度（content/scene/character）**结构预留**，流水线与审核本期只跑 content 级 | 拍板 |
+| 存储引擎 | 概念模型照本文档定稿，SQLite 先落地，PostgreSQL 后续迁移；DDL 遵守引擎中立规矩（§7） | 拍板 |
+| 挂载粒度 | `target_type` 与目录 `applicable_scope` 严格取 `content` / `scene` / `character` 之一（默认 `content`，`0019` 收紧数据库 `CHECK`）；生成落库已通过 `services/tags/mounting.py` 按目录适用范围解析挂载点（开放评测盲评对 `character` 级暂缓待补） | 拍板 |
 | 标签取值 | `val_generalized`（泛化值）**结构预留**，本期只跑 `val_fixed` | 拍板 |
 | 重跑语义 | 幂等唯一索引按 asset×target×tag（候选名）；旧行 approved/rejected 跳过（终审），pending 删旧插新（§6.1） | 拍板 |
 | 存档口径 | pre 表 = asset×tag 去重后的生成与审核记录；**全量原始档案由 mtg 审计文件兼任**（data/audit/mtg） | 拍板 |
@@ -18,13 +18,13 @@
 | API 兼容口径 | **随 v2 重设计**：语义未变的 URL 保持稳定，概念变了的改（前端同步改）；无外部 API 消费者 | 拍板 |
 | `review_record` 删除 | 行即日志：新模型下每行至多一审且终态不被覆盖，reviewer/comment/status 落行即完整审核事实（§6.2） | 裁量 |
 | `asset_tag.tag_name` 刷新 | tag_define 改名/合并时同步刷新全部挂载行，不留漂移；tag_change_log 留证 | 裁量 |
-| `candidate_dir_id` 可空 | 文档原定 open 模式生成时必填；实际生成端（mtg-v1 自拟分类）不知道目录体系，改为**合入标签库时赋值** | 裁量 |
+| `candidate_dir_id` 赋值时序 | 当前开放生成已改为逐目录两阶段管线，生成时即写入目标 `candidate_dir_id`；人工审核 `modify` 时可调整（库外新词通过入库前必填） | 裁量 |
 | review_status 枚举 | 简化为 pending/approved/rejected 三值；v1 的 modify/merge 是审核动作而非行状态，映射见 §6.2 | 裁量 |
-| 迁移策略 | 0007+ 重建系列（§9）；服务器业务数据已清零（2026-11-05），仅保留账号与模板种子 | 裁量 |
+| 迁移策略 | 0007+ 重建及后续演进系列（§8，最新至 `0019`） | 裁量 |
 | 识别状态表达 | media 合并后不设 recognition_status 列，`content_json IS NULL` 即未完成识别 | 裁量 |
 | 时间戳 ORM 类型 | DateTime（datetime 对象）沿用 v1，DDL 列 DATETIME；PG 目标 TIMESTAMPTZ | 裁量 |
-| merge 两支语义 | v1 merge 能力保留：并入既有（pre 行赋 tag_id，不建新标签）+ 合入新建（建 tag_define）；`open_match_threshold` 语义不变（mtg 归一命中阈值） | 裁量 |
-| 沿用三表不动 | user_account / prompt_template / asset_build_task 本期物理不动、ORM 保持 v1 形状；DDL 所示 CHECK/索引为 PG 目标形态 | 裁量 |
+| 审核动作与库内对齐 | `modify` 仅允许对库外候选新词行（`tag_id IS NULL`）执行；`merge` 并入库内既有标签并登记别名，新词入库走 `approve`；开放生成库内对齐由 `catalog_align`（精确重名 + `open_library_suspect_cosine` / `open_library_name_overlap` + LLM 概念复核）完成 | 裁量 |
+| 模板本地化与历史表 | `prompt_template` 已于 `0018` 移除，提示词改为代码常量（`capabilities/prompts/`）；`0014` 引入的 `tag_quality_evaluation` 保留用于历史评估数据兼容，不再新写 | 裁量 |
 | 审核指标口径 | 动作分布统计改为按 review_status 终态分布；merge 次数从 tag_change_log 补 | 裁量 |
 
 ---
@@ -43,7 +43,7 @@
 | 导入批次 | `import_batch` | `tag_import_task`（改语义名，结构同） |
 | 生成任务外键 | `generation_task.context_id` → media_context | `tag_generation_task.asset_id` → media_asset（随合并） |
 
-表数不变（11）：−`media_context` −`review_record` +`tag_define` +`pre_asset_tag`。
+现行表数 10 张（`0018` 移除 `prompt_template`，另保留 `0014` 历史兼容表 `tag_quality_evaluation`）。
 
 ### 2.2 核心关系链
 
@@ -60,18 +60,19 @@ media_asset (自引用 parent_id; content_json 含 scenes/characters)
 tag_import_task  → 导入写入 tag_catalog / tag_define
 tag_change_log   → 审计 tag_define 全生命周期（无外键，可指向已废弃/合并标签）
 
-独立表: prompt_template (mode+version 版本化) / user_account (admin/reviewer)
+独立表: user_account (admin/reviewer)
+历史保留表: tag_quality_evaluation (原生产附带质量评估快照，不再新写)
 ```
 
-**多粒度挂载（本期仅 content）：**
+**多粒度挂载：**
 
 | target_type | target_id 取值 | 状态 |
 |---|---|---|
-| `content` | `media_asset.asset_id` | **本期启用** |
-| `scene` | `content_json.content.scenes[].scene_id` | 结构预留 |
-| `character` | `content_json.content.characters[].character_id` | 结构预留 |
+| `content` | `media_asset.asset_id` | **已启用** |
+| `scene` | `content_json.content.scenes[].scene_id` | **已启用**（由 `mounting.resolve_mount` 取首个有效证据场景） |
+| `character` | `content_json.content.characters[].character_id` | **挂载逻辑已启用**（证据场景唯一角色；开放评测盲评待补） |
 
-`tag_catalog.applicable_scope` 声明目录适用范围，挂载时 target_type 与之对应。
+`tag_catalog.applicable_scope` 声明目录适用范围（`content` / `scene` / `character`），挂载时 `target_type` 与之对应。
 
 > **任务创建的场景归并**：`POST /api/v1/generation/tasks` 允许直接提交场景子资产
 > （`asset_type='scene'`），服务端沿 `parent_id` 上溯到最近带 `content_json` 的
@@ -87,7 +88,7 @@ tag_change_log   → 审计 tag_define 全生命周期（无外键，可指向�
 
 > 时间戳在 ORM 层建模为 **DateTime（datetime 对象，应用层赋值）**，不设数据库默认（沿用 v1 代码风格）；SQLite 落 DATETIME 列，PG 目标 TIMESTAMPTZ。
 > 业务实体主键为应用层生成 ID（`asset_`/`dir_`/`tag_`/`task_` 前缀 + uuid 片段）；结果/日志行用 INTEGER 自增。
-> 向量列为 BLOB（float32 小端，维度由应用配置固定——multilingual-e5-base 为 768）。
+> 向量列为 BLOB（float32 小端，维度由应用配置固定——当前默认 `BAAI/bge-m3` 为 1024 维）。
 
 ### 3.1 media_asset — 媒体资产
 
@@ -103,7 +104,8 @@ CREATE TABLE media_asset (
     video_uri     TEXT,
     content_json  TEXT,      -- JSON 串（PG 目标 JSONB）；NULL = 未完成内容识别
     source        TEXT,      -- 识别结果来源（外部项目 / 上传构建）
-    created_at    DATETIME
+    created_at    DATETIME,
+    updated_at    DATETIME
 );
 
 CREATE INDEX idx_media_asset_parent ON media_asset(parent_id);
@@ -124,7 +126,7 @@ CREATE INDEX idx_media_asset_type   ON media_asset(asset_type);
 CREATE TABLE tag_catalog (
     dir_id           TEXT PRIMARY KEY,
     dir_name         TEXT NOT NULL,
-    dir_type         TEXT NOT NULL CHECK (dir_type IN ('dir_static', 'dir_dynamic')),
+    dir_type         TEXT NOT NULL CHECK (dir_type IN ('dir_static', 'dir_dynamic', 'dir_asset')),
     description      TEXT NOT NULL,
     parent_id        TEXT REFERENCES tag_catalog(dir_id),
     aliases          TEXT,      -- JSON 数组串
@@ -195,14 +197,17 @@ CREATE TABLE tag_generation_task (
     status         TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     error          TEXT,
     created_at     DATETIME,
-    finished_at    DATETIME
+    finished_at    DATETIME,
+    batch_id       TEXT,
+    quality_model  TEXT       -- 历史字段：生产附带质量评估已移除，不再写入
 );
 
 CREATE INDEX idx_gen_task_asset  ON tag_generation_task(asset_id);
 CREATE INDEX idx_gen_task_status ON tag_generation_task(status);
+CREATE INDEX idx_gen_task_batch  ON tag_generation_task(batch_id);
 ```
 
-外键从 v1 的 `context_id`（→media_context）改为 `asset_id`（随 media 合并）。closed 模式仍消费 prompt_template；open 模式由 mtg-v1 内置流水线接管（不走模板）。
+外键从 v1 的 `context_id`（→media_context）改为 `asset_id`（随 media 合并）。closed 模式使用本地化提示词常量 `capabilities/prompts/templates.py`（`CLOSED_TEMPLATE_TEXT`）；open 模式由 `services/generation/open/mtg/` 逐目录两阶段流水线接管。
 
 ### 3.5 pre_asset_tag — 待审核标签（生成结果 + 审核队列）
 
@@ -214,11 +219,12 @@ CREATE TABLE pre_asset_tag (
     asset_id              TEXT NOT NULL REFERENCES media_asset(asset_id),
     target_type           TEXT NOT NULL DEFAULT 'content'
         CHECK (target_type IN ('content', 'scene', 'character')),
-    target_id             TEXT NOT NULL,      -- content 级 = asset_id 本身
+    target_id             TEXT NOT NULL,      -- content=asset_id / scene=scene_id / character=character_id
     tag_id                TEXT REFERENCES tag_define(tag_id),
     candidate_name        TEXT,
     candidate_dir_id      TEXT REFERENCES tag_catalog(dir_id),
     candidate_description TEXT,
+    candidate_alias       TEXT,               -- 自动并入库内标签时保留的原候选词（入库别名用）
     origin                TEXT NOT NULL CHECK (origin IN ('closed', 'open')),
     relevance_score       REAL,
     confidence            REAL,
@@ -249,10 +255,11 @@ CREATE INDEX idx_pre_tag_review ON pre_asset_tag(review_status);
 
 | 字段 | closed 模式 | open 模式 |
 |---|---|---|
-| `tag_id` | 必填（来自 `tag_define`） | 初始为空，审核合入标签库后赋值 |
-| `candidate_name` | 空 | 必填 |
-| `candidate_dir_id` | 空 | 生成时可空（mtg-v1 自拟分类不知目录体系），**合入时赋值** |
-| `candidate_description` | 空 | 仅 generated 标签填写 |
+| `tag_id` | 必填（来自 `tag_define`） | 库内对齐命中时即赋值；库外新词初始为空，审核通过入库后赋值 |
+| `candidate_name` | 空 | 库外新词必填（库内对齐命中时可空） |
+| `candidate_dir_id` | 空 | 逐目录开放生成时即写入目标目录，人工审核 `modify` 时可调整 |
+| `candidate_description` | 空 | 库外新词填写通用释义 |
+| `candidate_alias` | 空 | 库内概念复核自动并入时保留的原候选词，审核通过后写入别名 |
 | `origin` | `closed` | `open`（不可变，记录产出来源） |
 
 v1 的 `candidate_type`（LLM 自拟分类）不再入表——生成端分类留在 mtg 审计文件，入库后的规范归属以目录为准。
@@ -325,25 +332,16 @@ CREATE INDEX idx_change_log_task ON tag_change_log(task_id);
 NULL），批次反查走该索引列，替代 `after_json` 全表文本匹配；其余动作行为
 NULL。无外键，同 `tag_id` 契约——任务删除后日志仍可指向该任务号。
 
-### 3.9 prompt_template — Prompt 模板
+### 3.9 prompt_template — Prompt 模板（已于迁移 0018 移除）
 
-按 `mode + version` 版本化；同 mode 恰一个 `is_active = 1`。
+该表已在迁移 `0018_drop_prompt_template.py` 中删除。提示词改为代码常量集中维护于
+`src/tagplatform/capabilities/prompts/`（封闭模式模板见 `templates.py`，开放生成
+见 `mtg.py`，开放评测见 `open_review.py`，资产构建见 `assets.py`），由 Git 直接
+管理版本；`0018` 的 `downgrade` 保留了重建与回填能力。
 
-```sql
-CREATE TABLE prompt_template (
-    id            INTEGER PRIMARY KEY,
-    mode          TEXT NOT NULL CHECK (mode IN ('closed', 'open')),
-    version       INTEGER NOT NULL,
-    template_text TEXT NOT NULL,
-    is_active     INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0, 1)),
-    created_at    DATETIME,
-    CONSTRAINT ux_prompt_mode_version UNIQUE (mode, version)
-);
-
-CREATE INDEX idx_prompt_active ON prompt_template(mode, is_active);
-```
-
-沿用 v1 现有 3 行种子（closed v1 激活、open v1、open v2 过时标记——open 已由 mtg-v1 接管）。**本期表物理不动、ORM 保持 v1 形状**；上表 DDL（含 v1 没有的 CHECK）为 PG 迁移目标形态，届时统一对齐。
+> **历史保留表 `tag_quality_evaluation`**：由迁移 `0014` 引入，原用于存储生产任务
+> 附带质量评估快照。随着质量评估迁移至独立的「开放评测」模块，该表仅保留兼容历史数据，
+> 不再写入新记录。
 
 ### 3.10 user_account — 用户账号
 
@@ -451,18 +449,16 @@ CREATE INDEX idx_build_task_status ON asset_build_task(status);
 
 ## 5. 向量检索策略
 
-| 数据 | 向量存储 | 计算时机 | e5 角色 |
+| 数据 | 向量存储 | 计算时机 | 编码口径（`role`） |
 |---|---|---|---|
-| `tag_define` 标签 | `embedding` 列持久化（BLOB） | 标签入库/更新时 | passage |
-| `tag_catalog` 目录 | `embedding` 列持久化（BLOB） | 目录入库/更新时 | passage |
-| `media_asset` 内容 | 不存储 | 生成任务启动时实时计算 | query |
+| `tag_define` 标签 | `embedding` 列持久化（BLOB） | 导入治理、`reembed` 及审核新词入库时 | `f"{tag_name}。{description}"`（`passage`） |
+| `tag_catalog` 目录 | `embedding` 列持久化（BLOB） | 目录入库/更新及 `reembed` 时 | 目录名与描述（`passage`） |
+| `media_asset` 内容 | 不存储 | 生成任务启动时实时计算 | 内容摘要与场景文本（`query`） |
 
-closed 模式召回流程（沿用 v1 已验证的 e5 前缀契约）：
+当前默认嵌入模型为 `BAAI/bge-m3`（1024 维，纯文本编码不加前缀；仅在使用 `e5` 系列模型时按 `query:` / `passage:` 自动拼接前缀）。
 
-1. 按 `embed_content_texts` 现行规则提取摘要与场景文本（本期仅内容级）
-2. 用配置的 embedding 模型编码为 L2 归一化向量（**query: 前缀**）
-3. 与 `tag_define.embedding`（**passage: 前缀**）做余弦相似度 top-k 检索
-4. 召回候选注入 LLM 上下文做相关性判断
+- **closed 模式召回**：按 `embed_content_texts` 提取摘要与场景文本编码为 L2 归一化向量（`role="query"`），与 `tag_define.embedding`（`role="passage"`）做余弦检索并与 BM25 做 RRF 融合，取全局 Top-K 送入 LLM 判定。
+- **open 模式库内对齐**：`services/tags/library.py::library_index()` 直接复用持久化在 `tag_define.embedding` 的向量，仅在缺失或维度不匹配时按同一口径 `f"{tag_name}。{description}"`（`role="passage"`）即时回退编码，确保入库、召回与开放对齐处于同一向量空间。
 
 SQLite 实现下余弦相似度在应用层计算（BLOB 解包 + numpy）；PG 迁移后换 pgvector 原生算子，检索逻辑收敛在向量存储接缝（VectorStore）后面。
 
@@ -489,17 +485,16 @@ SQLite 实现下余弦相似度在应用层计算（BLOB 解包 + numpy）；PG 
 
 `review_record` 表删除。理由：新模型下每行至多一审——approved/rejected 是终态且行不被覆盖（§6.1），reviewer_id / review_comment / review_status / updated_at 落在行上即完整审核事实。库级变更仍由 `tag_change_log` 审计。
 
-v1 的审核动作映射为行操作（merge 保留 v1 的两支语义——并入既有 / 合入新建）：
+现行审核动作映射为行操作：
 
 | 审核动作 | 行操作 |
 |---|---|
-| approve | pre 行标 `approved` + reviewer/comment → 复制到 `asset_tag` |
-| reject | pre 行标 `rejected` + reviewer/comment |
-| modify（改候选后通过） | 更新 pre 行字段（candidate_name/description）→ 走 approve 流程，comment 记录修改内容 |
-| merge·并入既有（v1 merge） | 审核员认定候选 = 库内已有标签：pre 行赋 `tag_id`（candidate_name 原文保留可溯）→ 走 approve 流程，**不新建标签** |
-| merge·合入新建 | 库内确无对应：建 `tag_define` 行（change_log 记 `merge`）→ pre 行赋 `tag_id`/`candidate_dir_id` → 走 approve 流程 |
+| `approve` | pre 行标 `approved` + reviewer/comment；若为库外新词（`tag_id IS NULL`）则写入 `tag_define`（含 `embedding` 编码与 `tag_change_log`）并回填 `tag_id`；最后写入 `asset_tag` 正式挂载 |
+| `reject` | pre 行标 `rejected` + reviewer/comment |
+| `modify`（改候选后通过） | **仅允许对库外新词行（`tag_id IS NULL`）执行**（库内已有标签行返回 422 且审核界面不展示「修改」按钮）：更新 pre 行的 `candidate_name` / `candidate_description` / `candidate_dir_id`，随后直接走 `approve` 入库挂载流程 |
+| `merge`（并入既有） | 审核员认定候选 = 库内已有标签：pre 行赋目标 `tag_id`、清空候选字段，将原 `candidate_name` 登记为目标标签别名，随后标 `approved` 并挂载到 `asset_tag`，**不新建标签** |
 
-open 生成时的归一命中沿用 v1：mtg `_catalog_hits` 按 `open_match_threshold` 与库内标签向量匹配，命中行生成时即带 tag_id（origin 仍为 open）；审核端合并对话框由审核员自行搜索目标标签。
+open 生成时的库内对齐由 `catalog_align.py` 完成：精确重名直接归为库内命中（生成时即带 `tag_id`，`origin` 仍为 `open`）；向量余弦 ≥ `open_library_suspect_cosine` 或字面 Jaccard ≥ `open_library_name_overlap` 的疑似对子交由 LLM 概念复核，确认为同一概念时自动替换并记录 `candidate_alias`。
 
 **指标口径：** v1 按 ReviewRecord.action 的审核动作分布统计改为按 `review_status` 终态分布（modify/merge 的终态均为 approved）；merge 次数可从 `tag_change_log.action = 'merge'` 补出。
 
@@ -509,7 +504,7 @@ open 生成时的归一命中沿用 v1：mtg `_catalog_hits` 按 `open_match_thr
 
 ### 6.4 candidate_dir_id 赋值时序
 
-open 生成端（mtg-v1）产出的是自拟分类，不知道平台目录体系：生成时 `candidate_dir_id` 可空；审核 merge 入库时由合并流程赋值（此时起必填）。目录归属的唯一规范来源是 `tag_catalog`，生成端自拟分类不入库。
+当前开放生成采用逐目录两阶段流程，在生成阶段即针对目标目录产出候选并写入 `candidate_dir_id`；人工审核执行 `modify` 时可调整到其他合法的可扩充目录（`dir_dynamic` / `dir_asset`，且 `applicable_scope` 须与行挂载粒度一致）。目录归属的唯一规范来源是 `tag_catalog`。
 
 ### 6.5 生成结果过滤责任链（入库前）
 
@@ -560,6 +555,7 @@ open 生成端（mtg-v1）产出的是自拟分类，不知道平台目录体系
 - 0007+ 系列重建 v2 变更所及的业务表（新结构 + 新表名）；`user_account` / `prompt_template` / `asset_build_task` **本期物理不动、ORM 保持 v1 形状**（§3.9–3.11 所示 DDL 与 v1 的差异留待 PG 迁移时统一对齐；`prompt_template` 后由四层重构迁移 0018 drop——prompt 本地化，见下）。
 - 旧表（media_context / review_record / v1 asset_tag / v1 tag_catalog / import_batch / generation_task）业务数据为空，直接 drop。
 - ~~旧迁移 0002/0005 从 `tagplatform.db.models` import 种子常量（`PROMPT_V1_SEED` / `PROMPT_DEPRECATED_OPEN_SEED`）——重写 models.py 必须保住这两个导出~~ **已解除**：四层重构（Task 1/2）把 0002/0005/0012/0013/0014/0016 全部冻结为字面量快照，迁移文件自包含、不再 import 任何活常量；prompt 文案随之本地化为代码常量（`tagplatform.capabilities.prompts.templates`，git 即版本），`prompt_template` 表由迁移 **0018 drop**（downgrade 重建 + 从 templates.py 常量回填），ORM 与常量已删。
+- 后续演进迁移：`0014` 新增 `tag_quality_evaluation`（现保留为历史表）；`0015` 扩展 `tag_catalog.dir_type` 支持 `dir_asset`；`0017` 为 `tag_change_log` 增加 `task_id` 索引列；`0018` 移除 `prompt_template` 表；`0019` 将 `tag_catalog.applicable_scope` 收紧为 `IN ('content', 'scene', 'character')` 且默认 `'content'`。
 - 服务器升级流程不变：`alembic upgrade head`（沿用既有部署管线）。
 - 迁移按既有**带数据彩排法**验证：本地建库升到 0006 → 手工插父/子表数据（含外键行、账号、模板）→ upgrade head → 验证行数 / PRAGMA foreign_key_check / 约束。注意该环境 alembic 为非事务 DDL，PRAGMA foreign_keys=OFF 在迁移内真实生效。
 - **338 标签库在 v2 上线后再导入**（避免导两次）；分层 Excel 的层级列落到 tag_catalog（目录）+ tag_define（标签）两级，导入适配在实施计划中定义。
@@ -570,10 +566,10 @@ open 生成端（mtg-v1）产出的是自拟分类，不知道平台目录体系
 
 | 能力 | 表结构 | 流水线/审核 UI |
 |---|---|---|
-| content 级挂载 + val_fixed 标签 | ✅ | ✅ **本期** |
-| closed（目录召回 + LLM 判定）/ open（mtg-v1 流水线） | ✅ | ✅ 本期 |
-| scene / character 级挂载 | ✅ 预留（target_type/target_id + applicable_scope） | 后续 |
-| val_generalized 泛化值 | ✅ 预留（tag_type + asset_tag 唯一键含 tag_name） | 后续 |
+| `content` / `scene` 级挂载 + `val_fixed` 标签 | ✅ | ✅ 已启用 |
+| `character` 级挂载 | ✅ | ✅ 挂载逻辑已就位（开放评测盲评口径待补） |
+| `closed`（混合召回 + 分批 LLM 判定）/ `open`（逐目录两阶段 + Judge + 库内对齐） | ✅ | ✅ 已启用 |
+| `val_generalized` 泛化值 | ✅ 预留（`tag_type` + `asset_tag` 唯一键含 `tag_name`） | 后续 |
 | PostgreSQL + pgvector | —（§7 映射） | 后续迁移 |
 
 预留项不进流水线、不进审核界面，仅表结构与约束就位；启用属新需求，走新一轮设计。

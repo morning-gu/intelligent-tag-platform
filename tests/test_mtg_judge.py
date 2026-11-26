@@ -177,6 +177,7 @@ def test_dir_fit_only_applies_to_marked_candidates_and_recovers_missing_ids(cont
 
 
 def test_judge_prompt_marks_each_candidate_with_its_target_directory(content_fixture):
+    from tagplatform.capabilities.prompts.mtg import JUDGE_RETRY_HINT
     from tagplatform.services.generation.open.mtg.prompts import build_judge_messages
 
     dirs = [{"dir_id": "dir_mood", "path": "内容类标签/情感氛围",
@@ -184,13 +185,20 @@ def test_judge_prompt_marks_each_candidate_with_its_target_directory(content_fix
     text = build_judge_messages(
         content_fixture,
         [{"tag": "屋顶枪战追逐", "scope": "scene", "scenes": ["scene_001"],
-          "dir_ids": ["dir_mood"]}],
+          "dir_ids": ["dir_mood"], "candidate_id": "scene-000001"}],
         dirs=dirs)[0]["content"]
 
     assert "## 目标目录与目录契合" in text
     assert "- dir_mood｜内容类标签/情感氛围｜描述内容传递给观众的整体情感基调和氛围。" in text
-    assert "〔scene｜依据场景 scene_001｜目录 dir_mood〕" in text
-    assert '"dir_fits"' in text
+    assert "〔scene｜依据场景 scene_001｜目录 dir_mood｜候选 ID scene-000001〕" in text
+    assert '"confidence":0.85' in text
+    assert '"confidence":0.0' not in text
+    assert "完整上下文片段" in text
+    assert "氛围或情绪词" not in text
+    example = text.rsplit("只输出一个 JSON 对象", 1)[1]
+    assert '"candidate_id":"候选 ID"' in example
+    assert '"dir_fits":{"目录 ID":true}' in example
+    assert "candidate_id" in JUDGE_RETRY_HINT and "dir_fits" in JUDGE_RETRY_HINT
 
 
 def test_judge_without_directories_keeps_the_old_contract(content_fixture):
@@ -199,6 +207,7 @@ def test_judge_without_directories_keeps_the_old_contract(content_fixture):
     text = build_judge_messages(content_fixture, [{"tag": "示例"}])[0]["content"]
     assert "## 目标目录与目录契合" not in text
     assert "dir_fits" not in text
+    assert "candidate_id" not in text
 
 
 def test_candidate_ids_keep_same_name_verdicts_separate_across_batches(

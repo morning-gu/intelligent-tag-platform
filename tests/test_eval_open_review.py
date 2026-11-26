@@ -152,6 +152,15 @@ def test_missing_decision_or_overall_reason_is_not_inferred(field):
 def test_redundancy_instruction_in_prompt():
     assert "独立保留价值" in REVIEW_PROMPT
     assert '"evidence":' not in REVIEW_PROMPT
+    assert "缺失时参考场景挂载点" not in REVIEW_PROMPT
+
+
+def test_mock_llm_open_review_uses_0_to_4_scale():
+    rows = review_movie_tags(MockLLMClient(), _content(), _rows(), run_id="r1:mock")
+    assert all(row["pass"] is True for row in rows)
+    assert all(row["relevance"]["score"] == 4 for row in rows)
+    assert all(row["semantics"]["score"] == 4 for row in rows)
+    assert all(row["value"]["score"] == 4 for row in rows)
 
 
 def test_film_high_relevance_requires_two_valid_distinct_scenes():

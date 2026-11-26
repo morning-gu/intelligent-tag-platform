@@ -59,6 +59,7 @@ const ROW_A: ReviewItem = {
   id: 1,
   asset_id: 'a1',
   asset_title: '星际穿越',
+  tag_id: 'tag-crime',
   tag_name: '犯罪',
   origin: 'closed',
   mode: 'closed',
@@ -81,6 +82,7 @@ const ROW_CANDIDATE: ReviewItem = {
   id: 2,
   asset_id: 'a2',
   asset_title: '盗梦空间',
+  tag_id: null,
   tag_name: '主角争执',
   origin: 'open',
   mode: 'open',
@@ -252,7 +254,7 @@ describe('ReviewCenter 审核中心', () => {
     expect(itemsCallPaths()[1]).toContain('status=approved')
   })
 
-  it('行内四动作：通过/拒绝/修改/合并对新词候选行同样可用', async () => {
+  it('行内动作：库内已有标签行不显示修改按钮，新词候选行四动作齐全', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
@@ -261,12 +263,15 @@ describe('ReviewCenter 审核中心', () => {
     const rowA = screen.getByText('犯罪').closest('tr')!
     const rowC = screen.getByText('主角争执').closest('tr')!
 
-    for (const row of [rowA, rowC]) {
-      expect(within(row).getByRole('button', { name: /^通\s*过$/ })).toBeInTheDocument()
-      expect(within(row).getByRole('button', { name: /^拒\s*绝$/ })).toBeInTheDocument()
-      expect(within(row).getByRole('button', { name: /^修\s*改$/ })).toBeInTheDocument()
-      expect(within(row).getByRole('button', { name: /^合\s*并$/ })).toBeInTheDocument()
-    }
+    expect(within(rowA).getByRole('button', { name: /^通\s*过$/ })).toBeInTheDocument()
+    expect(within(rowA).getByRole('button', { name: /^拒\s*绝$/ })).toBeInTheDocument()
+    expect(within(rowA).queryByRole('button', { name: /^修\s*改$/ })).not.toBeInTheDocument()
+    expect(within(rowA).getByRole('button', { name: /^合\s*并$/ })).toBeInTheDocument()
+
+    expect(within(rowC).getByRole('button', { name: /^通\s*过$/ })).toBeInTheDocument()
+    expect(within(rowC).getByRole('button', { name: /^拒\s*绝$/ })).toBeInTheDocument()
+    expect(within(rowC).getByRole('button', { name: /^修\s*改$/ })).toBeInTheDocument()
+    expect(within(rowC).getByRole('button', { name: /^合\s*并$/ })).toBeInTheDocument()
   })
 
   it('单条通过：Popconfirm 确认后 POST approve 载荷并自动刷新', async () => {
@@ -313,27 +318,26 @@ describe('ReviewCenter 审核中心', () => {
     expect(itemsCallPaths()).toHaveLength(1)
   })
 
-  it('修改弹窗：预填展示名，提交 modify 载荷（提交即通过）并刷新', async () => {
+  it('修改弹窗：新词候选行预填展示名，提交 modify 载荷（提交即通过）并刷新', async () => {
     mockApis()
     renderReviewCenter()
     await screen.findByText('星际穿越')
     await expandGroups()
 
-    fireEvent.click(screen.getAllByRole('button', { name: /^修\s*改$/ })[0])
+    fireEvent.click(screen.getByRole('button', { name: /^修\s*改$/ }))
     const nameInput = await screen.findByLabelText('候选名')
-    // 后端 tag_name 已是"候选名优先、目录名回退"的展示名
-    expect(nameInput).toHaveValue('犯罪')
-    fireEvent.change(nameInput, { target: { value: '犯罪题材' } })
-    fireEvent.change(screen.getByLabelText('候选描述'), { target: { value: '涉及犯罪情节' } })
+    expect(nameInput).toHaveValue('主角争执')
+    fireEvent.change(nameInput, { target: { value: '角色冲突' } })
+    fireEvent.change(screen.getByLabelText('候选描述'), { target: { value: '人物之间爆发激烈争执' } })
     fireEvent.change(screen.getByLabelText('备注'), { target: { value: '修正措辞' } })
     fireEvent.click(screen.getByRole('button', { name: /确\s*定/ }))
 
-    await waitFor(() => expect(postedBody('/api/v1/asset-tags/1/review')).toBeDefined())
-    expect(JSON.parse(postedBody('/api/v1/asset-tags/1/review')!)).toEqual({
+    await waitFor(() => expect(postedBody('/api/v1/asset-tags/2/review')).toBeDefined())
+    expect(JSON.parse(postedBody('/api/v1/asset-tags/2/review')!)).toEqual({
       action: 'modify',
       payload: {
-        candidate_name: '犯罪题材',
-        candidate_description: '涉及犯罪情节',
+        candidate_name: '角色冲突',
+        candidate_description: '人物之间爆发激烈争执',
         comment: '修正措辞',
       },
     })

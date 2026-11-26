@@ -25,10 +25,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_get_prompt_seeded():
-    for mode in ("closed", "open"):
-        t = get_prompt(mode)
-        assert "{content}" in t
-    assert "{candidates}" not in get_prompt("closed")
+    t = get_prompt("closed")
+    assert "{content}" in t
+    assert "{candidates}" not in t
+    with pytest.raises(ValueError):
+        get_prompt("open")
 
 
 def test_get_prompt_missing_mode():
@@ -74,20 +75,16 @@ def test_migration_head_drops_prompt_template(tmp_path):
 
 
 def test_migration_downgrade_reseeds_from_local_constants(tmp_path):
-    """一级 downgrade：0018 重建表并从 templates.py 常量播种 v1 激活行。
+    """0018 downgrade：重建表并回填 closed/open v1 激活行。
 
     回滚路径（先 downgrade 再回滚旧镜像）可用性：行数 = closed/open v1
-    激活各一条（open v2 过时标注行不回填——过时标记随本地化退役），
-    文案与本地常量逐字一致。
+    激活各一条，其中 closed 来自 CLOSED_TEMPLATE_TEXT，open 来自 0018 内联冻结字面量。
     """
-    from tagplatform.capabilities.prompts import (
-        CLOSED_TEMPLATE_TEXT,
-        OPEN_TEMPLATE_TEXT,
-    )
+    from tagplatform.capabilities.prompts import CLOSED_TEMPLATE_TEXT
 
     db_path = tmp_path / "m.db"
-    assert _alembic(["upgrade", "head"], db_path).returncode == 0
-    result = _alembic(["downgrade", "-1"], db_path)
+    assert _alembic(["upgrade", "0018"], db_path).returncode == 0
+    result = _alembic(["downgrade", "0017"], db_path)
     assert result.returncode == 0, result.stderr
 
     conn = sqlite3.connect(db_path)
@@ -101,9 +98,8 @@ def test_migration_downgrade_reseeds_from_local_constants(tmp_path):
             "SELECT mode, version, is_active, template_text"
             " FROM prompt_template ORDER BY mode"
         ).fetchall()
-        assert rows == [
-            ("closed", 1, 1, CLOSED_TEMPLATE_TEXT),
-            ("open", 1, 1, OPEN_TEMPLATE_TEXT),
-        ]
+        assert rows[0] == ("closed", 1, 1, CLOSED_TEMPLATE_TEXT)
+        assert rows[1][:3] == ("open", 1, 1)
+        assert "{content}" in rows[1][3]
     finally:
         conn.close()

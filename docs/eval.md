@@ -5,23 +5,25 @@
 
 评测代码分两层：
 
-- `src/tagplatform/eval/`：**纯标准库**（`math` / `random`），不 import fastapi、
-  numpy 或任何平台模块（设计文档 §9.4 的分层红线）。因此这些指标可以被脚本、
-  测试、甚至未来的离线工具独立复用。
-- `scripts/eval_*.py`：只读的报表层，负责取数、聚合与打印。
+- `src/tagplatform/services/eval/` 中的纯标准库指标模块（`consistency.py` /
+  `ablation.py` / `ranking.py` / `closed_ranking.py`）：仅依赖标准库
+  （`math` / `random`），不 import fastapi、numpy 或业务存储模块（分层红线），
+  可被脚本、测试与离线工具独立复用；同目录下的 `service.py` / `open_service.py` /
+  `report.py` / `open_report.py` / `open_review.py` 为评测服务与报告层。
+- `scripts/eval_*.py`：只读的报表脚本，负责取数、聚合与打印。
 
 ---
 
-## 1. 一致性评测（`eval/consistency.py` + `scripts/eval_consistency.py`）
+## 1. 一致性评测（`services/eval/consistency.py` + `scripts/eval_consistency.py`）
 
 回答的问题：**同一份输入跑 N 轮，结果稳不稳？**
 
-旧版开放式生成对同一影片重复运行相同提示词，一致性指标衡量这些重复采样的稳定程度。`mtg-v4` 的两轮分别提炼场景级和影片级特征，输入和目标各异，脚本会跳过这类报告。评估新版的稳定性需要对同一影片重复执行整个任务，再比较最终输出。
+旧版开放式生成曾对同一影片重复运行相同提示词，一致性指标用于衡量这类历史重复采样的稳定程度。当前开放生成已改为逐目录两阶段流程（不再包含旧版重复采样分支），脚本会跳过非重复采样格式的报告；评估当前版本的稳定性需要对同一影片重复执行整个任务，再比较最终输出。
 
 ### 数据来源
 
-直接读审计报告 `mtg_report_dir/<task_id>.json` 里的 `runs[*]["tags"]`
-（由旧版 `pipeline.run_open_generation` 逐轮写入）。**离线计算，不重跑模型**：
+直接读历史审计报告 `mtg_report_dir/<task_id>.json` 里的 `runs[*]["tags"]`
+（由早期重复采样版本写入）。**离线计算，不重跑模型**：
 重跑既昂贵，又每次都是新样本，反而测不出"同一设置下的稳定程度"。
 
 ### 指标
@@ -74,7 +76,7 @@ ICC = (MSR − MSE) / (MSR + (k−1)·MSE + k·(MSC − MSE)/n)
 
 ---
 
-## 2. 消融实验（`eval/ablation.py` + `scripts/eval_ablation.py`）
+## 2. 消融实验（`services/eval/ablation.py` + `scripts/eval_ablation.py`）
 
 回答的问题：**每种输入模态各值多少？**
 
@@ -137,7 +139,7 @@ judge 的引用核对也使用同一 `modalities` 口径：关掉台词后再拿
 
 ---
 
-## 3. 目录归属排序评测（`eval/ranking.py` + `scripts/eval_dir_assignment.py`）
+## 3. 目录归属排序评测（`services/eval/ranking.py` + `scripts/eval_dir_assignment.py`）
 
 回答的问题：**标签自动归到哪个目录，排得准不准？**
 
@@ -153,14 +155,14 @@ judge 的引用核对也使用同一 `modalities` 口径：关掉台词后再拿
 
 ---
 
-## 4. 闭环排序评测（`eval/closed_ranking.py` + `services/eval/` 三分）
+## 4. 闭环排序评测（`services/eval/closed_ranking.py` + 评测服务三分）
 
 回答的问题：**闭环任务给一部片打的标签，排得准不准、分数有没有排序意义、覆盖全不全？**
 
 以 `/cache/MovieTags` 基准（131 部片 + MovieLens genome 0–1 相关性）为真值，
 把闭环产出当作一次检索：每部成功片一条样本，在（相关门槛 θ × 截断深度 K）
 网格上算 P@K / R@K / nDCG@K 宏平均，另报 Spearman 秩相关、覆盖率分布与
-随机/先验两条基线。指标装配在 `eval/closed_ranking.py`（纯标准库，与前三节
+随机/先验两条基线。指标装配在 `services/eval/closed_ranking.py`（纯标准库，与前三节
 同款红线）；原单文件 `closed_eval.py` 已四层重构三分进 `services/eval/`：
 数据集读与选片在 `dataset.py`、干跑运行器（`ClosedEvalService`）在
 `service.py`、报告组装/渲染/落盘在 `report.py`（服务层，与生产共用
@@ -238,7 +240,8 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 随机/先验基线、标定（一致率 + FP/FN）整体移除（`open_ranking.py` 已删）——
 开放生成没有排序真值任务，genome 相关性也不该当开放标签的质量真值。
 头条指标改为**评审通过率**（新词/命中分开）与**新词占比**，配三维均分/
-满分率/分布。银标准警示（note）保留：评审分仍是模型输出，不是人工标注。
+满分率/分布；开放评测报告仅在存在部分运行、同模评审或样本不足时展示对应警示，
+不再附带闭环银标准 `note` 提示。
 
 ### 样本构造
 
@@ -255,11 +258,13 @@ meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡
 
 ### 整片评审口径
 
-使用起跑时选择的模态、最终标签名称、通用释义、用途层级和来源场景整片盲评。
+使用起跑时选择的模态、最终标签名称、通用释义、用途层级和来源场景整片盲评（提示词
+版本 `open-review-v10`，维护于 `capabilities/prompts/open_review.py`）。
 库内标签取起跑时词库中的正式释义。评审高相关分须给出有效场景 ID，场景级须命中
-标签的来源场景，全片级至少两处。报告分别展示生成来源与评审引用。结构化引用不足时，
-可以使用评审理由中明确写出的有效场景 ID 补充。生产 judge 的分数、理由和摘录只在报告审计中展示。
-评审结合整组标签判断重复与独立保留价值。
+标签的来源场景（仅依据标签自身 `scene_ids`，不回退挂载点），全片级至少两处。报告前端与
+`report.md` 均展示生成阶段（一阶段/二阶段）、挂载目录、挂载层级（全片级/场景级/角色级）、
+生成来源与评审引用。结构化引用不足时，可以使用评审理由中明确写出的有效场景 ID 补充。
+生产 judge 的分数、理由和摘录只在报告审计中展示。评审结合整组标签判断重复与独立保留价值。
 
 通过率统计经过生产筛选的产出中，模型建议保留的条数占有明确结论条数的比例。比较生成策略时一起查看每片产出量、自滤保留率、评分覆盖率和通过条数。
 生产 judge 的语义分评名称清晰度，终评的语义分评名称与释义的一致性。

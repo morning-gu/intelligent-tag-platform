@@ -64,7 +64,8 @@ def _library_or_raise(session: Session) -> TagLibrary:
 
 
 def _ingest_new_tag(session: Session, row: PreAssetTag,
-                    library: TagLibrary, reviewer: str) -> dict | None:
+                    library: TagLibrary, reviewer: str, *,
+                    embedder=None) -> dict | None:
     """把一条已通过的新词写进 `tag_define`（无新词语义时返回 None）。"""
     if row.tag_id or not row.candidate_name:
         return None
@@ -79,14 +80,12 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
     # 被改成静态目录，或人工 modify 换了目录）。两条规则：
     # 1) 只有可扩充目录（dir_dynamic/dir_asset）允许审核后扩充新标签，
     #    静态目录的取值是固定的；
-    # 2) 候选行的挂载粒度必须落在目录的 applicable_scope 里（目录可能挂多个
-    #    粒度，逗号分隔），否则入的是挂不上资产的标签。
+    # 2) 候选行的挂载粒度必须与目录的 applicable_scope 一致，否则入的是挂不上资产的标签。
     if not directory.allows_new_tags:
         raise ValueError(
             f"目录「{directory.dir_name}」是静态目录（dir_static），不允许扩充新标签")
     scope = library.scope_of(row.candidate_dir_id)
-    allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
-    if row.target_type not in allowed:
+    if row.target_type != scope:
         raise ValueError(
             f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
             f"与候选行的 {row.target_type} 不一致")
@@ -105,6 +104,7 @@ def _ingest_new_tag(session: Session, row: PreAssetTag,
         description=row.candidate_description or "",
         aliases=[row.candidate_alias] if row.candidate_alias else [],
         source=source,
+        embedder=embedder,
     )
 
 
@@ -140,7 +140,8 @@ def _mount_asset_tag(session: Session, row: PreAssetTag, *,
 
 
 def apply_review(session: Session, row_id: int, action: str,
-                 reviewer: str, payload: dict | None) -> PreAssetTag:
+                 reviewer: str, payload: dict | None, *,
+                 embedder=None) -> PreAssetTag:
     """对 pre_asset_tag 行执行审核动作，服务内提交后返回该行。
 
     前置不满足/载荷非法按模块 docstring 抛错（ValueError/ConflictError，
@@ -168,6 +169,8 @@ def apply_review(session: Session, row_id: int, action: str,
 
     new_fields: dict[str, str] = {}
     if action == "modify":
+        if row.tag_id is not None:
+            raise ValueError("库内已有标签不支持审核修改，请使用通过、拒绝或合并")
         for canonical, alias in _MODIFY_FIELDS:
             value = (payload or {}).get(canonical)
             if value is None:
@@ -213,8 +216,7 @@ def apply_review(session: Session, row_id: int, action: str,
                     f"目录「{directory.dir_name}」是静态目录（dir_static），"
                     "不允许扩充新标签")
             scope = library.scope_of(final_dir)
-            allowed = {s.strip() for s in (scope or "").split(",") if s.strip()}
-            if row.target_type not in allowed:
+            if row.target_type != scope:
                 raise ValueError(
                     f"目录「{directory.dir_name}」的挂载粒度是 {scope}，"
                     f"与候选行的 {row.target_type} 不一致")
@@ -266,7 +268,8 @@ def apply_review(session: Session, row_id: int, action: str,
                 _mount_asset_tag(session, row, tag_id=define.tag_id,
                                  tag_name=define.tag_name, now=now)
         elif row.review_status == "approved" and not row.tag_id:
-            ingested = _ingest_new_tag(session, row, library, reviewer)
+            ingested = _ingest_new_tag(session, row, library, reviewer,
+                                       embedder=embedder)
             if ingested:
                 # 回填行内 tag_id：审核后 pre 行与 asset_tag 用同一个库内 id，
                 # 否则资产详情只能按候选名兜底匹配（历史行就是这么缺的）

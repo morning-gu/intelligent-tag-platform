@@ -12,30 +12,24 @@ drop，DB 版本机制随之删除）：文案是开发者资产，git 即版本
 消费方（tasks/runner、services/generation、closed_eval）一律向下 import 本包。
 """
 
-from tagplatform.capabilities.prompts.templates import (
-    CLOSED_TEMPLATE_TEXT,
-    OPEN_TEMPLATE_TEXT,
-)
+from tagplatform.capabilities.prompts.templates import CLOSED_TEMPLATE_TEXT
 
 __all__ = [
     "ALLOWED_FIELDS",
     "CLOSED_TEMPLATE_TEXT",
     "MODES",
-    "OPEN_TEMPLATE_TEXT",
     "REQUIRED_PLACEHOLDERS",
     "get_prompt",
     "render_prompt",
 ]
 
-# 支持的 mode 取值（只读契约视图按此枚举；与 generation_task.mode 的
-# CHECK 约束同口径）
-MODES: tuple[str, ...] = ("closed", "open")
+# 支持的模板 mode（仅 closed 消费外部模板；open 由内置 mtg 流水线自拼 prompt）
+MODES: tuple[str, ...] = ("closed",)
 
-# 各 mode 模板必须包含的占位符：closed/open 均仅内容——closed 的候选标签
+# 各 mode 模板必须包含的占位符：closed 仅含 {content}——候选标签
 # 分组 JSON 由 ClosedTagProducer 在 produce 内拼接（不经占位符注入）。
 REQUIRED_PLACEHOLDERS: dict[str, tuple[str, ...]] = {
     "closed": ("{content}",),
-    "open": ("{content}",),
 }
 
 # 占位符白名单：render_prompt 只以 content 一个关键字实参调用，模板里
@@ -46,7 +40,6 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({"content"})
 # mode → 模板常量（本地化的读取表；新增 mode = 加常量 + 更新契约映射）
 _MODE_TEMPLATES: dict[str, str] = {
     "closed": CLOSED_TEMPLATE_TEXT,
-    "open": OPEN_TEMPLATE_TEXT,
 }
 assert set(_MODE_TEMPLATES) == set(MODES)  # 读取表与 mode 枚举不漂移
 

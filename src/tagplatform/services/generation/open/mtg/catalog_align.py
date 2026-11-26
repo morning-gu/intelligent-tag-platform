@@ -22,30 +22,21 @@
 余弦只在"候选（query）× 库标签（passage）"之间比较。库内两条标签互比的
 分数（均值 0.896）不能当基线：角色前缀不同，两者不是一条分布。
 
-库内向量直接用导入时算好并落在 ``tag_catalog.embedding`` 的那份——再嵌一遍
-1400 条要几分钟，且会与库里已有向量口径不一致。
+库内向量由 ``services.tags.library.library_index`` 统一构建：优先复用持久化在
+``tag_define.embedding`` 中的向量（文本为 ``f"{tag_name}。{description}"``、
+role="passage"），缺失或维度不符时按同一口径补算。
 
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
-from sqlalchemy.orm import Session
 
-from tagplatform.capabilities.storage.models import TagDefine
-from tagplatform.services.tags.library import (  # 定义在 library，避免循环导入
-    LibraryTag,
-    is_deprecated,
-    is_placeholder,
-)
+from tagplatform.services.tags.library import LibraryTag  # 定义在 library，避免循环导入
 from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.schemas import ContentJSON
-from tagplatform.capabilities.vectors import decode_vector
-
-logger = logging.getLogger(__name__)
 
 # 标签名参与"包含关系"判断的最短长度：单字标签（如"爱"）会把半张表都算成疑似
 _MIN_CONTAIN_LEN = 2
@@ -56,12 +47,6 @@ BAND_NEW = "new"
 
 # 排序用：数值越大越优先（新词优先占名额）
 BAND_RANK = {BAND_NEW: 2, BAND_SUSPECT: 1, BAND_DUPLICATE: 0}
-
-# 模板占位行判定（is_placeholder）单一来源在 services.tags.library——本模块与
-# library_index 共用同一份词表，避免"库侧过滤了、对齐侧没过滤"的漂移。
-
-
-
 
 
 @dataclass(frozen=True)
@@ -78,36 +63,6 @@ class Alignment:
     matched_tag_id: str | None = None
     cosine: float | None = None
     same_concept: bool | None = None
-
-
-def load_library_index(session: Session, *, dim: int | None = None) -> list[LibraryTag]:
-    """读取库内标签（排除废弃行、无向量行与模板占位行），供提示与分档复用。
-
-    v2 起标签本体在 `tag_define`、目录节点在 `tag_catalog`——"叶子"这一概念
-    已经由表结构保证（目录不再混在标签里），所以直接取全部标签行即可，
-    不会出现"候选撞上一个分类名"。
-
-    `dim`：查询向量的维度。库内向量来自导入时算好的那份，换句向量模型后
-    必须重灌（python -m tagplatform.reembed）；万一忘了重灌，维度对不上会让
-    search_similar 抛 ValueError、整条生成任务失败。这里直接跳过维度不符的
-    行：宁可这一轮没有库可比（全部按新词出），也不要让任务挂掉。
-    """
-    rows = [row for row in session.query(TagDefine).all()
-            if not is_deprecated(row.status) and row.embedding
-            and not is_placeholder(row.tag_name)]
-    index: list[LibraryTag] = []
-    skipped = 0
-    for row in rows:
-        vector = decode_vector(row.embedding)
-        if dim is not None and vector.shape[0] != dim:
-            skipped += 1
-            continue
-        index.append(LibraryTag(tag_id=row.tag_id, name=row.tag_name,
-                                vector=vector))
-    if skipped:
-        logger.warning("标签库有 %d 条维度不符的向量（期望 %d），已跳过——"
-                       "换过句向量模型就要跑 python -m tagplatform.reembed", skipped, dim)
-    return index
 
 
 def _content_texts(content: ContentJSON) -> list[str]:

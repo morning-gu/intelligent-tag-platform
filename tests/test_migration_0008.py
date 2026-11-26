@@ -125,7 +125,7 @@ def test_0008_upgrade_rehearsal(rehearsal):
     command.upgrade(cfg, "0007")
     _seed_0007_data(db_path)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0008")
 
     # ---- 数据：目录父/子两行全列原样保留（INSERT SELECT 搬迁）----
     conn = sqlite3.connect(str(db_path))
@@ -198,7 +198,7 @@ def test_0008_upgrade_rehearsal(rehearsal):
 def test_0008_downgrade_and_roundtrip(rehearsal):
     """downgrade 回 0007：CHECK 回单值口径、行保留、再升回 head 可重入。"""
     cfg, db_path = rehearsal
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0008")
 
     # head 口径下插组合行 + 单值行
     conn = sqlite3.connect(str(db_path))
@@ -235,7 +235,7 @@ def test_0008_downgrade_and_roundtrip(rehearsal):
         conn.close()
 
     # round-trip：再升回 head，CHECK/默认值/索引全部回到位，组合行仍可插
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0008")
     sql = _create_table_sql(db_path, "tag_catalog")
     assert sql is not None
     assert "'content,scene'" in sql

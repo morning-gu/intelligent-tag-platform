@@ -11,9 +11,9 @@ import json
 EXPECTED_KEYS = {
     "llm_model", "llm_temperature", "mtg_judge_model", "mtg_judge_enabled",
     "embedding_backend", "embedding_model", "open_eval_review_model",
-    "recall_top_k_per_type", "open_match_threshold",
-    "generation_workers", "use_mock_llm", "use_mock_embedder",
-    "database_path",
+    "recall_top_k_per_type", "open_library_suspect_cosine",
+    "open_library_name_overlap", "generation_workers", "use_mock_llm",
+    "use_mock_embedder", "database_path",
 }
 
 
@@ -33,11 +33,26 @@ def test_config_returns_all_fields(client):
     assert body["embedding_model"] == "BAAI/bge-m3"
     assert body["open_eval_review_model"] == ""  # 空 = 回落主 LLM
     assert body["recall_top_k_per_type"] == 50
-    assert body["open_match_threshold"] == 0.85
+    assert body["open_library_suspect_cosine"] == 0.75
+    assert body["open_library_name_overlap"] == 0.4
     assert body["generation_workers"] == 0  # fixture 钉死同步执行
     assert body["use_mock_llm"] is True
     assert body["use_mock_embedder"] is True
     assert body["database_path"].endswith("tagplatform.db")  # fixture 临时库
+
+
+def test_config_reports_effective_remote_embedding_model():
+    """embedding_backend=remote 时，embedding_model 返回实际生效的 embedding_api_model。"""
+    from tagplatform.orchestration.config import get_config
+    from tagplatform.settings import Settings
+
+    remote = get_config(Settings(
+        embedding_backend="remote",
+        embedding_model="local/ignored",
+        embedding_api_model="bge-m3-remote",
+    ))
+    assert remote.embedding_backend == "remote"
+    assert remote.embedding_model == "bge-m3-remote"
 
 
 def test_config_contains_no_secrets(client):

@@ -397,13 +397,19 @@ def test_read_open_summary_upgrades_old_schema(tmp_path):
 
 
 def test_render_md_has_sections():
-    m1 = _result("ttA", hits=[_hit("t1", "悬疑")], new_words=[_new("新词甲")])
+    hit = {**_hit("t1", "悬疑"), "dir_name": "情绪氛围", "target_type": "content"}
+    word = {**_new("新词甲"), "level": "scene", "dir_id": "dir_story", "target_type": "scene"}
+    m1 = _result("ttA", hits=[hit], new_words=[word])
     report = assemble_open_report([m1], _meta(done=1, total=1))
+    assert "note" not in report
     md = render_open_report_md(report)
     assert "# 开放生成评测报告" in md
     assert "## 汇总" in md and "## 评分分布" in md
     assert "## judge 审计" in md and "## 逐片明细" in md and "## 口径" in md
-    assert "悬疑" in md and "新词甲" in md
+    assert "| 组 | 标签 | 生成阶段 | 挂载目录 | 挂载层级 | 相关 | 语义 | 价值 | 通过 | 理由 |" in md
+    assert "| 命中 | 悬疑 | 二阶段 | 情绪氛围 | 全片级 |" in md
+    assert "| 新词 | 新词甲 | 一阶段 | dir_story | 场景级 |" in md
+    assert "银标准" not in md
     assert "数量漏斗：—（审计缺失）" in md  # 无审计 → 漏斗 None 占位
 
 

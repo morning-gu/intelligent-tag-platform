@@ -233,9 +233,9 @@ def _quality_output(text: str, *, open_review: bool = False) -> dict:
     scenes = _parse_scenes(material)
     rows = [{
         "id": label["id"],
-        "relevance": {"score": 2 if scenes else None, "reason": "模拟内容评分"},
-        "semantics": {"score": 2 if label["desc"] else None, "reason": "模拟语义评分"},
-        "value": {"score": 2 if scenes else None, "reason": "模拟标签价值评分"},
+        "relevance": {"score": 4 if scenes else None, "reason": "模拟内容评分"},
+        "semantics": {"score": 4 if label["desc"] else None, "reason": "模拟语义评分"},
+        "value": {"score": 4 if scenes else None, "reason": "模拟标签价值评分"},
         "evidence": scenes[:1],
     } for label in labels]
     if open_review:

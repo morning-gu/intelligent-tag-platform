@@ -35,10 +35,10 @@ def test_post_prompts_removed_405(client):
 def test_post_prompts_valid_payload_still_405(client):
     """合法 admin 载荷也无法复活写路径（405 而非 200/422）。"""
     resp = client.post("/api/v1/prompts", json={
-        "mode": "open", "template_text": "内容：{content}"})
+        "mode": "closed", "template_text": "内容：{content}"})
     assert resp.status_code == 405
-    rows = client.get("/api/v1/prompts", params={"mode": "open"}).json()
-    assert [r["mode"] for r in rows] == ["open"]
+    rows = client.get("/api/v1/prompts", params={"mode": "closed"}).json()
+    assert [r["mode"] for r in rows] == ["closed"]
 
 
 def test_post_prompts_malformed_body_still_405(client):
@@ -70,7 +70,7 @@ def test_get_prompts_readonly_contract_structure(client):
     resp = client.get("/api/v1/prompts")
     assert resp.status_code == 200
     rows = resp.json()
-    assert [r["mode"] for r in rows] == ["closed", "open"]
+    assert [r["mode"] for r in rows] == ["closed"]
     for row in rows:
         assert set(row.keys()) == {"mode", "template_text",
                                    "allowed_fields", "required_placeholders"}
@@ -81,7 +81,7 @@ def test_get_prompts_template_text_matches_local_constants(client):
     """正文与本地常量逐字一致（契约视图即常量的只读投影）。"""
     rows = {r["mode"]: r for r in client.get("/api/v1/prompts").json()}
     assert rows["closed"]["template_text"] == get_prompt("closed")
-    assert rows["open"]["template_text"] == get_prompt("open")
+    assert "open" not in rows
 
 
 def test_get_prompts_placeholder_contract(client):
@@ -134,4 +134,4 @@ def test_non_admin_can_read_prompts_contract(client):
                 json={"username": "bob", "password": "pw-bob-1"})
     resp = client.get("/api/v1/prompts")
     assert resp.status_code == 200
-    assert [r["mode"] for r in resp.json()] == ["closed", "open"]
+    assert [r["mode"] for r in resp.json()] == ["closed"]
