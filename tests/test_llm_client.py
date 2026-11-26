@@ -125,14 +125,18 @@ def test_mock_open_scene_evidence():
 
 
 def test_mock_judge_branch():
-    """审核分支：候选行全部给过线三维分（4/3/3）、confidence 0.9、引用首场景。"""
+    """审核分支：候选行全部给过线三维分（4/3/三方向3分）、confidence 0.9、引用首场景。"""
     prompt = ("## 审核任务\n## 候选标签\n- 多线叙事｜叙事｜多线索交替\n"
               "- 情感张力｜情绪｜持续的紧张感\n\n## 影片内容\n" + "\n".join(_SCENE_LINES))
     items = json.loads(MockLLMClient().complete(
         [{"role": "user", "content": prompt}], "r1").content)
     assert [it["tag"] for it in items] == ["多线叙事", "情感张力"]
-    assert all((it["relevance"], it["semantics"], it["value"]) == (4, 3, 3)
-               for it in items)
+    assert all((it["relevance"], it["semantics"]) == (4, 3) for it in items)
+    assert all(
+        it["value_scores"] == {"presentation": 3, "search": 3, "recommendation": 3}
+        for it in items
+    )
+    assert all("dir_fits" not in it for it in items)
     assert all(it["confidence"] == 0.9 for it in items)
     assert all(it["scenes"] == ["scene_001"] for it in items)
 
