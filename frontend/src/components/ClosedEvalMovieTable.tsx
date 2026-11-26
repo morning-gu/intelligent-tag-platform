@@ -30,7 +30,7 @@
 // 整体漏斗块（增补 2026-11-26）：主表上方全 run 聚合——payload.rows 纯派生
 // （十键逐键加总 funnel 非 null 行，无任何非 null 行 → 「暂无」说明文案，
 // 同 detail-trace-absent 口径）：五 Statistic 主链（门控过/挂载成差式派生
-// 同 FunnelBar）+ BarChart 五行条形（显式 max=召回）+ 次要计数行（不含输出
+// 同 FunnelBars）+ BarChart 五行条形（显式 max=召回）+ 次要计数行（不含输出
 // 上限——聚合的 max_tags 无意义）+ 每片存活率（n_kept/n_recall，召回 0 的
 // 片跳过、偶数中位取中间两数均值）+ 覆盖标注（N 部有解剖数据 / 共 M 部）；
 // 不新增请求、θ 门/缓存逻辑零改动。
@@ -121,7 +121,7 @@ function byNumber(
 /** 全 run 漏斗聚合（纯函数）：十键逐键加总 funnel 非 null 行（失败片/老 run
  * 行 null 不计入），n_movies 为非 null 行数；无任何非 null 行 → null——
  * 老 run 是「算不出」不是全 0（None≠0），渲染层走「暂无」说明文案。 */
-export function aggregateFunnel(
+function aggregateFunnel(
   rows: MovieSummaryRow[],
 ): { counts: FunnelCounts; n_movies: number } | null {
   const counts: FunnelCounts = {
@@ -158,7 +158,7 @@ export function aggregateFunnel(
 /** 每片存活率统计（纯函数）：逐片 n_kept/n_recall（funnel null 或召回 0 的
  * 片跳过——0/0 不可算，None≠0 不造 0）；升序取 min/中位/max，偶数个取中间
  * 两数均值；无 eligible 片 → null（「暂无」）。 */
-export function survivalStats(
+function survivalStats(
   rows: MovieSummaryRow[],
 ): { min: number; median: number; max: number } | null {
   const rates: number[] = []
@@ -175,7 +175,7 @@ export function survivalStats(
   return { min: sorted[0], median, max: sorted[sorted.length - 1] }
 }
 
-/** 整体漏斗条形图（RunFunnelSummary 内）：主链五阶段同 FunnelBar 差式口径
+/** 整体漏斗条形图（RunFunnelSummary 内）：主链五阶段同 FunnelBars 差式口径
  * （门控过 = 提及−门控丢弃、挂载成 = 门控过−挂载失败），显式 max=召回——
  * 各阶段分母同为召回池，行间可比；复用既有 BarChart 纯 CSS 条形图。 */
 export function FunnelBars({ counts }: { counts: FunnelCounts }): JSX.Element {
