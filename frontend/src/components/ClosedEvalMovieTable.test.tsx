@@ -10,7 +10,8 @@
 // 后 A run 的在途明细不得串写成 B run 可命中的缓存（B run 展开必须重新请求）、
 // 首次明细在途窗口内收起再展开不得重复请求（pending 去重）。
 // 管线追踪（增补 2026-11-26）：主表漏斗列（召回→提及→产出，null 暂无，title
-// 全链计数）、明细漏斗条五阶段（门控过/挂载成由分流键差出）、候选踪迹表
+// 全链计数）、明细漏斗条五阶段 mini BarChart（复用 FunnelBars，门控过/挂载成
+// 由分流键差出；召回 0 全 0 行兜底无 NaN）、候选踪迹表
 // （结局 Select 筛选为本地受控状态、服务端召回序不重排、结局中文映射、
 // null 数值暂无）、漏检表丢失环节列（中文映射、null 暂无）、trace null 的
 // 老 run 说明文案（无踪迹表/漏斗条/下载）、llm-raw 下载 404 → message.error
@@ -358,9 +359,20 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
 
     fireEvent.click(expandIconOf(rowOf('tt0000001')))
 
-    // 五阶段主链：门控过 = 提及 4 − 门控丢弃 1 = 3；挂载成 = 3 − 挂载失败 1 = 2
+    // 五阶段主链 mini BarChart（复用 FunnelBars）：门控过 = 提及 4 − 门控丢弃 1
+    // = 3；挂载成 = 3 − 挂载失败 1 = 2；显式 max=召回 5 行间可比
     const bar = await screen.findByTestId('detail-funnel')
-    expect(bar).toHaveTextContent('召回 5 → 提及 4 → 门控过 3 → 挂载成 2 → 产出 1')
+    const barValues = [
+      ['召回', '5'],
+      ['提及', '4'],
+      ['门控过', '3'],
+      ['挂载成', '2'],
+      ['产出', '1'],
+    ] as const
+    for (const [label, value] of barValues) {
+      const barRow = within(bar).getByTestId(`bar-row-${label}`)
+      expect(within(barRow).getByText(value)).toBeInTheDocument()
+    }
     // 次要计数：分流/编造/批次（含解析重试）/输出上限
     expect(bar).toHaveTextContent('门控丢弃 1')
     expect(bar).toHaveTextContent('挂载失败 1')
@@ -368,6 +380,32 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     expect(bar).toHaveTextContent('编造 1')
     expect(bar).toHaveTextContent('批次 2（解析重试 1）')
     expect(bar).toHaveTextContent('输出上限 6')
+  })
+
+  it('召回 0 的单片明细：五行 bar-row 渲染无 NaN（BarChart 全 0 兜底为 1）', async () => {
+    // 候选全灭片：主链五键全 0（真实求和 0，可渲染——与 None≠0「算不出」
+    // 区分）；BarChart 显式 max=召回 0 非正 → 逐行兜底 1 防除零，不渲染 NaN
+    mockedGetRunMovieDetail.mockResolvedValue({
+      ...DETAIL,
+      trace: {
+        counts: FUNNEL_ZERO_RECALL,
+        candidates: [],
+        batches: [],
+        fabricated: [],
+        max_tags: 6,
+      },
+    })
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+
+    const bar = await screen.findByTestId('detail-funnel')
+    for (const label of ['召回', '提及', '门控过', '挂载成', '产出'] as const) {
+      const barRow = within(bar).getByTestId(`bar-row-${label}`)
+      expect(within(barRow).getByText('0')).toBeInTheDocument()
+      expect(within(barRow).queryByText('NaN')).not.toBeInTheDocument()
+    }
   })
 
   it('踪迹表按结局筛选：Select 选 gate → 只剩门控行；null 数值「暂无」', async () => {

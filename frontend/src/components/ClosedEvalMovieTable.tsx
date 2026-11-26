@@ -20,7 +20,8 @@
 // 保留 + 内联警示（refetchError），成功即清除——恢复路径不消失。
 // 管线追踪（增补 2026-11-26）：主表加「漏斗」列（召回→提及→产出，title
 // 浮全链十键计数，null「暂无」）；明细区 trace 非 null 渲染漏斗条（五阶段
-// 主链 + 分流/次要计数）、候选踪迹表（结局 Select 筛选为本地受控状态——
+// 主链 mini BarChart 复用 FunnelBars + 分流/次要计数）、候选踪迹表（结局
+// Select 筛选为本地受控状态——
 // 不进缓存/请求逻辑，服务端召回序不重排）、LLM 原始输出下载（fetch+blob，
 // 404/失败 message.error 透出不崩视图——不用 <a> 直链，404 会开浏览器错误
 // 页）；trace null（老 run/失败片）渲染说明文案。misses 表加「丢失环节」列。
@@ -256,21 +257,17 @@ export function RunFunnelSummary({ rows }: { rows: MovieSummaryRow[] }): JSX.Ele
   )
 }
 
-/** 漏斗条（trace 非 null 的明细区首块，一行统计）：主链五阶段 召回→提及→
- * 门控过→挂载成→产出，其中门控过/挂载成由分流键差出（提及池按结局分流
- * 完备：后端 FunnelCountsOut 注释口径——kept/gate/unmountable/m_cap 全带
- * 适用度，unmentioned 双 null 不入池）；次要计数列分流四键/编造/批次
- * （含解析重试）/输出上限。 */
+/** 漏斗条（trace 非 null 的明细区首块）：主链五阶段 复用 FunnelBars 迷你
+ * BarChart（差式派生随组件内聚——门控过/挂载成由分流键差出，提及池按结局
+ * 分流完备：后端 FunnelCountsOut 注释口径——kept/gate/unmountable/m_cap 全带
+ * 适用度，unmentioned 双 null 不入池；显式 max=召回行间可比）；次要计数列
+ * 分流四键/编造/批次（含解析重试）/输出上限——单片 M 有意义，与整体块不含
+ * 输出上限的区分是刻意口径。 */
 function FunnelBar({ counts }: { counts: FunnelCounts }): JSX.Element {
-  const passedGate = counts.n_mentioned - counts.n_gate
-  const mountedOk = passedGate - counts.n_unmountable
   return (
     <div data-testid="detail-funnel">
       <Typography.Title level={5}>管线漏斗</Typography.Title>
-      <Typography.Text>
-        {`召回 ${counts.n_recall} → 提及 ${counts.n_mentioned} → 门控过 ${passedGate}`
-          + ` → 挂载成 ${mountedOk} → 产出 ${counts.n_kept}`}
-      </Typography.Text>
+      <FunnelBars counts={counts} />
       <Typography.Text type="secondary" style={{ marginLeft: 12 }}>
         {`门控丢弃 ${counts.n_gate} · 挂载失败 ${counts.n_unmountable} · `
           + `上限截断 ${counts.n_m_cap} · 编造 ${counts.n_fabricated} · `
