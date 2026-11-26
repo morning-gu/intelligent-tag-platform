@@ -325,11 +325,21 @@ def test_open_catalog_match_sets_catalog_origin(session, content_fixture, mtg_se
 
 
 def test_open_respects_max_final_tags(session, content_fixture, mtg_settings):
-    """任务显式填写的总上限生效。"""
-    spec = _build_spec(session, content_fixture, run_id="r7",
-                       policy=GenerationPolicy(max_tags=1))
-    out = OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
-    assert len(out) == 1
+    """任务显式填写的总上限真正截断多条产出（未设限时产出 >1 条）。"""
+    content = _scene_content(content_fixture, "tt0000007", 2)
+    full = OpenTagProducer().produce(
+        _build_spec(session, content, run_id="r7-full",
+                    policy=GenerationPolicy(max_tags=30)),
+        session, MOCK_LLM, MOCK_EMBEDDER,
+    )
+    assert len(full) > 1
+
+    capped = OpenTagProducer().produce(
+        _build_spec(session, content, run_id="r7-cap",
+                    policy=GenerationPolicy(max_tags=1)),
+        session, MOCK_LLM, MOCK_EMBEDDER,
+    )
+    assert len(capped) == 1
 
 
 # ---- 层级约束（内部把关 + 层级落库） ----

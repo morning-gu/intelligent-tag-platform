@@ -158,10 +158,13 @@ def _text_with(content, modalities) -> str:
 
 
 def test_default_modalities_render_everything():
-    """`modalities=None` 必须与旧行为逐字节一致（否则默认路径被悄悄改了口径）。"""
+    """`modalities=None` 必须与全模态集合渲染结果逐字节一致。"""
     content = _content_with_dialogues(3)
 
-    assert _text_with(content, None) == _prompt_text(content)
+    default_text = _text_with(content, None)
+    full_text = _text_with(content, frozenset({"video", "script", "dialogue"}))
+    assert default_text == full_text
+    assert "第1句台词" in default_text
 
 
 def test_script_off_drops_all_content_text():

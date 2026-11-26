@@ -225,6 +225,7 @@ def test_mount_character_needs_exactly_one_character():
          / "content_movie.json").read_text(encoding="utf-8"))
     data.setdefault("content", {})["characters"] = [
         {"character_id": "char_001", "name": "甲"},
+        {"character_id": "char_002", "name": "乙"},
     ]
     data["content"]["scenes"] = [{
         "scene_id": "scene_001",
@@ -240,6 +241,10 @@ def test_mount_character_needs_exactly_one_character():
                          evidence) == Mount("character", "char_001")
     # 场景里没有角色 → 解析不出唯一角色
     content.content.scenes[0].character_ids = []
+    assert resolve_mount(SCOPE_CHARACTER, content.asset.asset_id, content,
+                         evidence) is None
+    # 场景里有多个角色 → 无法归属唯一角色，同样返回 None
+    content.content.scenes[0].character_ids = ["char_001", "char_002"]
     assert resolve_mount(SCOPE_CHARACTER, content.asset.asset_id, content,
                          evidence) is None
 

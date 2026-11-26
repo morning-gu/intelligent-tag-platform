@@ -50,11 +50,15 @@ def test_finalize_uses_macro_average():
 
 
 def test_finalize_empty_is_none_not_zero():
-    """"一条都没评"算出的平均是"暂无"，不是 0——0 会被读成"性能归零"。"""
-    result = VariantResult(variant_by_name("script-only")).finalize()
+    """"一条都没评"算出的平均是"暂无"（None），不是 0——0 会被读成"性能归零"。"""
+    empty = VariantResult(variant_by_name("script-only")).finalize()
+    assert empty.metrics == {}
+    assert empty.n_items == 0
 
-    assert result.metrics == {}
-    assert result.n_items == 0
+    with_empty_metric = VariantResult(
+        variant_by_name("script-only"), per_item={"accepted": []}).finalize()
+    assert with_empty_metric.metrics == {"accepted": None}
+    assert with_empty_metric.metrics["accepted"] is None
 
 
 # ---------------------------------------------------------------- 配对 bootstrap

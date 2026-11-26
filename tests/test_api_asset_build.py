@@ -198,8 +198,9 @@ def test_execute_success_writes_context(dataset_client, monkeypatch):
         assert content.content.characters[0].description == "由 Actor A 饰演"
 
 
-def test_progress_page_renders(dataset_client):
+def test_progress_page_renders(dataset_client, monkeypatch):
     """进度页：不依赖前端构建，浏览器打开自动轮询任务状态。"""
+    monkeypatch.setattr(asset_build, "submit", lambda *a, **k: None)
     body = _upload(dataset_client, "Test.Movie.1999.mkv").json()
     task_id = body["build_task_id"]
 

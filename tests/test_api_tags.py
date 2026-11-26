@@ -564,9 +564,18 @@ def test_deactivate_activate_writes_change_log(client):
     off = client.post(f"/api/v1/tags/{tag_id}/deactivate")
     assert off.status_code == 200
     assert off.json()["status"] == "deprecated"
+    # 同状态重复 deactivate：早返回，不重复写日志
+    off_again = client.post(f"/api/v1/tags/{tag_id}/deactivate")
+    assert off_again.status_code == 200
+    assert off_again.json()["status"] == "deprecated"
+
     on = client.post(f"/api/v1/tags/{tag_id}/activate")
     assert on.status_code == 200
     assert on.json()["status"] == "active"
+    # 同状态重复 activate：早返回，不重复写日志
+    on_again = client.post(f"/api/v1/tags/{tag_id}/activate")
+    assert on_again.status_code == 200
+    assert on_again.json()["status"] == "active"
 
     with client.app.state.session_factory() as s:
         logs = s.query(TagChangeLog).filter_by(tag_id=tag_id).filter(
@@ -577,12 +586,6 @@ def test_deactivate_activate_writes_change_log(client):
             ("deprecate", {"status": "active"}, {"status": "deprecated"}),
             ("update", {"status": "deprecated"}, {"status": "active"}),
         ]
-
-    # 同状态重复 deactivate：早返回不重复写日志
-    client.post(f"/api/v1/tags/{tag_id}/deactivate")
-    with client.app.state.session_factory() as s:
-        assert s.query(TagChangeLog).filter_by(tag_id=tag_id).filter(
-            TagChangeLog.action != "import").count() == 3
 
 
 def test_lifecycle_on_dir_id_404(client):

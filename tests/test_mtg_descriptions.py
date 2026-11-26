@@ -147,14 +147,17 @@ def test_fill_descriptions_keeps_only_general_items():
 
 
 def test_fill_descriptions_retries_when_first_round_leaks():
+    leaking = json.dumps({"items": [
+        {"tag": "多线叙事", "desc": "本片开头以多条时间线并行推进"}]},
+        ensure_ascii=False)
     good = json.dumps({"items": [
         {"tag": "多线叙事", "desc": "以多条时间线并行推进的叙事结构"}]},
         ensure_ascii=False)
-    client = _DescClient([good, good])
+    client = _DescClient([leaking, good])
     filled = fill_descriptions(
         client, [{"tag": "多线叙事", "dir": "叙事结构"}], run_id="t2")
     assert filled["多线叙事"] == "以多条时间线并行推进的叙事结构"
-    assert client.calls == 1
+    assert client.calls == 2
 
 
 def test_fill_descriptions_survives_client_failure():

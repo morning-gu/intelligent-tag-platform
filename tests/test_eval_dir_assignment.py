@@ -76,25 +76,47 @@ def test_variant_text_drops_the_held_out_tag(script):
 
 
 def test_variant_only_spans_first_sample_tags(script):
-    """只有落在前 `_DIR_SAMPLE_TAGS` 枚内的标签才有变体，集合大小可预期。"""
+    """目录标签超过 `_DIR_SAMPLE_TAGS` 枚时，仅前 `_DIR_SAMPLE_TAGS` 枚生成变体。"""
+    from tests.library_fixture import add_tags
+
+    add_tags([
+        {"tag_id": f"tag_overflow_{i:02d}", "dir_id": "dir_theme",
+         "tag_name": f"超限标签{i:02d}", "tag_type": "val_fixed",
+         "description": f"描述{i}", "status": "active"}
+        for i in range(_DIR_SAMPLE_TAGS + 3)
+    ])
     library = try_load_library()
     dirs = library.new_tag_dirs(None)
     _base, variants = script._dir_texts_and_variants(library, dirs)
 
-    for directory in dirs:
-        hits = [k for k in variants if k[0] == directory.dir_id]
-        in_dir = [t for t in library.tags() if t.dir_id == directory.dir_id]
-        assert len(hits) == min(len(in_dir), _DIR_SAMPLE_TAGS)
+    in_theme = [t for t in library.tags() if t.dir_id == "dir_theme"]
+    assert len(in_theme) > _DIR_SAMPLE_TAGS
+    theme_hits = [k for k in variants if k[0] == "dir_theme"]
+    assert len(theme_hits) == _DIR_SAMPLE_TAGS
 
 
 def test_variant_equals_base_when_tag_is_the_only_one(script):
-    """目录里只剩这一枚标签时，"去掉自己"就是空清单（不能残留分隔符）。"""
+    """目录里只有一枚标签时，"去掉自己"就是空清单（不残留"已收录："分隔符）。"""
+    from tests.library_fixture import add_dirs, add_tags
+
+    add_dirs([{
+        "dir_id": "dir_solo", "parent_id": "dir_content", "level": 2,
+        "dir_name": "独苗目录", "dir_type": "dir_dynamic",
+        "applicable_scope": "content", "description": "仅含一枚标签",
+        "aliases": [],
+    }])
+    add_tags([{
+        "tag_id": "tag_solo", "dir_id": "dir_solo", "tag_name": "独苗标签",
+        "tag_type": "val_fixed", "description": "唯一标签", "status": "active",
+    }])
     library = try_load_library()
-    dirs = [d for d in library.new_tag_dirs(None) if d.dir_id == "dir_theme"]
-    base_texts, variants = script._dir_texts_and_variants(library, dirs)
-    variant = variants[("dir_theme", "tag_revenge")]
-    assert variant != base_texts[0]
-    assert variant.count("已收录：") == 1
+    solo_dir = library.directory("dir_solo")
+    base_texts, variants = script._dir_texts_and_variants(library, [solo_dir])
+    variant = variants[("dir_solo", "tag_solo")]
+
+    assert "已收录：独苗标签" in base_texts[0]
+    assert "已收录：" not in variant
+    assert variant == script.dir_text(solo_dir, [])
 
 
 # ---------------------------------------------------------------- 编码次数
