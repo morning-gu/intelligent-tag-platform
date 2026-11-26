@@ -9,16 +9,25 @@
 // error.message（ApiError.message 即后端 detail 文案）；回归两条：runId 切换
 // 后 A run 的在途明细不得串写成 B run 可命中的缓存（B run 展开必须重新请求）、
 // 首次明细在途窗口内收起再展开不得重复请求（pending 去重）。
+// 管线追踪（增补 2026-11-26）：主表漏斗列（召回→提及→产出，null 暂无，title
+// 全链计数）、明细漏斗条五阶段（门控过/挂载成由分流键差出）、候选踪迹表
+// （结局 Select 筛选为本地受控状态、服务端召回序不重排、结局中文映射、
+// null 数值暂无）、漏检表丢失环节列（中文映射、null 暂无）、trace null 的
+// 老 run 说明文案（无踪迹表/漏斗条/下载）、llm-raw 下载 404 → message.error
+// 透出不崩视图（fetch mock，不用原生 <a> 直链——404 会开浏览器错误页）。
 // 注意：antd Table 展开图标按钮无可访问名，查询一律走
 // .ant-table-row-expand-icon（与 GenerationTasks 测试同口径）。
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ClosedEvalMovieTable from './ClosedEvalMovieTable'
 import {
   getRunMovieDetail,
   getRunMovies,
+  movieRawUrl,
+  type FunnelCounts,
   type MovieDetail,
   type MovieSummaryPayload,
+  type MovieTrace,
 } from '../api/eval'
 
 vi.mock('../api/eval', async (importOriginal) => {
@@ -37,8 +46,26 @@ const RUN_ID = 'run-20261120-000000-aa00'
 
 // ---------- 夹具（与后端 MovieSummaryOut / MovieDetailOut 契约同形） ----------
 
+/** 漏斗十键夹具（与 DETAIL.trace.counts 同一对象——摘要行 funnel 与明细
+ * trace 的 counts 在真实后端同源派生，测试保持同数）：5 候选五结局各一、
+ * 编造 1、批次 2（重试 1）、上限 6。 */
+const FUNNEL: FunnelCounts = {
+  n_recall: 5,
+  n_mentioned: 4,
+  n_kept: 1,
+  n_gate: 1,
+  n_unmountable: 1,
+  n_m_cap: 1,
+  n_fabricated: 1,
+  n_batches: 2,
+  parse_retries: 1,
+  max_tags: 6,
+}
+
 /** 摘要夹具：k_p=8 / k_r=20 档位（表头字面量 P@8 / R@20）。三行即服务端序：
- * 失败片置顶 → p=0.2 坏例片 → p=null 无交集片垫底。 */
+ * 失败片置顶 → p=0.2 坏例片 → p=null 无交集片垫底。funnel：失败片无 trace
+ * （trace 不落）→ null；两成功片有 trace → 计数对象（无交集片单独一份，
+ * 防行间串数）。 */
 const SUMMARY: MovieSummaryPayload = {
   theta_p: 0.2,
   theta_r: 0.8,
@@ -57,6 +84,7 @@ const SUMMARY: MovieSummaryPayload = {
       elapsed_ms: 1200,
       n_produced: 0,
       n_relevant: 5,
+      funnel: null,
     },
     {
       tt: 'tt0000001',
@@ -69,6 +97,7 @@ const SUMMARY: MovieSummaryPayload = {
       elapsed_ms: 8000,
       n_produced: 10,
       n_relevant: 10,
+      funnel: FUNNEL,
     },
     {
       tt: 'tt0000002',
@@ -81,13 +110,47 @@ const SUMMARY: MovieSummaryPayload = {
       elapsed_ms: 3000,
       n_produced: 4,
       n_relevant: 0,
+      funnel: {
+        n_recall: 4,
+        n_mentioned: 4,
+        n_kept: 4,
+        n_gate: 0,
+        n_unmountable: 0,
+        n_m_cap: 0,
+        n_fabricated: 0,
+        n_batches: 1,
+        parse_retries: 0,
+        max_tags: 6,
+      },
     },
   ],
 }
 
+/** 管线追踪夹具（与后端 MovieTraceOut 同形）：candidates 五结局各一（服务端
+ * 序=召回序）、unmentioned 候选 applicability/sf 双 null 且 tag_name null
+ * （回退 tag_id）、gate 候选 sf null（门控丢弃点不上报 sf）；counts 与
+ * FUNNEL 同数（mentioned = kept+gate+unmountable+m_cap，候选逐一可对账）。 */
+const TRACE: MovieTrace = {
+  counts: FUNNEL,
+  candidates: [
+    { tag_id: 'c-1', tag_name: '保留候选', dir_id: 'd-1', recall: 0.9, batch: 0, outcome: 'kept', applicability: 5, sf: 0.88 },
+    { tag_id: 'c-2', tag_name: null, dir_id: 'd-1', recall: 0.8, batch: 0, outcome: 'unmentioned', applicability: null, sf: null },
+    { tag_id: 'c-3', tag_name: '门控候选', dir_id: 'd-2', recall: 0.7, batch: 1, outcome: 'gate', applicability: 3, sf: null },
+    { tag_id: 'c-4', tag_name: '挂载候选', dir_id: 'd-2', recall: 0.6, batch: 1, outcome: 'unmountable', applicability: 4, sf: 0.55 },
+    { tag_id: 'c-5', tag_name: '截断候选', dir_id: 'd-3', recall: 0.5, batch: 2, outcome: 'm_cap', applicability: 5, sf: 0.44 },
+  ],
+  batches: [
+    { dir_id: 'd-1', batch: 0, n: 2, parse_retried: false },
+    { dir_id: 'd-2', batch: 1, n: 2, parse_retried: true },
+  ],
+  fabricated: ['fab-9'],
+  max_tags: 6,
+}
+
 /** 明细夹具（坏例片）：produced 含命中（●）/ 未命中（—）/ tag_name 缺失
  * （回退 tag_id）/ GT 分缺失（暂无）四类；out_of_space 与 misses（服务端已
- * 按 gt 分降序：0.9 → 0.6）各含一条。 */
+ * 按 gt 分降序：0.9 → 0.6 → 0.5）各含条目；misses.lost_at 覆盖未召回/
+ * 门控丢弃/null（kept-却-漏检防御）三态；trace 挂管线追踪夹具。 */
 const DETAIL: MovieDetail = {
   tt: 'tt0000001',
   title: '坏例片',
@@ -129,9 +192,19 @@ const DETAIL: MovieDetail = {
   ],
   out_of_space: [{ tag_id: 't-201', tag_name: '外空间甲', sf: 0.55 }],
   misses: [
-    { tag_id: 't-301', tag_name: '悲剧', gt_score: 0.9 },
-    { tag_id: 't-302', tag_name: '悬疑', gt_score: 0.6 },
+    { tag_id: 't-301', tag_name: '悲剧', gt_score: 0.9, lost_at: 'unrecalled' },
+    { tag_id: 't-302', tag_name: '悬疑', gt_score: 0.6, lost_at: 'gate' },
+    { tag_id: 't-303', tag_name: '喜剧', gt_score: 0.5, lost_at: null },
   ],
+  trace: TRACE,
+}
+
+/** 老 run 明细夹具：raw 行无 trace 键 → trace/lost_at 全 null（键恒在），
+ * funnel 同理（摘要侧已覆盖）。 */
+const DETAIL_OLD_RUN: MovieDetail = {
+  ...DETAIL,
+  trace: null,
+  misses: DETAIL.misses.map((m) => ({ ...m, lost_at: null })),
 }
 
 // ---------- 查询辅助 ----------
@@ -152,6 +225,11 @@ beforeEach(() => {
   mockedGetRunMovies.mockReset()
   mockedGetRunMovieDetail.mockReset()
   mockedGetRunMovies.mockResolvedValue(SUMMARY)
+})
+
+afterEach(() => {
+  // 下载用例 stub 的全局 fetch / URL.* 不渗入其他用例
+  vi.unstubAllGlobals()
 })
 
 describe('ClosedEvalMovieTable 单片明细表', () => {
@@ -233,8 +311,9 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     render(<ClosedEvalMovieTable runId={RUN_ID} />)
     await screen.findByText('tt0000003')
 
-    // 失败片与无交集片：Spearman/P@8/R@20 三格 null → 各 3 个暂无；有值行不出暂无
-    expect(within(rowOf('tt0000003')).getAllByText('暂无')).toHaveLength(3)
+    // 失败片：Spearman/P@8/R@20 三格 null + 漏斗列无 trace（trace 不落）→
+    // 共 4 个暂无；无交集片漏斗有值仍 3 个；有值行不出暂无
+    expect(within(rowOf('tt0000003')).getAllByText('暂无')).toHaveLength(4)
     expect(within(rowOf('tt0000002')).getAllByText('暂无')).toHaveLength(3)
     expect(within(rowOf('tt0000001')).queryByText('暂无')).not.toBeInTheDocument()
   })
@@ -247,6 +326,136 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     fireEvent.click(expandIconOf(rowOf('tt0000001')))
 
     expect(await screen.findByText('boom')).toBeInTheDocument()
+  })
+
+  // ---------- 管线追踪（增补 2026-11-26） ----------
+
+  it('主表漏斗列：召回→提及→产出 三数渲染，无 trace 行「暂无」', async () => {
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000003')
+
+    // 成功行三数渲染；title 带全链十键计数
+    const chain = within(rowOf('tt0000001')).getByText('召回 5 → 提及 4 → 产出 1')
+    expect(chain).toHaveAttribute(
+      'title',
+      '召回 5 · 提及 4 · 产出 1 · 门控丢弃 1 · 挂载失败 1 · 上限截断 1 · '
+        + '编造 1 · 批次 2（重试 1） · 输出上限 6',
+    )
+    expect(within(rowOf('tt0000002')).getByText('召回 4 → 提及 4 → 产出 4')).toBeInTheDocument()
+    // 失败行无 trace → 漏斗格「暂无」（行尾最后一格，相关数列之后）
+    const funnelCell = rowOf('tt0000003').querySelector('td:last-child')!
+    expect(funnelCell.textContent).toBe('暂无')
+  })
+
+  it('明细漏斗条渲染五计数与次要计数（门控/挂载/截断/编造/批次/上限）', async () => {
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+
+    // 五阶段主链：门控过 = 提及 4 − 门控丢弃 1 = 3；挂载成 = 3 − 挂载失败 1 = 2
+    const bar = await screen.findByTestId('detail-funnel')
+    expect(bar).toHaveTextContent('召回 5 → 提及 4 → 门控过 3 → 挂载成 2 → 产出 1')
+    // 次要计数：分流/编造/批次（含解析重试）/输出上限
+    expect(bar).toHaveTextContent('门控丢弃 1')
+    expect(bar).toHaveTextContent('挂载失败 1')
+    expect(bar).toHaveTextContent('上限截断 1')
+    expect(bar).toHaveTextContent('编造 1')
+    expect(bar).toHaveTextContent('批次 2（解析重试 1）')
+    expect(bar).toHaveTextContent('输出上限 6')
+  })
+
+  it('踪迹表按结局筛选：Select 选 gate → 只剩门控行；null 数值「暂无」', async () => {
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+
+    const traceArea = await screen.findByTestId('detail-trace')
+    // 服务端序=召回序，不重排：五候选按数组序出（tag_name null 回退 tag_id）
+    const names = within(traceArea)
+      .getAllByText(/^(保留候选|c-2|门控候选|挂载候选|截断候选)$/)
+      .map((el) => el.textContent)
+    expect(names).toEqual(['保留候选', 'c-2', '门控候选', '挂载候选', '截断候选'])
+    // unmentioned 行 applicability/sf 双 null → A/Sf 两格暂无；gate 行 sf null → 一格暂无
+    const unmentionedRow = within(traceArea).getByText('c-2').closest('tr')!
+    expect(within(unmentionedRow).getAllByText('暂无')).toHaveLength(2)
+    const gateRow = within(traceArea).getByText('门控候选').closest('tr')!
+    expect(within(gateRow).getByText('暂无')).toBeInTheDocument()
+    expect(within(gateRow).getByText('门控丢弃')).toBeInTheDocument()
+
+    // 结局筛选（本地受控状态）：选「门控丢弃」→ 只剩门控行
+    fireEvent.mouseDown(screen.getByTestId('trace-outcome-select'))
+    fireEvent.click(await screen.findByTitle('门控丢弃'))
+    await waitFor(() => {
+      expect(within(traceArea).getByText('门控候选')).toBeInTheDocument()
+      expect(traceArea.querySelectorAll('.ant-table-tbody tr.ant-table-row')).toHaveLength(1)
+    })
+    expect(within(traceArea).queryByText('保留候选')).not.toBeInTheDocument()
+    expect(within(traceArea).queryByText('c-2')).not.toBeInTheDocument()
+    expect(within(traceArea).queryByText('挂载候选')).not.toBeInTheDocument()
+    expect(within(traceArea).queryByText('截断候选')).not.toBeInTheDocument()
+  })
+
+  it('漏检表丢失环节列：未召回/门控丢弃 标签正确，null → 暂无', async () => {
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+
+    const misses = await screen.findByTestId('detail-misses')
+    expect(within(within(misses).getByText('悲剧').closest('tr')!).getByText('未召回'))
+      .toBeInTheDocument()
+    expect(within(within(misses).getByText('悬疑').closest('tr')!).getByText('门控丢弃'))
+      .toBeInTheDocument()
+    // lost_at null（kept-却-漏检防御/老 run）→ 暂无
+    expect(within(within(misses).getByText('喜剧').closest('tr')!).getByText('暂无'))
+      .toBeInTheDocument()
+  })
+
+  it('trace 为 null 的老 run 明细：渲染说明文案、无踪迹表/下载链接', async () => {
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL_OLD_RUN)
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+
+    expect(await screen.findByTestId('detail-trace-absent')).toHaveTextContent(
+      '本 run 早于管线追踪功能，无解剖数据',
+    )
+    expect(screen.queryByTestId('detail-funnel')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('detail-trace')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('llm-raw-download')).not.toBeInTheDocument()
+    // 老 run 的 misses.lost_at 全 null → 丢失环节列三个「暂无」
+    expect(within(screen.getByTestId('detail-misses')).getAllByText('暂无')).toHaveLength(3)
+  })
+
+  it('下载 404：fetch mock 404 → message.error 透出，不崩视图', async () => {
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: '该 run 无此影片的原始输出' }),
+      }),
+    )
+    render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    fireEvent.click(await screen.findByTestId('llm-raw-download'))
+
+    // 请求打在新端点上；后端 detail 经 message.error 透出
+    await waitFor(() =>
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(movieRawUrl(RUN_ID, 'tt0000001')))
+    expect(await screen.findByText(/原始输出下载失败/)).toBeInTheDocument()
+    expect(screen.getByText(/该 run 无此影片的原始输出/)).toBeInTheDocument()
+    // 视图不崩：踪迹表仍在
+    expect(screen.getByTestId('detail-trace')).toBeInTheDocument()
   })
 
   it('runId 切换后：A run 在途明细不落入 B run 缓存，B run 展开重新请求', async () => {

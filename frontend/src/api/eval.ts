@@ -224,9 +224,29 @@ export function fileUrl(runId: string, name: EvalFileName): string {
 
 // ---------------------------------------------------------------- 单片明细（badcase 视图）
 
+/** 漏斗十键计数（与后端 FunnelCountsOut 一致，全 number）：n_recall 召回
+ * 在册、n_mentioned 给过适用度、n_kept/n_gate/n_unmountable/n_m_cap 为四类
+ * 结局分流计数（unmentioned 不单设键，= n_recall − 其余四类）；n_fabricated
+ * 编造条数、n_batches 批次数、parse_retries 重试批次数、max_tags 全局输出
+ * 上限 M。trace 缺失（老 run）→ 整体 null「暂无」（None≠0）。 */
+export interface FunnelCounts {
+  n_recall: number
+  n_mentioned: number
+  n_kept: number
+  n_gate: number
+  n_unmountable: number
+  n_m_cap: number
+  n_fabricated: number
+  n_batches: number
+  parse_retries: number
+  max_tags: number
+}
+
 /** 单片摘要行（与后端 MovieSummaryRowOut 一致）：指标 float | None（None=
  * 算不出——失败片/无交集/θ-空相关集，前端「暂无」，None≠0）；行序由服务
- * 层给出（失败置顶 → p_at_k 升序 → null 垫底 → 同分按 tt），前端不重排。 */
+ * 层给出（失败置顶 → p_at_k 升序 → null 垫底 → 同分按 tt），前端不重排；
+ * funnel 为漏斗十键计数（新 run 且 raw 行带 trace 才有；老 run/失败片 →
+ * null「暂无」）。 */
 export interface MovieSummaryRow {
   tt: string
   title: string
@@ -238,6 +258,7 @@ export interface MovieSummaryRow {
   elapsed_ms: number
   n_produced: number
   n_relevant: number
+  funnel: FunnelCounts | null
 }
 
 /** 单片摘要包层（与后端 MovieSummaryOut 一致，增补 2026-11-22 拆 θ）：
@@ -282,15 +303,58 @@ export interface OutOfSpaceTag {
 }
 
 /** 漏检条目（与后端 MissTagOut 一致）：相关未产出，服务端按 gt 分降序；
- * tag_name 从当前标签库回填（库缺该标签 → null → 前端回退 tag_id）。 */
+ * tag_name 从当前标签库回填（库缺该标签 → null → 前端回退 tag_id）；
+ * lost_at 为丢失环节（unrecalled/unmentioned/gate/unmountable/m_cap）或
+ * null——trace 缺失（老 run）与 kept-却-漏检的不自洽防御同走 null（None≠0，
+ * 没数据≠没召回），前端做中文映射。 */
 export interface MissTag {
   tag_id: string
   tag_name: string | null
   gt_score: number
+  lost_at: string | null
+}
+
+/** 召回候选踪迹行（与后端 TraceCandidateOut 一致，服务端序=召回序）：
+ * 身份/目录/召回分/批次序入册定死；结局三字段 resolve 回填——unmentioned
+ * 候选的 applicability/sf 双 null（「未提及」无显式上报点）、gate 候选 sf
+ * null（门控丢弃点不算终分）。outcome 五值枚举 kept|unmentioned|gate|
+ * unmountable|m_cap，前端做中文映射。 */
+export interface TraceCandidate {
+  tag_id: string
+  tag_name: string | null
+  dir_id: string
+  recall: number | null
+  batch: number | null
+  outcome: string
+  applicability: number | null
+  sf: number | null
+}
+
+/** 批次追踪行（与后端 TraceBatchOut 一致）：parse_retried=首败重试成功；
+ * 原始输出不在此行（只存 llm_raw 文件、走 movieRawUrl 下载，不进 API 载荷）。 */
+export interface TraceBatchEvent {
+  dir_id: string
+  batch: number
+  n: number
+  parse_retried: boolean
+}
+
+/** 单片管线追踪包层（与后端 MovieTraceOut 一致）：counts=漏斗十键（与摘要
+ * 行 funnel 同数）；candidates 服务端序=召回序；batches 批次序；fabricated
+ * 按判定出现次序累积不去重；max_tags 与 counts.max_tags 同值冗余透出（服务
+ * 层组装形状如此）。老 run/失败片 → 整体 null「暂无」（None≠0）。 */
+export interface MovieTrace {
+  counts: FunnelCounts
+  candidates: TraceCandidate[]
+  batches: TraceBatchEvent[]
+  fabricated: string[]
+  max_tags: number
 }
 
 /** 单片明细（与后端 MovieDetailOut 一致）：produced/out_of_space/misses 三
- * 表；失败片三表全空、error 原样（前端不为其发明细请求）；null 一律「暂无」。 */
+ * 表；失败片三表全空、error 原样（前端不为其发明细请求）；theta_p/theta_r
+ * 与摘要包层同源（明细侧 hit/漏检分类跟 theta_r）；trace 为管线追踪包层
+ * （成功片且 raw 行带 trace 才组装）或 null——null 一律「暂无」。 */
 export interface MovieDetail {
   tt: string
   title: string
@@ -304,6 +368,7 @@ export interface MovieDetail {
   produced: ProducedTag[]
   out_of_space: OutOfSpaceTag[]
   misses: MissTag[]
+  trace: MovieTrace | null
 }
 
 /** θ query 拼接（增补 2026-11-22）：未传/空对象 → 无 query（服务端缺省）。 */
@@ -336,4 +401,11 @@ export function getRunMovieDetail(
 ): Promise<MovieDetail> {
   return apiFetch<MovieDetail>(
     `/api/v1/eval/closed/runs/${runId}/movies/${tt}${thetaQuery(theta)}`)
+}
+
+/** 单片 LLM 原始输出下载路径（llm_raw/{tt}.json，FileResponse 直下）：纯路径
+ * 拼接同 fileUrl 模式，不经 apiFetch（非 JSON 响应）。但 404 会开浏览器错误
+ * 页——调用方走 fetch+blob（同源请求自带会话 cookie）而非 <a> 直链。 */
+export function movieRawUrl(runId: string, tt: string): string {
+  return `/api/v1/eval/closed/runs/${runId}/movies/${tt}/llm-raw`
 }
