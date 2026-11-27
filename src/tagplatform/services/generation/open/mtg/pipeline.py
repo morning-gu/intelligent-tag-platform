@@ -73,7 +73,8 @@ logger = logging.getLogger(__name__)
 # v12 = 按目录分别生成，先评判再聚类，按生成阶段分配配额。
 # v13 = Judge 与开放评测对齐统一三维评分标准：目录匹配融合进 semantics，
 #       标签价值改为内容呈现/内容搜索/内容推荐三方向打分并按标签种类加权聚合。
-MTG_VERSION = "mtg-v13-aligned-criteria"
+# v14 = 明确场景证据归属和各维评分边界。
+MTG_VERSION = "mtg-v14-scoring-evidence"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3

@@ -1,6 +1,6 @@
 # 开放标签生成算法详解
 
-开放生成使用 `mtg-v13-aligned-criteria`。输入是影片识别材料、标签库和任务策略。输出标签带有来源、证据、目录和挂载点，由生产执行器写入审核队列或复用库内标签。 [算法入口](../src/tagplatform/services/generation/open/mtg/pipeline.py) · [默认配置](../src/tagplatform/settings.py)
+开放生成使用 `mtg-v14-scoring-evidence`。输入是影片识别材料、标签库和任务策略。输出标签带有来源、证据、目录和挂载点，由生产执行器写入审核队列或复用库内标签。 [算法入口](../src/tagplatform/services/generation/open/mtg/pipeline.py) · [默认配置](../src/tagplatform/settings.py)
 
 ## 两阶段生成
 
