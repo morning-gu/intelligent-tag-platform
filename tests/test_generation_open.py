@@ -6,7 +6,7 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v13-aligned-criteria`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v14-scoring-evidence`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
 视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
