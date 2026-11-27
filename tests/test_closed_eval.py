@@ -1124,6 +1124,9 @@ def test_live_json_lifecycle(eval_setup):
     assert "trace" in rows[0]                     # MOCK 成功片带 trace
     gate.set()
     _await_terminal(svc, run_id)
+    # 终态翻注册表先于落盘（_worker 写序），live 清理又是落盘尾巴——等
+    # worker 完全收尾（active 位释放）再验目录，避免与 unlink 竞态
+    _drain_active(svc)
     d = _run_dir(svc, run_id)
     assert not (d / "live.json").exists() and not (d / "live.json.tmp").exists()
     raw = _raw_rows(svc, run_id)

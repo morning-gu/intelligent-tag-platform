@@ -237,9 +237,10 @@ llm-raw 三端点原只认终态的 raw_results.json，运行中一律 404；liv
    文件）；行集与 raw_results.json 严格同形（同一 `_result_rows` 构造：
    gt 并入、produced 五键、成功片带 trace 键），发布失败只记日志不拖垮
    评测（旁路产物容错口径）；
-3. **终态删除**：raw_results.json（终态正典）落盘后删除 live.json（raw
-   优先级已盖过 live，删是为目录语义干净）；进程中断的残留 live.json 即
-   部分明细，照常可读；
+3. **终态删除**：报告三件套落盘后删除 live.json（写序 meta → raw →
+   report → unlink——raw 优先级已盖过 live，删是为目录语义干净；清理收尾
+   在正典产物之后，unlink 抛错不连坐报告三件套）；进程中断的残留
+   live.json 即部分明细，照常可读；
 4. **读侧回落序 raw → live → 404**：`_movies_read` 先读
    raw_results.json，缺失/截断/形状非法再回落 live.json，两处都无合法源
    才 404「无单片明细」——单片明细 / detail / llm-raw 三端点经同一读侧
@@ -247,8 +248,11 @@ llm-raw 三端点原只认终态的 raw_results.json，运行中一律 404；liv
 5. **前端入口三处**：running/interrupted 历史行点击、活跃卡「查看进度明细」
    按钮 → 进度明细视图（运行横幅 + 整块单片明细表，报告与明细互斥、互开即
    替换）；活跃 run 的 2s 轮询每 tick 驱动明细表带当前 θ 门静默重拉（行只增
-   不改——不清展开/明细缓存、失败静默下一 tick 重试），run 推进终态自动收起
-   明细切报告视图；interrupted 行打开不轮询（无活跃快照推进，明细一次性）。
+   不改——不清展开/明细缓存、失败静默下一 tick 重试），run 推进终态末次
+   bump 把 raw 全量送入仍开着的明细，报告就绪才收明细切报告（404 写序窗口
+   期明细保留）；interrupted 行打开不轮询（无活跃快照推进，明细一次性）；
+   横幅含状态/已完成/失败数，interrupted 行的 done/failed 渲染「—」（磁盘
+   meta 起跑骨架恒 0，真实进度只在 progress.jsonl——根修留后续）。
 
 ### 管线追踪（漏斗口径）
 

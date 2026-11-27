@@ -801,12 +801,15 @@ class ClosedEvalService:
 
     def _write_artifacts(self, job: _EvalJob, results: list[MovieResult],
                          status: str, error: str | None) -> None:
-        """终态写盘（worker 主线程）：meta.json → raw_results.json → 报告三件套。
+        """终态写盘（worker 主线程）：meta → raw_results → 报告三件套 → live 清理。
 
         写序非原子（meta 先行、报告最后）：读侧（history）对缺失/截断的
-        report.json 按「该 run 无报告」容错。报告口径用 job 携带的
-        gt/tag_universe（起跑时定格，run 中途换库不影响本 run）与终态
-        meta（banner/warning 需要终态 status/done/total/failed）。
+        report.json 按「该 run 无报告」容错。live.json 的 unlink 收尾在
+        报告三件套之后——Windows 开发盒上句柄占用窄窗的 unlink 抛错不再
+        连坐正典产物（worker 外层把落盘异常降级为日志，清理失败只损目录
+        语义）。报告口径用 job 携带的 gt/tag_universe（起跑时定格，run
+        中途换库不影响本 run）与终态 meta（banner/warning 需要终态
+        status/done/total/failed）。
         """
         run_dir = Path(self.settings.eval_output_root) / job.run_id
         meta = dict(job.meta)
@@ -827,14 +830,16 @@ class ClosedEvalService:
         rows = self._result_rows(job, results)
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)
-        # live.json 终态清理：raw 优先级已盖过 live，删是为目录语义干净
-        # （进程中断的残留 live.json 即部分明细，读侧照常回落可读）
-        (run_dir / "live.json").unlink(missing_ok=True)
         report = assemble_report(results, job.gt, job.tag_universe,
                                  job.meta.get("thetas") or DEFAULT_THETAS,
                                  job.meta.get("ks") or DEFAULT_KS,
                                  meta=meta)
         write_report(run_dir, report)
+        # live.json 终态清理（报告三件套之后的尾巴）：raw 优先级已盖过 live
+        # （读侧回落序 raw → live），删是为目录语义干净（进程中断的残留
+        # live.json 即部分明细，读侧照常回落可读）；放在正典产物之后——
+        # unlink 的句柄占用窄窗抛错不跳过报告三件套
+        (run_dir / "live.json").unlink(missing_ok=True)
 
     def _progress_path(self, run_id: str) -> str:
         return os.path.join(self.settings.eval_output_root, run_id,

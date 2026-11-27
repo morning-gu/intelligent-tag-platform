@@ -563,10 +563,8 @@ export default function ClosedEvalMovieTable({
     setExpandedKeys([])
     setDetails(new Map())
     setRefetchError(null)
-    getRunMovies(runId, {
-      p: nextP ?? undefined,
-      r: nextR ?? undefined,
-    })
+    // θ 拼参复用 thetaQuery（与 thetaArgs memo 同一形状构造，行为等价）
+    getRunMovies(runId, thetaQuery(nextP, nextR))
       .then((p) => {
         if (gen !== genRef.current) return
         setPayload(p)

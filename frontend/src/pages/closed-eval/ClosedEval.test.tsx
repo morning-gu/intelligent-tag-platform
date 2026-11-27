@@ -11,7 +11,8 @@
 // 只伪造 interval（setTimeout/Date/rAF 保持真实——antd 渲染与 RTL waitFor
 // 不受影响），用 advanceTimersByTimeAsync 推进 tick 并以 act 包裹刷新。
 // 进度明细视图（增补 2026-11-27）：running/interrupted 历史行点击与活跃卡
-// 按钮进入——横幅/轮询 refreshTick/终态自动切报告/互斥；明细表 stub 顶替。
+// 按钮进入——横幅/轮询 refreshTick/终态末次拍入表后报告就绪切报告/404 写序
+// 窗口明细保留/双向互斥；明细表 stub 顶替。
 // 注意：antd 对两个汉字的按钮自动插入空隙（"起跑"渲染为"起 跑"），按钮
 // 可访问名查询一律用宽容正则（与 ModelConfig 测试同理）。
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -209,6 +210,26 @@ const FAILED_SUMMARY: RunSummary = {
   p10: null,
   r20: null,
   coverage_median: null,
+}
+
+/** 终态刷新后的 succeeded 摘要行（404 写序窗口用例：行点击路由需要终态行）。 */
+const SUCCEEDED_SUMMARY: RunSummary = {
+  ...RUNNING_SUMMARY,
+  status: 'succeeded',
+  done: 30,
+  failed: 2,
+  finished_at: '2026-11-20T12:30:00',
+}
+
+/** interrupted 行的磁盘 meta 起跑骨架（后端 history 现状：meta 只在起跑/
+ * 终态写盘——中断 run 的 done 恒 0、failed 恒 0、total 定格，真实进度只在
+ * progress.jsonl）。横幅对 done/failed 渲染「—」不照抄失真值（I2 修复），
+ * total 骨架即真值照常。 */
+const INTERRUPTED_SKELETON_SUMMARY: RunSummary = {
+  ...RUNS_HISTORY[2],
+  done: 0,
+  total: 30,
+  failed: 0,
 }
 
 /** getReport 成功夹具（与后端 report.json 组装结构同形，banner/warning 无）。 */
@@ -797,13 +818,55 @@ describe('ClosedEval 闭环评测页', () => {
     }
   })
 
-  it('轮询推进终态 → 进度明细自动切报告视图（live 收起、getReport 调用、报告渲染）', async () => {
+  it('轮询推进终态 → 末次 bump 入表后报告就绪切报告（live 收起、getReport 调用、报告渲染）', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     try {
       mockActiveRunApis()
-      // 首拉 running（挂载接管）→ 下一 tick succeeded（终态）
+      // 首拉 running（挂载接管）→ 下一 tick succeeded（终态）；getReport 用
+      // 手动放行的 deferred——真实网络下终态渲染先于报告到达，deferred 复刻
+      // 该时序（立即 resolve 会与 closeLive 合并成一拍，观察不到末次拍）
       mockedGetRun.mockResolvedValueOnce(RUNNING_STATUS).mockResolvedValue(SUCCEEDED_STATUS)
-      mockedGetReport.mockResolvedValue(REPORT)
+      let resolveReport: ((data: ClosedEvalReport) => void) | null = null
+      mockedGetReport.mockImplementation(
+        () => new Promise<ClosedEvalReport>((resolve) => { resolveReport = resolve }))
+      render(<ClosedEval />)
+      await screen.findByText(/已完成\s*8\s*\/\s*30/)
+      fireEvent.click(screen.getByText('进行中').closest('tr')!)
+      expect(screen.getByTestId('live-detail')).toBeInTheDocument()
+      expect(lastTableProps().refreshTick).toBe(0)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      // 终态拍表：末次 bump 送到仍挂载的明细表（终态 raw 全量入表的末次
+      // 刷新），报告就绪才卸载
+      expect(lastTableProps().refreshTick).toBe(1)
+      expect(screen.getByTestId('live-detail')).toBeInTheDocument()
+      expect(mockedGetReport).toHaveBeenCalledWith('run-20261120-120000-xy90')
+
+      // 报告就绪 → live 收起、报告视图顶上（closeLive 随 openReport 成功路径）
+      await act(async () => { resolveReport!(REPORT) })
+      expect(screen.queryByTestId('live-detail')).not.toBeInTheDocument()
+      expect(screen.getByText(/评测报告：run-20261120-120000-xy90/)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('终态切换 404 写序窗口：报告未就绪 → toast + 进度明细保留；报告就绪后行点击切报告', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      mockedListDatasets.mockResolvedValue(DATASETS)
+      mockedGetDatasetRoot.mockResolvedValue({ root: '/cache/MovieTags', is_default: true })
+      // 挂载历史含活跃 run；终态刷新后该行翻 succeeded（重试的行点击路由需要终态行）
+      mockedListRuns.mockResolvedValueOnce([RUNNING_SUMMARY])
+        .mockResolvedValue([SUCCEEDED_SUMMARY])
+      mockedGetRun.mockResolvedValueOnce(RUNNING_STATUS).mockResolvedValue(SUCCEEDED_STATUS)
+      // 第一次取报告落在写序窗口（404）→ 报告落盘后重试（行点击）成功。
+      // toast 断言用 getAllByText：antd message 是页面外全局 holder，前序
+      // 用例的同文案 toast 3s 真实时长内可能未散场
+      mockedGetReport.mockRejectedValueOnce(new ApiError(404, '报告不存在或尚未生成'))
+        .mockResolvedValue(REPORT)
       render(<ClosedEval />)
       await screen.findByText(/已完成\s*8\s*\/\s*30/)
       fireEvent.click(screen.getByText('进行中').closest('tr')!)
@@ -812,28 +875,39 @@ describe('ClosedEval 闭环评测页', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000)
       })
-      // 终态：进度明细收起、报告视图顶上（末次 tick bump 后 closeLive 切报告）
-      expect(screen.queryByTestId('live-detail')).not.toBeInTheDocument()
+      // 404 写序窗口：toast 提示重试，进度明细保留（末次 bump 照常入表）——
+      // 不再「live 已关、报告未出、活跃卡已收」三无空窗
+      expect((await screen.findAllByText('报告生成中，稍后重试')).length).toBeGreaterThanOrEqual(1)
+      expect(screen.getByTestId('live-detail')).toBeInTheDocument()
+      expect(lastTableProps().refreshTick).toBe(1)
+      expect(screen.queryByText(/评测报告：run-20261120-120000-xy90/)).not.toBeInTheDocument()
+
+      // 报告落盘后（历史已翻终态行）点行重试 → 报告替换明细
+      fireEvent.click(screen.getByText('已成功').closest('tr')!)
+      await waitFor(() => expect(screen.queryByTestId('live-detail')).not.toBeInTheDocument())
       expect(screen.getByText(/评测报告：run-20261120-120000-xy90/)).toBeInTheDocument()
-      expect(mockedGetReport).toHaveBeenCalledWith('run-20261120-120000-xy90')
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('interrupted 行点击 → 进度明细（横幅「已中断」、不轮询：advance 2s 无新 getRun、refreshTick 恒 undefined）', async () => {
+  it('interrupted 行点击 → 进度明细（横幅「已中断」done/failed 渲染「—」、不轮询：advance 2s 无新 getRun、refreshTick 恒 undefined）', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     try {
       // 404 桩只为 RED 阶段兜底——绿态 interrupted 行路由到 openLive，不消费
       mockedGetReport.mockRejectedValue(new ApiError(404, '报告不存在或尚未生成'))
       mockIdleApis()
+      // 磁盘 meta 起跑骨架（done 恒 0/failed 恒 0/total 定格——后端 history
+      // 现状）：照抄会与明细表真实行数自相矛盾，横幅渲染「—」（I2）
+      mockedListRuns.mockResolvedValue([INTERRUPTED_SKELETON_SUMMARY])
       render(<ClosedEval />)
       await screen.findByText('已中断')
 
       fireEvent.click(screen.getByText('已中断').closest('tr')!)
       const liveCard = screen.getByTestId('live-detail')
-      // 横幅：已中断 + 进度 null → 「—」（无自动刷新提示）
-      expect(within(liveCard).getByText(/已中断 · 已完成/)).toBeInTheDocument()
+      // 横幅：已中断 + done/failed「—」（骨架失真值不照抄）、total 照常
+      // （无自动刷新提示）
+      expect(within(liveCard).getByText(/已中断 · 已完成 — \/ 30，失败 —/)).toBeInTheDocument()
       expect(lastTableProps().runId).toBe('run-20261117-080000-ef56')
       // 无活跃 run → 不轮询：refreshTick 恒 undefined（快照一次性）
       expect(lastTableProps().refreshTick).toBeUndefined()
@@ -869,5 +943,31 @@ describe('ClosedEval 闭环评测页', () => {
     await waitFor(() => expect(screen.queryByTestId('live-detail')).not.toBeInTheDocument())
     expect(screen.getByText(/评测报告：run-20261119-100000-ab12/)).toBeInTheDocument()
     expect(mockedGetReport).toHaveBeenCalledWith('run-20261119-100000-ab12')
+  })
+
+  it('报告 → 进度明细反向互斥：报告开着点「查看进度明细」→ 报告收起、明细顶上', async () => {
+    mockIdleApis()
+    // 活跃 run 与终态历史行并存：报告入口与活跃卡按钮入口都要用
+    mockedListRuns.mockResolvedValue([RUNNING_SUMMARY, ...RUNS_HISTORY])
+    mockedGetRun.mockResolvedValue(RUNNING_STATUS)
+    mockedGetReport.mockResolvedValue(REPORT)
+    render(<ClosedEval />)
+    await screen.findByText(/已完成\s*8\s*\/\s*30/)
+
+    // 先点 succeeded 行开报告视图
+    fireEvent.click(
+      within(screen.getByText('2026-11-19 10:00:00').closest('tr')!).getByText('已成功'))
+    expect(
+      await screen.findByText(/评测报告：run-20261119-100000-ab12/)).toBeInTheDocument()
+
+    // 再点活跃卡「查看进度明细」→ openLive 清报告：明细顶上、报告收起
+    // （与「明细开着点终态行 → 报告替换」互为反向）
+    fireEvent.click(screen.getByRole('button', { name: /查看进度明细/ }))
+    await waitFor(() =>
+      expect(screen.queryByText(/评测报告：run-20261119-100000-ab12/)).not.toBeInTheDocument())
+    expect(screen.getByTestId('live-detail')).toBeInTheDocument()
+    expect(lastTableProps().runId).toBe('run-20261120-120000-xy90')
+    // 进度明细路径不取报告（报告取数只在 openReport）
+    expect(mockedGetReport).toHaveBeenCalledTimes(1)
   })
 })
