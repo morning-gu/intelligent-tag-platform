@@ -7,7 +7,7 @@ list_producers() == ["closed", "open"] 是预期初始态。
 
 子包结构（四层重构 Task 4）：
 - `base`：TagProducer 协议 + 契约 dataclass + 注册表；
-- `closed/`：模式 A——producer（封闭提取）/ recall（混合召回）/
+- `closed/`：模式 A——producer（封闭提取）/ recall（向量召回）/
   parse（LLM 输出契约解析）；
 - `open/`：模式 B——producer（注册入口）+ mtg/（MovieTagGen 移植管线）；
 - `review/`：人工审核服务（pre_asset_tag 四动作行操作）。

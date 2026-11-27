@@ -1,10 +1,10 @@
-"""模式 A 封闭式标签提取测试：混合召回、输出解析与 ClosedTagProducer。
+"""模式 A 封闭式标签提取测试：向量召回、输出解析与 ClosedTagProducer。
 
 覆盖契约：
 - embed_content_texts：[剧情摘要, 各场景描述] 查询文本列表；
-- recall_candidates：向量 + BM25（标签名/描述/别名）双通道，按 tag_id
-  归一去重，RRF 排序并返回全局 top_k；排除 deprecate / 占位行，范围
-  dir_ids 生效，空库返回 []；候选 score 保留余弦供闭环终分使用；
+- recall_candidates：向量单通道，每条标签取跨查询最高余弦，按余弦降序
+  返回全局 top_k；排除 deprecate / 占位行，范围 dir_ids 生效，空库返回
+  []；候选 score 即余弦，供闭环终分使用；
 - parse_closed_output：键集与分值域校验、坏结构抛 LLMParseError；
 - ClosedTagProducer：库缺失/空候选 → ValueError；dir_asset 目录的候选
   召回后剔除（不建组、不调 LLM、不产出，范围内全是 asset 目录按空
@@ -128,7 +128,7 @@ def test_embed_content_texts(content_fixture):
     assert queries[1:] == [s.description for s in content_fixture.content.scenes]
 
 
-# ---- recall_candidates：混合召回 / 全局 top-k / 去重 / 范围 ----
+# ---- recall_candidates：向量召回 / 全局 top-k / 去重 / 范围 ----
 
 
 def test_closed_recall_global_top_k_and_dedup():
@@ -157,7 +157,8 @@ class _FixedRecallEmbedder:
         return np.asarray(vectors, dtype=np.float32)
 
 
-def _hybrid_recall_library() -> TagLibrary:
+def _fixed_recall_library() -> TagLibrary:
+    """两目录两标签；tag_revenge 的别名不再参与召回（仅向量通道）。"""
     return TagLibrary(
         [
             Directory("dir_vector", "向量目录"),
@@ -176,29 +177,29 @@ def _hybrid_recall_library() -> TagLibrary:
     )
 
 
-def test_closed_recall_fuses_keyword_alias_and_normalizes_to_tag_id():
+def test_closed_recall_ranks_by_highest_cosine():
     embedder = _FixedRecallEmbedder({
         "悬疑。制造谜团": [1.0, 0.0],
         "复仇。主角追查凶手": [0.8, 0.6],
     })
     candidates = recall_candidates(
-        _hybrid_recall_library(), embedder, ["报仇"], top_k=1)
+        _fixed_recall_library(), embedder, ["报仇"], top_k=1)
 
     assert len(candidates) == 1
-    assert candidates[0].tag_id == "tag_revenge"
-    assert candidates[0].tag_name == "复仇"
-    assert candidates[0].score == pytest.approx(0.8)
+    assert candidates[0].tag_id == "tag_vector"
+    assert candidates[0].score == pytest.approx(1.0)
 
 
-def test_closed_recall_bm25_matches_tag_description():
+def test_closed_recall_takes_max_across_queries():
     embedder = _FixedRecallEmbedder({
         "悬疑。制造谜团": [1.0, 0.0],
         "复仇。主角追查凶手": [0.8, 0.6],
     })
     candidates = recall_candidates(
-        _hybrid_recall_library(), embedder, ["追查凶手"], top_k=1)
+        _fixed_recall_library(), embedder, ["报仇", "追查凶手"], top_k=2)
 
-    assert [candidate.tag_id for candidate in candidates] == ["tag_revenge"]
+    by_tag = {c.tag_id: c.score for c in candidates}
+    assert by_tag == pytest.approx({"tag_vector": 1.0, "tag_revenge": 0.8})
 
 
 def test_closed_recall_empty_library():
