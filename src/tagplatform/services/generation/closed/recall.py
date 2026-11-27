@@ -34,6 +34,7 @@ class RecallCandidate:
     dir_id: str
     scope: str
     score: float = 0.0
+    aliases: tuple[str, ...] = ()
 
 
 def embed_content_texts(content: ContentJSON) -> list[str]:
@@ -94,6 +95,7 @@ def recall_candidates(
             dir_id=definition.dir_id,
             scope=library.scope_of(definition.dir_id),
             score=float(best[pos]),
+            aliases=definition.aliases,
         ))
         if len(picked) >= top_k:
             break

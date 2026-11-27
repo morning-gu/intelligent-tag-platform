@@ -55,7 +55,7 @@ const CONFIG: RuntimeConfig = {
 const CLOSED_ASSEMBLY_NOTE_TEXT =
   '组装说明（closed 生成 · 原始资产插入位置）：\n\n' +
   '1. 模板渲染：{content} 即原始资产文本的插入位置。\n' +
-  '2. 候选标签注入：以「## 候选标签分组」追加在渲染后正文之后。\n' +
+  '2. 候选标签注入：以「## 候选标签」节插入在渲染后正文之前。\n' +
   '3. 关键帧：帧目录可用时随请求发送；无帧退化为纯文本请求。'
 
 const CLOSED_CONFIDENCE_CCONS_TEXT =

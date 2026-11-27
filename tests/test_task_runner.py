@@ -127,7 +127,7 @@ def test_run_task_success_writes_tags(session):
     t = _make_task(session, policy_json='{"min_confidence": 0.5}')
     done = run_generation_task(t.task_id, session, MOCK_LLM, MOCK_EMBEDDER)
     assert done is t
-    assert t.status == "succeeded" and t.prompt_version == "1" and t.model_version == "mock-1"
+    assert t.status == "succeeded" and t.prompt_version == "2" and t.model_version == "mock-1"
     assert session.query(PreAssetTag).count() >= 1 and t.finished_at is not None
     # v2：任务直绑资产，结果行 target 固定 content、origin = 任务模式
     assert session.query(PreAssetTag).first().target_id == t.asset_id
@@ -258,8 +258,8 @@ def test_executor_thread_pool(tmp_path):
             assert open_row.status == "succeeded", statuses
             assert closed_row.model_version == "mock-1"
             # prompt_version 列为 Text（Task 3 模型契约）：写入侧即字符串
-            # （runner 写 str(template.version)），新会话读回仍为 "1"
-            assert str(closed_row.prompt_version) == "1"
+            # （runner 写 str(template.version)），新会话读回仍为 "2"
+            assert str(closed_row.prompt_version) == "2"
             # closed 任务有标签产出（min_confidence=0.5 下零选中概率 ≈ 2e-7）
             assert s.query(PreAssetTag).filter(
                 PreAssetTag.task_id == closed_id).count() >= 1
