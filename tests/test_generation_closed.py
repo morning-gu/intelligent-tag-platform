@@ -15,6 +15,7 @@
 """
 
 import json
+import re
 
 import numpy as np
 import pytest
@@ -117,6 +118,35 @@ def _seed_library_with_asset() -> None:
     """两目录默认库 + 一个 dir_asset 目录（挂两条会被召回的标签）。"""
     _seed_library(dirs=_DEFAULT_DIRS + [dict(_ASSET_DIR)],
                   extra=list(_ASSET_TAGS))
+
+
+# ---- 候选标签块解析（v2：tag_block 文本块，非 JSON） ----
+
+# 块内目录行 / 标签行（与 tag_block.render_candidate_block 逐字对齐）
+_BLOCK_DIR_RE = re.compile(r"^目录：(.+)$", re.MULTILINE)
+_BLOCK_TAG_RE = re.compile(r"^- tag_id：(\S+) 标签名称：(.+)$", re.MULTILINE)
+
+# 测试库目录名 → dir_id（桩 LLM 靠目录名路由回放表）
+_DIR_NAME_IDS = {
+    "主类型": "dir_genre",
+    "情绪基调": "dir_mood",
+    "角色标签": "dir_char",
+    "名场面": "dir_scene",
+    "演员关键词": "dir_actor",
+}
+
+
+def _parse_candidate_block(prompt: str) -> tuple[str, list[str]]:
+    """从完整 prompt 中切出候选标签块，返回 (目录名, [tag_id, ...])。
+
+    块从 `## 候选标签` 节起到 `## 影视内容` 节前截止（v2 前置注入）；
+    目录名取「目录：」行，tag_id 取各标签行。
+    """
+    section = prompt.split("## 候选标签\n", 1)[1].split(
+        "\n\n## 影视内容", 1)[0]
+    dir_name = _BLOCK_DIR_RE.search(section).group(1)
+    tag_ids = [tag_id for tag_id, _name in _BLOCK_TAG_RE.findall(section)]
+    return dir_name, tag_ids
 
 
 # ---- embed_content_texts ----
@@ -251,19 +281,19 @@ def _build_spec(session: Session, content_fixture, run_id: str,
 
 
 class _ScriptedLLM:
-    """按组返回固定判定结果（从 prompt 尾部的组 JSON 取 dir_id）。
+    """按目录组返回固定判定结果（从候选标签块的目录行取目录名映射回
+    dir_id）。
 
-    组 JSON 用 raw_decode 解析前缀：v7 重试 prompt 在 JSON 之后追加格式
-    纠正提示，整段 json.loads 会因尾巴文本报 Extra data。
+    候选块是文本行（v2：tag_block 渲染，非 JSON）：先切出块再取目录行。
     """
 
     def __init__(self, responses: dict[str, list[dict]]):
         self._responses = responses
 
     def complete(self, messages, run_id):
-        tail = messages[0]["content"].partition(
-            "\n\n## 候选标签分组\n")[2]
-        dir_id = json.JSONDecoder().raw_decode(tail)[0]["dir_id"]
+        dir_name, _tag_ids = _parse_candidate_block(
+            messages[0]["content"])
+        dir_id = _DIR_NAME_IDS[dir_name]
         return LLMResponse(
             content=json.dumps(self._responses[dir_id], ensure_ascii=False),
             usage={}, raw={}, ok=True)
@@ -288,10 +318,11 @@ def test_closed_produce_end_to_end(session, content_fixture):
 
 def test_closed_produce_groups_by_directory(session, content_fixture,
                                             monkeypatch):
-    """候选按目录分组、逐组调用 LLM：每组 prompt 含一个组对象 JSON，结果合并。
+    """候选按目录分组、逐组调用 LLM：每组 prompt 含一个候选标签块，结果合并。
 
-    spy 记录每次 llm.complete 的 prompt：断言调用次数 = 目录组数、每组只含
-    本组标签、组 JSON 带目录名称/描述、prompts 首段都是渲染后的正文。
+    spy 记录每次 llm.complete 的 prompt：断言调用次数 = 目录组数、每组
+    只含本组标签、块带目录名称/描述与标签行（tag_id/名称/描述/别名）、
+    prompt 首尾与渲染后正文逐字一致（候选块插在「## 影视内容」前）。
     批大小固定放大（50 > 组成员数），每组只发一批——本测聚焦分组语义，
     分批切分由 test_closed_produce_batches_within_group 专测。
     """
@@ -318,20 +349,37 @@ def test_closed_produce_groups_by_directory(session, content_fixture,
     dir_ids = {c.dir_id for c in candidates}
     assert len(calls) == len(dir_ids) >= 2
 
+    # 渲染正文的头尾（候选块插中间：头 = 导语，尾 = 原文「## 影视内容」
+    # 起的正文，含前导空行）
+    idx_spec = spec.prompt_text.find("\n\n## 影视内容\n")
+    spec_head = spec.prompt_text[:idx_spec]
+    spec_tail = spec.prompt_text[idx_spec:]
+
+    by_id = {c.tag_id: c for c in candidates}
     seen_tags: set[str] = set()
     for prompt in calls:
-        body, _, tail = prompt.partition("\n\n## 候选标签分组\n")
-        assert body == spec.prompt_text  # 渲染正文在前、逐字不变
-        group = json.loads(tail)
-        directory = library.directory(group["dir_id"])
-        assert group["dir_name"] == directory.dir_name
-        assert group["dir_description"] == directory.description
-        member_ids = {t["tag_id"] for t in group["tags"]}
-        assert member_ids == {c.tag_id for c in candidates
-                              if c.dir_id == group["dir_id"]}
-        for tag in group["tags"]:
-            assert set(tag) == {"tag_id", "tag_name", "description"}
-        seen_tags |= member_ids
+        head, _, _rest = prompt.partition("\n\n## 候选标签\n")
+        assert head == spec_head  # 导语在前、逐字不变
+        idx = prompt.find("\n\n## 影视内容\n")
+        assert prompt[idx:] == spec_tail  # 原文「## 影视内容」起逐字不变
+        dir_name, member_ids = _parse_candidate_block(prompt)
+        directory = library.directory(_DIR_NAME_IDS[dir_name])
+        section = prompt.split("## 候选标签\n", 1)[1].split(
+            "\n\n## 影视内容", 1)[0]
+        assert f"目录：{directory.dir_name}" in section.splitlines()
+        assert f"目录描述：{directory.description}" in section.splitlines()
+        assert member_ids == [c.tag_id for c in candidates
+                              if c.dir_id == directory.dir_id]
+        for line in section.splitlines():
+            if line.startswith("- tag_id："):
+                tag_id = line.split("：", 1)[1].split(" ", 1)[0]
+                candidate = by_id[tag_id]
+                # 标签行带名称，随后缩进行带描述（别名无则省略）
+                assert candidate.tag_name in line
+                assert (f"  标签描述：{candidate.description}"
+                        in section.splitlines())
+        assert section.count("  标签描述：") == len(member_ids)
+        seen_tags |= set(member_ids)
     # 全部候选都恰好进了某一组
     assert seen_tags == {c.tag_id for c in candidates}
 
@@ -340,9 +388,9 @@ def test_closed_produce_batches_within_group(session, content_fixture,
                                              monkeypatch):
     """组内分批（v5）：批大小 2 下每目录按召回序连续切片、逐批调用。
 
-    批次感知 scripted LLM：按 prompt 尾部组 JSON 的 tags 子集查表回放
-    （_ScriptedLLM 按 dir_id 回放、不感知批次，无法验证切分）。断言：
-    每目录调用数 = ceil(成员数/2)、各批目录信息一致且 tags 为连续切片、
+    批次感知 scripted LLM：按候选块内标签行子集查表回放
+    （_ScriptedLLM 按目录回放、不感知批次，无法验证切分）。断言：
+    每目录调用数 = ceil(成员数/2)、各批目录信息一致且标签行为连续切片、
     并集 = 组成员；批只切调用，组级合并（门控 A≥4 + tag_id 去重保最高
     分）语义不变。
     """
@@ -371,7 +419,7 @@ def test_closed_produce_batches_within_group(session, content_fixture,
     }
 
     class _BatchScriptedLLM:
-        """按批内首个 tag_id 回放（批次感知）：记录 prompt 供切分断言。"""
+        """按批内 tag_id 回放（批次感知）：记录 prompt 供切分断言。"""
 
         def __init__(self):
             self.calls: list[str] = []
@@ -379,10 +427,9 @@ def test_closed_produce_batches_within_group(session, content_fixture,
         def complete(self, messages, run_id):
             prompt = messages[0]["content"]
             self.calls.append(prompt)
-            tail = prompt.partition("\n\n## 候选标签分组\n")[2]
-            group = json.loads(tail)
-            items = [dict(row) for tag in group["tags"]
-                     for row in responses[tag["tag_id"]]]
+            _dir_name, tag_ids = _parse_candidate_block(prompt)
+            items = [dict(row) for tag_id in tag_ids
+                     for row in responses[tag_id]]
             return LLMResponse(content=json.dumps(items, ensure_ascii=False),
                                usage={}, raw={}, ok=True)
 
@@ -395,26 +442,28 @@ def test_closed_produce_batches_within_group(session, content_fixture,
     group_order = list(dict.fromkeys(c.dir_id for c in candidates))
 
     # 每目录调用数 = ceil(成员数/2)，全局总调用数 = 各目录批数之和
-    calls_by_dir: dict[str, list[dict]] = {d: [] for d in group_order}
+    calls_by_dir: dict[str, list[list[str]]] = {d: [] for d in group_order}
+    idx_spec = spec.prompt_text.find("\n\n## 影视内容\n")
+    spec_head = spec.prompt_text[:idx_spec]
+    spec_tail = spec.prompt_text[idx_spec:]
     for prompt in llm.calls:
-        body, _, tail = prompt.partition("\n\n## 候选标签分组\n")
-        assert body == spec.prompt_text
-        group = json.loads(tail)
-        directory = library.directory(group["dir_id"])
-        assert group["dir_name"] == directory.dir_name
-        assert group["dir_description"] == directory.description
-        assert len(group["tags"]) <= 2
-        calls_by_dir[group["dir_id"]].append(group)
+        head, _, _rest = prompt.partition("\n\n## 候选标签\n")
+        assert head == spec_head
+        idx = prompt.find("\n\n## 影视内容\n")
+        assert prompt[idx:] == spec_tail
+        dir_name, tag_ids = _parse_candidate_block(prompt)
+        directory = library.directory(_DIR_NAME_IDS[dir_name])
+        assert directory is not None
+        assert len(tag_ids) <= 2
+        calls_by_dir[directory.dir_id].append(tag_ids)
     for dir_id in group_order:
         members = [c for c in candidates if c.dir_id == dir_id]
         batches = calls_by_dir[dir_id]
         assert len(batches) == -(-len(members) // 2)  # ceil
-        # 各批 tags 为召回序连续切片，并集恰为组成员
-        sliced = [t["tag_id"] for b in batches for t in b["tags"]]
+        # 各批标签行为召回序连续切片，并集恰为组成员
+        sliced = [tag_id for batch in batches for tag_id in batch]
         assert sliced == [c.tag_id for c in members]
-        for batch in batches:
-            for tag in batch["tags"]:
-                assert set(tag) == {"tag_id", "tag_name", "description"}
+        assert len(set(sliced)) == len(sliced)  # 无跨批重复
 
     # 合并后门控：两组各留全场 Sf 最高的 tag_001/tag_005（跨批竞争胜出，
     # 证明门控与去重发生在组级合并之后而非逐批）；期望值用镜像召回 Semb 现算
@@ -647,11 +696,9 @@ def test_closed_produce_parse_retry_recovers(
             self.retry_prompt: str | None = None
 
         def complete(self, messages, run_id):
-            tail = messages[0]["content"].partition(
-                "\n\n## 候选标签分组\n")[2]
-            # 重试 prompt 在组 JSON 后追加 hint：raw_decode 只解析前缀
-            group = json.JSONDecoder().raw_decode(tail)[0]
-            dir_id = group["dir_id"]
+            dir_name, _tag_ids = _parse_candidate_block(
+                messages[0]["content"])
+            dir_id = _DIR_NAME_IDS[dir_name]
             self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
             if dir_id == "dir_genre" and self.calls[dir_id] == 1:
                 # 复现线上失败形态：缺 applicability 键（合法 JSON 非截断）
@@ -677,11 +724,10 @@ def test_closed_produce_parse_retry_recovers(
     # 首次解析失败有 warning（含 dir_id 与错误语义）
     assert any("解析失败" in r.message and "dir_genre" in r.message
                for r in caplog.records)
-    # 重试 prompt = 原 prompt + 格式纠正提示（组对象 JSON 仍在可解析前缀）
+    # 重试 prompt = 原 prompt + 格式纠正提示（候选块仍在可解析区）
     assert llm.retry_prompt is not None
-    tail = llm.retry_prompt.partition("\n\n## 候选标签分组\n")[2]
-    group = json.JSONDecoder().raw_decode(tail)[0]
-    assert group["dir_id"] == "dir_genre"
+    dir_name, _tag_ids = _parse_candidate_block(llm.retry_prompt)
+    assert _DIR_NAME_IDS[dir_name] == "dir_genre"
 
 
 def test_closed_produce_parse_retry_exhaustion_raises(
@@ -704,10 +750,9 @@ def test_closed_produce_parse_retry_exhaustion_raises(
             self.calls: dict[str, int] = {}
 
         def complete(self, messages, run_id):
-            tail = messages[0]["content"].partition(
-                "\n\n## 候选标签分组\n")[2]
-            group = json.JSONDecoder().raw_decode(tail)[0]
-            dir_id = group["dir_id"]
+            dir_name, _tag_ids = _parse_candidate_block(
+                messages[0]["content"])
+            dir_id = _DIR_NAME_IDS[dir_name]
             self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
             return LLMResponse(
                 content=json.dumps(bad, ensure_ascii=False),
@@ -923,8 +968,7 @@ def test_closed_produce_skips_dir_asset(session, content_fixture, monkeypatch):
 
     # 只为非 asset 目录建组调 LLM（静态 + 动态 = 2 组）
     assert len(calls) == 2
-    group_dirs = {json.loads(
-        p.partition("\n\n## 候选标签分组\n")[2])["dir_id"] for p in calls}
+    group_dirs = {_DIR_NAME_IDS[_parse_candidate_block(p)[0]] for p in calls}
     assert group_dirs == {"dir_genre", "dir_mood"}
     # 任何 prompt 都不提 asset 目录与其标签
     for prompt in calls:
@@ -1361,9 +1405,9 @@ def test_produce_trace_raw_rows_success_only(session, content_fixture,
             self.calls: dict[str, int] = {}
 
         def complete(self, messages, run_id):
-            tail = messages[0]["content"].partition(
-                "\n\n## 候选标签分组\n")[2]
-            dir_id = json.JSONDecoder().raw_decode(tail)[0]["dir_id"]
+            dir_name, _tag_ids = _parse_candidate_block(
+                messages[0]["content"])
+            dir_id = _DIR_NAME_IDS[dir_name]
             self.calls[dir_id] = self.calls.get(dir_id, 0) + 1
             if dir_id == "dir_genre" and self.calls[dir_id] == 1:
                 return LLMResponse(content="抱歉，我无法按该格式输出",

@@ -366,7 +366,7 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["dataset"]["id"] == "emotion"
     assert meta["dataset"]["n_rows"] == 12  # 3 片 × 4 标签（gt 全表，含无内容片）
     assert len(meta["dataset"]["gt_sha8"]) == 8
-    assert meta["prompt"] == {"mode": "closed", "version": 1}
+    assert meta["prompt"] == {"mode": "closed", "version": 2}
     assert meta["library"]["n_dirs"] == 1 and meta["library"]["n_tags"] == 4
     assert meta["llm_model"] == "mock-1" and meta["embedding_model"] == "mock"
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}

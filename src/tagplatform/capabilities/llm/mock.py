@@ -2,9 +2,9 @@
 
 与阶段 1 的 MockEmbedder 对应：无 random 模块、跨进程确定，全部行为由
 sha256 哈希驱动。按 prompt 内容识别两种模式（与任务 8 runner 的组装咬合）：
-- 模式 A（封闭提取）：prompt 含 `## 候选标签分组` 节（ClosedTagProducer
-  逐组再分批追加的候选分组 JSON）→ 解析组对象的 tags 列表（tag_id/tag_name 取
-  JSON 键），按 sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的
+- 模式 A（封闭提取）：prompt 含 `## 候选标签` 节（ClosedTagProducer
+  逐组再分批插入的候选标签块）→ 解析块内标签行（tag_id 从
+  `- tag_id：... 标签名称：...` 行提取），按 sha256(run_id + tag_id) 以 ~40% 概率选中，输出 LLM 契约的
   三键（tag_id/applicability/evidence，v8 起 evidence 为 content/scene/
   frame 三模态嵌套节）；
 - 模式 B（开放生成）：固定返回 3 个候选（多线叙事/情感张力/视听风格），
@@ -32,8 +32,11 @@ from tagplatform.capabilities.llm.client import LLMResponse
 # `- {scene_id} [{start_ms}-{end_ms}] {description}`；scene_id 取 \S+（候选
 # 行首词后跟 " |" 而非 " ["，两类行格式天然互斥，互不误配）
 _SCENE_LINE_RE = re.compile(r"^- (\S+) \[(\d+)-(\d+)\] (.+)$", re.MULTILINE)
-# 模式 A 标志节（ClosedTagProducer.produce 逐组分批追加候选分组 JSON 的标题）
-_CLOSED_MARKER = "## 候选标签分组"
+# 模式 A 标志节（ClosedTagProducer.produce 逐组分批插入候选标签块的标题）
+_CLOSED_MARKER = "## 候选标签"
+# 模式 A 候选标签行：`- tag_id：{id} 标签名称：{name}`（tag_block 渲染，
+# 全角冒号，与场景行/审核行格式互斥）
+_CLOSED_TAG_RE = re.compile(r"^- tag_id：(\S+) 标签名称：(.+)$", re.MULTILINE)
 # 开放式生成（mtg 流水线）的标志串：生成 / 审核两种请求靠它分流
 _MTG_GEN_MARKER = "## 标签生成任务"
 _MTG_JUDGE_MARKER = "## 审核任务"
@@ -107,23 +110,21 @@ def _pick_evidence(scenes: list[dict], hash_key: str) -> list[dict]:
 
 
 def _closed_output(text: str, run_id: str) -> list[dict]:
-    """模式 A：解析候选分组 JSON，哈希采样选中项（确定性伪判定），逐标签附三模态证据。
+    """模式 A：解析候选标签块，哈希采样选中项（确定性伪判定），逐标签附三模态证据。
 
-    ClosedTagProducer 按目录分组、组内再分批，以 `## 候选标签分组` 节
-    追加组对象（dir_id/dir_name/dir_description/tags）；一批一次调用，本
-    函数单次只解析一个组对象——批内 tags 列表即该批候选。场景行在
-    content 节（标志节之前），对全文解析即可。v8 多模态融合：输出嵌套
+    ClosedTagProducer 按目录分组、组内再分批，以 `## 候选标签` 节插入
+    渲染后正文之前（tag_block 文本块，非 JSON）；一批一次调用，本函数
+    单次只解析一个块——块内标签行即该批候选。场景行在
+    content 节（候选块之后），对全文解析即可。v8 多模态融合：输出嵌套
     evidence 对象，content/scene/frame 三模态节各含 evidence_strength 与
     evidences（哈希键带模态维度，三模态打分/取证据互不耦合）。
     """
-    tail = text.split(_CLOSED_MARKER, 1)[1].strip()
-    # 多模态消息里关键帧 text part 跟在组 JSON 后面（_extract_text 拼接
-    # 全部文本 part），raw_decode 只取第一个完整 JSON 值，余文不管
-    group = json.JSONDecoder().raw_decode(tail)[0]
+    # 候选块从标志节起到「## 影视内容」节前截止；关键帧 text part 在其后
+    # （_extract_text 拼接全部文本 part），不影响块内行解析
+    section = text.split(_CLOSED_MARKER, 1)[1].split("\n\n## 影视内容", 1)[0]
     scenes = _parse_scenes(text)
     items = []
-    for tag in group.get("tags", []):
-        tag_id = str(tag["tag_id"])
+    for tag_id, _tag_name in _CLOSED_TAG_RE.findall(section):
         if _hash_unit(run_id + tag_id) >= _SELECT_PROB:
             continue
         evidence: dict[str, dict] = {}

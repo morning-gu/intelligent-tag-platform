@@ -107,7 +107,7 @@ def test_closed_build_spec_renders_template(content_fixture):
     spec = build_spec(context, content=content_fixture, task_id="t1",
                       asset_id="a1", run_id="r1")
     assert "摘要" in spec.prompt_text and "{content}" not in spec.prompt_text
-    assert int(context.producer.prompt_version) == 1
+    assert int(context.producer.prompt_version) == 2
 
 
 def test_policy_json_override(content_fixture):
