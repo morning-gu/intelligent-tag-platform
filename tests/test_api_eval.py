@@ -925,6 +925,73 @@ def test_llm_raw_admin_gate(client):
     assert client.get(url).status_code == 401
 
 
+# ---------------------------------------------------------------- 实时进度明细（live.json 回落）
+
+
+def _write_live_run(client, *, run_id="run-live", live_rows=None, raw_rows=None,
+                    live_text=None):
+    """手写一个运行中形态的 run：meta(running) + live.json；raw_rows 给出
+    则另写 raw_results.json（优先级用例）；live_text 给出则原样写（损坏用例）。"""
+    out = Path(client.app.state.settings.eval_output_root)
+    d = out / run_id
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(
+        json.dumps({"run_id": run_id, "status": "running", "done": 0, "total": 2,
+                    "failed": 0, "dataset": {"id": "emotion"},
+                    "thetas": [0.2, 0.4, 0.6], "ks": [5, 10, 20],
+                    "started_at": "2026-11-27T10:00:00+00:00"},
+                   ensure_ascii=False), encoding="utf-8")
+    if live_text is not None:
+        (d / "live.json").write_text(live_text, encoding="utf-8")
+    elif live_rows is not None:
+        (d / "live.json").write_text(
+            json.dumps(live_rows, ensure_ascii=False), encoding="utf-8")
+    if raw_rows is not None:
+        (d / "raw_results.json").write_text(
+            json.dumps(raw_rows, ensure_ascii=False), encoding="utf-8")
+    return d
+
+
+def test_movies_falls_back_to_live(client):
+    """运行中 run（仅 live.json 无 raw）：movies 回落出数（失败置顶 + trace
+    夹具十键）、θ 门 query 照常 400、detail 回落、llm-raw 守卫随动（tt 在
+    live 行 + 文件在 → 200）。"""
+    _seed_dataset_and_library(client)
+    d = _write_live_run(client, live_rows=_trace_rows())
+    r = client.get(f"{_BASE}/runs/run-live/movies")
+    assert r.status_code == 200
+    body = r.json()
+    assert [row["tt"] for row in body["rows"]] == ["tt0000002", "tt0000001"]
+    assert body["rows"][1]["funnel"] == _FUNNEL
+    bad = client.get(f"{_BASE}/runs/run-live/movies", params={"theta_p": 0.3})
+    assert bad.status_code == 400
+    detail = client.get(f"{_BASE}/runs/run-live/movies/tt0000001").json()
+    assert detail["trace"]["counts"] == _FUNNEL
+    _write_llm_raw(d)
+    r2 = client.get(f"{_BASE}/runs/run-live/movies/tt0000001/llm-raw")
+    assert r2.status_code == 200 and 'filename="tt0000001.json"' in \
+        r2.headers["content-disposition"]
+
+
+def test_movies_raw_priority_and_empty_and_corrupt_live(client):
+    """raw 与 live 并存 → raw 胜出（live 的 trace 被盖 → funnel null）；空
+    live=[] → 200 rows=[]（起跑态不 404）；损坏 live → 按缺失容错 404。"""
+    _seed_dataset_and_library(client)
+    # 优先级：raw 行无 trace → funnel null（若误读 live 会是 _FUNNEL dict）
+    _write_live_run(client, run_id="run-prio", live_rows=_trace_rows(),
+                    raw_rows=_movies_rows())
+    body = client.get(f"{_BASE}/runs/run-prio/movies").json()
+    assert all(row["funnel"] is None for row in body["rows"])
+    # 空集：起跑态
+    _write_live_run(client, run_id="run-empty", live_rows=[])
+    empty = client.get(f"{_BASE}/runs/run-empty/movies")
+    assert empty.status_code == 200 and empty.json()["rows"] == []
+    # 损坏：按缺失 → 404（不 500）
+    _write_live_run(client, run_id="run-corrupt", live_text='{"rows": [')
+    corrupt = client.get(f"{_BASE}/runs/run-corrupt/movies")
+    assert corrupt.status_code == 404 and "无单片明细" in corrupt.json()["detail"]
+
+
 # ---------------------------------------------------------------- 开放评测端点族（open-eval Task 6）
 
 # open 端点族前缀（本节用例共用；dataset 三别名与 closed 共享 override 状态）
