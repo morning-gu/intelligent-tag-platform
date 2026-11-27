@@ -213,13 +213,39 @@ invalid/no_gt）永远响亮——不允许少评几条把平均拉高。
 
 ### 产物与历史
 
-每个 run 落 `<run_id>/` 六件：meta.json（口径快照：数据集 sha8 / 库版本 /
-模板版本 / 模型端点 / 选片清单）、progress.jsonl（增量落盘）、
+每个 run 落 `<run_id>/` 七件：meta.json（口径快照：数据集 sha8 / 库版本 /
+模板版本 / 模型端点 / 选片清单）、progress.jsonl（增量落盘）、live.json
+（实时进度明细——运行中增量发布的部分行集，见下节）、
 raw_results.json（逐片留痕，离线重算指标不必重烧 LLM）、report.json
 （前端契约结构）、report.md（人读版）、metrics.csv（长表
 `theta,k,metric,macro,ci_low,ci_high,random_baseline`）。历史列表只扫磁盘：
 meta.status=running 且无进程内注册表项 → `interrupted`（进程死亡在磁盘上
 可辨认）；report.json 缺失或截断的 run 按无报告处理，摘要列为「暂无」。
+
+### 实时进度明细（live.json）
+
+回答的问题：**run 还没跑完，逐片明细能不能先看？** movies / detail /
+llm-raw 三端点原只认终态的 raw_results.json，运行中一律 404；live.json
+让运行中的 run 也能打开逐片明细（写侧照抄开放评测报告的 live.json 模式）。
+
+机制五条：
+
+1. **起跑写空集**：start 落 meta 骨架后同步写 `live.json = []`——读侧从
+   t=0 起统一口径（运行中访问得 200 `rows==[]`，不 404）；
+2. **每片完成原子增量发布**：与 progress.jsonl 同位（完成序收敛处）把
+   **部分行集**整体重写进 live.json（tmp + replace 原子替换，读侧不撞半截
+   文件）；行集与 raw_results.json 严格同形（同一 `_result_rows` 构造：
+   gt 并入、produced 五键、成功片带 trace 键），发布失败只记日志不拖垮
+   评测（旁路产物容错口径）；
+3. **终态删除**：raw_results.json（终态正典）落盘后删除 live.json（raw
+   优先级已盖过 live，删是为目录语义干净）；进程中断的残留 live.json 即
+   部分明细，照常可读；
+4. **读侧回落序 raw → live → 404**：`_movies_read` 先读
+   raw_results.json，缺失/截断/形状非法再回落 live.json，两处都无合法源
+   才 404「无单片明细」——单片明细 / detail / llm-raw 三端点经同一读侧
+   自动随动，失败置顶、θ 门、trace/lost_at 全链路行为不变；
+5. **前端入口见下**：running/interrupted 历史行点击与活跃卡入口的视图
+   行为随下一任务交付。
 
 ### 管线追踪（漏斗口径）
 

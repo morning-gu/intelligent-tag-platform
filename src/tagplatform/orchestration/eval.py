@@ -399,9 +399,11 @@ def _movies_read(settings: Settings,
     """单片明细两端点的共同读侧（协议转换，模式同 get_run_report）：
 
     - run 目录守卫不过 → 404「run 不存在」（与 GET /runs/{run_id} 同口径）；
-    - raw_results.json 缺失/截断/非 list、或行级不是带 tt 键的 dict（残缺
-      行会在指标计算处 KeyError/AttributeError 打 500）→ 404「无单片明细」
-      （运行中 run 与 meta→raw 写序非原子窗口的既定容错，不 500）；
+    - 行集读取回落序 raw_results.json → live.json（运行中增量发布的部分
+      行集，与 raw 同形——实时进度明细）：缺失/截断/非 list、或行级不是
+      带 tt 键的 dict（残缺行会在指标计算处 KeyError/AttributeError 打
+      500）按该源缺失容错，首个合法源胜出；两处都无合法源 → 404「无单片
+      明细」（运行中 run 与 meta→raw 写序非原子窗口的既定容错，不 500）；
     - meta.json 缺失/损坏 → 档位回落 DEFAULT_THETAS / DEFAULT_KS；thetas
       与 ks 两键独立读取独立回落（缺一不影响另一——老 run 半残 meta
       照常出数）。
@@ -410,16 +412,22 @@ def _movies_read(settings: Settings,
     if run_dir is None:
         raise HTTPException(status_code=404,
                             detail=f"评测 run 不存在：{run_id!r}")
-    try:
-        rows = json.loads((run_dir / "raw_results.json")
-                          .read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        rows = None
-    if not (isinstance(rows, list)
-            and all(isinstance(r, dict) and "tt" in r for r in rows)):
-        raise HTTPException(
-            status_code=404,
-            detail=f"该 run 无单片明细（未完成或产物缺失）：{run_id!r}")
+    rows = None
+    # 回落序：raw_results.json（终态正典）→ live.json（运行中增量发布的
+    # 部分行集——实时进度明细：与 raw 同形，detail/llm-raw 经本读侧
+    # 自动随动）；各源按缺失/截断/形状容错，首个合法源胜出。
+    for name in ("raw_results.json", "live.json"):
+        try:
+            candidate = json.loads((run_dir / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(candidate, list) and all(
+                isinstance(r, dict) and "tt" in r for r in candidate):
+            rows = candidate
+            break
+    if rows is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该 run 无单片明细（未完成或产物缺失）：{run_id!r}")
     thetas: Sequence[float] = DEFAULT_THETAS
     ks: Sequence[int] = DEFAULT_KS
     try:
