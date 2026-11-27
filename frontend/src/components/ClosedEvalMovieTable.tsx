@@ -34,6 +34,12 @@
 // 上限——聚合的 max_tags 无意义）+ 每片存活率（n_kept/n_recall，召回 0 的
 // 片跳过、偶数中位取中间两数均值）+ 覆盖标注（N 部有解剖数据 / 共 M 部）；
 // 不新增请求、θ 门/缓存逻辑零改动。
+// 轮询驱动重拉（增补 2026-11-27）：refreshTick prop 变化即带当前 θ 参数静默
+// 重拉摘要——页面 2s 轮询每 tick 自增该 prop，运行中 run 的 live.json 行只增
+// 不改，故不清 θ/展开/明细缓存（θ 未变缓存仍有效）、旧表保留不闪 Spin；失败
+// 静默（旧表保留，下一 tick 重试；初次失败由挂载效果出 summaryError——两
+// 效果职责分离）。refreshTick === undefined（终态行/interrupted 直开，不
+// 轮询）时本效果 no-op，行为与旧版逐字节相同。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX, Key } from 'react'
 import { Alert, Button, Select, Spin, Statistic, Table, Typography, message } from 'antd'
@@ -114,6 +120,15 @@ function byNumber(
   field: 'n_produced' | 'n_relevant' | 'elapsed_ms',
 ): (a: MovieSummaryRow, b: MovieSummaryRow) => number {
   return (a, b) => a[field] - b[field]
+}
+
+/** 已选 θ 的 query 形状（未选字段不携带；全未选 → undefined 不带参）。 */
+function thetaQuery(
+  thetaP: number | null,
+  thetaR: number | null,
+): ThetaQuery | undefined {
+  if (thetaP === null && thetaR === null) return undefined
+  return { p: thetaP ?? undefined, r: thetaR ?? undefined }
 }
 
 // ---------- 整体漏斗块（主表上方全 run 聚合，增补 2026-11-26） ----------
@@ -444,7 +459,13 @@ function detailKey(runId: string, tt: string): string {
   return `${runId}:${tt}`
 }
 
-export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.Element {
+export default function ClosedEvalMovieTable({
+  runId,
+  refreshTick,
+}: {
+  runId: string
+  refreshTick?: number
+}): JSX.Element {
   const [payload, setPayload] = useState<MovieSummaryPayload | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [expandedKeys, setExpandedKeys] = useState<Key[]>([])
@@ -456,18 +477,22 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
   const [thetaR, setThetaR] = useState<number | null>(null)
   // θ 重拉失败的内联警示（不毁视图，成功即清除）
   const [refetchError, setRefetchError] = useState<string | null>(null)
-  // 请求代际：换 run / 切 θ 自增——旧代际响应一律作废不写回
+  // 请求代际：换 run / 切 θ / 轮询重拉自增——旧代际响应一律作废不写回
   const genRef = useRef(0)
+  // 轮询重拉的上次触发快照（tick+runId）：挂载当拍、换 run 当拍、同 tick
+  // 当拍（θ 切换引发的重跑）不重拉——挂载/θ 变化的取数各归其主，重拉只会
+  // 重复请求且换 run 当拍可能携切换前的陈旧 θ
+  const lastTickRef = useRef<{ tick: number | undefined; runId: string } | null>(null)
 
   /** 当前生效门（选择器初值与表头字面量用）：已选取已选，否则取 payload 回传。 */
   const effectiveThetaP = thetaP ?? payload?.theta_p
   const effectiveThetaR = thetaR ?? payload?.theta_r
 
   /** 已选 θ 的 query 形状（未选字段不携带；全未选 → undefined 不带参）。 */
-  const thetaArgs = useMemo<ThetaQuery | undefined>(() => {
-    if (thetaP === null && thetaR === null) return undefined
-    return { p: thetaP ?? undefined, r: thetaR ?? undefined }
-  }, [thetaP, thetaR])
+  const thetaArgs = useMemo<ThetaQuery | undefined>(
+    () => thetaQuery(thetaP, thetaR),
+    [thetaP, thetaR],
+  )
 
   // 摘要随 runId 拉取；换 run 清摘要/展开态/θ 选择/警示（明细缓存按
   // runId 分键，无需清），并使旧 run 的在途响应全部作废
@@ -494,6 +519,34 @@ export default function ClosedEvalMovieTable({ runId }: { runId: string }): JSX.
       cancelled = true
     }
   }, [runId])
+
+  // 轮询驱动重拉（增补 2026-11-27）：refreshTick 变化即带当前 θ 参数静默重拉
+  // 摘要。不清 θ/展开/明细缓存：live.json 行只增不改（服务端增量发布、θ 未变
+  // 缓存仍有效），刷新不闪 Spin、展开与明细原样保留。挂载当拍/换 run 当拍/
+  // 同 tick 当拍（θ 切换引发的重跑——其重拉由 changeTheta 自管）一律不重拉
+  // （lastTickRef 守卫），故 θ 进 deps 只增守卫命中、不增请求。失败静默：
+  // 轮询失败旧表保留，下一 tick 重试；初次失败由挂载效果出 summaryError——
+  // 两效果职责分离。代际与挂载效果/θ 切换共用 genRef，慢响应不覆盖新代际。
+  useEffect(() => {
+    const prev = lastTickRef.current
+    lastTickRef.current = { tick: refreshTick, runId }
+    if (refreshTick === undefined) return
+    if (prev === null || prev.runId !== runId || prev.tick === refreshTick) return
+    genRef.current += 1
+    const gen = genRef.current
+    let cancelled = false
+    getRunMovies(runId, thetaQuery(thetaP, thetaR))
+      .then((p) => {
+        if (!cancelled && gen === genRef.current) setPayload(p)
+      })
+      .catch(() => {
+        // 静默：轮询失败旧表保留，下一 tick 重试（初次失败由挂载效果出
+        // summaryError——两效果职责分离）
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [refreshTick, runId, thetaP, thetaR])
 
   /** θ 选择器切换：重拉摘要（带参）+ 清明细缓存 + 收起展开行——θ_r 变了
    * 缓存里的 hit/漏检过期（θ_p-only 变更明细技术上仍有效，但统一清不区分，
