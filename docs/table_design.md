@@ -457,7 +457,7 @@ CREATE INDEX idx_build_task_status ON asset_build_task(status);
 
 当前默认嵌入模型为 `BAAI/bge-m3`（1024 维，纯文本编码不加前缀；仅在使用 `e5` 系列模型时按 `query:` / `passage:` 自动拼接前缀）。
 
-- **closed 模式召回**：按 `embed_content_texts` 提取摘要与场景文本编码为 L2 归一化向量（`role="query"`），与 `tag_define.embedding`（`role="passage"`）做余弦检索并与 BM25 做 RRF 融合，取全局 Top-K 送入 LLM 判定。
+- **closed 模式召回**：按 `embed_content_texts` 提取摘要与场景文本编码为 L2 归一化向量（`role="query"`），与 `tag_define.embedding`（`role="passage"`）做余弦检索，每个标签取跨查询最高余弦后按余弦降序取全局 Top-K 送入 LLM 判定。
 - **open 模式库内对齐**：`services/tags/library.py::library_index()` 直接复用持久化在 `tag_define.embedding` 的向量，仅在缺失或维度不匹配时按同一口径 `f"{tag_name}。{description}"`（`role="passage"`）即时回退编码，确保入库、召回与开放对齐处于同一向量空间。
 
 SQLite 实现下余弦相似度在应用层计算（BLOB 解包 + numpy）；PG 迁移后换 pgvector 原生算子，检索逻辑收敛在向量存储接缝（VectorStore）后面。
@@ -568,7 +568,7 @@ open 生成时的库内对齐由 `catalog_align.py` 完成：精确重名直接�
 |---|---|---|
 | `content` / `scene` 级挂载 + `val_fixed` 标签 | ✅ | ✅ 已启用 |
 | `character` 级挂载 | ✅ | ✅ 挂载逻辑已就位（开放评测盲评口径待补） |
-| `closed`（混合召回 + 分批 LLM 判定）/ `open`（逐目录两阶段 + Judge + 库内对齐） | ✅ | ✅ 已启用 |
+| `closed`（向量召回 + 分批 LLM 判定）/ `open`（逐目录两阶段 + Judge + 库内对齐） | ✅ | ✅ 已启用 |
 | `val_generalized` 泛化值 | ✅ 预留（`tag_type` + `asset_tag` 唯一键含 `tag_name`） | 后续 |
 | PostgreSQL + pgvector | —（§7 映射） | 后续迁移 |
 

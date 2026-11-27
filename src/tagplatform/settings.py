@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     llm_request_interval: float = 0.5
     # True 时用确定性 MockLLMClient（测试专用，零网络）
     use_mock_llm: bool = False
-    # 模式 A 混合召回全局 top-k；配置名为兼容旧环境变量/API 保留
+    # 模式 A 向量召回全局 top-k；配置名为兼容旧环境变量/API 保留
     recall_top_k_per_type: int = 50
     # 模式 A 判定：目录组内候选标签分批上限（每批一次 LLM 调用，防输出
     # 截断）；组内全部批次完成后才合并门控截断。<=0 视为 1

@@ -169,7 +169,7 @@ class ClosedTagProducer:
         library = spec.library
         if library is None:
             raise ValueError("标签库未就绪，无法执行封闭式生成")
-        # 1. 混合召回全局 top-k，再按目录范围过滤（候选带目录与挂载粒度）
+        # 1. 向量召回全局 top-k，再按目录范围过滤（候选带目录与挂载粒度）
         candidates = recall_candidates(
             library,
             embedder,
