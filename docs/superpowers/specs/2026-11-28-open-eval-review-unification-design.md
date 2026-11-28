@@ -110,11 +110,20 @@ value 三方向 0–4 整数，null/漏字段/非法 = 协议错误（重试）�
    逐字可寻；excerpt/scene 级按生产现状语义限制在来源场景文本内核验；
 2. `scenes` 计数：film 级 ≥ 2 个互异有效场景；scene 级 ≥ 1 个且 ∈ 该标签来源场景
    （评审侧现行的「允许场景交集」规则保留）；
-3. 任一不满足 → **relevance 压 1**（沿用生产 `_require_quotes` 语义），reason 改写
-   为核验失败说明。评审侧原「置 None 出分母」退役；「理由文本挖场景 ID」兜底
-   （`_scene_mentions`）删除——quote 即逐字证据；
-4. **生产侧由此新增程序化 scenes 计数核验**（原先仅提示词约束）：生产过滤会
-   收紧，属有意变更，须在文档与审计淘汰原因中可见。
+3. 任一不满足 → **relevance 压 1**（沿用生产 `_require_quotes` 语义）：压分把
+   核验失败原因（quote / 场景计数）记进判决，核验失败说明写进
+   `relevance.reason`。评审侧原「置 None 出分母」退役；「理由文本挖场景 ID」
+   兜底（`_scene_mentions`）删除——quote 即逐字证据；
+4. **核验只认评审方自己引用的证据**（quote + 判决 scenes），不回落生成侧
+   `candidate.scenes`（`_evidence_for` 的回落仅保留用于幸存行的证据展示，不参与
+   核验判定）——【待拍板，推荐如上】；
+5. **压分不吞淘汰原因**：因压分而不过线的候选在 `_filter_candidates` 优先给专属
+   淘汰原因（`_DROP_NO_EVIDENCE` / `_DROP_SINGLE_SCENE` 语义改接到 press 路径），
+   未压分的低分仍走通用「评分未过线」；两闸保留作 belt（防 relevance < 3 却零
+   证据等旁路），`is_filter_stage_drop` 分类不动——漏斗与审计 `dropped` 读侧语义
+   不漂移——【待拍板，推荐如上】；
+6. **生产侧由此新增程序化 scenes 计数核验 + 自引证据要求**（原先仅提示词约束、
+   且可被生成侧场景回落救回）：生产过滤收紧，属有意变更（口径变更 #3）。
 
 **裁决复算**（共享函数，两侧同源）：
 
@@ -133,9 +142,14 @@ value 三方向 0–4 整数，null/漏字段/非法 = 协议错误（重试）�
 - **缺漏策略**：评审侧拆批（budget `2n+2`、子批后单条复试）；生产侧不拆
   （批 ≤20 固定、salvage 部分判决、漏判淘汰）→ 以策略参数区分
   （`split_on_missing` / `budget` / `salvage`）；
-- **判决后处理**：证据核验（上节）、semantics 缺释义规则（现散在
-  `open_review.py` 200–241 行）、value 聚合（`aggregate_value_score`）；
-- trace / 审计记录形状统一（`batches` / `raw` / `errors` 键族）。
+- **判决后处理**：证据核验（上节）、value 聚合（`aggregate_value_score`）；
+  semantics 缺释义→null 规则**仅评测侧**生效（生产候选在通用释义补写前送审，
+  判 2–4 无释义按现状不置 null——「两侧现有语义不变」验收线的一部分）；
+- **trace 形状统一为一个键族**（评审侧超集：
+  `{batches:[{batch,attempt,targets,raw,error,missing}], errors:{id:消息},
+  salvaged}`），judge 侧 trace 迁到同族；diagnostics 端点透传结构不变，
+  `OpenEvalMovieAudit.tsx` 与相关测试随形状更新；旧 run 的旧形状 trace 按
+  键存在性容错渲染（「暂无」语义，宁缺勿假）。
 
 **解析器融合**：`parse_judge_items` 与 `_parse_reviews` 合并为一个 `parse_verdicts`，
 容错家族取并集（围栏剥除、首尾大括号抠对象、`verdicts`/`reviews`/裸列表、
@@ -160,7 +174,17 @@ id 行号容忍、重复 id 剔除、salvage 合格条目、协议错误与显�
 - `_group_stats`：`passed = sum(pass is True)`、`judged = sum(pass is not None)`
   ——分母语义自动从「模型有结论」变为「复算可判」；
 - **新增一致性对照**（回答痛点 3）：judge 放行条目上 judge vs 评审的
-  verdict 分歧率、逐维均差、完全一致率——进 summary 与 metrics.csv；
+  verdict 分歧率、逐维均差、完全一致率——进 summary 与 metrics.csv。
+  口径三桶响亮核算（None≠0 纪律延伸到对照段）：分母 = 复算可判（pass 非
+  None）且有 `judge_reference` 的行；复算 None（轴 null）单独计「复算无法
+  判断」；缺 `judge_reference` 单独计「无 judge 参考」——都不静默出分母；
+  分歧率 = 复算不通过占分母比（judge 侧按构造全放行）；逐维均差只在两侧
+  都有该维分的行上算；
+- **顶层 reason 保留为派生字段**：协议只让模型输出逐维 reason；后处理为
+  verdict / review 行派生一条顶层 reason（压分时 = 核验失败说明；否则拼接
+  各维简要 / `_summarize_value_reasons`）——report.md 理由列、前端
+  `labelDetail`、`judge_reference.reason`、审计「judge 理由」行继续有数据，
+  前端保持小改；
 - `meta.review.pass_mode`："model" → "threshold"；
 - `OPEN_REPORT_SCHEMA_VERSION` 3 → 4；lazy upgrade 沿用：旧 run 的 raw review
   行按存储分数复算出新 pass（旧「证据不足置 None」行在新规则下复算为 None 出
@@ -171,11 +195,15 @@ id 行号容忍、重复 id 剔除、salvage 合格条目、协议错误与显�
 ### 6. mock 与测试
 
 - mock `_quality_output`：judge/review 两模式统一输出融合形状（review 模式不再
-  返回 pass）——分流标志串维持现状（`## 审核任务` / `## 标签质量评估`）；
-- 测试面：`test_generation_open`（判决形状/过滤收紧）、`test_eval_open_review`
-  （解析/拆批/预算/证据核验新规则）、`test_open_eval`（编排）、`test_api_eval`、
-  前端 `OpenEvalReport.test.tsx`；`quality_metrics` 输入形状不变（三维
-  {score,reason} 键族未动）。
+  返回 pass）——分流标志串维持现状（`## 审核任务` / `## 标签质量评估`）；评审
+  子分支靠「## 开放评测补充规则」串细分——重写协议附注时保留该节标题（或同步
+  改 mock 标志串），由测试钉住；
+- 测试面：`test_generation_open`（判决形状/过滤收紧/淘汰原因）、
+  `test_eval_open_review`（解析/拆批/预算/证据核验新规则）、
+  `test_eval_open_report`（报告/一致性对照/legacy 升级）、`test_open_eval`
+  （编排）、`test_api_eval`、前端 `OpenEvalReport.test.tsx` 与
+  `OpenEvalMovieAudit` 相关用例（trace 形状）；`quality_metrics` 输入形状不变
+  （三维 {score,reason} 键族未动）。
 
 ### 7. 兼容与版本
 
@@ -187,8 +215,8 @@ id 行号容忍、重复 id 剔除、salvage 合格条目、协议错误与显�
 
 1. 评审通过率 = 生产规则阈值复算（不再是模型保留意见）——头条指标语义变化；
 2. 证据不足：评审侧 relevance 由「置 None 出分母」改为「压 1」（对齐生产）；
-3. 生产侧新增程序化 scenes 计数核验——**生产过滤收紧**（合并前后过滤率对比
-   须在上线验证中量化）；
+3. 生产侧新增程序化 scenes 计数核验，且核验只认判决自引证据（不回落生成侧
+   场景）——**生产过滤收紧**（幅度按风险节的离线复算量化后再上线）；
 4. 新旧 run 通过率不可横比（通用纪律 2），legacy 复算口径随报告标注。
 
 ## 我做的三个小决定（可否决）
@@ -203,11 +231,27 @@ id 行号容忍、重复 id 剔除、salvage 合格条目、协议错误与显�
 
 ## 风险与开放问题
 
-- **生产过滤收紧幅度未知**（新增 scenes 计数核验）：计划中应包含对既有 run 的
-  audit verdicts 做离线复算，量化新旧过滤率差再上线；
+- **生产过滤收紧幅度未知**（新增 scenes 计数核验 + 自引证据要求）：离线复算
+  语料 = 8101 的 49 份 MTG 审计 + open-eval run 目录的 audit/（脚本参数化目录，
+  对 verdicts 重放新规则；quote 核验需材料快照，缺快照条目单独计「不可复算」
+  不混入差值）；阈值默认【待拍板】：过滤率差 < 5pp → 记录后上线；
+  ≥ 5pp → 停下重议 press 规则。背景：8100 生产 asset_tag 尚未放量，收紧主要
+  影响未来 run，以历史审计的量化为准；
 - 整片评审输出变大（quote + confidence + 逐维 reason）：`max_tokens=8192` 与拆批
   兜底已覆盖，但要观察整批成功率变化；
 - 引擎抽象的失真风险（反目标 3）：以「策略参数 + 两侧现有语义不变」为验收线。
+
+## 评审问答定稿（builder check 六问，2026-11-28；均同样可否决）
+
+1. 淘汰原因分类：`_DROP_NO_EVIDENCE` / `_DROP_SINGLE_SCENE` 保留并改接到
+   press 路径，belt 语义保留，漏斗与审计读侧不漂移（§2.5）——【待拍板】；
+2. 顶层 reason：协议不收模型总评，后处理派生（§5）；核验失败文案落
+   `relevance.reason` 并入派生 reason；
+3. trace 形状：统一为评审侧超集键族，diagnostics 读侧与测试随动，旧形状
+   容错渲染（§3）；
+4. semantics 缺释义→null：仅评测侧（§3）；
+5. 离线复算：语料与阈值见风险节（8101 审计 + run audit/；5pp 阈值）——【待拍板】；
+6. 一致性对照 None 口径：三桶响亮核算，不静默出分母（§5）。
 
 ## 留给实现的
 
