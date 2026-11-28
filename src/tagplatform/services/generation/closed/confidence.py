@@ -5,8 +5,11 @@
 - Ccons（评分一致性）：对每个最终标签**再评 2 次**（与原判定共 3 次），
   分数口径 = Sevi 融合分（0–1，三模态 evidence_strength 加权归一化）；
   As = 三次分数的总体方差（÷3，ddof=0）；Ccons = exp(−As/b)，b 默认 0.2。
-- Cver（证据可验性）：LLM 按五级核验表（1=无法核验 … 5=完全可核验）
-  对"标签 + 证据条目"打 1–5 分，Cver = (S−1)/4。
+- Cver（证据核验，v2 模态两维）：LLM 按 content/scene/frame 三模态各判
+  Rn（0/1 评价资格）+ 充分度三档 + T 真实性（1–5）+ V 可核验性（1–5），
+  数值计算本地做：T/V 各按 (x−1)/4 归一，模态分 Cver,n = 0.6T + 0.4V，
+  权重 Qn 由充分度组合查固定菜单（同级并列时 V 高者拿大权重，再平 T，
+  再平按 content→scene→frame 顺序），Cver = Σ Rn·Qn·Cver,n（0–1）。
 - Cmod（跨模态一致性）：s_m = (evidence_strength_m − 1)/4（归一化标尺），
   dij = |si − sj|，Cs = 1 − (d12 + d13 + d23)/3，Cc = max(dij)，
   Cmod = j·Cs + (1−j)·(1−Cc)，j 默认 0.5。本地计算。
@@ -19,8 +22,9 @@
   2026-11：三次判定同条件测量）。Mock 端哈希键含 run_id，同 run_id
   重调 = 相同输出 → As = 0 → Ccons = 1.0。
 - Cver 核验：`spec.prompt_text + "\n\n" + CLOSED_VERIFICATION_PROMPT`
-  （五级表在模板常量里），Cver 分支要求模型输出小 JSON {"score": N}；
-  有帧时核验消息带与生成时相同的帧 parts（多模态对照）。
+  （判定表在模板常量里）+ 标签名 + 按模态分节的证据条目；Cver 分支
+  要求模型输出按模态小 JSON（Rn/充分度/T/V）；有帧时核验消息带与生成
+  时相同的帧 parts（多模态对照，帧即 frame 模态的核验材料）。
 - Cmod：读 ProducedTag.evidence_scores（producer v8 带出的三模态原始
   强度 1–5），纯本地算术。
 
@@ -65,10 +69,202 @@ from tagplatform.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Cver 小 JSON 的解析宽容度：容忍 ```json 围栏与键名漂移（"score"/"分数"/
-# "rating"），分值钳到 1–5。与 parse_closed_output 的围栏剥离口径一致。
+# Cver 小 JSON 的解析宽容度：容忍 ```json 围栏与键名漂移（"modalities"/
+# "模态"），分值钳到 1–5。与 parse_closed_output 的围栏剥离口径一致。
 _VERIFY_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
-_VERIFY_KEYS = ("score", "分数", "rating", "分值")
+_VERIFY_MODALITY_KEYS = ("modalities", "模态")
+_SUFFICIENCY_LEVELS = ("充分", "支持", "辅助")
+_MODALITY_ORDER = ("content", "scene", "frame")
+
+
+@dataclass
+class ModalityVerdict:
+    """单模态核验判定（LLM 原始输出解析结果）。"""
+
+    r: int = 0                      # 模态标签相关性：1=具备评价资格
+    sufficiency: str = ""           # 充分度三档：充分/支持/辅助
+    t: int | None = None            # 真实性 1–5（Rn=0 时 None）
+    v: int | None = None            # 可核验性 1–5（Rn=0 时 None）
+
+
+def _clamp_score(value) -> int:
+    """宽容转整数并钳 1–5（复刻旧 _parse_verify_score 的钳位口径）。"""
+    return min(max(int(value), 1), 5)
+
+
+def _parse_sufficiency(value) -> str:
+    """充分度归一到三档枚举；异常值按「辅助」处理（最保守档）。"""
+    text = str(value or "").strip()
+    for level in _SUFFICIENCY_LEVELS:
+        if level in text:
+            return level
+    return "辅助"
+
+
+def _sufficiency_rank(level: str) -> int:
+    """充分度档位 → 排序秩：充分=2 > 支持=1 > 辅助=0（异常档按辅助）。"""
+    if level not in _SUFFICIENCY_LEVELS:
+        return 0
+    return len(_SUFFICIENCY_LEVELS) - 1 - _SUFFICIENCY_LEVELS.index(level)
+
+
+def _parse_modality_verdicts(raw: str) -> dict[str, ModalityVerdict]:
+    """Cver 输出 → 三模态判定。剥围栏、找对象、容忍键名漂移。
+
+    缺失模态按 Rn=0（无评价资格）补齐；r 非法值按 0 处理。Rn=0 时
+    t/v 忽略（保持 None）。
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = _VERIFY_FENCE_RE.sub("", text).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise LLMParseError(f"核验输出不是 JSON 对象: {raw[:200]!r}")
+    try:
+        obj = json.loads(text[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise LLMParseError(f"核验输出解析失败: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise LLMParseError(f"核验输出顶层不是对象: {raw[:200]!r}")
+    modalities = None
+    for key in _VERIFY_MODALITY_KEYS:
+        if key in obj and isinstance(obj[key], dict):
+            modalities = obj[key]
+            break
+    if modalities is None:
+        raise LLMParseError(f"核验输出缺少 modalities 键: {raw[:200]!r}")
+    verdicts: dict[str, ModalityVerdict] = {}
+    for modality in _MODALITY_ORDER:
+        entry = modalities.get(modality)
+        if not isinstance(entry, dict):
+            verdicts[modality] = ModalityVerdict(r=0)
+            continue
+        try:
+            r = int(entry.get("r", 0))
+        except (TypeError, ValueError):
+            r = 0
+        r = 1 if r else 0
+        verdict = ModalityVerdict(r=r, sufficiency=_parse_sufficiency(
+            entry.get("sufficiency")))
+        if r:
+            try:
+                verdict.t = _clamp_score(entry.get("t"))
+                verdict.v = _clamp_score(entry.get("v"))
+            except (TypeError, ValueError) as exc:
+                raise LLMParseError(
+                    f"核验输出 {modality} 模态 t/v 不是整数: "
+                    f"{entry.get('t')!r}/{entry.get('v')!r}") from exc
+        verdicts[modality] = verdict
+    return verdicts
+
+
+# ---- 权重菜单（用户口径 2026-12）----
+# 充分度三档组合 → 固定菜单行。同级并列时大权重给 V 分更高的模态
+# （再平 T，再平按 content→scene→frame 顺序）。
+
+# 2 个相关模态（相对原表 0.1:0.9 / 0.3:0.7 / 0.5:0.5）
+_WEIGHT_MENU_TWO = {
+    ("充分", "充分"): (0.5, 0.5),
+    ("充分", "支持"): (0.7, 0.3),
+    ("充分", "辅助"): (0.9, 0.1),
+    ("支持", "支持"): (0.5, 0.5),
+    ("支持", "辅助"): (0.7, 0.3),
+    ("辅助", "辅助"): (0.5, 0.5),
+}
+
+# 3 个相关模态（相对原表 0.1:0.2:0.7 / 0.1:0.4:0.5 / 0.3:0.3:0.4）：
+# 组合归并为四类——三个都有效（充分×3 / 充分×2+支持 / 充分+支持×2 /
+# 支持×3）→ 0.3:0.3:0.4；两个有效 + 一个辅助 → 0.5:0.4:0.1；一个有效
+# + 两个辅助 → 0.7:0.2:0.1；辅助×3 → 0.3:0.3:0.4。
+def _map_three_modality_weights(
+    verdicts: dict[str, ModalityVerdict],
+) -> dict[str, float]:
+    """3 相关模态组合 → 每模态权重（菜单行内排列由并列破序规则定）。"""
+    levels = {m: verdicts[m].sufficiency for m in _MODALITY_ORDER}
+    full = ("充分", "支持")
+    if all(levels[m] in full for m in _MODALITY_ORDER):
+        base = (0.3, 0.3, 0.4)
+    elif sum(1 for m in _MODALITY_ORDER if levels[m] in full) == 2:
+        base = (0.5, 0.4, 0.1)
+    elif sum(1 for m in _MODALITY_ORDER if levels[m] in full) == 1:
+        base = (0.7, 0.2, 0.1)
+    else:
+        base = (0.3, 0.3, 0.4)
+    # 菜单行内排列：大权重配更充分的模态。破序键：充分度秩（充分=2 >
+    # 支持=1 > 辅助=0）→ V → T → 固定顺序；降序排列 → 秩大者在前，
+    # zip 时按序拿 sorted(base, reverse=True) 的大值。
+    order = sorted(
+        _MODALITY_ORDER,
+        key=lambda m: (
+            _sufficiency_rank(levels[m]),
+            verdicts[m].v or 0, verdicts[m].t or 0,
+            -_MODALITY_ORDER.index(m),
+        ),
+        reverse=True,
+    )
+    weights = dict(zip(order, sorted(base, reverse=True)))
+    return weights
+
+
+def _assign_modality_weights(
+    verdicts: dict[str, ModalityVerdict],
+) -> dict[str, float]:
+    """全部模态的 Qn（本地权重分配，Rn=0 强制 0）。
+
+    规则（用户口径）：两模态 Rn=0 → 剩余模态 1；一 Rn=0 → 二模态菜单；
+    全 Rn=1 → 三模态菜单；全 Rn=0 → 调用方降级（视为输出异常）。
+    """
+    relevant = [m for m in _MODALITY_ORDER if verdicts[m].r]
+    weights = {m: 0.0 for m in _MODALITY_ORDER}
+    if not relevant:
+        return weights
+    if len(relevant) == 1:
+        weights[relevant[0]] = 1.0
+        return weights
+    if len(relevant) == 2:
+        a, b = relevant
+        pair = _WEIGHT_MENU_TWO.get(
+            (verdicts[a].sufficiency, verdicts[b].sufficiency))
+        if pair is None:  # 反序组合（如 辅助+充分）→ 菜单对称重查
+            pair = _WEIGHT_MENU_TWO.get(
+                (verdicts[b].sufficiency, verdicts[a].sufficiency))
+        if pair is None:  # 异常档位兜底：对称五五开
+            pair = (0.5, 0.5)
+        # pair 为 (大, 小)：大权重给更充分模态（档位秩→V→T→固定序破平）
+        rank = {
+            m: (_sufficiency_rank(verdicts[m].sufficiency),
+                verdicts[m].v or 0, verdicts[m].t or 0)
+            for m in (a, b)
+        }
+        first, second = (a, b) if (
+            rank[a] > rank[b] or
+            (rank[a] == rank[b] and _MODALITY_ORDER.index(a)
+             < _MODALITY_ORDER.index(b))
+        ) else (b, a)
+        weights[first], weights[second] = max(pair), min(pair)
+        return weights
+    return _map_three_modality_weights(verdicts)
+
+
+def _compute_c_ver(
+    verdicts: dict[str, ModalityVerdict],
+) -> tuple[float, dict[str, float]]:
+    """本地数值计算：Cver = Σ Rn·Qn·(0.6T + 0.4V)（T/V 已归一 0–1）。
+
+    返回 (Cver, 各模态 Qn)。全 Rn=0 抛 ValueError（调用方降级）。
+    """
+    weights = _assign_modality_weights(verdicts)
+    if not any(verdicts[m].r for m in _MODALITY_ORDER):
+        raise ValueError("三模态 Rn 全为 0，无法计算 Cver")
+    total = 0.0
+    for m in _MODALITY_ORDER:
+        verdict = verdicts[m]
+        if not verdict.r:
+            continue
+        t_norm = (verdict.t - 1) / 4
+        v_norm = (verdict.v - 1) / 4
+        total += weights[m] * (0.6 * t_norm + 0.4 * v_norm)
+    return total, weights
 
 
 @dataclass
@@ -82,8 +278,9 @@ class TagConfidence:
     variance: float | None = None
     c_cons: float | None = None
     cons_partial: bool = False   # 重评失败 → 原分补位（视为无波动）
-    # Cver：LLM 核验分（1–5 原始 + 归一化）
-    verify_score: int | None = None
+    # Cver：三模态判定（Rn/sufficiency/T/V）与本地计算的 Qn/Cver
+    verify_score: dict[str, ModalityVerdict] = field(default_factory=dict)
+    ver_weights: dict[str, float] = field(default_factory=dict)
     c_ver: float | None = None
     ver_partial: bool = False    # 核验失败 → 0.5 占位
     # Cmod：三模态原始强度与中间量
@@ -112,29 +309,13 @@ def _sevi_from_scores(scores: dict[str, int], weights: tuple[float, float, float
     return (weights[0] * s_content + weights[1] * s_scene + weights[2] * s_frame)
 
 
-def _parse_verify_score(raw: str) -> int:
-    """Cver 输出 → 1–5 分。剥围栏、找对象、容忍键名漂移。"""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = _VERIFY_FENCE_RE.sub("", text).strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        raise LLMParseError(f"核验输出不是 JSON 对象: {raw[:200]!r}")
-    try:
-        obj = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as exc:
-        raise LLMParseError(f"核验输出解析失败: {exc}") from exc
-    if not isinstance(obj, dict):
-        raise LLMParseError(f"核验输出顶层不是对象: {raw[:200]!r}")
-    for key in _VERIFY_KEYS:
-        if key in obj:
-            try:
-                value = int(obj[key])
-            except (TypeError, ValueError) as exc:
-                raise LLMParseError(
-                    f"核验分值不是整数: {obj.get(key)!r}") from exc
-            return min(max(value, 1), 5)
-    raise LLMParseError(f"核验输出缺少 score 键: {raw[:200]!r}")
+def _parse_verify_score(raw: str) -> dict[str, ModalityVerdict]:
+    """Cver 输出 → 三模态判定（旧名单一 score 契约退役）。
+
+    兼容别名：老式 {"score": N} 会被 _parse_modality_verdicts 以
+    缺 modalities 键拒绝；mock 与测试均已切到新契约。
+    """
+    return _parse_modality_verdicts(raw)
 
 
 def _build_group_payload(spec: GenerationSpec, tag: ProducedTag,
@@ -209,12 +390,14 @@ def _verify_evidence(
     tag: ProducedTag,
     llm,
     frame_parts: list[dict],
-) -> int:
-    """Cver 核验：标签 + 证据条目 + 五级表 → 1–5 分。
+) -> dict[str, ModalityVerdict]:
+    """Cver 核验：标签 + 证据条目 → 三模态判定（Rn/充分度/T/V）。
 
-    材料段复用 spec.prompt_text（已含渲染后正文 + 场景行），追加模板常量
-    与该标签的证据条目；有帧时带多模态 parts（与生成时同一组帧）。失败
-    抛错由上层降级（0.5 占位）。
+    三模态的核验材料即三个输入通道：content=spec.prompt_text 中的整体
+    资产文本、scene=其中的逐场景行、frame=随消息附带的关键帧图片（与
+    生成时同一组）。证据条目按场景锚定平铺（Evidence 无模态归属，同一
+    条证据可在多个通道中定位）。数值计算在 _compute_c_ver 本地做。
+    失败抛错由上层降级（0.5 占位）。
     """
     lines = [CLOSED_VERIFICATION_PROMPT, ""]
     lines.append(f"### 待核验标签：{tag.tag_name}")
@@ -305,15 +488,33 @@ def _render_report(
                      f"{_format_cell(r.c_cons)} |{partial_mark}")
         lines.append("")
         # Cver
-        lines.append("### Cver 证据可验性（五级核验表）")
+        lines.append("### Cver 证据核验（模态两维：Rn/充分度/T/V）")
         if r.ver_partial:
             lines.append("")
             lines.append("⚠️ 核验失败，Cver 占位 0.5（partial）。")
         else:
             lines.append("")
-            lines.append("| 核验分 S | Cver = (S−1)/4 |")
+            lines.append("| 模态 | Rn | 充分度 | T | V | Qn | Cver,n = 0.6·T′+0.4·V′ |")
+            lines.append("|----|----|----|----|----|----|----|")
+            for modality in _MODALITY_ORDER:
+                verdict = r.verify_score.get(modality)
+                if verdict is None:
+                    lines.append(f"| {modality} | — | — | — | — | — | — |")
+                    continue
+                t_norm = (verdict.t - 1) / 4 if verdict.t else None
+                v_norm = (verdict.v - 1) / 4 if verdict.v else None
+                modality_score = (None if t_norm is None or v_norm is None
+                                  else 0.6 * t_norm + 0.4 * v_norm)
+                lines.append(
+                    f"| {modality} | {verdict.r} | "
+                    f"{verdict.sufficiency or '—'} | "
+                    f"{verdict.t if verdict.t else '—'} | "
+                    f"{verdict.v if verdict.v else '—'} | "
+                    f"{_format_cell(r.ver_weights.get(modality))} | "
+                    f"{_format_cell(modality_score)} |")
+            lines.append("")
+            lines.append(f"| Cver = Σ Rn·Qn·Cver,n | {_format_cell(r.c_ver)} |")
             lines.append("|----|----|")
-            lines.append(f"| {r.verify_score} | {_format_cell(r.c_ver)} |")
         lines.append("")
         # Cmod
         lines.append("### Cmod 跨模态一致性")
@@ -442,9 +643,11 @@ def _compute_for_tag(
     result.c_cons = math.exp(-variance / b)
     # ---- Cver ----
     try:
-        score = _verify_evidence(spec, tag, llm, frame_parts)
-        result.verify_score = score
-        result.c_ver = (score - 1) / 4
+        verdicts = _verify_evidence(spec, tag, llm, frame_parts)
+        c_ver, ver_weights = _compute_c_ver(verdicts)
+        result.verify_score = verdicts
+        result.ver_weights = ver_weights
+        result.c_ver = c_ver
     except Exception as exc:  # noqa: BLE001 —— 核验失败 → 0.5 占位
         logger.warning("标签 %s Cver 核验失败（0.5 占位）：%s",
                        tag.tag_name, exc)

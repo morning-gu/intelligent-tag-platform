@@ -6,15 +6,17 @@
 - Ccons：三次 Sevi（原判定 + 2 次重评）总体方差 → exp(−As/b)；有帧时
   重评消息带多模态 parts（三次同条件测量），无帧纯文本；重评失败降级
   为原分补位（As=0 → Ccons=1.0，partial 标注）；
-- Cver：五级分 (S−1)/4；解析宽容（围栏/键名漂移/分值钳 1–5）；失败
-  降级 0.5 占位；
+- Cver（v2 模态两维）：LLM 输出三模态判定 JSON（Rn/充分度/T/V）；解析
+  宽容（围栏/键名漂移/分值钳 1–5/缺模态补 Rn=0）；权重由充分度组合查
+  固定菜单（本地），Cver = Σ Rn·Qn·(0.6T′+0.4V′)；全 Rn=0 / 失败降级
+  0.5 占位；
 - Craw 加权（默认 0.45/0.30/0.25，Settings 层归一化）并覆写
   tags[*].confidence；MD 报告含总览表、三张分量表与 partial 标注；
 - apply_confidence 永不抛错（内部降级红线）：LLM 炸 / 材料缺全兜住，
   任务不落 failed；
 - Mock 端到端（execute 路径）：同 run_id 哈希 → 三次分数相同 →
-  Ccons=1.0；核验分支给确定性 4 分 → Cver=0.75；落库 confidence=Craw
-  ∈ [0.5, 1.0]。
+  Ccons=1.0；核验分支给确定性三模态判定（content 充分 / scene 支持 /
+  frame 辅助，分值哈希采样）；落库 confidence=Craw ∈ [0.5, 1.0]。
 
 Mock 技巧：_ScriptedLLM 按调用序分流（组判定 / 核验 / 重评），桩契约
 与 test_generation_closed 的 raw_decode 组解析同口径。
@@ -32,8 +34,11 @@ from tagplatform.capabilities.llm.mock import _extract_text
 from tagplatform.services.generation import Evidence, GenerationSpec, ProducedTag
 from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.services.generation.closed.confidence import (
+    ModalityVerdict,
     TagConfidence,
+    _assign_modality_weights,
     _compute_c_mod,
+    _compute_c_ver,
     _parse_verify_score,
     _reconsistency_scores,
     _render_report,
@@ -65,20 +70,37 @@ def test_sevi_matches_producer_formula():
         {"content": 5, "scene": 5, "frame": 1}, weights) == pytest.approx(0.6)
 
 
-# ---- Cver 解析层 ----
+# ---- Cver 解析层（v2 模态契约）----
 
-def test_parse_verify_score_plain_and_fenced():
-    assert _parse_verify_score('{"score": 4}') == 4
-    assert _parse_verify_score('```json\n{"score": 5}\n```') == 5
-    assert _parse_verify_score('```\n{"score": 3}\n```') == 3
+def _v(r=1, suf="充分", t=None, v=None):
+    return ModalityVerdict(r=r, sufficiency=suf, t=t, v=v)
 
 
-def test_parse_verify_score_clamps_and_key_fallback():
-    assert _parse_verify_score('{"score": 9}') == 5
-    assert _parse_verify_score('{"score": 0}') == 1
-    assert _parse_verify_score('{"score": 2.7}') == 2
-    assert _parse_verify_score('{"分数": 2}') == 2
-    assert _parse_verify_score('{"rating": 4}') == 4
+def test_parse_verify_score_full_contract():
+    raw = json.dumps({"modalities": {
+        "content": {"r": 1, "sufficiency": "充分", "t": 4, "v": 5},
+        "scene": {"r": 1, "sufficiency": "支持", "t": 3, "v": 4},
+        "frame": {"r": 0, "sufficiency": "辅助"},
+    }}, ensure_ascii=False)
+    verdicts = _parse_verify_score(raw)
+    assert verdicts["content"] == _v(1, "充分", 4, 5)
+    assert verdicts["scene"] == _v(1, "支持", 3, 4)
+    assert verdicts["frame"] == _v(0, "辅助")  # Rn=0 → t/v 置 None
+
+
+def test_parse_verify_score_fenced_and_clamped():
+    fenced = "```json\n" + json.dumps({"modalities": {
+        "content": {"r": 1, "sufficiency": "充分", "t": 9, "v": 0},
+    }}) + "\n```"
+    verdicts = _parse_verify_score(fenced)
+    assert verdicts["content"].t == 5   # 钳 1–5
+    assert verdicts["content"].v == 1
+    # 缺失模态补 Rn=0；键名漂移容忍（"模态"）
+    drift = json.dumps({"模态": {"content": {"r": 1, "sufficiency": "充分",
+                                             "t": 2, "v": 2}}})
+    verdicts = _parse_verify_score(drift)
+    assert verdicts["content"] == _v(1, "充分", 2, 2)
+    assert verdicts["scene"] == _v(0, "") and verdicts["frame"] == _v(0, "")
 
 
 def test_parse_verify_score_rejects_garbage():
@@ -86,6 +108,117 @@ def test_parse_verify_score_rejects_garbage():
         _parse_verify_score("完全不是 JSON")
     with pytest.raises(LLMParseError):
         _parse_verify_score('{"other": 3}')
+    # 旧契约 {"score": N} 已退役：缺 modalities 键 → 解析失败
+    with pytest.raises(LLMParseError):
+        _parse_verify_score('{"score": 4}')
+
+
+def test_parse_verify_score_bad_sufficiency_falls_back():
+    """异常充分度文案归「辅助」（最保守档），不抛错。"""
+    raw = json.dumps({"modalities": {
+        "content": {"r": 1, "sufficiency": "特别充分", "t": 4, "v": 4},
+    }})
+    verdicts = _parse_verify_score(raw)
+    assert verdicts["content"].sufficiency == "充分"
+    raw_bad = json.dumps({"modalities": {
+        "content": {"r": 1, "sufficiency": "???", "t": 4, "v": 4},
+    }})
+    assert _parse_verify_score(raw_bad)["content"].sufficiency == "辅助"
+
+
+# ---- Cver 权重菜单（本地映射）----
+
+def test_weights_two_relevant_modalities():
+    """二模态菜单 6 组合 + 大权重归充分模态。"""
+    def weights(suf_a, suf_b):
+        verdicts = {"content": _v(1, suf_a, 4, 4),
+                    "scene": _v(1, suf_b, 4, 4), "frame": _v(0)}
+        return _assign_modality_weights(verdicts)
+    assert weights("充分", "充分") == {"content": 0.5, "scene": 0.5, "frame": 0.0}
+    assert weights("充分", "支持") == {"content": 0.7, "scene": 0.3, "frame": 0.0}
+    assert weights("充分", "辅助") == {"content": 0.9, "scene": 0.1, "frame": 0.0}
+    assert weights("支持", "支持") == {"content": 0.5, "scene": 0.5, "frame": 0.0}
+    assert weights("支持", "辅助") == {"content": 0.7, "scene": 0.3, "frame": 0.0}
+    assert weights("辅助", "辅助") == {"content": 0.5, "scene": 0.5, "frame": 0.0}
+
+
+def test_weights_two_modalities_ranking():
+    """同级并列：大权重给 V 高者；V 平比 T；再平按 content→scene→frame。"""
+    verdicts = {"content": _v(1, "充分", 4, 5), "scene": _v(1, "充分", 5, 4),
+                "frame": _v(0)}
+    w = _assign_modality_weights(verdicts)
+    assert w["content"] == 0.5 and w["scene"] == 0.5  # 同级 0.5:0.5 无排序问题
+    # 不同级（充分 vs 辅助）→ 0.9:0.1，充分方拿大权重
+    verdicts = {"content": _v(1, "辅助", 5, 5), "scene": _v(1, "充分", 2, 2),
+                "frame": _v(0)}
+    w = _assign_modality_weights(verdicts)
+    assert w["scene"] == 0.9 and w["content"] == 0.1
+
+
+def test_weights_three_relevant_modalities():
+    """三模态菜单归并四类：全有效 / 两有效+辅助 / 一有效+两辅助 / 全辅助。"""
+    def weights(sufs, t_v=(4, 4)):
+        verdicts = {m: _v(1, s, t_v[0], t_v[1]) for m, s in
+                   zip(("content", "scene", "frame"), sufs)}
+        return _assign_modality_weights(verdicts)
+    # 三个都有效（充分/支持任一组合）→ {0.4, 0.3, 0.3}
+    for sufs in (("充分", "充分", "充分"), ("充分", "支持", "支持"),
+                 ("支持", "支持", "支持"), ("充分", "充分", "支持")):
+        w = weights(sufs)
+        assert sorted(w.values()) == [0.3, 0.3, 0.4]
+        assert sum(w.values()) == pytest.approx(1.0)
+    # 两个有效 + 一个辅助 → {0.5, 0.4, 0.1}
+    for sufs in (("充分", "充分", "辅助"), ("充分", "支持", "辅助"),
+                 ("支持", "支持", "辅助")):
+        w = weights(sufs)
+        assert sorted(w.values()) == [0.1, 0.4, 0.5]
+    # 一个有效 + 两个辅助 → {0.7, 0.2, 0.1}
+    for sufs in (("充分", "辅助", "辅助"), ("支持", "辅助", "辅助")):
+        w = weights(sufs)
+        assert sorted(w.values()) == [0.1, 0.2, 0.7]
+    # 全辅助 → {0.4, 0.3, 0.3}
+    w = weights(("辅助", "辅助", "辅助"))
+    assert sorted(w.values()) == [0.3, 0.3, 0.4]
+
+
+def test_weights_three_modalities_ranking():
+    """三模态同级并列：大权重给更充分/V 更高模态。"""
+    # 充分×2+支持 → 0.4 给充分（V 高者），0.3/0.3 分给其余
+    verdicts = {"content": _v(1, "充分", 4, 4), "scene": _v(1, "充分", 4, 5),
+                "frame": _v(1, "支持", 5, 5)}
+    w = _assign_modality_weights(verdicts)
+    assert w["scene"] == 0.4       # 充分 + V 高
+    assert w["content"] == 0.3    # 充分但 V 低
+    assert w["frame"] == 0.3
+    # 充分+辅助×2 → 0.7:0.2:0.1：充分拿 0.7，辅助按 V 分 0.2/0.1
+    verdicts = {"content": _v(1, "辅助", 4, 5), "scene": _v(1, "辅助", 4, 4),
+                "frame": _v(1, "充分", 2, 2)}
+    w = _assign_modality_weights(verdicts)
+    assert w["frame"] == 0.7 and w["content"] == 0.2 and w["scene"] == 0.1
+
+
+def test_weights_single_relevant_modality():
+    """两模态 Rn=0 → 剩余模态权重 1。"""
+    verdicts = {"content": _v(0), "scene": _v(0), "frame": _v(1, "充分", 3, 3)}
+    assert _assign_modality_weights(verdicts) == {
+        "content": 0.0, "scene": 0.0, "frame": 1.0}
+
+
+def test_c_ver_computation_and_all_zero_degrades():
+    """Cver = Σ Rn·Qn·(0.6T′+0.4V′)；全 Rn=0 抛错（上层降级）。"""
+    verdicts = {"content": _v(1, "充分", 5, 5), "scene": _v(1, "充分", 5, 5),
+                "frame": _v(1, "充分", 5, 5)}
+    c_ver, w = _compute_c_ver(verdicts)
+    assert c_ver == pytest.approx(1.0)          # 全满分
+    assert sorted(w.values()) == [0.3, 0.3, 0.4]
+    # 单模态：Qn=1，Cver,n = 0.6·0.75+0.4·0.75 = 0.75
+    verdicts = {"content": _v(1, "充分", 4, 4), "scene": _v(0), "frame": _v(0)}
+    c_ver, w = _compute_c_ver(verdicts)
+    assert c_ver == pytest.approx(0.75)
+    assert w["content"] == 1.0
+    # 全 Rn=0 → ValueError（调用方降级 0.5 + partial）
+    with pytest.raises(ValueError):
+        _compute_c_ver({"content": _v(0), "scene": _v(0), "frame": _v(0)})
 
 
 # ---- 文件名清洗 ----
@@ -103,7 +236,8 @@ class _ScriptedConfLLM:
 
     - 含 "## 候选标签分组"：Ccons 重评请求 → 返回指定 Sevi 的判定 JSON
       （按调用序取 reconsistency_outputs[i]，可实现三次分数不同）；
-    - 含 "## 证据核验"：Cver 核验请求 → 返回 {"score": N}；
+    - 含 "## 证据核验"：Cver 核验请求 → 返回三模态判定 JSON
+      （verify_output，默认单模态 content：Rn=1 充分 T=V=4 → Cver=0.75）；
     - 其余：抛 AssertionError（置信度环节不应发其他请求）。
 
     消息取文本走 _extract_text 口径（纯文本与多模态 parts 两种形态
@@ -113,7 +247,10 @@ class _ScriptedConfLLM:
     def __init__(self, reconsistency_outputs: list[dict] | None = None,
                  verify_output: dict | None = None):
         self._reoutputs = reconsistency_outputs or []
-        self._verify = verify_output if verify_output is not None else {"score": 4}
+        self._verify = (verify_output if verify_output is not None
+                        else {"modalities": {
+                            "content": {"r": 1, "sufficiency": "充分",
+                                        "t": 4, "v": 4}}})
         self.re_calls = 0
         self.verify_calls = 0
 
@@ -170,7 +307,8 @@ def test_apply_confidence_full_flow(session, tmp_path, monkeypatch):
             {"applicability": 5, "evidence": _evi(5, 5, 5)},
             {"applicability": 5, "evidence": _evi(1, 1, 1)},
         ],
-        verify_output={"score": 4},
+        verify_output={"modalities": {
+            "content": {"r": 1, "sufficiency": "充分", "t": 4, "v": 4}}},
     )
     tag_a = ProducedTag(
         origin="catalog", tag_id="tag_g_00", tag_name="类型标签0",
@@ -206,8 +344,10 @@ def test_apply_confidence_full_flow(session, tmp_path, monkeypatch):
     assert ra.variance == pytest.approx(var)
     assert ra.c_cons == pytest.approx(math.exp(-var / 0.2))
     assert not ra.cons_partial
-    # Cver = 4 → (4−1)/4 = 0.75
-    assert ra.verify_score == 4
+    # Cver：单模态判定 content(充分 T4 V4) → Qn=1，
+    # Cver = 0.6·(3/4) + 0.4·(3/4) = 0.75
+    assert ra.verify_score["content"] == _v(1, "充分", 4, 4)
+    assert ra.ver_weights == {"content": 1.0, "scene": 0.0, "frame": 0.0}
     assert ra.c_ver == pytest.approx(0.75)
     assert not ra.ver_partial
     # Cmod (4,5,4)
@@ -310,7 +450,8 @@ def test_apply_confidence_missing_evidence_scores_degrades(session,
                       asset_id="asset_x", run_id="conf_t3:run1")
     llm = _ScriptedConfLLM(
         reconsistency_outputs=[{"applicability": 5, "evidence": _evi(5, 5, 5)}],
-        verify_output={"score": 5},
+        verify_output={"modalities": {
+            "content": {"r": 1, "sufficiency": "充分", "t": 5, "v": 5}}},
     )
     tag = ProducedTag(
         origin="catalog", tag_id="tag_g_00", tag_name="类型标签0",
@@ -329,6 +470,7 @@ def test_apply_confidence_missing_evidence_scores_degrades(session,
     assert r.c_mod == pytest.approx(0.5)
     # Ccons 重评正常（同 5 分 → Sevi=1.0；原分 1.0 → 三次全 1.0）
     assert r.c_cons == pytest.approx(1.0)
+    # Cver：单模态满分 → Cver=1.0
     assert r.c_ver == pytest.approx(1.0)
     w = get_settings().closed_confidence_weight_values
     assert r.c_raw == pytest.approx(w[0] * 1.0 + w[1] * 1.0 + w[2] * 0.5)

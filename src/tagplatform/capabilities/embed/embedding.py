@@ -26,6 +26,7 @@ embed_texts 缓存层与 ApiEmbedder 不随迁——远程通道按 OpenAI 兼�
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import Callable, Protocol
 
 import numpy as np
@@ -113,7 +114,14 @@ class MockEmbedder:
 # ---------- LocalEmbedder ----------
 
 class LocalEmbedder:
-    """sentence-transformers 本地模型；模型加载惰性到首次 embed 非空输入。"""
+    """sentence-transformers 本地模型；模型加载惰性到首次 embed 非空输入。
+
+    加载用双检锁：评测线程池/生成 worker 首查时并发进 embed，无锁的话多
+    个线程同时构造 SentenceTransformer，原生层（tokenizers/safetensors 的
+    Rust 分配器）直接崩溃且 Python 层拦不住（实测 0xC0000409 进程即亡）。
+    锁只护加载：模型加载完成后并发 encode 已验证线程安全，不在锁内串行
+    化，评测吞吐不受影响。
+    """
 
     def __init__(self, model_name: str, device: str = "cpu"):
         self.model_name = model_name
@@ -122,16 +130,21 @@ class LocalEmbedder:
         self.dim = None          # 首次真实编码后回填（模型维度随模型而定）
         self.prefix_style = _prefix_style(model_name)
         self._model = None
+        self._load_lock = threading.Lock()
 
     def _load(self):
-        if self._model is None:
-            # 懒导入：mock/测试路径不需要安装后首次 import 的开销，更不触发下载
-            from sentence_transformers import SentenceTransformer
-            # local_files_only=True：内网环境 huggingface.co 被 403/断连，
-            # 每次加载都刷 "Server disconnected" 警告并白等数秒退避；
-            # 模型已缓存，直接走本地即可
-            self._model = SentenceTransformer(
-                self.model_name, device=self.device, local_files_only=True)
+        if self._model is not None:
+            return self._model
+        with self._load_lock:
+            if self._model is None:
+                # 懒导入：mock/测试路径不需要安装后首次 import 的开销，
+                # 更不触发下载
+                from sentence_transformers import SentenceTransformer
+                # local_files_only=True：内网环境 huggingface.co 被 403/断
+                # 连，每次加载都刷 "Server disconnected" 警告并白等数秒退
+                # 避；模型已缓存，直接走本地即可
+                self._model = SentenceTransformer(
+                    self.model_name, device=self.device, local_files_only=True)
         return self._model
 
     def embed(self, texts: list[str], *, role: str) -> np.ndarray:
