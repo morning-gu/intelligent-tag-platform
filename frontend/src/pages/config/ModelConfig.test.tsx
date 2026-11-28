@@ -64,9 +64,9 @@ const CLOSED_CONFIDENCE_CCONS_TEXT =
   '2. 调用：同一 run_id 重复调用 2 次，取三次 Sevi 的方差 As，Ccons = exp(−As/b)。'
 
 const CLOSED_CONFIDENCE_CVER_TEXT =
-  '组装说明（置信度 Cver 证据可核验性 · 原始资产插入位置）：\n\n' +
-  '1. 材料：spec.prompt_text + CLOSED_VERIFICATION_PROMPT（五级可核验表）。\n' +
-  '2. 调用：带上与生成时同一组关键帧图片；Cver = (S−1)/4。'
+  '组装说明（置信度 Cver 证据核验 · 原始资产插入位置）：\n\n' +
+  '1. 材料：spec.prompt_text + CLOSED_VERIFICATION_PROMPT（Rn 相关性 / 充分度三档 / T 真实性 / V 可核验性判定表）+ 按模态分节的证据条目。\n' +
+  '2. 调用：带上与生成时同一组关键帧图片；LLM 按模态输出 JSON，本地映射权重菜单后加权求和。'
 
 const CLOSED_CONFIDENCE_CMOD_TEXT =
   '组装说明（置信度 Cmod 跨模态一致性）：\n\n' +
@@ -354,7 +354,7 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
       within(confidenceCard).getByText('① Ccons · 评分一致性重评'),
     ).toBeInTheDocument()
     expect(
-      within(confidenceCard).getByText('② Cver · 证据可核验性核验'),
+      within(confidenceCard).getByText('② Cver · 证据核验（真实性 + 可核验性）'),
     ).toBeInTheDocument()
     expect(
       within(confidenceCard).getByText('③ Cmod · 跨模态一致性（本地计算）'),
@@ -368,7 +368,7 @@ describe('ModelConfig 模型配置中心页（只读）', () => {
     expect(within(confidenceCard).getByText('CLOSED_CONFIDENCE_CMOD_NOTE')).toBeInTheDocument()
     expect(
       within(confidenceCard).getByText(
-        /置信度 Cver 证据可核验性 · 原始资产插入位置/,
+        /置信度 Cver 证据核验 · 原始资产插入位置/,
         { exact: false },
       ),
     ).toBeInTheDocument()

@@ -109,6 +109,39 @@ def _pick_evidence(scenes: list[dict], hash_key: str) -> list[dict]:
              "end_ms": scene["end_ms"], "description": scene["description"]}]
 
 
+def _closed_verify_output(text: str, messages: list[dict]) -> dict:
+    """closed Cver 核验（v2 模态两维）：确定性三模态判定输出。
+
+    分流前提：_CLOSED_VERIFY_MARKER 在 _CLOSED_MARKER 之前判（"## 证据
+    核验" 节只出现在核验消息中）。输出新契约 modalities JSON：
+    - content 恒 relevant（整体资产文本必在 prompt 中）；
+    - scene 按场景行有无（_SCENE_LINE_RE 命中即相关）；
+    - frame 按 messages 是否带图片 part（核验消息多模态时才有）；
+    分值哈希采样 4/5（与旧口径等值，_score_five_point 确定性）。
+    """
+    content_part = messages[0]["content"]
+    has_frame_parts = (isinstance(content_part, list)
+                       and any(part.get("type") == "image_url"
+                               for part in content_part
+                               if isinstance(part, dict)))
+    modalities: dict[str, dict] = {
+        "content": {"r": 1, "sufficiency": "充分",
+                    "t": _score_five_point("verify|content|" + text[:64]),
+                    "v": _score_five_point("verify|v|content|" + text[:64])},
+    }
+    if _SCENE_LINE_RE.search(text):
+        modalities["scene"] = {
+            "r": 1, "sufficiency": "支持",
+            "t": _score_five_point("verify|scene|" + text[:64]),
+            "v": _score_five_point("verify|v|scene|" + text[:64])}
+    if has_frame_parts:
+        modalities["frame"] = {
+            "r": 1, "sufficiency": "辅助",
+            "t": _score_five_point("verify|frame|" + text[:64]),
+            "v": _score_five_point("verify|v|frame|" + text[:64])}
+    return {"modalities": modalities}
+
+
 def _closed_output(text: str, run_id: str) -> list[dict]:
     """模式 A：解析候选标签块，哈希采样选中项（确定性伪判定），逐标签附三模态证据。
 
@@ -280,7 +313,7 @@ class MockLLMClient:
         elif _MTG_DESC_MARKER in text:
             out = _desc_output(text)
         elif _CLOSED_VERIFY_MARKER in text:
-            out = {"score": 4}
+            out = _closed_verify_output(text, messages)
         elif _CLOSED_MARKER in text:
             out = _closed_output(text, run_id)
         else:

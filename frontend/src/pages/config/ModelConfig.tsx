@@ -59,7 +59,7 @@ const CONFIDENCE_SECTIONS = [
     entryNames: ['CLOSED_CONFIDENCE_CCONS_NOTE'],
   },
   {
-    title: '② Cver · 证据可核验性核验',
+    title: '② Cver · 证据核验（真实性 + 可核验性）',
     entryNames: ['CLOSED_VERIFICATION_PROMPT', 'CLOSED_CONFIDENCE_CVER_NOTE'],
   },
   {

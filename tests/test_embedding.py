@@ -6,6 +6,7 @@ monkeypatch 还原，不破坏该红线）。
 """
 
 import sys
+import threading
 import types
 
 import numpy as np
@@ -89,6 +90,56 @@ def test_local_plain_models_get_no_prefix(monkeypatch):
     assert e.prefix_style == "plain"
     e.embed(["雨夜"], role="query")
     assert encoded == [["雨夜"]]
+
+
+def test_local_lazy_load_is_double_checked_locked(monkeypatch):
+    """并发首调 embed 只允许一次模型构造（双检锁）。
+
+    无锁懒加载在评测线程池下多线程同时构造 SentenceTransformer，原生层
+    （tokenizers/safetensors Rust 分配器）直接崩溃且 Python 层拦不住
+    （实测 0xC0000409 进程即亡）。锁只护加载：构造完后并发 encode 不再
+    串行（已验证线程安全）。
+    """
+    loads = []
+    load_started = threading.Event()
+    release = threading.Event()
+
+    class _BlockingModel:
+        def __init__(self, name, device="cpu", *, local_files_only: bool):
+            loads.append(threading.get_ident())
+            load_started.set()
+            release.wait(timeout=5)  # 模拟真模型数十秒加载窗口
+            self.dummy = True
+
+        def encode(self, texts, convert_to_numpy=True,
+                   normalize_embeddings=True, show_progress_bar=False):
+            mat = np.array([[float(len(t))] for t in texts], dtype=np.float32)
+            return mat / np.clip(
+                np.linalg.norm(mat, axis=1, keepdims=True), 1e-12, None)
+
+    fake_st = types.ModuleType("sentence_transformers")
+    fake_st.SentenceTransformer = _BlockingModel
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
+
+    e = LocalEmbedder("BAAI/bge-m3")
+    shapes = {}
+
+    def worker(i: int) -> None:
+        v = e.embed([f"文本{i}"], role="query")
+        shapes[i] = v.shape
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    # 第一个线程进入构造后，其余三个都在等锁：此时仍只有一次加载记录
+    assert load_started.wait(timeout=5)
+    assert len(loads) == 1
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+    assert len(loads) == 1          # 全程仅构造一次模型
+    assert sorted(shapes) == [0, 1, 2, 3]
+    assert all(s == (1, 1) for s in shapes.values())
 
 
 # ---------- RemoteEmbedder（OpenAI 兼容 /v1/embeddings，transport 可注入） ----------
