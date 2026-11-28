@@ -10,14 +10,17 @@ _EvalJob 快照携带）→ daemon worker 持线程池逐片生成 → 终态落
 第二级，起跑快照渲染 content 文本）→ `ClosedTagProducer.produce`（producer
 本就不落库——落库是正式执行器的职责），所以干跑全程对业务表只读（DB
 零写入红线，且干跑循环零 DB 交互——装配只在起跑发生一次），评测
-产物只写 `settings.eval_output_root/<run_id>/`（六个固定文件外，管线
+产物只写 `settings.eval_output_root/<run_id>/`（七个固定文件外，管线
 追踪起另有 llm_raw/{tt}.json 每片原始输出，管线追踪 Task 2）：起跑即写
-meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）、
+meta.json 骨架（status=running——进程中断可被历史扫描标 interrupted）
+与 live.json 空集、
 每片完成锁内追加 progress.jsonl（增量落盘，中止/取消/崩溃不丢已完成片
-；成功片行带 trace）、每片成功在池线程落 llm_raw/{tt}.json（LLM 原始
-输出，不持锁）、终态由 worker 主线程写 meta + raw_results（gt 向量并
-入；成功片行带 trace）+ 报告三件套
-（report.json / report.md / metrics.csv，Task 5；组装/渲染/写在 report.py）。
+；成功片行带 trace）并增量发布 live.json 部分行集（与 raw 同形——实时
+进度明细；发布失败只记日志，见 _publish_live）、每片成功在池线程落
+llm_raw/{tt}.json（LLM 原始输出，不持锁）、终态由 worker 主线程写
+meta + raw_results（gt 向量并入；成功片行带 trace）+ 报告三件套
+（report.json / report.md / metrics.csv，Task 5；组装/渲染/写在
+report.py）并删除 live.json（raw 正典盖过 live，读侧回落 raw→live→404）。
 
 容错语义：每片共 1+RETRY_PER_MOVIE 次尝试（异常兜底记 error，单片失败
 不断跑）；**完成序**连续 ABORT_CONSECUTIVE 次失败 → 中止余量（系统性
@@ -379,7 +382,8 @@ class ClosedEvalService:
                        meta=meta, dataset_root=root, context=context)
 
         # run 目录骨架：meta 先行落盘 status=running（进程中断后可被历史
-        # 扫描识别为 interrupted，不留无名目录）
+        # 扫描识别为 interrupted，不留无名目录）；live.json 起跑写空集——
+        # 读侧 t=0 起统一口径（运行中明细 200 rows==[]，不 404）
         run_dir = Path(self.settings.eval_output_root) / run_id
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +391,7 @@ class ClosedEvalService:
                        {**meta, "status": "running", "done": 0,
                         "total": len(selected), "failed": 0,
                         "started_at": started_at, "finished_at": None})
+            _dump_json(run_dir / "live.json", [])
             thread = threading.Thread(target=self._worker, args=(job,),
                                       name=f"closed-eval-{run_id}", daemon=True)
             thread.start()
@@ -655,6 +660,9 @@ class ClosedEvalService:
                     result = future.result()
                     results.append(result)
                     self._record_result(job.run_id, result)
+                    # live.json 增量发布与 progress.jsonl 同位：停止后到达
+                    # 的完成片照发——读侧实时进度照常推进
+                    self._publish_live(job, results)
                     if aborted or event.is_set():
                         continue
                     consecutive = 0 if result.ok else consecutive + 1
@@ -757,14 +765,51 @@ class ClosedEvalService:
             with open(self._progress_path(run_id), "a", encoding="utf-8") as f:
                 f.write(payload + "\n")
 
+    @staticmethod
+    def _result_rows(job: _EvalJob, results: list[MovieResult]) -> list[dict]:
+        """raw_results.json / live.json 共用行构造（同形红线）。
+
+        键序与 trace 条件展开即原 `_write_artifacts` 行构造原样上提：
+        gt 向量并入、produced 五键、trace 键非 None 才写（管线追踪
+        Task 2）——失败片/老 run 的行无该键（消费方以键存在性区分
+        「无追踪」与「追踪为空」）；snapshot 不含原始输出——llm_raw
+        走每片独立文件（_write_llm_raw）。live.json 增量发布的部分
+        行集与 raw_results.json 终态正典严格同形，读侧回落才可无缝
+        切换（orchestration/eval._movies_read）。
+        """
+        return [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
+                 "produced": r.produced, "gt": job.gt.get(r.tt, {}),
+                 "elapsed_ms": r.elapsed_ms,
+                 **({"trace": r.trace} if r.trace is not None else {})}
+                for r in results]
+
+    def _publish_live(self, job: _EvalJob, results: list[MovieResult]) -> None:
+        """增量发布部分行集到 live.json（实时进度明细，与 raw_results 同形）。
+
+        worker 主线程单点调用（_converge 完成序收敛处），无锁竞争；
+        tmp + replace 原子替换（镜像 open_service._publish_live 模式），
+        读侧不撞半截文件；发布失败只记日志不拖垮评测（旁路产物容错
+        口径——主产物 raw_results.json / 报告不受影响）。
+        """
+        run_dir = Path(self.settings.eval_output_root) / job.run_id
+        try:
+            temporary = run_dir / "live.json.tmp"
+            _dump_json(temporary, self._result_rows(job, results))
+            temporary.replace(run_dir / "live.json")
+        except Exception:  # noqa: BLE001 —— 旁路产物：发布失败不拖垮评测
+            logger.exception("live.json 发布失败 %s", job.run_id)
+
     def _write_artifacts(self, job: _EvalJob, results: list[MovieResult],
                          status: str, error: str | None) -> None:
-        """终态写盘（worker 主线程）：meta.json → raw_results.json → 报告三件套。
+        """终态写盘（worker 主线程）：meta → raw_results → 报告三件套 → live 清理。
 
         写序非原子（meta 先行、报告最后）：读侧（history）对缺失/截断的
-        report.json 按「该 run 无报告」容错。报告口径用 job 携带的
-        gt/tag_universe（起跑时定格，run 中途换库不影响本 run）与终态
-        meta（banner/warning 需要终态 status/done/total/failed）。
+        report.json 按「该 run 无报告」容错。live.json 的 unlink 收尾在
+        报告三件套之后——Windows 开发盒上句柄占用窄窗的 unlink 抛错不再
+        连坐正典产物（worker 外层把落盘异常降级为日志，清理失败只损目录
+        语义）。报告口径用 job 携带的 gt/tag_universe（起跑时定格，run
+        中途换库不影响本 run）与终态 meta（banner/warning 需要终态
+        status/done/total/failed）。
         """
         run_dir = Path(self.settings.eval_output_root) / job.run_id
         meta = dict(job.meta)
@@ -778,14 +823,11 @@ class ClosedEvalService:
         })
         if error is not None:
             meta["error"] = error
-        # trace 键非 None 才写（管线追踪 Task 2）：失败片/老 run 的行无该键
-        # （消费方以键存在性区分「无追踪」与「追踪为空」）；snapshot 不含
-        # 原始输出——llm_raw 走每片独立文件（_write_llm_raw）
-        rows = [{"tt": r.tt, "title": r.title, "ok": r.ok, "error": r.error,
-                 "produced": r.produced, "gt": job.gt.get(r.tt, {}),
-                 "elapsed_ms": r.elapsed_ms,
-                 **({"trace": r.trace} if r.trace is not None else {})}
-                for r in results]
+        # 行构造走 _result_rows（raw / live 同形红线）：trace 键非 None 才
+        # 写（管线追踪 Task 2）——失败片/老 run 的行无该键（消费方以键
+        # 存在性区分「无追踪」与「追踪为空」）；snapshot 不含原始输出——
+        # llm_raw 走每片独立文件（_write_llm_raw）
+        rows = self._result_rows(job, results)
         _dump_json(run_dir / "meta.json", meta)
         _dump_json(run_dir / "raw_results.json", rows)
         report = assemble_report(results, job.gt, job.tag_universe,
@@ -793,6 +835,11 @@ class ClosedEvalService:
                                  job.meta.get("ks") or DEFAULT_KS,
                                  meta=meta)
         write_report(run_dir, report)
+        # live.json 终态清理（报告三件套之后的尾巴）：raw 优先级已盖过 live
+        # （读侧回落序 raw → live），删是为目录语义干净（进程中断的残留
+        # live.json 即部分明细，读侧照常回落可读）；放在正典产物之后——
+        # unlink 的句柄占用窄窗抛错不跳过报告三件套
+        (run_dir / "live.json").unlink(missing_ok=True)
 
     def _progress_path(self, run_id: str) -> str:
         return os.path.join(self.settings.eval_output_root, run_id,

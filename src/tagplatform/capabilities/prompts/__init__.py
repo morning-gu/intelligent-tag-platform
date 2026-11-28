@@ -27,7 +27,7 @@ __all__ = [
 MODES: tuple[str, ...] = ("closed",)
 
 # 各 mode 模板必须包含的占位符：closed 仅含 {content}——候选标签
-# 分组 JSON 由 ClosedTagProducer 在 produce 内拼接（不经占位符注入）。
+# 文本块由 ClosedTagProducer 在 produce 内注入（不经占位符注入）。
 REQUIRED_PLACEHOLDERS: dict[str, tuple[str, ...]] = {
     "closed": ("{content}",),
 }

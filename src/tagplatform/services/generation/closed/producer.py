@@ -2,8 +2,9 @@
 
 流程（设计文档 §4.2）：按目录范围召回候选 → 剔除 dir_asset 目录的候选
 （该类目录标签由元数据导入/联网搜索获取，不做内容语义打分）→ 空候选
-显式失败（提示先导入标签库）→ 候选**按目录分组**、每组以 JSON 追加到
-渲染后的 prompt 正文之后（组含目录名称/描述，标签含 id/名称/描述）→
+显式失败（提示先导入标签库）→ 候选**按目录分组**、每组的「## 候选标签」
+文本块插入渲染后 prompt 正文的「## 影视内容」节之前（块含目录名称/
+描述，标签含 tag_id/名称/描述/别名，非 JSON）→
 逐组调用 LLM 判定（组内按 closed_batch_size 分批，防单组标签过多导致
 输出截断；解析失败追加格式纠正提示重调本批一次，仍失败抛错落任务失败）
 → 契约校验解析 → 终分 Sf = G·(a·Semb + b·Sapp + c·Sevi)（a/b/c =
@@ -24,8 +25,7 @@ v3 增量（2026-12）：候选不再由 runner 经 `{candidates}` 占位符注�
 prompt_text，改由本 producer 按目录分组、以 JSON 格式追加到正文末尾，逐组
 调用 LLM 后合并结果（分组规则：目录下有召回标签才建组）。
 
-v4 增量（2026-12）：LLM 判定改带 1–5 分的 applicability/evidence_strength；
-终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)，Semb 取召回候选自带的余弦
+v4 增量终分 Sf = G·(0.2·Semb + 0.5·Sapp + 0.3·Sevi)，Semb 取召回候选自带的余弦
 分，Sf 与标签成对（落 ProducedTag.relevance_score）；confidence 保留为
 证据维度的独立读数随行保存（v8 起为三模态融合 Sevi）。
 
@@ -62,13 +62,18 @@ v8 增量（2026-12 多模态融合评分）：Sevi 从单一 evidence_strength 
 （老资产/测试环境）自动退化为纯文本消息。三模态 evidences 条目展平成
 统一 Evidence 列表（scene_id 校验保留），confidence 改为融合 Sevi。
 
+v9 增量（prompt v2）：候选清单从「正文末尾追加组 JSON」改为「## 候选标签」
+文本块插入正文的「## 影视内容」节之前——字段逐行标注（tag_id/名称/描述/
+别名，全角冒号分隔），并补充标签别名（自库定义）。模板升 v2（评估流程 +
+输出前自查），prompt_version "1"→"2"。渲染与拼接统一走 closed/tag_block
+（与 confidence 的 Ccons 重评同构）。
+
 导入即注册：`register_producer(ClosedTagProducer())` 在模块顶层执行。
 分层红线：本模块不得 import fastapi（设计文档 §9.4）。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
 from sqlalchemy.orm import Session
@@ -84,6 +89,10 @@ from tagplatform.services.generation.trace import ProduceTrace, TraceCandidate
 from tagplatform.services.generation.open.mtg.keyframes import _local_roots
 from tagplatform.services.generation.open.mtg.prompts import encode_image, keyframe_parts
 from tagplatform.services.generation.closed.recall import embed_content_texts, recall_candidates
+from tagplatform.services.generation.closed.tag_block import (
+    render_candidate_block,
+    splice_candidate_block,
+)
 from tagplatform.services.tags.library import DIR_ASSET
 from tagplatform.services.generation.closed.parse import LLMParseError, parse_closed_output
 from tagplatform.services.tags.mounting import Mount, resolve_mount
@@ -154,9 +163,9 @@ class ClosedTagProducer:
     # 协议声明（Task 4）：本模式不自拼 prompt——runner 装配统一渲染本地
     # 模板常量（capabilities/prompts/templates.py CLOSED_TEMPLATE_TEXT）
     builds_prompt = False
-    # 任务口径留痕（generation_task.prompt_version，TEXT 列字符串）：沿用
-    # DB 版本机制时代的 v1 值——模板即 v1 就地演进（git 即版本）
-    prompt_version = "1"
+    # 任务口径留痕（generation_task.prompt_version，TEXT 列字符串）：模板
+    # 升 v2（候选块前置 + 评估流程/自查）——git 即版本
+    prompt_version = "2"
 
     def produce(self, spec: GenerationSpec, session: Session, llm,
                 embedder, trace: ProduceTrace | None = None,
@@ -198,15 +207,16 @@ class ClosedTagProducer:
         #     消息 parts，跨目录组/批次复用（每批全量重发）。无帧（老资产
         #     或帧根未配置）退化为纯文本消息——与既有行为兼容。
         frame_parts = _resolve_frame_parts(spec)
-        # 5. 逐组调用 LLM：组对象以 JSON 追加到渲染后的 prompt 正文之后；
-        #    单组标签过多易截断模型输出，组内再按 closed_batch_size 分批，
-        #    每批送同构组对象（目录信息相同、tags 为该批子集，批次按召回
-        #    序连续切片）。每批解析失败追加格式纠正提示重调本批一次（v7），
-        #    仍失败抛错落任务失败；传输失败不重试（client 层已有退避）。
-        #    判定按 tag_id 去重保留 Sf 最高分（天然涵盖跨批重复——真实
-        #    模型可能跨批重复判定同一标签）；组内不截断，全局选择统一在
-        #    5.5 步进行。run_id 沿用任务级 id（Mock 哈希采样键不变）。
-        #    丢弃计数贯穿全流程：门控（A≤3）/编造 id/挂载失败三类
+        # 5. 逐组调用 LLM：每组候选渲染成「## 候选标签」文本块插入渲染后
+        #    prompt 的「## 影视内容」节之前；单组标签过多易截断模型输出，
+        #    组内再按 closed_batch_size 分批，每批送同构块（目录信息相同、
+        #    标签为该批子集，批次按召回序连续切片）。每批解析失败追加格式
+        #    纠正提示重调本批一次（v7），仍失败抛错落任务失败；传输失败不
+        #    重试（client 层已有退避）。判定按 tag_id 去重保留 Sf 最高分
+        #    （天然涵盖跨批重复——真实模型可能跨批重复判定同一标签）；
+        #    组内不截断，全局选择统一在 5.5 步进行。run_id 沿用任务级 id
+        #    （Mock 哈希采样键不变）。丢弃计数贯穿全流程：门控（A≤3）/
+        #    编造 id/挂载失败三类
         items: list[tuple[float, dict]] = []
         dropped_gate = 0
         dropped_fabricated = 0
@@ -228,24 +238,13 @@ class ClosedTagProducer:
                                        batch=start // batch_size)
                         for c in batch
                     ])
-                group_payload = {
-                    "dir_id": dir_id,
-                    "dir_name": directory.dir_name if directory else "未分类",
-                    "dir_description": directory.description if directory else "",
-                    "tags": [
-                        {
-                            "tag_id": c.tag_id,
-                            "tag_name": c.tag_name,
-                            "description": c.description,
-                        }
-                        for c in batch
-                    ],
-                }
-                prompt = (
-                    spec.prompt_text
-                    + "\n\n## 候选标签分组\n"
-                    + json.dumps(group_payload, ensure_ascii=False, indent=2)
+                block = render_candidate_block(
+                    dir_name=directory.dir_name if directory else "未分类",
+                    dir_description=directory.description if directory else "",
+                    tags=[(c.tag_id, c.tag_name, c.description, c.aliases)
+                          for c in batch],
                 )
+                prompt = splice_candidate_block(spec.prompt_text, block)
                 # 5a. 单批调用与解析重试（v7）：真实端点偶发返回缺键元素，
                 #     一次坏输出不再让整任务作废——记 warning（含 dir_id
                 #     与原始输出前 400 字，此前零线索），追加格式纠正提示

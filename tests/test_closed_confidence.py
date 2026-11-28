@@ -18,12 +18,13 @@
   Ccons=1.0；核验分支给确定性三模态判定（content 充分 / scene 支持 /
   frame 辅助，分值哈希采样）；落库 confidence=Craw ∈ [0.5, 1.0]。
 
-Mock 技巧：_ScriptedLLM 按调用序分流（组判定 / 核验 / 重评），桩契约
-与 test_generation_closed 的 raw_decode 组解析同口径。
+Mock 技巧：_ScriptedConfLLM 按调用序分流（重评 / 核验），桩契约
+与 test_generation_closed 的候选块行解析同口径。
 """
 
 import json
 import math
+import re
 
 import pytest
 from conftest import MOCK_EMBEDDER, MOCK_LLM
@@ -258,11 +259,13 @@ class _ScriptedConfLLM:
 
     def complete(self, messages, run_id):
         text = _extract_text(messages)
-        if "## 候选标签分组" in text:
-            # 单标签成组：从组 JSON 尾巴取 tag_id，拼进判定
-            tail = text.partition("\n\n## 候选标签分组\n")[2]
-            group = json.JSONDecoder().raw_decode(tail)[0]
-            tag_id = group["tags"][0]["tag_id"]
+        if "## 候选标签" in text:
+            # 单标签块：从块内标签行取 tag_id，拼进判定
+            section = text.split("## 候选标签\n", 1)[1].split(
+                "\n\n## 影视内容", 1)[0]
+            match = re.search(r"^- tag_id：(\S+) 标签名称：", section,
+                              re.MULTILINE)
+            tag_id = match.group(1)
             output = self._reoutputs[self.re_calls % len(self._reoutputs)]
             item = {
                 "tag_id": tag_id,
@@ -557,13 +560,21 @@ def test_reconsistency_scores_with_frames_multimodal(session):
     assert scores == [0.75, 0.75]
     assert len(captured) == 2
     for msg_content in captured:
-        # 多模态形态：首 part 为 text（完整组拼法正文），帧 parts 依序跟后
+        # 多模态形态：首 part 为 text（完整候选块拼法正文），帧 parts 依序跟后
         assert isinstance(msg_content, list)
         assert msg_content[0]["type"] == "text"
         prompt = msg_content[0]["text"]
-        head, sep, tail = prompt.partition("\n\n## 候选标签分组\n")
+        head, sep, _tail = prompt.partition("\n\n## 候选标签\n")
         assert sep and head
-        group = json.JSONDecoder().raw_decode(tail)[0]
-        assert group["tags"][0]["tag_id"] == "tag_g_00"
+        # 头尾与渲染后正文逐字一致：候选块插在「## 影视内容」前
+        idx_spec = spec.prompt_text.find("\n\n## 影视内容\n")
+        assert head == spec.prompt_text[:idx_spec]
+        idx = prompt.find("\n\n## 影视内容\n")
+        assert prompt[idx:] == spec.prompt_text[idx_spec:]
+        section = prompt.split("## 候选标签\n", 1)[1].split(
+            "\n\n## 影视内容", 1)[0]
+        match = re.search(r"^- tag_id：(\S+) 标签名称：", section,
+                          re.MULTILINE)
+        assert match and match.group(1) == "tag_g_00"
         rest = msg_content[1:]
         assert rest == frame_parts

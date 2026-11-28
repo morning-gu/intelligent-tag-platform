@@ -124,7 +124,7 @@ def test_generation_e2e_closed_succeeded(client):
     assert client.post(f"/api/v1/generation/tasks/{task_id}/quality/retry").status_code == 404
     assert detail["model_version"] == "mock-1"
     # prompt_version 列为 TEXT：API 响应以字符串出现（T8 附注）
-    assert detail["prompt_version"] == "1"
+    assert detail["prompt_version"] == "2"
     assert detail["error"] is None and detail["finished_at"] is not None
     assert detail["created_at"] is not None
     results = detail["results"]
@@ -454,7 +454,7 @@ def test_retry_failed_task_then_succeeds(client):
     assert detail["status"] == "succeeded"
     assert len(detail["results"]) >= 1  # 标签库已补导，重试真触发生成
     assert detail["error"] is None and detail["finished_at"] is not None
-    assert detail["prompt_version"] == "1"
+    assert detail["prompt_version"] == "2"
 
 
 # ---- GET /generation/tasks：列表过滤与分页 ----

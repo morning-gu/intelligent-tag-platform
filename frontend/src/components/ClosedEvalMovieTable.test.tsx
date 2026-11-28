@@ -20,6 +20,9 @@
 // 十键逐键加总 funnel 非 null 行 + 差式派生门控过/挂载成 + 存活率 + 覆盖
 // 标注；老 run 全 null → 说明文案；失败片混入只计非 null 行；召回 0 片不进
 // 存活率；切 θ 重拉聚合值不漂移）。
+// 轮询驱动 refreshTick（增补 2026-11-27）：tick 变化即带当前 θ 静默重拉——
+// 不清 θ/展开/明细缓存（行只增不改）、在途窗口旧表不闪、失败静默下一 tick
+// 重试；undefined（终态/不轮询直开）时不重拉，行为与旧版相同。
 // 注意：antd Table 展开图标按钮无可访问名，查询一律走
 // .ant-table-row-expand-icon（与 GenerationTasks 测试同口径）。
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -987,5 +990,81 @@ describe('ClosedEvalMovieTable 单片明细表', () => {
     expect(screen.getByTestId('run-funnel-mounted')).toHaveTextContent('挂载成6')
     expect(screen.getByTestId('run-funnel-kept')).toHaveTextContent('产出5')
     expect(screen.getByTestId('run-funnel-coverage')).toHaveTextContent('合计覆盖 2 部 / 共 3 部')
+  })
+
+  // ---------- 轮询驱动 refreshTick（增补 2026-11-27） ----------
+
+  it('refreshTick 变化即重拉：带当前 θ 参数、展开与 θ 选择保留、旧表不闪', async () => {
+    // 初载 → 切 θ_P 重拉 → refreshTick 重拉（未决 promise 卡住——在途窗口
+    // 断言旧表不闪）。重拉落地行不变 → 展开仍开、明细缓存命中不重发。
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY_THETA)
+      .mockResolvedValueOnce({ ...SUMMARY_THETA, theta_p: 0.4 })
+    let resolveRefresh!: (p: MovieSummaryPayload) => void
+    mockedGetRunMovies.mockReturnValueOnce(
+      new Promise<MovieSummaryPayload>((res) => {
+        resolveRefresh = res
+      }),
+    )
+    mockedGetRunMovieDetail.mockResolvedValue(DETAIL)
+    const { rerender } = render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    // 先展开一行：明细取数并入缓存
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(1))
+    await screen.findByText('动作')
+
+    // 切 θ_P 到 0.4（初值 0.2——同值重选不发事件）：重拉带参、缓存清空、展开收起
+    fireEvent.mouseDown(screen.getByTestId('theta-p-select'))
+    fireEvent.click(await screen.findByTitle('0.4'))
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+    expect(mockedGetRunMovies).toHaveBeenNthCalledWith(2, RUN_ID, { p: 0.4 })
+
+    // 重展开：缓存已清 → 明细带 θ 取数并回填缓存
+    fireEvent.click(expandIconOf(rowOf('tt0000001')))
+    await waitFor(() => expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(2))
+    await screen.findByText('动作')
+
+    // refreshTick 变化即重拉：带当前 θ 参数；在途窗口旧表不闪（行与展开
+    // 明细仍在——重拉不清 payload/展开态）
+    rerender(<ClosedEvalMovieTable runId={RUN_ID} refreshTick={1} />)
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(3))
+    expect(mockedGetRunMovies).toHaveBeenNthCalledWith(3, RUN_ID, { p: 0.4 })
+    expect(screen.getByText('tt0000001')).toBeInTheDocument()
+    expect(screen.getByText('动作')).toBeVisible()
+
+    // 重拉落地（行不变）→ 视图依旧：展开不收起、明细缓存命中不重发、θ 选择保留
+    await act(async () => {
+      resolveRefresh(SUMMARY_THETA)
+    })
+    expect(screen.getByText('动作')).toBeVisible()
+    expect(mockedGetRunMovieDetail).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('theta-p-select').textContent).toContain('0.4')
+  })
+
+  it('refreshTick 重拉失败静默：旧表保留、无 error Alert、无 theta-refetch-error', async () => {
+    // 初载 SUMMARY → refreshTick 重拉 reject → 静默
+    mockedGetRunMovies
+      .mockResolvedValueOnce(SUMMARY)
+      .mockRejectedValueOnce(new Error('轮询重拉失败'))
+    const { rerender } = render(<ClosedEvalMovieTable runId={RUN_ID} />)
+    await screen.findByText('tt0000001')
+
+    rerender(<ClosedEvalMovieTable runId={RUN_ID} refreshTick={1} />)
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(2))
+
+    // 静默：payload 仍是首次值（行与表头照旧）、无整页错误 Alert、无 θ 重拉警示
+    expect(screen.getByText('tt0000001')).toBeInTheDocument()
+    expect(screen.getByText('P@8(θ0.2)')).toBeInTheDocument()
+    expect(document.querySelector('.ant-alert-error')).toBeNull()
+    expect(screen.queryByTestId('theta-refetch-error')).not.toBeInTheDocument()
+
+    // 下一 tick 重试成功 → 照常恢复
+    mockedGetRunMovies.mockResolvedValueOnce(SUMMARY)
+    rerender(<ClosedEvalMovieTable runId={RUN_ID} refreshTick={2} />)
+    await waitFor(() => expect(mockedGetRunMovies).toHaveBeenCalledTimes(3))
+    expect(screen.getByText('tt0000001')).toBeInTheDocument()
+    expect(screen.getByText('P@8(θ0.2)')).toBeInTheDocument()
   })
 })

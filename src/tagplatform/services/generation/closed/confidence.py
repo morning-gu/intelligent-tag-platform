@@ -15,8 +15,9 @@
   Cmod = j·Cs + (1−j)·(1−Cc)，j 默认 0.5。本地计算。
 
 三个分量的取材（与 producer 判定口径一一对应）：
-- Ccons 重评：复用 closed 生成契约——`spec.prompt_text + "\n\n##
-  候选标签分组\n" + 组 JSON`（单标签成组），同 run_id 调 2 次，输出经
+- Ccons 重评：复用 closed 生成契约——单标签「## 候选标签」块插入
+  spec.prompt_text 的「## 影视内容」节之前（tag_block 拼法，与生成时
+  同构），同 run_id 调 2 次，输出经
   parse_closed_output 解析，每次按 evidence_scores 算 Sevi。消息与
   生成时同构：有帧带多模态 parts（与 Cver 核验同一组帧，用户口径
   2026-11：三次判定同条件测量）。Mock 端哈希键含 run_id，同 run_id
@@ -64,6 +65,10 @@ from tagplatform.services.generation.base import Evidence, GenerationSpec, Produ
 from tagplatform.services.generation.closed.parse import (
     LLMParseError,
     parse_closed_output,
+)
+from tagplatform.services.generation.closed.tag_block import (
+    render_candidate_block,
+    splice_candidate_block,
 )
 from tagplatform.settings import get_settings
 
@@ -318,28 +323,25 @@ def _parse_verify_score(raw: str) -> dict[str, ModalityVerdict]:
     return _parse_modality_verdicts(raw)
 
 
-def _build_group_payload(spec: GenerationSpec, tag: ProducedTag,
-                         ) -> dict:
-    """单标签重建 closed 组 JSON（与 producer 拼法同构）。
+def _build_candidate_block(spec: GenerationSpec, tag: ProducedTag,
+                           ) -> str:
+    """单标签重建 closed 候选块（与 producer 拼法同构）。
 
-    组对象：{"dir_id", "dir_name", "dir_description", "tags": [tag 定义]}；
-    目录与标签定义从 spec.library 反查（producer 同款访问器）。
+    「## 候选标签」节：目录头（名称/描述）+ 单标签行组（tag_id/名称/
+    描述/别名）；目录与标签定义从 spec.library 反查（producer 同款
+    访问器）。
     """
     library = spec.library
     directory = library.directory(tag.dir_id) if (library and tag.dir_id) else None
     definition = library.tag(tag.tag_id) if (library and tag.tag_id) else None
-    tag_entry = {
-        "tag_id": tag.tag_id or "",
-        "tag_name": tag.tag_name,
-        "description": (definition.description if definition
-                        else (tag.candidate_description or "")),
-    }
-    return {
-        "dir_id": tag.dir_id or "",
-        "dir_name": directory.dir_name if directory else "",
-        "dir_description": directory.description if directory else "",
-        "tags": [tag_entry],
-    }
+    description = (definition.description if definition
+                   else (tag.candidate_description or ""))
+    return render_candidate_block(
+        dir_name=directory.dir_name if directory else "未分类",
+        dir_description=directory.description if directory else "",
+        tags=[(tag.tag_id or "", tag.tag_name, description,
+               definition.aliases if definition else ())],
+    )
 
 
 def _reconsistency_scores(
@@ -351,14 +353,13 @@ def _reconsistency_scores(
 ) -> list[float]:
     """Ccons 重评：同 run_id 再调 2 次单标签组判定，取每次的 Sevi。
 
-    复用 closed 生成契约（组 JSON 拼法 + parse_closed_output），失败抛错
+    复用 closed 生成契约（候选块拼法 + parse_closed_output），失败抛错
     由上层降级（原分补位）。返回 [Sevi_2, Sevi_3]（第 1 次为原判定，不
     在此重调——原判定分数直接用 tag.confidence）。消息与生成/Cver 同构：
     有帧带多模态 parts（三次判定同条件，帧评分口径才可比）。
     """
-    group_payload = _build_group_payload(spec, tag)
-    prompt = (spec.prompt_text + "\n\n## 候选标签分组\n"
-              + json.dumps(group_payload, ensure_ascii=False, indent=2))
+    prompt = splice_candidate_block(
+        spec.prompt_text, _build_candidate_block(spec, tag))
     parts = frame_parts or []
     request = ([{"role": "user", "content": prompt}] if not parts else
                [{"role": "user", "content": [

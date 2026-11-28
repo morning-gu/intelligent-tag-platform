@@ -366,7 +366,7 @@ def test_run_completes_and_writes_artifacts(svc, root):
     assert meta["dataset"]["id"] == "emotion"
     assert meta["dataset"]["n_rows"] == 12  # 3 片 × 4 标签（gt 全表，含无内容片）
     assert len(meta["dataset"]["gt_sha8"]) == 8
-    assert meta["prompt"] == {"mode": "closed", "version": 1}
+    assert meta["prompt"] == {"mode": "closed", "version": 2}
     assert meta["library"]["n_dirs"] == 1 and meta["library"]["n_tags"] == 4
     assert meta["llm_model"] == "mock-1" and meta["embedding_model"] == "mock"
     assert meta["movies"] == {"mode": "all", "ids": ["tt0000001", "tt0000002"]}
@@ -1069,3 +1069,85 @@ def test_write_llm_raw_skips_unsafe_tt(tmp_path):
     service._write_llm_raw(job, "tt0000001", rows)  # 正控：合法 tt 照常落盘
     assert json.loads((run_dir / "llm_raw" / "tt0000001.json")
                       .read_text(encoding="utf-8")) == rows
+
+
+# ---------------------------------------------------------------- 实时进度 live.json
+
+
+class _GateLLM(MockLLMClient):
+    """门 LLM：指定影片的调用阻塞至事件置位（其余照常）——live.json
+    中途观测的确定性缝隙。gate 第二片，让第一片的完成态可被稳定轮询到。"""
+
+    def __init__(self, tt: str, event: threading.Event):
+        super().__init__()
+        self._suffix = f":{tt}"
+        self._event = event
+
+    def complete(self, messages, run_id):
+        if run_id.endswith(self._suffix):
+            assert self._event.wait(10), "gate 10s 未放行"
+        return super().complete(messages, run_id)
+
+
+def _read_live(service, run_id) -> list | None:
+    try:
+        return json.loads((_run_dir(service, run_id) / "live.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _await_live(service, run_id, n_rows, timeout=10.0):
+    """轮询 live.json 直到行数 ≥ n_rows（gate 保证窗口稳定不闪失）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = _read_live(service, run_id)
+        if isinstance(rows, list) and len(rows) >= n_rows:
+            return rows
+        time.sleep(0.01)
+    pytest.fail(f"live.json 未在 {timeout}s 内达到 {n_rows} 行")
+
+
+def test_live_json_lifecycle(eval_setup):
+    """生命周期：起跑同步写空集 → 每完成一片增量发布（与 raw_results 同形：
+    gt 并入、produced 五键、成功片带 trace 键）→ 终态删除（raw 为正典、
+    tmp 无残留）。concurrency=1 + gate 第二片。"""
+    gate = threading.Event()
+    svc = eval_setup(llm=_GateLLM("tt0000002", gate))
+    run_id = svc.start("emotion", {"mode": "all"}, concurrency=1)
+    assert _read_live(svc, run_id) == []          # start 返回即有（不依赖调度）
+    rows = _await_live(svc, run_id, 1)
+    assert rows[0]["tt"] == "tt0000001"
+    assert rows[0]["gt"] == {"t1": 0.9, "t2": 0.4, "t7": 0.1, "t9": 0.8}
+    assert all(set(p) == {"tag_id", "tag_name", "sf", "confidence",
+                          "evidence_count"} for p in rows[0]["produced"])
+    assert "trace" in rows[0]                     # MOCK 成功片带 trace
+    gate.set()
+    _await_terminal(svc, run_id)
+    # 终态翻注册表先于落盘（_worker 写序），live 清理又是落盘尾巴——等
+    # worker 完全收尾（active 位释放）再验目录，避免与 unlink 竞态
+    _drain_active(svc)
+    d = _run_dir(svc, run_id)
+    assert not (d / "live.json").exists() and not (d / "live.json.tmp").exists()
+    raw = _raw_rows(svc, run_id)
+    assert len(raw) == 2 and all(r["ok"] for r in raw)
+
+
+def test_live_publish_failure_tolerated(eval_setup, monkeypatch):
+    """live 发布失败只记日志：run 照常 succeeded、终态产物完整（旁路产物
+    容错口径——spec）。只对 live.json.tmp 注入 OSError。"""
+    import tagplatform.services.eval.service as svc_mod
+    real_dump = svc_mod._dump_json
+
+    def _boom(path, payload):
+        if str(path).endswith("live.json.tmp"):
+            raise OSError("磁盘满（注入）")
+        return real_dump(path, payload)
+
+    monkeypatch.setattr(svc_mod, "_dump_json", _boom)
+    svc = eval_setup()
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    assert svc.get(run_id).status == "succeeded"
+    d = _run_dir(svc, run_id)
+    assert (d / "raw_results.json").exists()
+    assert len(_raw_rows(svc, run_id)) == 2

@@ -15,6 +15,11 @@
 // 行点击取报告：GET report 在终态落盘（meta→raw→report）非原子的毫秒级窗口
 // 可能 404（后端 Task 6 披露）——优雅提示重试，不崩页面。报告视图渲染委托给
 // Task 9 的 ClosedEvalReport 组件，本页只负责取数与 runId 透传。
+// 进度明细视图（增补 2026-11-27）：running/interrupted 历史行点击与活跃卡
+// 「查看进度明细」按钮进入——运行横幅 + 整块单片明细表（ClosedEvalMovieTable
+// 的 refreshTick 由 2s 轮询每 tick 自增驱动静默重拉），与报告视图互斥（互开
+// 即替换）；run 推进终态末次 bump 把 raw 全量送入仍开着的明细，报告就绪才
+// 收明细切报告（404 写序窗口期明细保留）；interrupted 行打开不轮询。
 import {
   Alert,
   Button,
@@ -56,6 +61,7 @@ import {
 } from '../../api/eval'
 import { formatTime } from '../../api/time'
 import ClosedEvalReportView from '../../components/ClosedEvalReport'
+import ClosedEvalMovieTable from '../../components/ClosedEvalMovieTable'
 
 /** 轮询间隔：单片 1–3 分钟量级的进度节奏，2s 足够跟手（spec §6）。 */
 const POLL_INTERVAL_MS = 2000
@@ -141,6 +147,31 @@ function metricText(v: number | null): string {
   return v === null ? '暂无' : String(v)
 }
 
+/** 进度明细横幅文案（spec 口径：状态/已完成/失败数，轮询中追加自动刷新）。
+ * interrupted 行的 done/failed 取磁盘 meta 起跑骨架（done 恒 0、failed 0
+ * ——meta 只在起跑/终态写盘，真实进度只在 progress.jsonl），照抄会与下方
+ * 明细表的真实行数自相矛盾 → 渲染「—」不照抄失真值（根修：history 按
+ * progress.jsonl 行数回填，留后续）。total 是选片起跑定格值，骨架即真值，
+ * 照常显示。autoRefresh 仅在真实轮询中为真（横幅据此宣称自动刷新）。 */
+function liveBannerText(
+  banner: {
+    status: string
+    done: number | null
+    total: number | null
+    failed: number | null
+  },
+  autoRefresh: boolean,
+): string {
+  const interrupted = banner.status === 'interrupted'
+  const doneText = interrupted ? '—' : (banner.done ?? '—')
+  const failedText = interrupted ? '—' : (banner.failed ?? '—')
+  return (
+    `${STATUS_LABELS[banner.status] ?? banner.status} · `
+    + `已完成 ${doneText} / ${banner.total ?? '—'}，失败 ${failedText}`
+    + (autoRefresh ? ' · 每 2 秒自动刷新' : '')
+  )
+}
+
 const columns: NonNullable<TableProps<RunSummary>['columns']> = [
   // 时间 null 也走「暂无」——本表 null 口径统一（不用 formatTime 的 '—'）
   {
@@ -195,6 +226,17 @@ export default function ClosedEval() {
 
   // —— 报告取数位（Task 9 的视图组件消费 report.data） ——
   const [report, setReport] = useState<{ runId: string; data: ClosedEvalReport } | null>(null)
+  // —— 进度明细视图（增补 2026-11-27）：running/interrupted 历史行点击与
+  // 活跃卡「查看进度明细」进入，与报告视图互斥。liveRun 的 ref 供轮询闭包
+  // 读最新值（回调闭包可能持有陈旧 state）；liveTick 由轮询每 tick 自增，
+  // 经 refreshTick prop 驱动明细表静默重拉 ——
+  const [liveRun, setLiveRun] = useState<{ runId: string } | null>(null)
+  const liveRunRef = useRef<{ runId: string } | null>(null)
+  const [liveTick, setLiveTick] = useState(0)
+  // tick 喂送的 run（beginPolling 置位，不清——runId 比对天然隔离跨 run
+  // 串写）：终态后仍保持喂送，末次 bump（raw 全量入表）要到表，报告就绪
+  // 视图才收；interrupted 行直开不在此列，refreshTick 恒 undefined
+  const [polledRunId, setPolledRunId] = useState<string | null>(null)
   // —— 数据集根（页面级切换：输入值 / 服务端生效值 / 应用中） ——
   const [rootInput, setRootInput] = useState('')
   const [effectiveRoot, setEffectiveRoot] = useState<string | null>(null)
@@ -229,10 +271,53 @@ export default function ClosedEval() {
     }
   }, [])
 
+  /** 进度明细视图开关（增补 2026-11-27）：打开置 ref+state 并清报告（视图
+   * 互斥——同一时刻只展示报告或明细之一）；关闭清两者。零依赖只碰 setter/
+   * ref——引用稳定，可安全进 beginPolling 闭包与 deps。 */
+  const openLive = useCallback((runId: string) => {
+    liveRunRef.current = { runId }
+    setLiveRun({ runId })
+    setReport(null)
+  }, [])
+
+  const closeLive = useCallback(() => {
+    liveRunRef.current = null
+    setLiveRun(null)
+  }, [])
+
+  /** 行点击取报告：GET report 在终态落盘（meta→raw→report→live 清理）非
+   * 原子的毫秒级窗口可能 404（后端 Task 6 披露）——优雅提示重试，不崩
+   * 页面，且不动 live 视图（轮询终态路径依赖此语义：404 窗口期明细保留）。
+   * 成功路径先 closeLive 再 setReport：明细开着点终态行 → 报告替换明细
+   * （互斥）。useCallback 供 beginPolling 终态分支复用（deps 稳定不重挂
+   * 轮询）。 */
+  const openReport = useCallback(
+    async (runId: string) => {
+      try {
+        const data = await getReport(runId)
+        closeLive()
+        setReport({ runId, data })
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) {
+          // 终态落盘非原子的毫秒级窗口（后端 Task 6 披露）：提示重试，不崩页面
+          message.warning('报告生成中，稍后重试')
+        } else {
+          message.error(err instanceof Error ? err.message : '报告加载失败')
+        }
+      }
+    },
+    [closeLive],
+  )
+
   /** 轮询一个 run 到终态：立即首拉 + 2s 间隔；终态清定时器、收起卡片并刷新
-   * 历史。查询失败（run 消失/网络断）同样收束——宁缺勿崩，不打死循环。 */
+   * 历史。查询失败（run 消失/网络断）同样收束——宁缺勿崩，不打死循环。
+   * 进度明细视图开着且轮询的是同一 run：running tick 同步自增 liveTick
+   * （refreshTick 驱动明细表静默重拉）；终态末次 bump 让 raw 全量入表，
+   * 报告就绪才收 live 切报告（getReport 404 写序窗口期 live 保留——沿用
+   * openReport 的既有提示口径）。 */
   const beginPolling = useCallback((runId: string) => {
     stopPolling()
+    setPolledRunId(runId)
     const session = ++pollSessionRef.current
     const tick = async () => {
       try {
@@ -241,9 +326,19 @@ export default function ClosedEval() {
         if (TERMINAL_STATUSES.has(st.status)) {
           stopPolling()
           setActiveRun(null)
+          if (liveRunRef.current?.runId === runId) {
+            // 末次 bump：明细表带参重拉，读侧回落序 raw_results 优先——
+            // raw 已落盘即全量入表（极窄写序窗内仍回落 live 部分行集，读侧
+            // 既定容错）。这里不 closeLive：报告就绪才收 live（openReport
+            // 成功路径自带），404 写序窗口期 live 视图保留——与行点击路径
+            // 行为一致，消除「live 已关、报告未出、活跃卡已收」三无空窗
+            setLiveTick((n) => n + 1)
+            void openReport(runId)
+          }
           void refreshRuns()
         } else {
           setActiveRun(st)
+          if (liveRunRef.current?.runId === runId) setLiveTick((n) => n + 1)
         }
       } catch (err) {
         if (pollSessionRef.current !== session) return
@@ -255,7 +350,7 @@ export default function ClosedEval() {
     }
     void tick()
     pollTimerRef.current = setInterval(() => void tick(), POLL_INTERVAL_MS)
-  }, [refreshRuns, stopPolling])
+  }, [closeLive, openReport, refreshRuns, stopPolling])
 
   // 挂载取数据集根：展示服务端生效值；is_default 时（重启后 override 已
   // 消失）以 localStorage 存值预填输入（仅提示，非真相）。失败不阻塞表单。
@@ -430,31 +525,19 @@ export default function ClosedEval() {
   }
 
   /** 删除终态 run：磁盘产物 + 注册表一并清除；报告视图正展示该 run 时
-   * 收起（悬空展示已删 run 会误导）；409（运行中/收尾窗口）/404（已删）
-   * detail 经 message 透出，失败不刷新历史。报告收起走函数式 set——
-   * 表格单元格 memo 下回调闭包可能持有陈旧 report，函数式读最新值。 */
+   * 收起（悬空展示已删 run 会误导）；进度明细开着同一 run 时一并收起。
+   * 409（运行中/收尾窗口）/404（已删）detail 经 message 透出，失败不刷新
+   * 历史。报告收起走函数式 set——表格单元格 memo 下回调闭包可能持有陈旧
+   * report，函数式读最新值。 */
   async function handleDelete(runId: string) {
     try {
       await deleteRun(runId)
       message.success(`已删除 run ${runId}`)
       setReport((prev) => (prev?.runId === runId ? null : prev))
+      if (liveRunRef.current?.runId === runId) closeLive()
       void refreshRuns()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '删除失败')
-    }
-  }
-
-  async function openReport(runId: string) {
-    try {
-      const data = await getReport(runId)
-      setReport({ runId, data })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        // 终态落盘非原子的毫秒级窗口（后端 Task 6 披露）：提示重试，不崩页面
-        message.warning('报告生成中，稍后重试')
-      } else {
-        message.error(err instanceof Error ? err.message : '报告加载失败')
-      }
     }
   }
 
@@ -492,6 +575,16 @@ export default function ClosedEval() {
       },
     },
   ]
+
+  /** 进度明细横幅数据源：活跃 run 优先取实时快照（轮询保活，进度跟手），
+   * 否则从历史行找（interrupted 行/历史终态快照）；两处都无（历史尚未刷新）
+   * → null 只渲染表格不出横幅。RunStatus 与 RunSummary 的横幅四字段同形。 */
+  const liveBanner =
+    liveRun === null
+      ? null
+      : liveRun.runId === activeRun?.run_id
+        ? activeRun
+        : runs.find((r) => r.run_id === liveRun.runId) ?? null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -609,9 +702,14 @@ export default function ClosedEval() {
         <Card
           title={`进行中：${activeRun.run_id}`}
           extra={
-            <Button danger size="small" onClick={() => void handleCancel()}>
-              取消
-            </Button>
+            <Space>
+              <Button size="small" onClick={() => openLive(activeRun.run_id)}>
+                查看进度明细
+              </Button>
+              <Button danger size="small" onClick={() => void handleCancel()}>
+                取消
+              </Button>
+            </Space>
           }
         >
           <Progress
@@ -645,7 +743,16 @@ export default function ClosedEval() {
           loading={runsLoading}
           pagination={{ showTotal: (t) => `共 ${t} 条` }}
           onRow={(row) => ({
-            onClick: () => void openReport(row.run_id),
+            onClick: () => {
+              // 路由（增补 2026-11-27）：running/interrupted → 进度明细视图
+              //（运行中/中断 run 无报告可开，live.json 回落让 movies 端点
+              // 照常出数）；其余终态 → 报告视图（原样）
+              if (row.status === 'running' || row.status === 'interrupted') {
+                openLive(row.run_id)
+              } else {
+                void openReport(row.run_id)
+              }
+            },
             style: { cursor: 'pointer' },
           })}
         />
@@ -654,6 +761,26 @@ export default function ClosedEval() {
       {report !== null && (
         <Card title={`评测报告：${report.runId}`}>
           <ClosedEvalReportView report={report.data} runId={report.runId} />
+        </Card>
+      )}
+
+      {liveRun !== null && (
+        <Card title={`进度明细：${liveRun.runId}`} data-testid="live-detail">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {liveBanner !== null && (
+              <Typography.Text>
+                {/* 「每 2 秒自动刷新」宣称条件与真实轮询同源（activeRun 非空
+                    即轮询在跑），与下方 refreshTick 的喂送口径（polledRunId，
+                    终态后仍喂末次 bump）刻意不同——tick 恒定不触发重拉，
+                    不可作为「在刷新」的依据 */}
+                {liveBannerText(liveBanner, liveRun.runId === activeRun?.run_id)}
+              </Typography.Text>
+            )}
+            <ClosedEvalMovieTable
+              runId={liveRun.runId}
+              refreshTick={liveRun.runId === polledRunId ? liveTick : undefined}
+            />
+          </div>
         </Card>
       )}
     </div>
