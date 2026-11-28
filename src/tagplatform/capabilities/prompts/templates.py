@@ -75,23 +75,25 @@ CLOSED_RETRY_HINT = (
     "不要任何解释文字或 Markdown 代码块。"
 )
 
-# 证据核验（closed 置信度 Cver，v2 2026-12 模态两维重构）：对最终输出的
-# 每个标签，按 content/scene/frame 三模态分别做「标签相关性 Rn + 充分度
-# 三档 + 真实性 T + 可核验性 V」判定，数值计算（权重菜单映射、加权求和）
-# 全部在本地做（closed/confidence.py）。组装方以
-# `spec.prompt_text + "\n\n" + 本常量 + 标签与按模态分节的证据材料` 拼接
-# （不走 render_prompt——本常量无占位符）。输出契约小 JSON：
-# {"modalities": {content/scene/frame: {"r": 0|1, "sufficiency": 充分|支持|辅助,
-# "t": 1–5, "v": 1–5}}}（Rn=0 的模态省略 t/v）。模板文本不得出现字面
-# 花括号——下方 JSON 示例已双写 {{ }} 转义。
+# 证据核验（closed 置信度 Cver，v3 重做）：角色定位 + 原始资产材料
+# 自拼（不复用 spec.prompt_text——生成契约正文含候选清单与输出指令残留，
+# 长上下文下证据条目易被淹没）。组装方（closed/confidence.py
+# _verify_evidence）按「本常量 → ## 影视内容（assemble._render_content_text
+# 渲染的资产文本）→ ### 待核验标签（含标签描述与别名，缺则省行）→
+# 证据条目（带时间区间）→ 输出行」拼接（不走 render_prompt——本常量
+# 无占位符），输出行由组装方置尾（模态 JSON 契约单花括号，放常量外）。
+# 输出契约小 JSON：{"modalities": {content/scene/frame: {"r": 0|1,
+# "sufficiency": 充分|支持|辅助, "t": 1–5, "v": 1–5}}}（Rn=0 的模态
+# 省略 t/v）。
 CLOSED_VERIFICATION_PROMPT = "\n".join([
     "## 证据核验",
     "",
-    "上文已附原始资产材料：渲染后的资产文本（含标题、摘要、人物与逐场景",
-    "描述及明细行，对应 content 模态=整体描述与 scene 模态=场景行），以及",
-    "各场景关键帧图片（对应 frame 模态，资产帧可用时随消息附带）。",
-    "下面按「### 待核验标签」给出一个标签及其按模态分节的证据条目。",
-    "请对每个模态（content/scene/frame）分别完成三项判定：",
+    "你是影视内容标签证据核验员。下面先给出原始资产材料：渲染后的资产",
+    "文本（含标题、摘要、人物与逐场景描述及明细行，对应 content 模态=",
+    "整体描述与 scene 模态=场景行），以及各场景关键帧图片（对应 frame",
+    "模态，资产帧可用时随消息附带）。随后给出一个待核验标签（含标签",
+    "描述与别名）及其证据条目。请逐条对照原始资产材料，对每个模态",
+    "（content/scene/frame）分别完成三项判定：",
     "",
     "一、模态标签相关性 Rn（判断该模态是否具备对该标签的评价资格，",
     "不是证据质量）：",
@@ -118,9 +120,6 @@ CLOSED_VERIFICATION_PROMPT = "\n".join([
     "  但定位和核验存在困难，或描述笼统，需要较多上下文进行推断；",
     "  4=证据较为具体，可验定位和核验；5=证据具体、定位明确，可验直接",
     "  核验。",
-    "",
-    "只输出 JSON 对象（Rn 判 0 的模态省略 t/v 字段），不要输出其他文字：",
-    "{{\"modalities\": {{\"content\": {{\"r\": 0 或 1, \"sufficiency\": \"充分 或 支持 或 辅助\", \"t\": 1 到 5 的整数, \"v\": 1 到 5 的整数}}, \"scene\": {{…}}, \"frame\": {{…}}}}}}",
 ])
 
 # —— 以下为组装说明常量（2026-12 置信度配套）：非模板、不经
@@ -152,14 +151,16 @@ CLOSED_ASSEMBLY_NOTE = "\n".join([
 # 置信度三环节携带资产总标注（2026-12 配置页直观化）：closed 模板卡以
 # 「必需占位符：{content}」指明资产插入位置，置信度卡对应以本常量为卡
 # 头醒目标注行，指明三环节各自携带的材料。文案与 closed/confidence.py
-# 的实际组装对齐：Ccons 重评（_reconsistency_scores）与 Cver 核验
-# （_verify_evidence）的 LLM 消息均以 spec.prompt_text 起头（原始资产
-# 文本已在 {content} 位置渲染就位），有帧时附同一组关键帧多模态 parts；
-# Cmod（_compute_c_mod）纯本地算术。
+# 的实际组装对齐：Ccons 重评（_reconsistency_scores）以 spec.prompt_text
+# 起头（复用生成契约）；Cver 核验（_verify_evidence）自拼材料——
+# assemble._render_content_text 渲染的资产文本不复用生成契约正文；两者
+# 有帧时均附同一组关键帧多模态 parts；Cmod（_compute_c_mod）纯本地
+# 算术。
 CLOSED_CONFIDENCE_ASSETS_NOTE = (
-    "携带资产：Ccons 重评与 Cver 核验的 LLM 消息均以 spec.prompt_text "
-    "起头——原始资产文本已在模板 {content} 位置渲染就位（含标题、摘要、"
-    "人物与逐场景描述及明细行），资产帧可用时随消息附与生成时同一组"
+    "携带资产：Ccons 重评以 spec.prompt_text 起头（原始资产文本已在"
+    "模板 {content} 位置渲染就位）；Cver 核验不复用生成契约正文，自拼"
+    "原始资产材料（assemble._render_content_text 渲染的资产文本，含"
+    "标题、摘要、人物与逐场景描述及明细行），有帧时附与生成时同一组"
     "关键帧图片（多模态 parts，无帧资产退化为纯文本）；Cmod 为纯本地"
     "算术，不调用 LLM、不携带资产。"
 )
@@ -181,19 +182,21 @@ CLOSED_CONFIDENCE_CCONS_NOTE = "\n".join([
     "   Ccons = exp(−As/b)，b 为波动容忍参数（默认 0.2）。",
 ])
 
-# 置信度 Cver（证据核验）的组装配方：原始资产文本经 spec.prompt_text
-# 注入，核验常量与按模态分节的证据材料追加其后。
+# 置信度 Cver（证据核验）的组装配方：核验常量 + 自拼原始资产文本 +
+# 待核验标签（含描述/别名）与证据条目，输出行置尾。
 CLOSED_CONFIDENCE_CVER_NOTE = "\n".join([
     "组装说明（置信度 Cver 证据核验 · 原始资产插入位置）：",
     "",
-    "1. 材料：spec.prompt_text（原始资产文本在其 {content} 位置渲染就位，",
-    "   模型据原文核验证据）+ CLOSED_VERIFICATION_PROMPT（Rn 相关性 /",
-    "   充分度三档 / T 真实性 / V 可核验性判定表）+ 待核验标签名与该",
-    "   标签的证据条目（按模态分节：content=整体描述证据、scene=场景行",
-    "   证据、frame=关键帧图片证据）。",
+    "1. 材料：CLOSED_VERIFICATION_PROMPT（角色定位 + Rn 相关性 / 充分度",
+    "   三档 / T 真实性 / V 可核验性判定表）+「## 影视内容」节——",
+    "   assemble._render_content_text(spec.content) 渲染的原始资产文本",
+    "   （不复用生成契约正文 spec.prompt_text，无候选清单与生成输出",
+    "   指令残留）+ 待核验标签（含标签描述与别名，经 spec.library 反查，",
+    "   缺则省行）与该标签的证据条目（带时间区间）。",
     "2. 调用：资产帧可用时带上与生成时同一组关键帧图片（多模态 parts，",
-    "   即 frame 模态的核验材料），无帧时纯文本；模型按模态输出 JSON",
-    "   （Rn/sufficiency/T/V），本地映射权重菜单后加权求和。",
+    "   即 frame 模态的核验材料），无帧时纯文本；输出行（模态 JSON",
+    "   契约）置消息末尾；模型按模态输出 JSON（Rn/sufficiency/T/V），",
+    "   本地映射权重菜单后加权求和。",
     "3. 计算（本地）：T、V 各按 (x−1)/4 归一到 0–1，模态分",
     "   Cver,n = 0.6·T + 0.4·V；Cver = Σ Rn·Qn·Cver,n，Qn 由充分度",
     "   组合查固定菜单（LLM 不做数值计算）。",

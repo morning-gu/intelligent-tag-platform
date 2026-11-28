@@ -22,10 +22,14 @@
   生成时同构：有帧带多模态 parts（与 Cver 核验同一组帧，用户口径
   2026-11：三次判定同条件测量）。Mock 端哈希键含 run_id，同 run_id
   重调 = 相同输出 → As = 0 → Ccons = 1.0。
-- Cver 核验：`spec.prompt_text + "\n\n" + CLOSED_VERIFICATION_PROMPT`
-  （判定表在模板常量里）+ 标签名 + 按模态分节的证据条目；Cver 分支
-  要求模型输出按模态小 JSON（Rn/充分度/T/V）；有帧时核验消息带与生成
-  时相同的帧 parts（多模态对照，帧即 frame 模态的核验材料）。
+- Cver 核验：自拼材料（不复用 spec.prompt_text——生成契约正文含候选
+  清单与输出指令残留，长上下文下证据条目易被淹没）：常量
+  CLOSED_VERIFICATION_PROMPT（角色定位 + Rn/充分度/T/V 判定表）→
+  「## 影视内容」节（_render_content_text(spec.content) 渲染的原始资产
+  文本）→「### 待核验标签」（含标签描述与别名，经 spec.library 反查，
+  缺则省行）→ 证据条目（带时间区间）→ 输出行（模态 JSON 契约，置尾）；
+  Cver 分支要求模型输出按模态小 JSON（Rn/充分度/T/V）；有帧时核验消息
+  带与生成时相同的帧 parts（多模态对照，帧即 frame 模态的核验材料）。
 - Cmod：读 ProducedTag.evidence_scores（producer v8 带出的三模态原始
   强度 1–5），纯本地算术。
 
@@ -61,12 +65,14 @@ from sqlalchemy.orm import Session
 from tagplatform.capabilities.prompts.templates import (
     CLOSED_VERIFICATION_PROMPT,
 )
+from tagplatform.services.generation.assemble import _render_content_text
 from tagplatform.services.generation.base import Evidence, GenerationSpec, ProducedTag
 from tagplatform.services.generation.closed.parse import (
     LLMParseError,
     parse_closed_output,
 )
 from tagplatform.services.generation.closed.tag_block import (
+    _one_line,
     render_candidate_block,
     splice_candidate_block,
 )
@@ -323,6 +329,12 @@ def _parse_verify_score(raw: str) -> dict[str, ModalityVerdict]:
     return _parse_modality_verdicts(raw)
 
 
+def _tag_definition(spec: GenerationSpec, tag: ProducedTag):
+    """经 spec.library 反查标签定义（无库/无 tag_id 时 None）。"""
+    return spec.library.tag(tag.tag_id) if (
+        spec.library and tag.tag_id) else None
+
+
 def _build_candidate_block(spec: GenerationSpec, tag: ProducedTag,
                            ) -> str:
     """单标签重建 closed 候选块（与 producer 拼法同构）。
@@ -333,7 +345,7 @@ def _build_candidate_block(spec: GenerationSpec, tag: ProducedTag,
     """
     library = spec.library
     directory = library.directory(tag.dir_id) if (library and tag.dir_id) else None
-    definition = library.tag(tag.tag_id) if (library and tag.tag_id) else None
+    definition = _tag_definition(spec, tag)
     description = (definition.description if definition
                    else (tag.candidate_description or ""))
     return render_candidate_block(
@@ -386,6 +398,14 @@ def _reconsistency_scores(
     return scores
 
 
+_VERIFY_OUTPUT_LINE = (
+    '只输出 JSON 对象（Rn 判 0 的模态省略 t/v 字段，scene/frame 模态'
+    '省略时整体省略该键），例如 '
+    '{"modalities": {"content": {"r": 1, "sufficiency": "充分", "t": 4, "v": 5}}}'
+    '，不要输出其他文字。'
+)
+
+
 def _verify_evidence(
     spec: GenerationSpec,
     tag: ProducedTag,
@@ -394,21 +414,39 @@ def _verify_evidence(
 ) -> dict[str, ModalityVerdict]:
     """Cver 核验：标签 + 证据条目 → 三模态判定（Rn/充分度/T/V）。
 
-    三模态的核验材料即三个输入通道：content=spec.prompt_text 中的整体
-    资产文本、scene=其中的逐场景行、frame=随消息附带的关键帧图片（与
-    生成时同一组）。证据条目按场景锚定平铺（Evidence 无模态归属，同一
-    条证据可在多个通道中定位）。数值计算在 _compute_c_ver 本地做。
-    失败抛错由上层降级（0.5 占位）。
+    自拼材料（不复用 spec.prompt_text——生成契约正文含候选清单与输出
+    指令残留）：核验常量（角色定位 + 判定表）→「## 影视内容」节
+    （_render_content_text 渲染的原始资产文本）→ 待核验标签（含描述/
+    别名，经 spec.library 反查，缺则省行）→ 证据条目（带时间区间）→
+    输出行置尾。三模态的核验材料即三个输入通道：content=资产文本整体、
+    scene=其中的逐场景行、frame=随消息附带的关键帧图片（与生成时同一
+    组）。证据条目按场景锚定平铺（Evidence 无模态归属，同一条证据可
+    在多个通道中定位）。数值计算在 _compute_c_ver 本地做。失败抛错由
+    上层降级（0.5 占位）。
     """
-    lines = [CLOSED_VERIFICATION_PROMPT, ""]
-    lines.append(f"### 待核验标签：{tag.tag_name}")
+    definition = _tag_definition(spec, tag)
+    description = (definition.description if definition
+                    else (tag.candidate_description or ""))
+    aliases = definition.aliases if definition else ()
+    lines = [CLOSED_VERIFICATION_PROMPT, "",
+             "## 影视内容", _render_content_text(spec.content), "",
+             f"### 待核验标签：{tag.tag_name}"]
+    description = _one_line(description)
+    if description:
+        lines.append(f"标签描述：{description}")
+    aliases = tuple(_one_line(alias) for alias in aliases if _one_line(alias))
+    if aliases:
+        lines.append(f"标签别名：{'、'.join(aliases)}")
     if tag.evidence:
         lines.append("证据条目：")
         for ev in tag.evidence:
-            lines.append(f"- 场景 {ev.scene_id}：{ev.description}")
+            lines.append(f"- 场景 {ev.scene_id} "
+                         f"[{ev.start_ms}-{ev.end_ms}]：{ev.description}")
     else:
         lines.append("（该标签无证据条目）")
-    prompt = spec.prompt_text + "\n\n" + "\n".join(lines)
+    lines.append("")
+    lines.append(_VERIFY_OUTPUT_LINE)
+    prompt = "\n".join(lines)
     request = ([{"role": "user", "content": prompt}] if not frame_parts else
                [{"role": "user", "content": [
                    {"type": "text", "text": prompt}, *frame_parts]}])
