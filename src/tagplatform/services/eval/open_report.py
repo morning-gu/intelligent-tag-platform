@@ -3,14 +3,19 @@
 2026-11-23 三维化（open-judge-quality）：θ 网格 / 集合准确率 / nDCG /
 随机与先验基线 / 标定全部移除——那些是闭环检测的口径，开放生成没有
 gt 排序任务。报告改为分支式内容组织：汇总卡（通过率 + 三维均分/满分率
-+ 新词占比）→ 评分分布 → 逐片明细（每标签三维分 + 理由 + 摘录 + judge
-参考）→ 异常表 → judge 审计与数量漏斗聚合。
++ 新词占比 + judge↔评审一致性对照）→ 评分分布 → 逐片明细（每标签三维
+分 + 理由 + 摘录 + judge 参考）→ 异常表 → judge 审计与数量漏斗聚合。
+
+2026-11-28 复算口径（评审归一）：通过率一律按行内三维分经 verdict_pass
+阈值复算（不信任行内存的 pass——新行幂等，旧 run 的行即 legacy 升级
+路径）；行存 pass 仅保留给行级展示。新增行级 judge↔评审一致性对照
+（summary.consistency，schema v4）与旧协议 run 的 banner 警示。
 
 输入是 OpenMovieResult 列表（干跑运行器的原子产出）：hits/new_words
-行带 review = {"pass","relevance","semantics","value","reason","evidence_scene_ids","evaluated"}
-（三维各 {"score","reason"}，pass 和总评由评审模型直接给出）或 None（该片
-评审失败，产出不作废）。三维汇总复用 services/eval/tag_quality 的
-quality_metrics（与生产批次汇总同一套指标机制）。
+行带 review = {"pass","relevance","semantics","value","reason",
+"evidence_scene_ids","quote","confidence"}（三维各 {"score","reason"}）
+或 None（该片评审失败，产出不作废）。三维汇总复用 services/eval/
+tag_quality 的 quality_metrics（与生产批次汇总同一套指标机制）。
 
 分层红线：本层不 import fastapi；OpenMovieResult 以 TYPE_CHECKING 引用
 防循环。读侧（history → _read_open_summary）对缺失/截断的 report.json
@@ -26,18 +31,20 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tagplatform.capabilities.prompts.open_review import REVIEW_PROMPT_VERSION
 from tagplatform.services.eval.report import (
     BANNER_PARTIAL,
     _dump_json,
 )
 from tagplatform.services.eval.tag_quality import MAX_SCORE, quality_metrics
 from tagplatform.services.generation.open.mtg.pipeline import is_filter_stage_drop
+from tagplatform.services.generation.open.mtg.verdicts import verdict_pass
 from tagplatform.services.tags.value_scoring import format_score, score_bucket
 
 if TYPE_CHECKING:
     from tagplatform.services.eval.open_service import OpenMovieResult
 
-OPEN_REPORT_SCHEMA_VERSION = 3
+OPEN_REPORT_SCHEMA_VERSION = 4
 
 __all__ = [
     "assemble_open_report",
@@ -50,6 +57,9 @@ __all__ = [
 # 评审和生成共享模型时提示可能的判断偏差。
 BANNER_SAME_MODEL = ("评审与生成复用同一模型，可能共享判断偏差，"
                      "绝对值需打折解读")
+# 旧协议 run（prompt_version ≠ open-review-v14）：通过率已改阈值复算口径。
+BANNER_LEGACY_PROTOCOL = ("旧协议 run：通过率按阈值复算口径重算，"
+                          "与原模型保留率不可横比")
 # 小样本警示（失败核算三类分开点名）
 _BANNER_SMALL_SAMPLE = ("小样本警示：{detail}，占比超 10%——成功样本少，"
                         "指标波动大，勿单独引用")
@@ -72,17 +82,34 @@ def _rate(passed: int, judged: int) -> float | None:
     return passed / judged if judged else None
 
 
+def _numeric_score(value) -> float | None:
+    """数值分清洗（None≠0）：布尔/非数值 → None，其余原样（int/float）。"""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _score_of(review: dict, axis: str) -> float | None:
+    """行 review 单轴数值分：缺键/非 dict/null → None（不猜分）。"""
+    dim = review.get(axis)
+    return _numeric_score(dim.get("score")) if isinstance(dim, dict) else None
+
+
 def _group_stats(rows: list[dict]) -> dict:
     """一组产出行的评审统计：pass_rate / review_missing / metrics。
 
     rows 为 hits 或 new_words 行（review 可能 None = 该片评审失败，整组
-    排除出分母）。metrics 用 quality_metrics（固定五档），输入直接是
+    排除出分母）。pass 一律按行内三维分经 verdict_pass 阈值复算（不信任
+    行内存的 pass——新行幂等，旧 run 的行即 legacy 升级口径），行存 pass
+    仅保留给行级展示。metrics 用 quality_metrics（固定五档），输入直接是
     review dict（其 relevance/semantics/value 即 {"score","reason"}）。
     """
     reviews = [row["review"] for row in rows
                if row.get("review") is not None and row["review"].get("evaluated") is True]
-    passed = sum(review["pass"] is True for review in reviews)
-    judged = sum(review["pass"] is not None for review in reviews)
+    passes = [verdict_pass(_score_of(review, "relevance"),
+                           _score_of(review, "semantics"),
+                           _score_of(review, "value"))
+              for review in reviews]
+    passed = sum(p is True for p in passes)
+    judged = sum(p is not None for p in passes)
     missing = sum(row.get("review") is not None and not row["review"].get("evaluated")
                   for row in rows)
     pending = sum(row.get("review") is None for row in rows)
@@ -92,6 +119,71 @@ def _group_stats(rows: list[dict]) -> dict:
         "three_judged": sum(all(review[axis]["score"] is not None for axis in _SCORE_AXES)
                             for review in reviews),
         "metrics": quality_metrics(len(rows), reviews).model_dump() if rows else None,
+    }
+
+
+def _consistency(rows: list[dict]) -> dict:
+    """行级 judge↔评审一致性对照（三桶响亮核算，None≠0 延伸）。
+
+    只看评审成功的行（review 非 None 且 evaluated）。三桶互斥全覆盖：
+    - denominator = 复算可判（三维分经 verdict_pass 非 None）且
+      judge_reference 三维分数齐的行；其中复算 False 的行即
+      review_rejected（judge 参考按构造全放行——judge_reference 只来自
+      生产审计 accepted——评审否决即分歧）；disagreement_rate 分母 0 →
+      None（None≠0）；
+    - review_undetermined = 复算 None（轴 null）的行；
+    - no_judge_reference = 复算可判但缺 judge_reference 或其三维不齐的行。
+    axis_delta 逐维取两侧都有该维分数的行（评审 null 轴不进该维分母，
+    其余轴照常计入；value 维用 judge_reference["value"] vs review
+    value.score）：mean_abs = |judge 分 − review 分| 均值（无行 → None）、
+    exact_rate = 完全相等行数 / 该维行数（0 行 → None）、n = 该维行数。
+    """
+    pairs: dict[str, list[tuple[float, float]]] = {axis: [] for axis in _SCORE_AXES}
+    denominator = rejected = undetermined = no_reference = 0
+    for row in rows:
+        review = row.get("review")
+        if not isinstance(review, dict) or review.get("evaluated") is not True:
+            continue
+        scores = {axis: _score_of(review, axis) for axis in _SCORE_AXES}
+        reference = row.get("judge_reference")
+        recomputed = verdict_pass(scores["relevance"], scores["semantics"],
+                                  scores["value"])
+        if recomputed is None:
+            undetermined += 1
+        else:
+            complete = (isinstance(reference, dict)
+                        and all(_numeric_score(reference.get(axis)) is not None
+                                for axis in _SCORE_AXES))
+            if not complete:
+                no_reference += 1
+            else:
+                denominator += 1
+                if recomputed is False:
+                    rejected += 1
+        for axis in _SCORE_AXES:
+            judge_score = (_numeric_score(reference.get(axis))
+                           if isinstance(reference, dict) else None)
+            if scores[axis] is not None and judge_score is not None:
+                pairs[axis].append((judge_score, scores[axis]))
+    axis_delta = {}
+    for axis in _SCORE_AXES:
+        rows_with_scores = pairs[axis]
+        axis_delta[axis] = {
+            "mean_abs": (sum(abs(judge - review)
+                             for judge, review in rows_with_scores)
+                         / len(rows_with_scores)) if rows_with_scores else None,
+            "exact_rate": (sum(judge == review
+                               for judge, review in rows_with_scores)
+                           / len(rows_with_scores)) if rows_with_scores else None,
+            "n": len(rows_with_scores),
+        }
+    return {
+        "denominator": denominator,
+        "review_rejected": rejected,
+        "disagreement_rate": (rejected / denominator) if denominator else None,
+        "review_undetermined": undetermined,
+        "no_judge_reference": no_reference,
+        "axis_delta": axis_delta,
     }
 
 
@@ -294,17 +386,21 @@ def _judge_section(audit_dir: Path | None, ok_films: list[str],
 
 def _banner(meta: dict, total: int, done: int, n_failed: int,
             n_review_failed: int) -> list[str]:
-    """banner 聚合（list[str]）：部分运行 → 同模评审 → 小样本。
+    """banner 聚合（list[str]）：部分运行 → 同模评审 → 旧协议 → 小样本。
 
     部分运行口径与闭环同款：status 未 succeeded 或 done < total 一律不可
     与全量横比（覆盖 cancelled/aborted 与 worker 兜底 failed、取消后余量
-    未跑的 done<total）。
+    未跑的 done<total）。旧协议 run（review.prompt_version ≠ 当前评审
+    协议，或缺）：通过率按阈值复算口径重算，与原模型保留率不可横比。
     """
     banner: list[str] = []
     if not (meta.get("status") == "succeeded" and done >= total):
         banner.append(BANNER_PARTIAL)
-    if (meta.get("review") or {}).get("same_model"):
+    review_meta = meta.get("review") or {}
+    if review_meta.get("same_model"):
         banner.append(BANNER_SAME_MODEL)
+    if review_meta.get("prompt_version") != REVIEW_PROMPT_VERSION:
+        banner.append(BANNER_LEGACY_PROTOCOL)
     if total:
         parts = []
         if n_failed / total > 0.1:
@@ -321,7 +417,8 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
     """干跑结果 → report.json 结构（分支式内容组织，report.md 同数据）。
 
     汇总口径：全部 ok 片产出计 total_tags / new_ratio；评审成功片的产出
-    计通过率与三维指标。覆盖率的分母包括评审失败片的产出。
+    计通过率与三维指标（pass 按阈值复算）。summary.consistency 为行级
+    judge↔评审一致性对照。覆盖率的分母包括评审失败片的产出。
     `audit_dir` = run 目录的 audit/ 子目录（None = 无审计，judge 空段 +
     警示）。行序按 tt 稳定排序——运行器 results 是线程池完成序，报告
     落盘要可跨 run 对比，不随并发调度漂移。
@@ -397,6 +494,7 @@ def assemble_open_report(results: list["OpenMovieResult"], meta: dict, *,
             "hit_pass": hit_stats["pass_rate"],
             "review_missing": overall["review_missing"] + review_failed_tags,
             "metrics": metrics,
+            "consistency": _consistency(all_rows),
         },
         "produced_stats": {
             "counts": counts,
@@ -484,6 +582,20 @@ def render_open_report_md(report: dict) -> str:
             lines.append(f"- {label}：均分 {_fmt(dim.get('average'))}"
                          f" / 满分率 {_pct(dim.get('high_rate'))}")
         lines.append(f"- 三维满分率：{_pct(metrics.get('three_dimension_high_rate'))}")
+    consistency = summary.get("consistency") or {}
+    if consistency:
+        lines.append(
+            f"- 一致性对照：与 judge 分歧率 {_pct(consistency.get('disagreement_rate'))}"
+            f"（可判 {consistency.get('denominator', 0)} 行，评审否决"
+            f" {consistency.get('review_rejected', 0)} / 无法判定"
+            f" {consistency.get('review_undetermined', 0)} / 缺 judge 参考"
+            f" {consistency.get('no_judge_reference', 0)}）")
+        for axis, label in (("relevance", "相关性"),
+                            ("semantics", "语义"), ("value", "价值")):
+            delta = (consistency.get("axis_delta") or {}).get(axis) or {}
+            lines.append(f"- {label}：judge 均差 {_fmt(delta.get('mean_abs'))}"
+                         f" / 一致率 {_pct(delta.get('exact_rate'))}"
+                         f"（{delta.get('n', 0)} 行）")
     lines += ["", "## 评分分布（评审，0-4）", "",
               "| 维度 | 0 | 1 | 2 | 3 | 4 | null | 均分 |",
               "| --- | --- | --- | --- | --- | --- | --- | --- |"]
@@ -595,7 +707,8 @@ def render_open_report_md(report: dict) -> str:
 def write_open_report(run_dir: Path, report: dict) -> None:
     """报告三件套落盘：report.json / report.md / metrics.csv。
 
-    长表行 `metric,value,n`：通过率族 + 三维均分/满分率 + 新词占比。
+    长表行 `metric,value,n`：通过率族 + 三维均分/满分率 + 新词占比 +
+    一致性对照（分歧率 n=分母，逐维均差/一致率 n=该维行数）。
     写序在 meta/raw 之后（worker 终态序），读侧（history →
     _read_open_summary）对缺失/截断的 report.json 容错。
     """
@@ -628,6 +741,20 @@ def write_open_report(run_dir: Path, report: dict) -> None:
                          metrics.get("three_dimension_high_rate")
                          if metrics.get("three_dimension_high_rate") is not None else "",
                          summary.get("three_judged_tags")])
+        # 一致性对照：分歧率（n=可判分母）+ 逐维均差/一致率（n=该维行数）
+        consistency = summary.get("consistency") or {}
+        axis_delta = consistency.get("axis_delta") or {}
+        rate = consistency.get("disagreement_rate")
+        writer.writerow(["disagreement_rate",
+                         rate if rate is not None else "",
+                         consistency.get("denominator", 0)])
+        for axis in _SCORE_AXES:
+            delta = axis_delta.get(axis) or {}
+            n = delta.get("n", 0)
+            for suffix in ("mean_abs", "exact_rate"):
+                value = delta.get(suffix)
+                writer.writerow([f"{axis}_{suffix}",
+                                 value if value is not None else "", n])
         # judge 数量漏斗七率（n = 对应分母；审计缺失 → 空值）
         funnel = (report.get("judge") or {}).get("funnel") or {}
         rank_denominator = "cluster_kept" if "cluster_kept" in funnel else "judge_passed"
