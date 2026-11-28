@@ -283,6 +283,117 @@ class _ScriptedConfLLM:
         raise AssertionError(f"置信度环节收到意外请求：{text[:200]!r}")
 
 
+class _CaptureVerifyLLM:
+    """核验 prompt 捕获壳：记录收到的核验消息文本，返回固定判定。"""
+
+    def __init__(self):
+        self.verify_prompts: list[str] = []
+
+    model = "stub-capture"
+
+    def complete(self, messages, run_id):
+        text = _extract_text(messages)
+        if "## 证据核验" in text:
+            self.verify_prompts.append(text)
+            return LLMResponse(content=json.dumps({"modalities": {
+                "content": {"r": 1, "sufficiency": "充分", "t": 4, "v": 4}},
+            }, ensure_ascii=False), usage={}, raw={}, ok=True)
+        raise AssertionError(f"非核验请求：{text[:200]!r}")
+
+
+def test_verify_evidence_prompt_structure(session):
+    """Cver 核验 prompt 结构（v3 自拼材料重做）：
+
+    常量（角色定位 + 判定表）→「## 影视内容」节（_render_content_text
+    自拼，不复用 spec.prompt_text）→ 待核验标签（含描述/别名行，缺则省）
+    → 证据条目带时间区间 → 输出行置尾（单花括号）。
+    """
+    from tagplatform.services.content.content_io import load_content
+    from tagplatform.services.generation.assemble import (
+        build_spec,
+        load_assembly_context,
+    )
+
+    _seed_catalog(session)
+    content = load_content(json.dumps(_CONTENT_DATA, ensure_ascii=False))
+    context = load_assembly_context("closed", "{}")
+    spec = build_spec(context, content=content, task_id="conf_vp",
+                      asset_id="asset_x", run_id="conf_vp:run1")
+    tag = ProducedTag(
+        origin="catalog", tag_id="tag_g_00", tag_name="类型标签0",
+        candidate_type=None, candidate_description=None,
+        relevance_score=0.9, confidence=0.75,
+        evidence=[Evidence(scene_id="scene_001", start_ms=120000,
+                           end_ms=180000, description="证据A")],
+        dir_id="dir_genre", evidence_scores={"content": 4, "scene": 5,
+                                             "frame": 4},
+    )
+    llm = _CaptureVerifyLLM()
+    from tagplatform.services.generation.closed.confidence import (
+        _verify_evidence,
+    )
+    verdicts = _verify_evidence(spec, tag, llm, frame_parts=[])
+    assert verdicts["content"] == _v(1, "充分", 4, 4)
+    assert len(llm.verify_prompts) == 1
+    text = llm.verify_prompts[0]
+    # 结构骨架：常量起头（角色定位紧随节头）→ 资产节 → 标签 → 证据 → 输出行
+    assert text.startswith("## 证据核验\n\n你是影视内容标签证据核验员。")
+    assert "\n## 影视内容\n" in text
+    assert "《" in text  # _render_content_text 首行《标题》
+    assert "摘要：" in text
+    assert "- scene_001 [120000-180000] 两名人物在仓库中发生激烈争执" in text
+    # 待核验标签：名称 + 描述（库反查「类型描述文本0」）+ 别名（无 → 省行）
+    assert "### 待核验标签：类型标签0" in text
+    assert "标签描述：类型描述文本0" in text
+    assert "标签别名" not in text
+    # 证据条目带时间区间
+    assert "- 场景 scene_001 [120000-180000]：证据A" in text
+    # 输出行置尾、单花括号合法
+    assert text.rstrip().endswith(
+        '不要输出其他文字。')
+    assert '{"modalities": {"content"' in text
+    # 生成契约残留不出现（自拼材料红线）
+    assert "只输出 JSON 数组" not in text
+    assert "## 候选标签" not in text
+    assert "## 评估流程" not in text
+    assert "{{" not in text
+    # 不复用 spec.prompt_text：生成契约正文里的输出指令不在核验 prompt 中
+    assert spec.prompt_text not in text
+
+
+def test_verify_evidence_prompt_no_evidence_placeholder(session):
+    """无证据标签：渲染「（该标签无证据条目）」占位，标签描述走
+    candidate_description 回退（无库标签定义时）。"""
+    from tagplatform.services.content.content_io import load_content
+    from tagplatform.services.generation.assemble import (
+        build_spec,
+        load_assembly_context,
+    )
+    from tagplatform.services.generation.closed.confidence import (
+        _verify_evidence,
+    )
+
+    _seed_catalog(session)
+    content = load_content(json.dumps(_CONTENT_DATA, ensure_ascii=False))
+    context = load_assembly_context("closed", "{}")
+    spec = build_spec(context, content=content, task_id="conf_vp2",
+                      asset_id="asset_x", run_id="conf_vp2:run1")
+    tag = ProducedTag(
+        origin="new", tag_id=None, tag_name="自创标签",
+        candidate_type=None, candidate_description="候选描述X",
+        relevance_score=0.9, confidence=0.75,
+        evidence=[],
+        dir_id=None, evidence_scores={},
+    )
+    llm = _CaptureVerifyLLM()
+    _verify_evidence(spec, tag, llm, frame_parts=[])
+    text = llm.verify_prompts[0]
+    assert "### 待核验标签：自创标签" in text
+    assert "标签描述：候选描述X" in text  # 库反查无果 → 候选描述回退
+    assert "（该标签无证据条目）" in text
+    assert "标签别名" not in text
+
+
 def _evi(ec: int, es: int, ef: int) -> dict:
     return {m: {"evidence_strength": s, "evidences": []}
             for m, s in (("content", ec), ("scene", es), ("frame", ef))}

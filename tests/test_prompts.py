@@ -123,11 +123,14 @@ def test_registry_closed_assembly_notes(client):
     assert "{content}" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]     # 插入位置标记
     assert "关键帧" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
     assert "spec.prompt_text" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
+    assert "_render_content_text" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
     assert "不调用 LLM" in items["CLOSED_CONFIDENCE_ASSETS_NOTE"]
     assert "spec.prompt_text" in items["CLOSED_CONFIDENCE_CCONS_NOTE"]
     assert "重复调用 2 次" in items["CLOSED_CONFIDENCE_CCONS_NOTE"]
     assert "CLOSED_VERIFICATION_PROMPT" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
-    assert "{content}" in items["CLOSED_CONFIDENCE_CVER_NOTE"]       # 插入位置标记
+    assert "_render_content_text" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
+    assert "不复用生成契约正文" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
+    assert "标签描述与别名" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
     assert "关键帧" in items["CLOSED_CONFIDENCE_CVER_NOTE"]
     assert "不调用 LLM" in items["CLOSED_CONFIDENCE_CMOD_NOTE"]
     assert "0.5 占位" in items["CLOSED_CONFIDENCE_CMOD_NOTE"]
