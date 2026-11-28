@@ -1,8 +1,8 @@
 """生产 Judge 与开放评测评审共用的判决域/解析/证据核验/批编排引擎。
 
-已落：判决域（VERDICT_FLOORS/verdict_pass/VerdictTarget，Task 1）与融合
-解析器（parse_verdicts，Task 2——两套容错家族取并集）。后续任务在同一
-文件追加：证据核验终判（finalize_verdict，Task 3）与批编排引擎
+已落：判决域（VERDICT_FLOORS/verdict_pass/VerdictTarget，Task 1）、融合
+解析器（parse_verdicts，Task 2——两套容错家族取并集）与证据核验终判
+（finalize_verdict，Task 3）。后续任务在同一文件追加：批编排引擎
 （run_verdicts，Task 4）。
 
 分层红线：本模块不得 import fastapi / sqlalchemy；eval 侧 import 本模块属于
@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from tagplatform.services.generation.open.mtg.parse import (
@@ -20,6 +22,10 @@ from tagplatform.services.generation.open.mtg.parse import (
 from tagplatform.services.tags.value_scoring import (
     VALUE_DIRECTIONS,
     VALUE_DIRECTION_ALIASES,
+    VALUE_DIRECTION_LABELS,
+    aggregate_value_score,
+    normalize_tag_kind,
+    weights_dict_for_kind,
 )
 
 # 三轴通过下限（评审归一拍板值，逐字）：relevance/semantics 楼层 3、value 楼层 2。
@@ -316,3 +322,146 @@ def parse_verdicts(text: str) -> list[dict]:
     if not items:
         raise MTGParseError("审核输出为空数组")
     return items
+
+
+# ---------------------------------------------------------------------------
+# 证据核验与终判（评审归一 Task 3）：生产 `_require_quotes` 与评审
+# open_review.py 200–241 行后处理的统一实现——quote 逐字核验 + 场景计数 +
+# 缺释义置 null + value 三方向聚合，产出两侧共用的终判 dict。
+# ---------------------------------------------------------------------------
+
+# quote 核验三件套从 pipeline.py 原样搬移（评审归一 Task 3）——与 pipeline
+# 副本暂时并存，Task 6 删 pipeline 侧副本改为 import 本模块，届时收敛。
+_QUOTE_MIN_CHARS = 8
+_QUOTE_STRIP_RE = re.compile(
+    r"[\s「」『』“”‘’\"'…—·,，。、；;：:！!？?（）()\[\]【】]+")
+
+
+def _normalize_quote(text: str) -> str:
+    return _QUOTE_STRIP_RE.sub("", text or "")
+
+
+def _quote_ok(quote: str | None, haystack: str) -> bool:
+    """quote 与内容有 ≥8 字连续重合即视为有效引用。"""
+    normalized = _normalize_quote(str(quote or ""))
+    if len(normalized) < _QUOTE_MIN_CHARS:
+        return False
+    for start in range(len(normalized) - _QUOTE_MIN_CHARS + 1):
+        if normalized[start:start + _QUOTE_MIN_CHARS] in haystack:
+            return True
+    return False
+
+
+def _summarize_value_reasons(dims: dict[str, dict]) -> str:
+    """将三个价值方向的得分与理由汇总为单句可读文案。
+
+    从 open_review.py 原样搬移（评审归一 Task 3）——与 open_review 副本暂时
+    并存，Task 7 删 open_review 侧副本，届时收敛。
+    """
+    parts = []
+    for direction in VALUE_DIRECTIONS:
+        entry = dims[direction]
+        label = VALUE_DIRECTION_LABELS[direction]
+        score = "null" if entry["score"] is None else str(entry["score"])
+        reason = entry.get("reason") or ""
+        parts.append(f"{label}({score})：{reason}" if reason else f"{label}({score})")
+    return "；".join(parts)
+
+
+def _axis_reason(label: str, entry: dict) -> str:
+    """单轴简要文案（与 _summarize_value_reasons 同款格式：标签(分)：理由）。"""
+    score = "null" if entry["score"] is None else str(entry["score"])
+    reason = entry.get("reason") or ""
+    return f"{label}({score})：{reason}" if reason else f"{label}({score})"
+
+
+# 核验失败文案（拍板口径）：quote 失败含「未引用可核对原文」、场景计数失败
+# 含「引用场景不足」；写入 relevance.reason 并同步为顶层派生 reason。
+_QUOTE_FAIL_REASON = "未引用可核对原文，相关性高分缺少逐字依据"
+_SCENES_FAIL_REASON = "有效引用场景不足，无法核验所给相关性高分"
+
+# 有效场景计数下限（open_review 同款映射；level 恒为 film/scene，缺省 1 兜底）。
+_SCENE_MIN_COUNTS = {"film": 2, "scene": 1}
+
+
+def finalize_verdict(item: dict, target: VerdictTarget, *, haystack: str,
+                     scene_texts: Mapping[str, str],
+                     value_weights: Mapping | None = None,
+                     semantics_null_without_desc: bool = False) -> dict:
+    """单条判决的证据核验与终判（评审归一 Task 3）：生产 judge 与评审共用。
+
+    规则序：① scenes 求有效集（item.scenes ∩ scene_texts 键集，scene 级再
+    ∩ allowed_scenes，排序输出）；② relevance 为 int 且 ≥3 时核验证据——
+    quote 须在 allowed 场景文本（空则退回全文 haystack）中 ≥8 字连续重合，
+    且有效场景计数达下限（film≥2 / scene≥1；scene 级 allowed_scenes 为空集
+    时计数免查、quote 核验退回全文 haystack），任一失败 relevance 压 1 并写
+    核验失败说明 + verify_fail（quote 先查、失败即压，优先于 scenes）；
+    ③ semantics 缺释义规则（仅 semantics_null_without_desc 开且 has_desc=
+    False 且分为 int ≥2 时置 {"score": None, "reason": "缺少释义"}；null=
+    无法判断不在此列）；④ value 三方向按标签种类权重聚合（aggregate_value_
+    score，保留两位）；⑤ 派生顶层 reason（压分时 = 核验失败说明；否则各轴
+    「标签(分)：理由」+ value 汇总拼接）。
+
+    返回键：relevance/semantics {"score","reason"}、value {"score","reason",
+    "tag_kind","weights","dimensions"}、quote、scenes（核验后有效集，排序）、
+    confidence、reason（派生顶层理由）、verify_fail（None|"quote"|"scenes"）。
+    入参 haystack/scene_texts 须为调用方归一化后的核验文本（Task 6/7 现口径
+    _normalize_quote(render(...))），本函数不重复归一。
+    """
+    relevance = item["relevance"]
+    semantics = item["semantics"]
+    cited = {s for s in item.get("scenes") or [] if s in scene_texts}
+    if target.level == "scene":
+        cited &= target.allowed_scenes
+
+    verify_fail = None
+    verify_reason = ""
+    score = relevance["score"]
+    if isinstance(score, int) and score >= VERDICT_FLOORS["relevance"]:
+        sources = [scene_texts[s] for s in sorted(target.allowed_scenes)
+                   if s in scene_texts] or [haystack]
+        if not any(_quote_ok(item.get("quote"), source) for source in sources):
+            verify_fail, verify_reason = "quote", _QUOTE_FAIL_REASON
+        elif not (target.level == "scene" and not target.allowed_scenes):
+            if len(cited) < _SCENE_MIN_COUNTS.get(target.level, 1):
+                verify_fail, verify_reason = "scenes", _SCENES_FAIL_REASON
+    if verify_fail:
+        relevance = {"score": 1, "reason": verify_reason}
+
+    sem_score = semantics["score"]
+    if (semantics_null_without_desc and not target.has_desc
+            and isinstance(sem_score, int) and sem_score >= 2):
+        semantics = {"score": None, "reason": "缺少释义"}
+
+    tag_kind = normalize_tag_kind(target.tag_kind)
+    dims = item["value"]
+    value_reason = dims.get("reason") or _summarize_value_reasons(dims)
+    value_block = {
+        "score": aggregate_value_score(
+            {d: dims[d]["score"] for d in VALUE_DIRECTIONS},
+            tag_kind, weights=value_weights),
+        "reason": value_reason,
+        "tag_kind": tag_kind,
+        "weights": weights_dict_for_kind(tag_kind, value_weights),
+        "dimensions": {d: dict(dims[d]) for d in VALUE_DIRECTIONS},
+    }
+
+    if verify_fail:
+        reason = verify_reason
+    else:
+        reason = "；".join([
+            _axis_reason("相关性", relevance),
+            _axis_reason("语义", semantics),
+            value_reason,
+        ])
+
+    return {
+        "relevance": {"score": relevance["score"], "reason": relevance["reason"]},
+        "semantics": {"score": semantics["score"], "reason": semantics["reason"]},
+        "value": value_block,
+        "quote": item.get("quote") or "",
+        "scenes": sorted(cited),
+        "confidence": item.get("confidence"),
+        "reason": reason,
+        "verify_fail": verify_fail,
+    }
