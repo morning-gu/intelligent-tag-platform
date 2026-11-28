@@ -36,7 +36,11 @@ from tagplatform.schemas.content import (
     Scene,
     TimeRange,
 )
-from tagplatform.schemas.upstream import UpstreamPayload, parse_upstream
+from tagplatform.schemas.upstream import (
+    UpstreamDialogue,
+    UpstreamPayload,
+    parse_upstream,
+)
 
 # 上游未定义 metadata：按“已完成识别”的语义补齐，前端据此显示上下文来源
 _SOURCE = "video_understanding"
@@ -97,6 +101,18 @@ def _characters(up: UpstreamPayload) -> list[Character]:
     return rows
 
 
+def _lookup_name(cid: str | None, by_id: dict[str, Character]) -> str | None:
+    """角色表按 id 反查名字（评测数据集的台词只有 speaker_id）。"""
+    return by_id[cid].name if (cid and cid in by_id) else None
+
+
+def _dialogue_speaker(d: UpstreamDialogue,
+                       by_id: dict[str, Character]) -> str:
+    """台词说话人：显式姓名 → 角色表按 id 反查 → 裸 id → 兜底。"""
+    return (d.speaker_name or _lookup_name(d.speaker_id, by_id)
+            or d.speaker_id or "未知说话人")
+
+
 def to_content_json(up: UpstreamPayload) -> ContentJSON:
     """上游 payload → 平台 ContentJSON（纯函数，便于测试直接调用）。"""
     characters = _characters(up)
@@ -115,11 +131,12 @@ def to_content_json(up: UpstreamPayload) -> ContentJSON:
         ]
         dialogues = [
             Dialogue(
-                speaker=(d.speaker_name or d.speaker_id or "未知说话人"),
+                speaker=(_dialogue_speaker(d, by_id)),
                 text=d.text,
                 start_ms=d.start_ms or 0,
                 end_ms=d.end_ms if d.end_ms is not None else (d.start_ms or 0),
-                speaker_name=d.speaker_name,
+                speaker_name=(d.speaker_name
+                              or _lookup_name(d.speaker_id, by_id)),
                 emotion=(DialogueEmotion(
                     text_emotion=d.emotion.text_emotion,
                     voice_emotion=d.emotion.voice_emotion,

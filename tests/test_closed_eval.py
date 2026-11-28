@@ -168,7 +168,11 @@ def test_gt_cache_rereads_after_mtime_change(root):
 
 def test_load_movie_content_renames_speak_id(root):
     content = load_movie_content(root, "tt0000001")
-    assert content.content.scenes[0].dialogues[0].speaker == "character_001"
+    d = content.content.scenes[0].dialogues[0]
+    # speak_id 改名后按角色表反查真名：说话人不得退化成「未知」或裸 id
+    assert d.speaker == "主角"
+    assert d.speaker_name == "主角"
+    assert d.speaker_id == "character_001"
 
 
 def test_movie_entries_titles(root):

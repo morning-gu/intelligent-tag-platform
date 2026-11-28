@@ -159,6 +159,52 @@ def test_vision_adapter_duplicate_scene_ids_get_suffix():
     assert [s.scene_id for s in c.content.scenes] == ["s1", "s1_2"]
 
 
+def test_vision_adapter_speaker_id_resolved_from_character_table():
+    """评测数据集形态：台词只有 speaker_id、无 speaker_name。
+
+    说话人须按角色表反查真名（character_048 → Jack Harmon 一类裸 ID 不得
+    出现在渲染文本里），且 speaker_name 字段补齐（open/mtg 与情绪回推的
+    `speaker_name or speaker` 回退链依赖该字段）；speaker_id 原样保留。
+    """
+    raw = {
+        "asset": {"asset_id": "tt0117060", "title": "碟中谍"},
+        "content": {
+            "characters": [
+                {"character_id": "character_001", "name": "Ethan Hunt"},
+                {"character_id": "character_048", "name": "Jack Harmon"},
+            ],
+            "scenes": [{
+                "scene_id": "scene_001", "start_ms": 0, "end_ms": 60_000,
+                "description": "开场对话。",
+                "dialogues": [
+                    {"dialogue_id": "d1", "speaker_id": "character_048",
+                     "text": "Any questions?"},
+                ],
+            }],
+        },
+    }
+    d = get_adapter("vision").adapt(raw).content.scenes[0].dialogues[0]
+    assert d.speaker == "Jack Harmon"
+    assert d.speaker_name == "Jack Harmon"
+    assert d.speaker_id == "character_048"
+
+
+def test_vision_adapter_speaker_id_not_in_table_falls_back_to_id():
+    """speaker_id 在角色表查不到：回退裸 id，不得抛错（宁缺勿崩）。"""
+    raw = {
+        "asset": {"asset_id": "m10", "title": "未知说话人"},
+        "content": {
+            "characters": [{"character_id": "character_001", "name": "甲"}],
+            "scenes": [{
+                "scene_id": "s1", "start_ms": 0, "end_ms": 1,
+                "dialogues": [{"text": "台词", "speaker_id": "character_404"}],
+            }],
+        },
+    }
+    d = get_adapter("vision").adapt(raw).content.scenes[0].dialogues[0]
+    assert d.speaker == "character_404" and d.speaker_name is None
+
+
 def test_vision_adapter_ignores_unknown_fields():
     raw = json.loads(json.dumps(SAMPLE))
     raw["future_section"] = {"x": 1}
