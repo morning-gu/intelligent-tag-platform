@@ -69,7 +69,10 @@ export interface DimensionScore {
   dimensions?: Record<'presentation' | 'search' | 'recommendation', ValueDirectionScore>
 }
 
-/** 标签评审结果，pass 由终评模型直接给出。 */
+/** 标签评审结果。pass 语义随 calibre.review_config.pass_mode：threshold
+ * = 程序按三维分阈值复算（评审归一，模型只出分不出保留意见）；model =
+ * 旧协议模型直出。行契约恒 9 键——quote/confidence 为评审归一（Task 8）
+ * 新增，部分漏判失败行与旧 run 缺键 → undefined。 */
 export interface TagReview {
   pass: boolean | null
   relevance: DimensionScore
@@ -78,6 +81,8 @@ export interface TagReview {
   reason: string
   evaluated: boolean
   evidence_scene_ids: string[]
+  quote?: string | null
+  confidence?: number | null
 }
 
 /** 生产 judge 三维参考分（审计缺失时整条 null）：仅供参考，评审独立判断。 */
@@ -224,6 +229,25 @@ export interface OpenEvalReport {
     hit_pass: number | null
     review_missing: number
     metrics: QualityMetrics | null
+    /** 行级 judge↔评审一致性对照（评审归一 Task 9，schema v4 新增；
+     * 旧 run 缺键 → undefined）。denominator = 复算可判且 judge 参考三维
+     * 齐的行数，review_rejected = 其中评审否决（judge 参考按构造全放行，
+     * 评审否决即分歧）；disagreement_rate 分母 0 → null（None≠0）；
+     * review_undetermined = 复算 None（轴 null）行数；no_judge_reference =
+     * 复算可判但缺 judge 参考或其三维不齐的行数。axis_delta 逐维取两侧都
+     * 有该维分数的行（value 用 judge_reference["value"] vs value.score）。 */
+    consistency?: {
+      denominator: number
+      review_rejected: number
+      disagreement_rate: number | null
+      review_undetermined: number
+      no_judge_reference: number
+      axis_delta?: Partial<Record<'relevance' | 'semantics' | 'value', {
+        mean_abs: number | null
+        exact_rate: number | null
+        n: number
+      }>>
+    }
   }
   produced_stats: {
     counts: { tt: string; hits: number; new_words: number }[]
@@ -248,7 +272,7 @@ export interface OpenEvalReport {
       reasoning_effort?: string | null
       max_tokens?: number | null
       max_concurrent_requests?: number
-      pass_mode?: 'model'
+      pass_mode?: 'model' | 'threshold'
     }
     library_version: string | null
     dataset_id: string | null
@@ -260,8 +284,11 @@ export interface OpenEvalReport {
   warnings: string[]
 }
 
-/** 生产 judge 的一条判决（审计 verdicts 行，键与 parse_judge_items 一致）：
- * 三维分 0-4（value 为三方向加权小数）或 null。dir_fits/in_dir 仅兼容历史审计产物。 */
+/** 生产 judge 的一条判决（审计 verdicts 扁平行，键与 parse_verdicts 一致，
+ * 由 pipeline._audit_verdict_rows 投影）：三维分 0-4（value 为三方向加权
+ * 小数）或 null；relevance_reason/semantics_reason/value_reasons/
+ * verify_fail 为评审归一（mtg-v15）扁平投影新增键（终判逐轴理由与核验
+ * 失败标记）；dir_fits/in_dir 仅兼容历史审计产物。 */
 export interface JudgeVerdictRow {
   tag: string
   candidate_id?: string
@@ -270,12 +297,41 @@ export interface JudgeVerdictRow {
   value: number | null
   value_scores?: Record<string, number>
   tag_kind?: string
-  in_dir?: boolean | null
-  dir_fits?: Record<string, boolean>
+  relevance_reason?: string
+  semantics_reason?: string
+  value_reasons?: string
+  verify_fail?: string | null
   confidence?: number
   scenes?: string[]
   quote?: string | null
   reason?: string
+  in_dir?: boolean | null
+  dir_fits?: Record<string, boolean>
+}
+
+/** 统一判决引擎 trace（mtg.verdicts.run_verdicts，judge/评审同键族）：
+ * batches 逐批调用现场（batch 批次号、attempt 轮次、targets 本批目标、
+ * raw 原始响应、error 失败原因、missing 漏判目标），errors 为最终未获判决
+ * 目标的 dict（target key → 原因），salvaged 为漏判恢复条数。 */
+export interface VerdictRunTrace {
+  batches: {
+    batch: string
+    attempt: number
+    targets?: string[]
+    raw?: string
+    error?: string | null
+    missing?: string[]
+  }[]
+  errors?: Record<string, string>
+  salvaged?: number
+}
+
+/** legacy judge trace（旧 run 审计产物）：逐次响应/错误按 attempt 索引的
+ * 列表。与新键族按键存在性分流（前端读侧 `batches in trace`）。 */
+export interface LegacyJudgeTrace {
+  raw?: { attempt: number; content: string }[]
+  errors?: { attempt: number; error: string }[]
+  salvaged?: number
 }
 
 /** 生产审计（audit/<tt>.json 的诊断子集）：候选、判决、淘汰原因、最终保留。 */
@@ -303,11 +359,7 @@ export interface OpenMovieAudit {
     tag: string; candidate_id?: string; candidate?: string; dir_id?: string | null; origin?: string
   }[]
   library?: { truncated?: { tag: string; candidate_id?: string; band?: string | null }[] }
-  judge_trace?: {
-    raw?: { attempt: number; content: string }[]
-    errors?: { attempt: number; error: string }[]
-    salvaged?: number
-  }
+  judge_trace?: VerdictRunTrace | LegacyJudgeTrace
 }
 
 /** 评审现场（review/<tt>.json）：逐批原始响应与失败原因。 */
