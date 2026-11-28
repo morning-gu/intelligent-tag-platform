@@ -134,7 +134,9 @@ def review_movie_tags(
             key=key, tag=row.get("name"), level=level,
             allowed_scenes=(scene_ids if level == "film"
                             else frozenset(scene_ids.intersection(row.get("scene_ids") or []))),
-            tag_kind=tag_kind, has_desc=bool(row.get("desc")),
+            tag_kind=tag_kind,
+            # 终审修复：desc 仅空白 = 无释义（legacy strip 口径），缺失释义置 null。
+            has_desc=bool((row.get("desc") or "").strip()),
             id_aliases=(str(index),)))
         labels[key] = {
             "id": key,

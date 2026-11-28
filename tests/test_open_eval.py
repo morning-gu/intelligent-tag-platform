@@ -307,6 +307,33 @@ class _ReviewFailStub:
         raise RuntimeError("评审端点宕机")
 
 
+class _ReviewPartialStub:
+    """评审替身：只给指定 id 的标签出判决，其余一律漏判——制造「一成一败」
+    混合行（引擎 salvage 路径：漏判子集拆批恢复后仍记 errors 的终态）。"""
+
+    model = "mock-1"
+
+    def __init__(self, hit_id: str = "t0") -> None:
+        self.hit_id = hit_id
+        self.calls: list[str] = []
+
+    def complete(self, messages, run_id) -> str:
+        self.calls.append(run_id)
+        labels = json.loads(messages[-1]["content"].rsplit("## 待评估标签\n", 1)[1])
+        reviews = [{"id": label["id"],
+                    "relevance": {"score": 4, "reason": "场景有据"},
+                    "semantics": {"score": 3, "reason": "名称清晰"},
+                    "value": {
+                        "presentation": {"score": 3, "reason": "有内容看点"},
+                        "search": {"score": 3, "reason": "支持检索"},
+                        "recommendation": {"score": 3, "reason": "推荐可用"},
+                    },
+                    "quote": "两名人物在开场场景中发生",
+                    "scenes": ["scene_001", "scene_002"],
+                    "confidence": 0.9} for label in labels if label["id"] == self.hit_id]
+        return json.dumps({"verdicts": reviews}, ensure_ascii=False)
+
+
 class _GateLLM(MockLLMClient):
     """闸门 LLM（互斥用例的 closed 侧）：hold 后阻塞调用，保持 run 活跃；
     10s 未放行自恢复防挂死，放行后走 mock 正常完成。"""
@@ -606,6 +633,37 @@ def test_review_failure_preserves_output(open_setup):
     assert "评审端点宕机" in trace["error"]
     assert trace["batches"][0]["error"].startswith("评审调用失败")
     assert trace["errors"]
+
+
+def test_review_partial_miss_projects_full_row_contract(open_setup):
+    """混合行投影（终审钉死，deferred T8-①）：部分漏判 salvage 后成功行
+    保全值、失败行恒带 9 键且 quote/confidence 投影为 None——open_service
+    行投影 `.get` 契约在真实漏判路径（_review_produced）上的形状。"""
+    svc, fake = open_setup()
+    svc._review_client = _ReviewPartialStub(hit_id="t0")
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    state = svc.get(run_id)
+    assert state.status == "succeeded" and state.failed == 0
+    rows = _raw_rows(svc, run_id)
+    row1 = next(r for r in rows if r["tt"] == "tt0000001")
+    # 成功行（tt0000001 首个标签 → key t0）：9 键齐、值原样保留
+    ok = next(h for h in row1["hits"] if h["tag_id"] == "t1")["review"]
+    assert set(ok) == {"pass", "relevance", "semantics", "value", "reason",
+                       "evidence_scene_ids", "evaluated", "quote", "confidence"}
+    assert ok["evaluated"] is True and ok["pass"] is True
+    assert ok["quote"] == "两名人物在开场场景中发生" and ok["confidence"] == 0.9
+    # 漏判失败行（tX 交集外词 → key t1）：仍 9 键，quote/confidence 补 null
+    missed = row1["hits"][1]["review"]
+    assert set(missed) == {"pass", "relevance", "semantics", "value", "reason",
+                           "evidence_scene_ids", "evaluated", "quote", "confidence"}
+    assert missed["evaluated"] is False and missed["pass"] is None
+    assert missed["quote"] is None and missed["confidence"] is None
+    assert missed["relevance"]["score"] is None
+    # 新词行（key t2，同样漏判）同契约
+    nw = row1["new_words"][0]["review"]
+    assert nw["evaluated"] is False
+    assert nw["quote"] is None and nw["confidence"] is None
+    assert set(nw) == set(missed)
 
 
 # ---------------------------------------------------------------- 双熔断

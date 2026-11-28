@@ -543,10 +543,11 @@ def _match_items(items: list[dict], batch: list[VerdictTarget],
     """判决条目 → {target.key: 条目}：id/别名精确优先，其次名称两级兜底。
 
     id 匹配认 target.key 与 id_aliases（模型回 "3"/3/"t3" 都落回 key "t3"）；
-    带 id 但引擎不认识的条目不进名称兜底（镜像 judge/_parse_reviews 两侧：
-    回错 id 比名错更不可信）。名称兜底仅 match_by_name=True（judge 策略）
-    时启用：normalize_key 精确 → 唯一前缀（judge._map_items 同款）。重复
-    回配同一 key 以首条为准（setdefault）。
+    名称兜底仅 match_by_name=True（judge 策略）时启用：normalize_key 精确 →
+    唯一前缀（judge._map_items 同款），且带 id 但引擎不认识的条目**也走名称
+    兜底**（终审加固：legacy _map_items 对带 id 条目同样按名匹配；评审策略
+    match_by_name=False 下未识别 id 仍直接丢弃——回错 id 比名错更不可信）。
+    重复回配同一 key 以首条为准（setdefault）。
     """
     by_id: dict[str, VerdictTarget] = {}
     for target in batch:
@@ -559,9 +560,8 @@ def _match_items(items: list[dict], batch: list[VerdictTarget],
     leftovers: list[tuple[str, dict]] = []
     for item in items:
         item_id = item.get("id")
-        if item_id is not None:
-            if item_id in by_id:
-                matched.setdefault(by_id[item_id].key, item)
+        if item_id is not None and item_id in by_id:
+            matched.setdefault(by_id[item_id].key, item)
             continue
         if not match_by_name:
             continue

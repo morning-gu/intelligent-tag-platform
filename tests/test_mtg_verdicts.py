@@ -5,8 +5,9 @@ import pytest
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.generation.open.mtg.parse import MTGParseError
 from tagplatform.services.generation.open.mtg.verdicts import (
-    VERDICT_FLOORS, VerdictPolicy, VerdictTarget, _normalize_quote,
-    finalize_verdict, parse_verdicts, run_verdicts, verdict_pass)
+    VERDICT_FLOORS, VerdictPolicy, VerdictTarget, _match_items,
+    _normalize_quote, finalize_verdict, parse_verdicts, run_verdicts,
+    verdict_pass)
 from tagplatform.services.tags.value_scoring import (
     VALUE_DIRECTIONS, aggregate_value_score, weights_dict_for_kind)
 
@@ -617,6 +618,34 @@ def test_run_verdicts_without_id_and_name_flag_go_missing():
     verdicts, errors = _run_engine(recorder, targets)
     assert verdicts == {}
     assert errors == {"t0": "评审响应未包含有效判决"}
+
+
+def test_match_items_unknown_id_routes_through_name_tiers():
+    """终审加固：match_by_name=True 时带未识别 id 的条目也走名称兜底
+    （legacy _map_items 语义——tag 撞目标名即配上）；tag 也撞不上 → 丢弃。
+    match_by_name=False 时未识别 id 仍直接丢弃（评审策略不变）。"""
+    targets = _engine_targets(2)
+    matched = _match_items([
+        {"id": "x1", "tag": "街道晨跑"},      # id 不认识、tag 与目标 t1 同名 → 名称精确
+        {"id": "x2", "tag": "完全无关标签"},   # id/tag 都不认识 → 丢弃
+        {"id": "t0", "tag": "逃离安排"},      # id 精确命中，名称兜底不参与
+    ], targets, match_by_name=True)
+    assert set(matched) == {"t0", "t1"}
+    assert matched["t1"]["id"] == "x1"
+    assert _match_items([{"id": "x1", "tag": "街道晨跑"}], targets,
+                        match_by_name=False) == {}
+
+
+def test_run_verdicts_unknown_id_falls_back_to_name_verdict_lands():
+    """run_verdicts 端到端（终审加固）：响应条目 id 全错但 tag 对得上目标 →
+    match_by_name=True 下终判照常落位，不再因回错 id 整体丢失。"""
+    targets = _engine_targets(2)
+    recorder = Recorder([_verdicts_json([
+        _engine_entry("t0", id="x1", tag="逃离安排"),
+        _engine_entry("t1", id="x2", tag="街道晨跑"),
+    ])])
+    verdicts, errors = _run_engine(recorder, targets, match_by_name=True)
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
 
 
 def test_run_verdicts_format_failure_retries_whole_batch_once():

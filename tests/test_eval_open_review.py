@@ -304,6 +304,18 @@ def test_missing_desc_keeps_low_semantics_defect_but_nulls_high_score():
     assert out[1]["semantics"] == {"score": None, "reason": "缺少释义"}
 
 
+def test_whitespace_only_desc_counts_as_missing_desc():
+    """终审修复：legacy .strip() 语义——desc 仅空白 = 无释义（缺释义路径，
+    open_review 恒传 semantics_null_without_desc=True），semantics 高分置 null
+    而非因非空字符串被当作「有释义」放行。"""
+    row = {"id": "t0", "name": "空白释义", "desc": "   ", "level": "film",
+           "scene_ids": []}
+    result = review_movie_tags(StubClient(by_name={"空白释义": _v(s=3)}),
+                               _content(), [row], run_id="r1:m1")[0]
+    assert result["evaluated"] is True
+    assert result["semantics"] == {"score": None, "reason": "缺少释义"}
+
+
 # ---- 证据核验（引擎复算在行上的投影）----
 
 
