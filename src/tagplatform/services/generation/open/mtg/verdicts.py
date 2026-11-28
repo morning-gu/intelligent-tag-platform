@@ -1,9 +1,9 @@
 """生产 Judge 与开放评测评审共用的判决域/解析/证据核验/批编排引擎。
 
 已落：判决域（VERDICT_FLOORS/verdict_pass/VerdictTarget，Task 1）、融合
-解析器（parse_verdicts，Task 2——两套容错家族取并集）与证据核验终判
-（finalize_verdict，Task 3）。后续任务在同一文件追加：批编排引擎
-（run_verdicts，Task 4）。
+解析器（parse_verdicts，Task 2——两套容错家族取并集）、证据核验终判
+（finalize_verdict，Task 3）与批编排引擎（run_verdicts + VerdictPolicy，
+Task 4——两套旧控制循环收敛为一个队列驱动循环）。
 
 分层红线：本模块不得 import fastapi / sqlalchemy；eval 侧 import 本模块属于
 既有先例方向（`open_review.py` import `mtg.prompts` 已开此口）。
@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections import deque
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 
+from tagplatform.capabilities.llm.usage import accumulate_usage
+from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.parse import (
     MTGParseError,
     extract_json_array,
@@ -465,3 +469,247 @@ def finalize_verdict(item: dict, target: VerdictTarget, *, haystack: str,
         "reason": reason,
         "verify_fail": verify_fail,
     }
+
+
+# ---------------------------------------------------------------------------
+# 批编排引擎（评审归一 Task 4）：judge._judge_batch（固定 20 一批/整批重试/
+# salvage）与 open_review.review_movie_tags（整片单批/漏判拆半/单条复试/
+# 预算 2n+2）两套控制循环收敛为一个队列驱动循环，两侧差异全部收敛在
+# VerdictPolicy 三个旋钮里。每次调用的原始响应与漏判都进 trace（两测统一
+# 键族），审计能还原异常形态。
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VerdictPolicy:
+    """批编排策略参数——judge 与评审两条旧控制循环的差异全在这三个旋钮。
+
+    - max_batch_size：初始分批大小（None = 整批一队，评审现状；judge = 20）；
+    - split_on_missing：漏判是否拆批恢复（评审开——漏判子集另起一批、零命中
+      对半拆；judge 关——漏判重试一轮后直接记 errors 由上层淘汰）；
+    - defer_single_retries：单条复试是否追加到所有子批之后排队补试（评审开，
+      一次机会；judge 关）。
+
+    预算不在这里：恒为 2 * len(targets) + 2（两测同款，见 run_verdicts）。
+    """
+    max_batch_size: int | None = None
+    split_on_missing: bool = False
+    defer_single_retries: bool = False
+
+
+# 错误文案拍板口径：预算文案与现行评审逐字一致（运行器测试按全文断言）；
+# 调用失败/截断/漏判三族文案沿用两侧现状的公共形状。
+_BUDGET_ERROR = "评审调用预算耗尽，未发出恢复请求"
+_TRUNCATED_ERROR = "评审输出超出长度限制"
+_CALL_FAIL_PREFIX = "评审调用失败"
+
+
+def _unwrap(response) -> tuple[str, bool, str]:
+    """引擎响应归一（open_review._unwrap 同语义本地实现，不跨模块引私有）：
+    纯文本替身按成功处理；LLMResponse 失败时给 raw.error 错误串。
+
+    返回 (text, ok, error)。
+    """
+    if isinstance(response, str):
+        return response, True, ""
+    ok = bool(getattr(response, "ok", True))
+    if not ok:
+        raw = getattr(response, "raw", None) or {}
+        return "", False, str(raw.get("error") or "模型未返回成功响应")
+    return getattr(response, "content", None) or "", True, ""
+
+
+def _truncated(response) -> bool:
+    """finish_reason == "length" 判定（open_review._truncated 同语义本地实现）。
+
+    ok=False 信封不判截断（失败请求的 raw 里即便带着 length 也走「调用失败」
+    口径）；纯文本替身没有 raw 信封，恒 False。
+    """
+    if not getattr(response, "ok", True):
+        return False
+    raw = getattr(response, "raw", None) or {}
+    choices = raw.get("choices") or [{}]
+    return choices[0].get("finish_reason") == "length"
+
+
+def _match_items(items: list[dict], batch: list[VerdictTarget],
+                 match_by_name: bool) -> dict[str, dict]:
+    """判决条目 → {target.key: 条目}：id/别名精确优先，其次名称两级兜底。
+
+    id 匹配认 target.key 与 id_aliases（模型回 "3"/3/"t3" 都落回 key "t3"）；
+    带 id 但引擎不认识的条目不进名称兜底（镜像 judge/_parse_reviews 两侧：
+    回错 id 比名错更不可信）。名称兜底仅 match_by_name=True（judge 策略）
+    时启用：normalize_key 精确 → 唯一前缀（judge._map_items 同款）。重复
+    回配同一 key 以首条为准（setdefault）。
+    """
+    by_id: dict[str, VerdictTarget] = {}
+    for target in batch:
+        by_id.setdefault(target.key, target)
+        for alias in target.id_aliases:
+            by_id.setdefault(alias, target)
+    by_name = ({normalize_key(target.tag): target for target in batch
+                if normalize_key(target.tag)} if match_by_name else {})
+    matched: dict[str, dict] = {}
+    leftovers: list[tuple[str, dict]] = []
+    for item in items:
+        item_id = item.get("id")
+        if item_id is not None:
+            if item_id in by_id:
+                matched.setdefault(by_id[item_id].key, item)
+            continue
+        if not match_by_name:
+            continue
+        key = normalize_key(item["tag"])
+        if key and key in by_name:
+            matched.setdefault(by_name[key].key, item)
+        else:
+            leftovers.append((key, item))
+    for key, item in leftovers:
+        if not key:
+            continue
+        hits = [candidate_key for candidate_key in by_name
+                if key.startswith(candidate_key) or candidate_key.startswith(key)]
+        if len(hits) == 1 and by_name[hits[0]].key not in matched:
+            matched.setdefault(by_name[hits[0]].key, item)
+    return matched
+
+
+def run_verdicts(client, targets: list[VerdictTarget], *,
+                 build_messages: Callable[[list[VerdictTarget], int], list[dict]],
+                 run_id: str, policy: VerdictPolicy, haystack: str,
+                 scene_texts: Mapping[str, str] | None = None,
+                 value_weights: Mapping | None = None,
+                 semantics_null_without_desc: bool = False,
+                 match_by_name: bool = False, trace: dict | None = None,
+                 usage: dict | None = None, request_slot=None,
+                 ) -> tuple[dict[str, dict], dict[str, str]]:
+    """队列驱动的判决批编排：返回 ({target.key: 终判}, {target.key: 错误})。
+
+    控制流（评审归一拍板口径，覆盖两套旧循环）：初始按 max_batch_size 分批
+    （None = 整批一队）；每批调用 → parse_verdicts → 回配（id/别名精确 →
+    match_by_name 时名称两级）→ 全配齐即完成。漏判派发：
+    attempt 0 零命中且未截断 → 整批重试一次（attempt 1，重试 hint 由
+    build_messages 按 attempt 附加）；有命中 → split_on_missing 时漏判子集
+    另起一批（已判不重发），否则 judge 口径漏判子集带 hint 重试一轮；
+    零命中且 split_on_missing 且 >1 条 → 对半两批入队（front，深度优先）；
+    单条 → defer_single_retries 时追加队尾单条复试（一次机会），否则记
+    errors。截断（finish_reason=length）不整批重试——重发只会再截断，直接
+    走拆批口径；已解析条目照常保留。每次调用前查预算（恒
+    2*len(targets)+2，含单条复试），耗尽后剩余目标直接记「预算耗尽」，
+    不再发请求。调用抛异常或 LLMResponse.ok=False：该批目标记「评审调用
+    失败」，其余批继续。
+
+    usage 传入 dict 时逐次真实响应累计（accumulate_usage，judge 同款）；
+    trace 传入 dict 时记录统一键族 {"batches": [{batch, attempt, targets,
+    raw, error, missing}], "errors": {key: msg}, "salvaged": int}——salvaged
+    为未配齐批次里保住的判决条数。命中目标逐条 finalize_verdict 出终判。
+    """
+    if not targets:
+        return {}, {}
+    scene_texts = scene_texts or {}
+    targets_by_key = {target.key: target for target in targets}
+    errors: dict[str, str] = {}
+    verdicts: dict[str, dict] = {}
+    budget = 2 * len(targets) + 2
+    if trace is not None:
+        # 统一键族三键恒在（成功批 errors 空表 / salvaged 0），前端读侧免判键。
+        trace.setdefault("batches", [])
+        trace.setdefault("errors", {})
+        trace.setdefault("salvaged", 0)
+    queue: deque = deque()
+    size = policy.max_batch_size or len(targets)
+    for start in range(0, len(targets), size):
+        queue.append((targets[start:start + size], 0, False))
+
+    def note_errors() -> None:
+        """errors 就地镜像进 trace（实时进度读得到，终值同 legacy 落法）。"""
+        if trace is not None and errors:
+            trace["errors"] = dict(errors)
+
+    while queue:
+        batch, attempt, derived = queue.popleft()
+        if budget <= 0:
+            for target in batch:
+                errors[target.key] = _BUDGET_ERROR
+            note_errors()
+            continue
+        budget -= 1
+        batch_id = f"{run_id}:{batch[0].key}-{batch[-1].key}"
+        record = {"batch": batch_id, "attempt": attempt,
+                  "targets": [target.key for target in batch], "raw": "",
+                  "error": None, "missing": []}
+        if trace is not None:
+            trace.setdefault("batches", []).append(record)
+        try:
+            with request_slot if request_slot is not None else nullcontext():
+                response = client.complete(build_messages(batch, attempt), batch_id)
+        except Exception as exc:  # noqa: BLE001 —— 传输层任何异常统一按调用失败
+            error = f"{_CALL_FAIL_PREFIX}：{exc}"
+            record.update(error=error,
+                          missing=[target.key for target in batch])
+            for target in batch:
+                errors[target.key] = error
+            note_errors()
+            continue
+        if usage is not None:
+            accumulate_usage(usage, getattr(response, "usage", None))
+        text, ok, call_error = _unwrap(response)
+        if not ok:
+            error = f"{_CALL_FAIL_PREFIX}：{call_error}"
+            record.update(error=error,
+                          missing=[target.key for target in batch])
+            for target in batch:
+                errors[target.key] = error
+            note_errors()
+            continue
+        record["raw"] = text
+        truncated = _truncated(response)
+        parse_error = ""
+        try:
+            items = parse_verdicts(text)
+        except MTGParseError as exc:
+            items = exc.items
+            parse_error = str(exc)
+        matched = _match_items(items, batch, match_by_name)
+        for key, item in matched.items():
+            verdicts.setdefault(key, finalize_verdict(
+                item, targets_by_key[key], haystack=haystack,
+                scene_texts=scene_texts, value_weights=value_weights,
+                semantics_null_without_desc=semantics_null_without_desc))
+        missing = [target for target in batch if target.key not in matched]
+        if not missing:
+            continue
+        if truncated:
+            error = _TRUNCATED_ERROR
+        elif parse_error:
+            error = f"评审响应无法解析：{parse_error}"
+        elif not matched:
+            error = "评审响应未包含有效判决"
+        else:
+            error = "评审响应缺少目标判决"
+        record.update(error=error, missing=[target.key for target in missing])
+        if trace is not None:
+            trace["salvaged"] = trace.get("salvaged", 0) + len(matched)
+        # 漏判派发（brief Step 3 控制流，按序判定）：
+        if attempt == 0 and not derived and not truncated and not matched:
+            queue.appendleft((batch, 1, True))              # 整批重试一次
+        elif matched and policy.split_on_missing:
+            queue.appendleft((missing, 0, True))            # 漏判子集另起一批
+        elif matched:
+            if attempt == 0:
+                queue.appendleft((missing, 1, True))        # judge：漏判带 hint 重试一轮
+            else:
+                for target in missing:
+                    errors[target.key] = error
+                note_errors()
+        elif policy.split_on_missing and len(missing) > 1:
+            middle = len(missing) // 2                      # 对半两批，front 入队（深度优先）
+            queue.appendleft((missing[middle:], 0, True))
+            queue.appendleft((missing[:middle], 0, True))
+        elif (len(missing) == 1 and policy.defer_single_retries
+              and attempt == 0):
+            queue.append((missing, 1, True))                # 单条复试排队尾，一次机会
+        else:
+            for target in missing:
+                errors[target.key] = error
+            note_errors()
+    return verdicts, errors

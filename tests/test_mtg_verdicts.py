@@ -2,10 +2,11 @@ import json
 
 import pytest
 
+from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.generation.open.mtg.parse import MTGParseError
 from tagplatform.services.generation.open.mtg.verdicts import (
-    VERDICT_FLOORS, VerdictTarget, _normalize_quote, finalize_verdict,
-    parse_verdicts, verdict_pass)
+    VERDICT_FLOORS, VerdictPolicy, VerdictTarget, _normalize_quote,
+    finalize_verdict, parse_verdicts, run_verdicts, verdict_pass)
 from tagplatform.services.tags.value_scoring import (
     VALUE_DIRECTIONS, aggregate_value_score, weights_dict_for_kind)
 
@@ -455,3 +456,333 @@ def test_finalize_value_overall_reason_priority_and_kind_alias():
     assert verdict["reason"].endswith("；整体价值中上")
     assert verdict["value"]["tag_kind"] == "character"
     assert set(verdict["value"]["dimensions"]) == set(VALUE_DIRECTIONS)
+
+
+# ---------------------------------------------------------------------------
+# 批编排引擎 run_verdicts（评审归一 Task 4）：队列驱动控制流 + VerdictPolicy
+# 策略参数 + 预算 + 统一 trace 键族。Recorder 替身契约：
+# complete(messages, run_id) -> str | LLMResponse（str=成功替身，镜像
+# open_review._unwrap/_truncated 语义；LLMResponse 信封走 ok/截断口径）。
+# ---------------------------------------------------------------------------
+
+_ENGINE_TAGS = ("逃离安排", "街道晨跑", "雨夜追踪", "结局反转")
+
+
+def _engine_target(index, **overrides) -> VerdictTarget:
+    """film 级全场景引擎目标（tag 取 _ENGINE_TAGS，按需覆盖字段）。"""
+    params = dict(key=f"t{index}", tag=_ENGINE_TAGS[index], level="film",
+                  allowed_scenes=frozenset(_SCENE_TEXTS), tag_kind="content",
+                  has_desc=True)
+    params.update(overrides)
+    return VerdictTarget(**params)
+
+
+def _engine_targets(count, **overrides) -> list[VerdictTarget]:
+    return [_engine_target(i, **overrides) for i in range(count)]
+
+
+def _engine_entry(key, **overrides) -> dict:
+    """对 target key 的标准合格判决条目（quote/scenes 落在核验材料内）。"""
+    entry = {
+        "id": key,
+        "relevance": {"score": 4, "reason": "主线强相关"},
+        "semantics": {"score": 3, "reason": "语义清楚"},
+        "value": {
+            "presentation": {"score": 3, "reason": "有看点"},
+            "search": {"score": 4, "reason": "类型明确"},
+            "recommendation": {"score": 3, "reason": "强度一般"},
+        },
+        "quote": _GOOD_QUOTE,
+        "scenes": ["scene_001", "scene_002"],
+        "confidence": 0.85,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _verdicts_json(entries) -> str:
+    return json.dumps({"verdicts": entries}, ensure_ascii=False)
+
+
+def _truncated_response(content: str = "") -> LLMResponse:
+    """ok 信封 + finish_reason=length（截断口径的替身）。"""
+    return LLMResponse(content=content, usage={},
+                       raw={"choices": [{"finish_reason": "length"}]}, ok=True)
+
+
+class Recorder:
+    """引擎测试替身：按脚本逐次返回响应并记录每次 (messages, run_id)。
+
+    脚本项为 str（成功替身）/ LLMResponse（信封）/ Exception 实例（抛出）；
+    脚本耗尽后重复最后一项（预算耗尽用例靠它制造"每次都失败"）。
+    """
+
+    def __init__(self, script):
+        self.script = list(script)
+        self._last = script[-1] if script else None
+        self.calls: list[tuple[list[dict], str]] = []
+
+    def complete(self, messages, run_id):
+        self.calls.append((messages, run_id))
+        step = self.script.pop(0) if self.script else self._last
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _engine_build_messages(batch, attempt):
+    """极简 build_messages 替身：把 attempt 编码进 user 内容，供重试 hint 断言。"""
+    keys = ",".join(t.key for t in batch)
+    return [{"role": "system", "content": "SYS"},
+            {"role": "user", "content": f"batch={keys};attempt={attempt}"}]
+
+
+def _run_engine(recorder, targets, *, policy=None, trace=None, usage=None,
+                match_by_name=False, request_slot=None):
+    return run_verdicts(
+        recorder, targets, build_messages=_engine_build_messages, run_id="r1",
+        policy=policy or VerdictPolicy(), haystack=_HAYSTACK,
+        scene_texts=_SCENE_TEXTS, match_by_name=match_by_name,
+        trace=trace, usage=usage, request_slot=request_slot)
+
+
+def test_run_verdicts_whole_batch_success():
+    """整批一次成功：每目标一条终判、errors 空、trace 单批且 batch/targets 键正确。"""
+    targets = _engine_targets(2)
+    recorder = Recorder([_verdicts_json([_engine_entry("t0"), _engine_entry("t1")])])
+    trace: dict = {}
+    verdicts, errors = _run_engine(recorder, targets, trace=trace)
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
+    verdict = verdicts["t0"]
+    assert verdict["relevance"]["score"] == 4
+    assert verdict["scenes"] == ["scene_001", "scene_002"]
+    assert verdict["verify_fail"] is None
+    assert verdict["value"]["score"] == pytest.approx(3.4)  # 默认 content 权重聚合
+    [record] = trace["batches"]
+    assert record["batch"] == "r1:t0-t1"
+    assert record["targets"] == ["t0", "t1"]
+    assert record["attempt"] == 0
+    assert record["error"] is None and record["missing"] == []
+    assert "verdicts" in record["raw"]
+    assert trace["errors"] == {} and trace["salvaged"] == 0
+
+
+@pytest.mark.parametrize("response_id", ["3", 3, "t3"])
+def test_run_verdicts_id_variants_match(response_id):
+    """id 变体回配：回 "3" / 3 / "t3"（target key "t3"、id_aliases=("3",)）都回配上。"""
+    targets = [_engine_target(3, id_aliases=("3",))]
+    recorder = Recorder([_verdicts_json([_engine_entry("t3", id=response_id)])])
+    verdicts, errors = _run_engine(recorder, targets)
+    assert set(verdicts) == {"t3"} and errors == {}
+
+
+def test_run_verdicts_name_fallback_exact_and_unique_prefix():
+    """回 tag 不回 id 且 match_by_name=True：归一化精确 → 唯一前缀两级兜底。"""
+    targets = _engine_targets(2)
+    recorder = Recorder([_verdicts_json([
+        _engine_entry("t0", id=None, tag="街道晨跑"),          # 与目标 t1 同名 → 精确
+        _engine_entry("t1", id=None, tag="逃离安排续作篇"),     # 目标 t0 名称的前缀超集
+    ])])
+    verdicts, errors = _run_engine(recorder, targets, match_by_name=True)
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
+
+
+def test_run_verdicts_without_id_and_name_flag_go_missing():
+    """match_by_name=False（评审策略）时无 id 条目不配对：零命中 → 整批重试后记 errors。"""
+    targets = _engine_targets(1)
+    recorder = Recorder([_verdicts_json([_engine_entry("t0", id=None)])])
+    verdicts, errors = _run_engine(recorder, targets)
+    assert verdicts == {}
+    assert errors == {"t0": "评审响应未包含有效判决"}
+
+
+def test_run_verdicts_format_failure_retries_whole_batch_once():
+    """整批格式失败（非 JSON）→ 同批 attempt 1 重试一次（build_messages 收到 attempt=1）后成功。"""
+    targets = _engine_targets(2)
+    recorder = Recorder(["不是 JSON",
+                         _verdicts_json([_engine_entry("t0"), _engine_entry("t1")])])
+    trace: dict = {}
+    verdicts, errors = _run_engine(recorder, targets, trace=trace)
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
+    assert len(recorder.calls) == 2
+    assert "attempt=1" in recorder.calls[1][0][1]["content"]
+    assert [record["attempt"] for record in trace["batches"]] == [0, 1]
+    assert trace["batches"][0]["missing"] == ["t0", "t1"]
+    assert trace["batches"][0]["error"]
+    assert trace["batches"][1]["error"] is None
+
+
+def test_run_verdicts_split_on_missing_reenqueues_subset_and_halves():
+    """split_on_missing=True：漏判子集另起一批（已判不重发）→ 子批零命中对半拆 →
+    单条进 defer 复试队列（attempt 1）并成功。"""
+    targets = _engine_targets(4)
+    recorder = Recorder([
+        _verdicts_json([_engine_entry("t0"), _engine_entry("t1")]),  # 整批漏 t2/t3
+        "不是 JSON",                                                  # [t2,t3] 零命中 → 对半
+        _verdicts_json([_engine_entry("t2")]),                        # [t2] 成功
+        "不是 JSON",                                                  # [t3] 失败 → 单条复试
+        _verdicts_json([_engine_entry("t3")]),                        # 单条复试成功
+    ])
+    trace: dict = {}
+    policy = VerdictPolicy(split_on_missing=True, defer_single_retries=True)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy, trace=trace)
+    assert set(verdicts) == {"t0", "t1", "t2", "t3"} and errors == {}
+    assert [record["targets"] for record in trace["batches"]] == [
+        ["t0", "t1", "t2", "t3"], ["t2", "t3"], ["t2"], ["t3"], ["t3"]]
+    assert [record["attempt"] for record in trace["batches"]] == [0, 0, 0, 0, 1]
+    assert trace["batches"][1]["missing"] == ["t2", "t3"]
+    assert trace["batches"][3]["missing"] == ["t3"]
+
+
+def test_run_verdicts_single_retries_after_all_subbatches_then_errors():
+    """单条复试排在所有子批之后才发出；复试失败 → errors 有该 key。"""
+    targets = _engine_targets(3)
+    recorder = Recorder([_verdicts_json([_engine_entry("t0")]),
+                         "不是 JSON"])  # 脚本耗尽后重复失败：首轮只配齐 t0
+    trace: dict = {}
+    policy = VerdictPolicy(split_on_missing=True, defer_single_retries=True)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy, trace=trace)
+    assert set(verdicts) == {"t0"}
+    assert set(errors) == {"t1", "t2"}
+    assert [record["targets"] for record in trace["batches"]] == [
+        ["t0", "t1", "t2"], ["t1", "t2"], ["t1"], ["t2"], ["t1"], ["t2"]]
+    assert [record["attempt"] for record in trace["batches"]] == [0, 0, 0, 0, 1, 1]
+    assert trace["salvaged"] == 1
+
+
+def test_run_verdicts_judge_policy_retries_missing_round_then_salvages():
+    """split_on_missing=False（judge 策略，max_batch_size=2 分批）：漏判重试一轮后记
+    errors、已判保留、salvaged 计数正确。"""
+    targets = _engine_targets(4)
+    recorder = Recorder([
+        _verdicts_json([_engine_entry("t0")]),   # [t0,t1]@0：t1 漏判 → 漏判子集重试
+        "不是 JSON",                              # [t1]@1 失败 → errors
+        "不是 JSON",                              # [t2,t3]@0 零命中 → 整批重试
+        _verdicts_json([_engine_entry("t2")]),   # [t2,t3]@1：t3 漏判 → 重试机会已用完
+    ])
+    trace: dict = {}
+    policy = VerdictPolicy(max_batch_size=2)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy, trace=trace)
+    assert set(verdicts) == {"t0", "t2"}
+    assert set(errors) == {"t1", "t3"}
+    assert len(recorder.calls) == 4
+    assert [record["targets"] for record in trace["batches"]] == [
+        ["t0", "t1"], ["t1"], ["t2", "t3"], ["t2", "t3"]]
+    assert [record["attempt"] for record in trace["batches"]] == [0, 1, 0, 1]
+    assert trace["salvaged"] == 2
+    assert "attempt=1" in recorder.calls[1][0][1]["content"]  # 漏判子集重试带 hint
+
+
+def test_run_verdicts_truncated_keeps_parsed_and_splits_missing():
+    """截断（finish_reason=length）：已解析条目保留 + 漏判子集走拆批。"""
+    targets = _engine_targets(4)
+    recorder = Recorder([
+        LLMResponse(content=_verdicts_json([_engine_entry("t0"), _engine_entry("t1")]),
+                    usage={}, raw={"choices": [{"finish_reason": "length"}]}, ok=True),
+        _verdicts_json([_engine_entry("t2"), _engine_entry("t3")]),
+    ])
+    trace: dict = {}
+    policy = VerdictPolicy(split_on_missing=True)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy, trace=trace)
+    assert set(verdicts) == {"t0", "t1", "t2", "t3"} and errors == {}
+    assert [record["targets"] for record in trace["batches"]] == [
+        ["t0", "t1", "t2", "t3"], ["t2", "t3"]]
+    assert trace["batches"][0]["error"] == "评审输出超出长度限制"
+    assert trace["batches"][0]["missing"] == ["t2", "t3"]
+
+
+def test_run_verdicts_truncated_zero_hit_splits_without_whole_retry():
+    """截断且零命中：不整批重试（重发只会再截断），直接对半拆批。"""
+    targets = _engine_targets(2)
+    recorder = Recorder([
+        _truncated_response(),
+        _verdicts_json([_engine_entry("t0")]),
+        _verdicts_json([_engine_entry("t1")]),
+    ])
+    policy = VerdictPolicy(split_on_missing=True)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy)
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
+    assert len(recorder.calls) == 3
+
+
+def test_run_verdicts_budget_exhausted_marks_remaining_without_requests():
+    """预算耗尽：每次都失败、目标 3 条（预算 8）→ 消耗完后剩余目标进 errors
+    （含「预算耗尽」），不再发请求。"""
+    targets = _engine_targets(3)
+    recorder = Recorder(["不是 JSON"])  # 脚本耗尽后重复失败
+    policy = VerdictPolicy(split_on_missing=True, defer_single_retries=True)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy)
+    assert verdicts == {}
+    assert set(errors) == {"t0", "t1", "t2"}
+    assert "预算耗尽" in errors["t2"]
+    assert len(recorder.calls) == 2 * 3 + 2
+
+
+def test_run_verdicts_call_exception_marks_batch_and_continues():
+    """调用抛异常：该批目标进 errors（含「评审调用失败」与异常文本），其余批继续。"""
+    targets = _engine_targets(4)
+    recorder = Recorder([
+        RuntimeError("端点宕机"),
+        _verdicts_json([_engine_entry("t2"), _engine_entry("t3")]),
+    ])
+    policy = VerdictPolicy(max_batch_size=2)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy)
+    assert set(verdicts) == {"t2", "t3"}
+    assert set(errors) == {"t0", "t1"}
+    assert "评审调用失败" in errors["t0"] and "端点宕机" in errors["t0"]
+    assert len(recorder.calls) == 2
+
+
+def test_run_verdicts_llm_response_failure_records_error_without_retry():
+    """LLMResponse.ok=False（调用失败信封）：该批目标记「评审调用失败」，
+    错误串取 raw.error，不重试不发请求。"""
+    targets = _engine_targets(2)
+    recorder = Recorder([LLMResponse(content="", usage={},
+                                     raw={"error": "连接超时"}, ok=False)])
+    verdicts, errors = _run_engine(recorder, targets)
+    assert verdicts == {}
+    assert errors == {"t0": "评审调用失败：连接超时", "t1": "评审调用失败：连接超时"}
+    assert len(recorder.calls) == 1
+
+
+def test_run_verdicts_usage_accumulated_per_call():
+    """usage 传入 dict：LLMResponse.usage 经 accumulate_usage 累计（calls+tokens）。"""
+    targets = _engine_targets(1)
+    recorder = Recorder([LLMResponse(content=_verdicts_json([_engine_entry("t0")]),
+                                     usage={"prompt_tokens": 10, "completion_tokens": 5},
+                                     raw={}, ok=True)])
+    usage: dict = {}
+    _run_engine(recorder, targets, usage=usage)
+    assert usage == {"calls": 1, "prompt_tokens": 10, "completion_tokens": 5}
+
+
+def test_run_verdicts_request_slot_wraps_each_call():
+    """request_slot 上下文在每次 client.complete 前后进入/退出（并发限速缝隙）。"""
+    entered = []
+
+    class Slot:
+        def __enter__(self):
+            entered.append("enter")
+            return self
+
+        def __exit__(self, *exc):
+            entered.append("exit")
+            return False
+
+    targets = _engine_targets(2)
+    recorder = Recorder([_verdicts_json([_engine_entry("t0")]),
+                         _verdicts_json([_engine_entry("t1")])])
+    policy = VerdictPolicy(max_batch_size=1)
+    verdicts, errors = _run_engine(recorder, targets, policy=policy,
+                                   request_slot=Slot())
+    assert set(verdicts) == {"t0", "t1"} and errors == {}
+    assert entered == ["enter", "exit", "enter", "exit"]
+
+
+def test_run_verdicts_empty_targets_noop():
+    """空目标：直接返回空二元组，不发请求。"""
+    recorder = Recorder([])
+    result = run_verdicts(recorder, [], build_messages=_engine_build_messages,
+                          run_id="r1", policy=VerdictPolicy(), haystack="")
+    assert result == ({}, {})
+    assert recorder.calls == []
