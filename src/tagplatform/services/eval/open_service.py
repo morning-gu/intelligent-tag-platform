@@ -862,8 +862,10 @@ class OpenEvalService:
                     run_id=f"{run_id}:{tt}", request_slot=self._review_slots,
                     trace=review_trace, value_weights=self.settings.tag_value_weights)
                 fields = ("pass", "relevance", "semantics", "value", "reason",
-                          "evidence_scene_ids", "evaluated")
-                reviews = [{key: row[key] for key in fields} for row in reviewed]
+                          "evidence_scene_ids", "evaluated", "quote", "confidence")
+                # 失败行（部分漏判）只有 7 旧键——quote/confidence 投影补 null，
+                # 行契约恒 9 键（评审归一 Task 8）。
+                reviews = [{key: row.get(key) for key in fields} for row in reviewed]
         except Exception as exc:  # noqa: BLE001 —— 评审失败时保留生成产出
             review_error = f"{type(exc).__name__}: {exc}"
         with self._lock:
