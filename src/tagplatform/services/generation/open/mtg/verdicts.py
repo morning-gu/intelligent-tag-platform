@@ -132,7 +132,8 @@ def _clean_dimension(value) -> tuple:
 def _clean_value_block(entry: dict) -> tuple[dict | None, list[str]]:
     """解析 value 三方向分（presentation/search/recommendation，均 0-4 整数）。
 
-    新协议 `value` 优先，旧 judge `value_scores` 兜底；中文方向键经
+    新协议 `value` 优先，旧 judge `value_scores` 兜底（与 parse_judge_items
+    的 value_scores 优先相反；仅畸形双键并存的响应才有差异）；中文方向键经
     VALUE_DIRECTION_ALIASES 归一。方向分接受裸整数或 {score, reason} 对象；
     null / 漏方向 / 布尔 / 越界一律协议错误（v13 纪律：value 不接受
     「无法判断」，绝不与 relevance 的 null 混同）。
@@ -189,11 +190,25 @@ def _flatten_wrapper(data) -> list | None:
 
 
 def _loads_verdict_payload(text: str) -> list:
-    """取判决条目数组：先直读 JSON（包装 dict 在本地展平），失败走
-    extract_json_array 兜底（```json 围栏 / 前后 prose / 嵌套列表）。"""
+    """取判决条目数组：先直读 JSON（包装 dict 在本地展平）；失败按首尾大
+    括号抠对象再展平（open_review._loads_with_prose_fallback 同款——prose
+    包裹的 {"reviews": {"t0": {...}}} 不失守，extract_json_array 只会抠
+    [...] 抠不了 {...}），仍失败走 extract_json_array 兜底（```json 围栏 /
+    前后 prose / 嵌套列表）。"""
     try:
         data = json.loads((text or "").strip())
     except json.JSONDecodeError:
+        raw = (text or "").strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+            else:
+                flattened = _flatten_wrapper(data)
+                if flattened is not None:
+                    return flattened
         return extract_json_array(text)
     flattened = _flatten_wrapper(data)
     if flattened is not None:

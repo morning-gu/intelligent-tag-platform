@@ -130,6 +130,23 @@ def test_parse_verdicts_fence_and_prose_stripped():
     assert [it["id"] for it in items] == ["t0"]
 
 
+def test_parse_verdicts_prose_wrapped_id_indexed_dict():
+    """无围栏 prose + 按 id 索引对象 → 首尾大括号抠取再展平（legacy 缺口修复）。"""
+    body = json.dumps({"reviews": {"t0": _FUSED_ENTRY}}, ensure_ascii=False)
+    items = parse_verdicts(f"评审结果如下：\n{body}\n请核对。")
+    assert [it["id"] for it in items] == ["t0"]
+    assert items[0]["relevance"]["score"] == 4
+    assert items[0]["value"]["presentation"]["score"] == 3
+
+
+def test_parse_verdicts_fenced_prose_id_indexed_dict():
+    """prose + ```json 围栏 + 按 id 索引对象 → 抠取展平，不被容错三误判为标签名映射。"""
+    body = json.dumps({"reviews": {"t0": _FUSED_ENTRY}}, ensure_ascii=False)
+    items = parse_verdicts(f"以下是评审结果：\n```json\n{body}\n```\n请核对。")
+    assert [it["id"] for it in items] == ["t0"]
+    assert items[0]["id"] == "t0" and items[0]["tag"] == ""
+
+
 @pytest.mark.parametrize("form,reason", [
     ({"score": None, "reason": "材料缺失"}, "材料缺失"),
     (None, ""),
