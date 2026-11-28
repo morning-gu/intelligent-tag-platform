@@ -2,7 +2,9 @@
 // （mock 到模块边界即隔离网络，模式同 ClosedEvalMovieTable.test.tsx）。
 // 覆盖：整片 0 条产出时仍列出全部候选与淘汰原因（value=null 整批归零的
 // 现场）、保留行标出最终名、目录契合 false 如实呈现、judge 协议异常提示、
-// 评审失败批次原因、取数失败透出 message、无审计时的兜底文案。
+// judge trace 新键族（batches/errors dict/salvaged，评审归一）逐批渲染、
+// legacy trace（raw/errors 列表）照常渲染不崩、评审失败批次原因、取数失败
+// 透出 message、无审计时的兜底文案。
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import OpenEvalMovieAudit from './OpenEvalMovieAudit'
@@ -93,9 +95,38 @@ describe('OpenEvalMovieAudit 生产审计面板', () => {
     expect(await screen.findByText('粗粝写实')).toBeInTheDocument()
     expect(screen.getByText('合并候选 2 条 · judge 判决 0 条 · 最终保留 0 条')).toBeInTheDocument()
     expect(screen.queryByText(/生成阶段就没有产出/)).not.toBeInTheDocument()
+    expect(screen.getByText('judge 有 2 次调用出现异常')).toBeInTheDocument()
     fireEvent.click(screen.getByText('judge 原始响应（2 次）'))
     fireEvent.click(screen.getByText('judge 第 2 次 · 始终漏判'))
     expect(screen.getByText('[]')).toBeVisible()
+  })
+
+  it('judge trace 新键族：逐批响应/错误渲染 + errors dict + salvaged 计数', async () => {
+    mockedFetch.mockResolvedValue(diagnostics({
+      audit: {
+        version: 'mtg-v15-unified-verdict',
+        merged: [{ tag: '粗粝写实', scope: 'film' }],
+        judge_trace: {
+          batches: [
+            { batch: 'tt0067116:t0-t0', attempt: 0, targets: ['t0'], raw: '{"verdicts":[]}',
+              error: null, missing: [] },
+            { batch: 'tt0067116:t0-t0', attempt: 1, targets: ['t0'], raw: '',
+              error: '评审调用失败：超时', missing: ['t0'] },
+          ],
+          errors: { t0: '评审调用失败：超时' },
+          salvaged: 2,
+        },
+      },
+    }))
+    render(<OpenEvalMovieAudit runId={RUN_ID} tt="tt0067116" />)
+    expect(await screen.findByText('粗粝写实')).toBeInTheDocument()
+    expect(screen.getByText('judge 有 1 个候选未获判决')).toBeInTheDocument()
+    expect(screen.getByText('judge 未完成：t0 评审调用失败：超时')).toBeInTheDocument()
+    expect(screen.getByText('漏判恢复 2 条')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('judge 原始响应（2 次）'))
+    fireEvent.click(screen.getByText('tt0067116:t0-t0#0 · t0'))
+    expect(screen.getByText('{"verdicts":[]}')).toBeVisible()
+    expect(screen.getByText(/tt0067116:t0-t0#1 · t0 · 评审调用失败：超时（缺少 t0）/)).toBeInTheDocument()
   })
 
   it('评审原始响应和预算耗尽的条目均可追查', async () => {

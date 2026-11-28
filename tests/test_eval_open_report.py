@@ -6,15 +6,20 @@ OpenMovieResult 的行契约
 （hits/new_words 带 review = 三维分 + 推导 pass + quote，judge_reference
 可选）。钉死：
 
-1. 汇总微口径：通过率分母只计有判定行（漏判 pass=None 排除），评审
-   失败片整体排除（None≠0，产出不作废仍计 total_tags/new_ratio）；
+1. 汇总微口径：通过率分母只计复算可判行（三维分经 verdict_pass 复算，
+   不信任行内存 pass——旧 run 的行走 legacy 升级口径），评审失败片整体
+   排除（None≠0，产出不作废仍计 total_tags/new_ratio）；
 2. 三维指标复用 quality_metrics（与生产批次汇总同机制）；
 3. judge 审计聚合（数量漏斗 / 三维分聚合 / dropped / bands）与缺失
-   警示；banner 三档（部分运行 / 同模 / 小样本）；
-4. report.json / report.md / metrics.csv 三件套与历史摘要五键容错。
+   警示；banner 四档（部分运行 / 同模 / 旧协议 / 小样本）；
+4. 一致性对照（summary.consistency，schema v4）：三桶响亮核算（互斥
+   全覆盖：可判×参考齐 / 复算 null / 缺 judge 参考）+ 逐维均差/一致率
+   （None 轴不进该维分母）；
+5. report.json / report.md / metrics.csv 三件套与历史摘要五键容错。
 """
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -186,13 +191,102 @@ def test_movie_rows_carry_review_and_reference():
     assert movie["metrics"]["evaluated_tags"] == 2
 
 
+def test_pass_rate_recomputes_threshold_not_stored_pass():
+    """统计口径：pass 一律按行内三维分 verdict_pass 复算——行存 pass 是
+    旧模型保留值（旧 run 的 False）不进统计；任一轴 null → 复算 None
+    出 judged 分母（None≠0）。"""
+    m = _result("ttA", hits=[
+        _hit("t1", review=_review(False)),               # 存储 pass=False，复算 (4,3,3) 过线
+        _hit("t2", review=_review(r=None, s=3, v=2.5)),  # relevance null → 复算 None
+    ])
+    report = assemble_open_report([m], _meta(done=1, total=1))
+    summary = report["summary"]
+    assert summary["passed_tags"] == 1
+    assert summary["judged_tags"] == 1
+    assert summary["pass_rate"] == pytest.approx(1.0)
+    assert summary["three_judged_tags"] == 1  # three_judged 语义不变：仅 t1 全轴有分
+
+
+def test_report_schema_version_is_four():
+    report = assemble_open_report([_result("ttA", hits=[_hit("t1")])],
+                                  _meta(done=1, total=1))
+    assert report["schema_version"] == 4
+    assert "consistency" in report["summary"]
+
+
+def test_consistency_buckets_and_axis_deltas():
+    """一致性对照三桶响亮核算（互斥全覆盖：可判×参考齐 / 复算 null /
+    缺或不齐 judge 参考）+ 逐维 delta（None≠0：null 轴不进该维分母，
+    其余轴照常计入）。"""
+    m = _result("ttA", hits=[
+        _hit("t1", reference={"relevance": 4, "semantics": 3, "value": 3.0}),
+        _hit("t2", review=_review(False, r=2),
+             reference={"relevance": 4, "semantics": 3, "value": 3.0}),
+        _hit("t3", review=_review(r=None, s=3, v=2.5),
+             reference={"relevance": 4, "semantics": 2, "value": 2.5}),
+        _hit("t4", reference=None),
+        _hit("t5", reference={"relevance": 4, "semantics": None, "value": 3.0}),
+    ])
+    report = assemble_open_report([m], _meta(done=1, total=1))
+    consistency = report["summary"]["consistency"]
+    assert consistency["denominator"] == 2          # t1/t2（可判 + 参考三维齐）
+    assert consistency["review_rejected"] == 1      # t2 复算 False = 分歧
+    assert consistency["disagreement_rate"] == pytest.approx(0.5)
+    assert consistency["review_undetermined"] == 1  # t3 relevance null
+    assert consistency["no_judge_reference"] == 2   # t4 缺 / t5 三维不齐
+    delta = consistency["axis_delta"]
+    # relevance：t3 评审侧 null、t4 无 judge 侧都不进分母 → t1/t2/t5
+    assert delta["relevance"]["n"] == 3
+    assert delta["relevance"]["mean_abs"] == pytest.approx(2 / 3)
+    assert delta["relevance"]["exact_rate"] == pytest.approx(2 / 3)
+    # semantics：t5 judge 侧 null 不进分母 → t1/t2/t3（t3 差 1）
+    assert delta["semantics"]["n"] == 3
+    assert delta["semantics"]["mean_abs"] == pytest.approx(1 / 3)
+    assert delta["semantics"]["exact_rate"] == pytest.approx(2 / 3)
+    # value：t1/t2/t3/t5 两侧都有分且全等
+    assert delta["value"]["n"] == 4
+    assert delta["value"]["mean_abs"] == pytest.approx(0.0)
+    assert delta["value"]["exact_rate"] == pytest.approx(1.0)
+
+
+def test_render_md_consistency_section():
+    m = _result("ttA", hits=[
+        _hit("t1", review=_review(False, r=2),
+             reference={"relevance": 4, "semantics": 3, "value": 3.0}),
+    ])
+    report = assemble_open_report([m], _meta(done=1, total=1))
+    md = render_open_report_md(report)
+    assert "一致性对照" in md
+    assert "分歧率" in md and "100.0%" in md  # 1/1 全分歧
+
+
+def test_metrics_csv_consistency_rows(tmp_path):
+    m = _result("ttA", hits=[
+        _hit("t1", reference={"relevance": 4, "semantics": 3, "value": 3.0}),
+        _hit("t2", review=_review(False, r=2),
+             reference={"relevance": 4, "semantics": 3, "value": 3.0}),
+    ])
+    report = assemble_open_report([m], _meta(done=1, total=1))
+    write_open_report(tmp_path, report)
+    with (tmp_path / "metrics.csv").open(encoding="utf-8") as f:
+        rows = {row[0]: row[1:] for row in csv.reader(f)}
+    assert rows["disagreement_rate"] == ["0.5", "2"]  # n = denominator
+    assert float(rows["relevance_mean_abs"][0]) == pytest.approx(1.0)
+    assert rows["relevance_mean_abs"][1] == "2"       # n = axis_delta.relevance.n
+    assert float(rows["relevance_exact_rate"][0]) == pytest.approx(0.5)
+    assert rows["semantics_mean_abs"][1] == "2"
+    assert float(rows["semantics_mean_abs"][0]) == pytest.approx(0.0)
+    assert rows["value_mean_abs"][1] == "2"
+    assert float(rows["value_exact_rate"][0]) == pytest.approx(1.0)
+
+
 # ---- banner ----
 
 
 def test_banner_conditions_and_clean_run():
     partial = assemble_open_report([_result("ttA", hits=[_hit("t1")])],
                                    _meta(status="cancelled", done=1, total=3))
-    assert any("部分" in b or "不可" in b for b in partial["banner"])
+    assert any("部分运行" in b for b in partial["banner"])
 
     same_model = assemble_open_report(
         [_result("ttA", hits=[_hit("t1")])],
@@ -200,6 +294,11 @@ def test_banner_conditions_and_clean_run():
                                        "same_model": True,
                                        "prompt_version": "open-review-v2"}))
     assert any("共享判断偏差" in b for b in same_model["banner"])
+
+    # 旧协议 run（prompt_version ≠ open-review-v14）：复算口径警示必在
+    legacy = assemble_open_report([_result("ttA", hits=[_hit("t1")])],
+                                  _meta(done=1, total=1))
+    assert any("旧协议" in b and "不可横比" in b for b in legacy["banner"])
 
     small = assemble_open_report(
         [_result("ttA", hits=[_hit("t1")])]
@@ -209,7 +308,9 @@ def test_banner_conditions_and_clean_run():
 
     clean = assemble_open_report(
         [_result(f"tt{i}", hits=[_hit("t1")]) for i in range(3)],
-        _meta(done=3, total=3))
+        _meta(done=3, total=3,
+              review={"model": "rev-model", "same_model": False,
+                      "prompt_version": "open-review-v14"}))
     assert clean["banner"] == []
 
 
@@ -380,23 +481,29 @@ def test_judge_funnel_stub_audit_without_keys_is_none(tmp_path):
 
 def _old_run_dir(tmp_path):
     from dataclasses import asdict
-    m1 = _result("ttA", hits=[_hit("t1")])
+    # 行存 pass 是旧模型保留值 False，三维分 (4,3,3) 阈值复算为过线——
+    # 升级路径必须用分数复算，不能用存储 pass。
+    m1 = _result("ttA", hits=[_hit("t1", review=_review(False))])
     meta = _meta(done=1, total=1)
     meta["run_id"] = "run-old"
     _dump(tmp_path / "meta.json", meta)
     _dump(tmp_path / "raw_results.json", [asdict(m1)])
     _dump(tmp_path / "audit" / "ttA.json", _audit_payload())
     _dump(tmp_path / "report.json",
-          {"schema_version": 2, "judge": {"self_filter": 0.5}})
+          {"schema_version": 3, "judge": {"self_filter": 0.5}})
     return m1, meta
 
 
 def test_upgrade_open_report_rebuilds_old_schema(tmp_path):
     _old_run_dir(tmp_path)
     report = upgrade_open_report(tmp_path)
-    assert report is not None and report["schema_version"] == 3
+    assert report is not None and report["schema_version"] == 4
     assert report["judge"]["funnel"]["merged"] == 4
     assert report["summary"]["total_tags"] == 1
+    # pass_rate 来自分数复算（存储 pass=False 不进统计）
+    assert report["summary"]["pass_rate"] == pytest.approx(1.0)
+    # 旧协议 meta（prompt_version=open-review-v2）→ legacy 警示必在
+    assert any("旧协议" in b and "不可横比" in b for b in report["banner"])
     on_disk = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert on_disk == report  # 三件套重写，读侧不再 410
     assert (tmp_path / "report.md").exists()
@@ -415,7 +522,7 @@ def test_read_open_summary_upgrades_old_schema(tmp_path):
     assert summary["pass_rate"] == pytest.approx(1.0)
     assert summary["hit_pass"] == pytest.approx(1.0)
     on_disk = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
-    assert on_disk["schema_version"] == 3
+    assert on_disk["schema_version"] == 4
 
 
 # ---- 渲染与落盘 ----

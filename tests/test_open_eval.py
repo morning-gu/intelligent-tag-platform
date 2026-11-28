@@ -31,7 +31,11 @@ _ReviewFailStub）替换 `svc._review_client`——make_review_client 的
 9. review calibre（model / same_model / prompt_version）进 meta；
 10. history 五摘要键（pass_rate / new_pass / hit_pass / new_ratio /
     three_high）由 open_report._read_open_summary 读 report.json；
-    报告组装的专测在 test_eval_open_report.py。
+    报告组装的专测在 test_eval_open_report.py；
+11. 评审行契约（评审归一 Task 8）：成功行 review 恒带 9 键（pass/relevance/
+    semantics/value/reason/evidence_scene_ids/evaluated/quote/confidence，
+    pass 由 verdict_pass 阈值复算、reason 引擎派生、quote/confidence 由
+    模型引证落 raw），meta.review 记 pass_mode=threshold；rereview 行同契约。
 """
 
 from __future__ import annotations
@@ -258,11 +262,14 @@ class FakeOpenProducer:
 class _ReviewOkStub:
     model = "mock-1"
 
-    """评审替身：回三维分 4/3/3，并引用两处夹具场景。
+    """评审替身：融合协议形状（评审归一 Task 7/8）——回三维分 4/3/3 +
+    可核验引证 + 置信度，不再收 pass/总评（引擎按阈值复算、reason 派生）。
 
-    返回纯文本（open_review._unwrap 对 str 按成功处理）；多出的 id（超出
-    实际行数）由 open_review 按批内 index 出界忽略。`delay` 供取消用例
-    拉开片完成间隔。
+    quote 取夹具场景描述前 12 字（「两名人物在开场场景中发生」，核验基准
+    文本含原文 → ≥8 字连续重合），scenes 给足两处夹具场景（film 级计数
+    下限 2）→ 证据核验通过、relevance 不被压分。返回纯文本（引擎 _unwrap
+    对 str 按成功处理）；`total` 截断可制造漏判（漏判由引擎拆批恢复兜底）；
+    `delay` 供取消用例拉开片完成间隔。
     """
 
     def __init__(self, total: int = 48, delay: float = 0.0) -> None:
@@ -276,8 +283,6 @@ class _ReviewOkStub:
         self.calls.append(run_id)
         labels = json.loads(messages[-1]["content"].rsplit("## 待评估标签\n", 1)[1])
         reviews = [{"id": label["id"],
-                    "pass": True if label["desc"] else None,
-                    "reason": "场景检索有独立价值" if label["desc"] else "缺少释义，暂无法决定",
                     "relevance": {"score": 4, "reason": "场景有据"},
                     "semantics": {"score": 3, "reason": "名称清晰"},
                     "value": {
@@ -285,8 +290,10 @@ class _ReviewOkStub:
                         "search": {"score": 3, "reason": "支持检索"},
                         "recommendation": {"score": 3, "reason": "推荐可用"},
                     },
-                    "evidence_scene_ids": ["scene_001", "scene_002"]} for label in labels[:self._total]]
-        return json.dumps({"reviews": reviews}, ensure_ascii=False)
+                    "quote": "两名人物在开场场景中发生",
+                    "scenes": ["scene_001", "scene_002"],
+                    "confidence": 0.9} for label in labels[:self._total]]
+        return json.dumps({"verdicts": reviews}, ensure_ascii=False)
 
 
 class _ReviewFailStub:
@@ -298,6 +305,33 @@ class _ReviewFailStub:
     def complete(self, messages, run_id) -> str:
         self.calls.append(run_id)
         raise RuntimeError("评审端点宕机")
+
+
+class _ReviewPartialStub:
+    """评审替身：只给指定 id 的标签出判决，其余一律漏判——制造「一成一败」
+    混合行（引擎 salvage 路径：漏判子集拆批恢复后仍记 errors 的终态）。"""
+
+    model = "mock-1"
+
+    def __init__(self, hit_id: str = "t0") -> None:
+        self.hit_id = hit_id
+        self.calls: list[str] = []
+
+    def complete(self, messages, run_id) -> str:
+        self.calls.append(run_id)
+        labels = json.loads(messages[-1]["content"].rsplit("## 待评估标签\n", 1)[1])
+        reviews = [{"id": label["id"],
+                    "relevance": {"score": 4, "reason": "场景有据"},
+                    "semantics": {"score": 3, "reason": "名称清晰"},
+                    "value": {
+                        "presentation": {"score": 3, "reason": "有内容看点"},
+                        "search": {"score": 3, "reason": "支持检索"},
+                        "recommendation": {"score": 3, "reason": "推荐可用"},
+                    },
+                    "quote": "两名人物在开场场景中发生",
+                    "scenes": ["scene_001", "scene_002"],
+                    "confidence": 0.9} for label in labels if label["id"] == self.hit_id]
+        return json.dumps({"verdicts": reviews}, ensure_ascii=False)
 
 
 class _GateLLM(MockLLMClient):
@@ -490,7 +524,13 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert h1["scene_ids"] == ["scene_001"]
     assert h1["judge_reference"] is None
     assert h1["review"]["pass"] is True
-    assert h1["review"]["reason"] == "场景检索有独立价值"
+    # Task 8 行契约：quote/confidence 落 raw（评审行字段元组扩两键）
+    assert h1["review"]["quote"] == "两名人物在开场场景中发生"
+    assert h1["review"]["confidence"] == 0.9
+    # pass/reason 不再收模型保留意见：pass 由阈值复算、reason 引擎派生
+    assert h1["review"]["reason"] == ("相关性(4)：场景有据；语义(3)：名称清晰；"
+                                     "内容呈现(3)：有内容看点；内容搜索(3)：支持检索；"
+                                     "内容推荐(3)：推荐可用")
     assert h1["review"]["evidence_scene_ids"] == ["scene_001", "scene_002"]
     assert h1["review"]["relevance"] == {"score": 4, "reason": "场景有据"}
     hx = next(h for h in row1["hits"] if h["tag_id"] == "tX")
@@ -523,6 +563,7 @@ def test_run_completes_writes_all_artifacts(open_setup):
     assert "thetas" not in meta  # 闭环遗留口径已移除
     assert meta["modalities"] == ["script", "dialogue"]
     assert meta["concurrency"] == DEFAULT_CONCURRENCY
+    assert meta["review"]["pass_mode"] == "threshold"  # 评审归一：pass 由阈值复算
     assert (meta["status"], meta["done"], meta["total"],
             meta["failed"]) == ("succeeded", 2, 2, 0)
     assert meta.get("warning") is None  # 有交集 → 无 warning
@@ -592,6 +633,37 @@ def test_review_failure_preserves_output(open_setup):
     assert "评审端点宕机" in trace["error"]
     assert trace["batches"][0]["error"].startswith("评审调用失败")
     assert trace["errors"]
+
+
+def test_review_partial_miss_projects_full_row_contract(open_setup):
+    """混合行投影（终审钉死，deferred T8-①）：部分漏判 salvage 后成功行
+    保全值、失败行恒带 9 键且 quote/confidence 投影为 None——open_service
+    行投影 `.get` 契约在真实漏判路径（_review_produced）上的形状。"""
+    svc, fake = open_setup()
+    svc._review_client = _ReviewPartialStub(hit_id="t0")
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    state = svc.get(run_id)
+    assert state.status == "succeeded" and state.failed == 0
+    rows = _raw_rows(svc, run_id)
+    row1 = next(r for r in rows if r["tt"] == "tt0000001")
+    # 成功行（tt0000001 首个标签 → key t0）：9 键齐、值原样保留
+    ok = next(h for h in row1["hits"] if h["tag_id"] == "t1")["review"]
+    assert set(ok) == {"pass", "relevance", "semantics", "value", "reason",
+                       "evidence_scene_ids", "evaluated", "quote", "confidence"}
+    assert ok["evaluated"] is True and ok["pass"] is True
+    assert ok["quote"] == "两名人物在开场场景中发生" and ok["confidence"] == 0.9
+    # 漏判失败行（tX 交集外词 → key t1）：仍 9 键，quote/confidence 补 null
+    missed = row1["hits"][1]["review"]
+    assert set(missed) == {"pass", "relevance", "semantics", "value", "reason",
+                           "evidence_scene_ids", "evaluated", "quote", "confidence"}
+    assert missed["evaluated"] is False and missed["pass"] is None
+    assert missed["quote"] is None and missed["confidence"] is None
+    assert missed["relevance"]["score"] is None
+    # 新词行（key t2，同样漏判）同契约
+    nw = row1["new_words"][0]["review"]
+    assert nw["evaluated"] is False
+    assert nw["quote"] is None and nw["confidence"] is None
+    assert set(nw) == set(missed)
 
 
 # ---------------------------------------------------------------- 双熔断
@@ -801,6 +873,33 @@ def test_rereview_reuses_snapshot_without_produce(open_setup):
     assert report["summary"]["total_tags"] == 5  # 产出不作废
     assert report["summary"]["pass_rate"] is None  # 评审失败排除出分母
     assert report["movies"][0]["hits"][0]["target_type"] == "content"
+
+
+def test_rereview_rows_carry_fused_contract(open_setup):
+    """rereview 行同融合契约（Task 8）：评审走融合协议——行恒带 9 键、
+    quote/confidence 落 raw、pass 为阈值复算值；不重跑生成。"""
+    svc, fake = open_setup()
+    svc._review_client = _ReviewOkStub()
+    run_id = svc.start("emotion", {"mode": "all"}, wait=True)
+    _drain_active(svc)
+    calls_before = len(fake.calls)
+    out = svc.rereview(run_id)
+    assert out["reviewed"] == 2 and out["review_failed"] == 0
+    assert len(fake.calls) == calls_before  # 复用产出快照，不重跑生成
+    rows = _raw_rows(svc, out["run_id"])
+    row1 = next(r for r in rows if r["tt"] == "tt0000001")
+    h1 = next(h for h in row1["hits"] if h["tag_id"] == "t1")
+    review = h1["review"]
+    # 9 键契约（Task 8 Produces：fields 元组扩 quote/confidence）
+    assert set(review) == {"pass", "relevance", "semantics", "value", "reason",
+                           "evidence_scene_ids", "evaluated", "quote", "confidence"}
+    assert review["pass"] is True  # 阈值复算（rel 4 / sem 3 / val 3.0 全过线）
+    assert review["evaluated"] is True
+    assert review["quote"] == "两名人物在开场场景中发生"
+    assert review["confidence"] == 0.9
+    # 新词行同契约：9 键齐、quote/confidence 落 raw
+    nw = row1["new_words"][0]
+    assert nw["review"]["pass"] is True and nw["review"]["confidence"] == 0.9
 
 
 def test_rereview_preserves_zero_output_and_original_produce_failure(open_setup):

@@ -1,9 +1,12 @@
-"""开放生成 Judge 过滤与开放评测评审共用的统一三维评价标准（唯一权威源）。
+"""开放生成 Judge 过滤与开放评测评审共用的统一三维评价标准与判决输出协议（唯一权威源）。
 
 Judge（`capabilities/prompts/mtg.py`）与开放评测评审
 （`capabilities/prompts/open_review.py`）直接嵌入本模块的同一份评分标准正文，
 确保两环节在内容相关性（relevance）、语义准确性（semantics，已融合目标目录匹配度）
-与标签价值（value，内容呈现 / 内容搜索 / 内容推荐三方向分别评分）上口径完全一致。
+与标签价值（value，内容呈现 / 内容搜索 / 内容推荐三方向分别评分）上口径完全一致；
+输出协议（VERDICT_OUTPUT_SPEC 字段要求 + 融合 JSON 示例、VERDICT_RETRY_HINT 重试提示）
+同驻本模块，两处模板嵌入同一份，模型只输出评分与证据，不输出裁决字段
+（是否保留由程序按分数复算）。
 
 分层红线：本模块纯常量，不得 import fastapi / sqlalchemy / tagplatform.services。
 """
@@ -59,3 +62,24 @@ UNIFIED_EVALUATION_CRITERIA = """## 评分标准
 - 2：能间接反映大致的观看状态、注意力投入或受众范围（如大致偏向轻松消遣或专注投入），但指向较为宽泛。
 - 3：清晰传达了以下任一推荐语境信号：适宜的观影时间、地点或环境场景；观看所需的注意力投入程度与认知负荷；或适合的社交观影语境与共同观看人群，可直接辅助场景化匹配。
 - 4：精准且直接地刻画了典型的观影时间与环境场景、明确的观看强度与认知负荷、或鲜明的社交共看语境与人群特征，能够强有力地支撑“何时何地看 / 什么状态看 / 和谁一起看”的精准推荐。"""
+
+# ---- 融合判决输出协议（两处评审共用的唯一输出块；评审归一设计 §1）----
+# 模型只输出评分与证据，不输出任何裁决字段（pass 由程序按分数复算）。
+# 示例 JSON 为两侧唯一输出形状：id 键回配 + 每维 {score, reason} + value 三方向带理由。
+VERDICT_OUTPUT_SPEC = """## 输出字段要求
+- id：原样返回目标 id，每个目标恰好一条判决。
+- relevance 与 semantics：返回 {"score": 0–4 整数或 null, "reason": "简短理由"}；仅这两维允许 null（表示无法判断），并在 reason 写明缺失的信息。
+- value：内容呈现（presentation）、内容搜索（search）、内容推荐（recommendation）三方向各自返回 {"score": 0–4 整数, "reason": "理由"}，不接受 null。
+- quote：用于核验 relevance 的连续逐字原文摘录，从场景描述或台词中连续截取完整上下文片段（10–25 字）；relevance 达到 3 或 4 分时必须给出；找不到可引用原文时填空字符串。
+- scenes：引用的真实场景 id；film 级标签至少列出两个共同支撑标签的独立场景，scene 级标签取该标签的来源场景；无引用时返回空数组。
+- confidence：0–1，对本次评分结果的把握。
+
+只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：
+{"verdicts":[{"id":"t0","relevance":{"score":4,"reason":"…"},"semantics":{"score":3,"reason":"…"},"value":{"presentation":{"score":3,"reason":"…"},"search":{"score":4,"reason":"…"},"recommendation":{"score":2,"reason":"…"}},"quote":"10–25 字逐字原文摘录","scenes":["scene_001","scene_007"],"confidence":0.85}]}"""
+
+# 解析失败重试时追加到用户消息末尾（两侧共用；开头的空行用于与材料正文分隔）。
+VERDICT_RETRY_HINT = (
+    "\n\n上一响应缺少可用判决。请按协议在 verdicts 中返回每个目标 id、"
+    "relevance/semantics 的 {score, reason}、value 下三方向各自的 {score, reason}、"
+    "逐字摘录 quote、引用场景 scenes 与 confidence。"
+)

@@ -1,4 +1,11 @@
-"""开放评测整片盲评、拆批、证据和客户端契约。"""
+"""开放评测整片盲评（统一判决引擎封装）：行契约、批编排口径与客户端契约。
+
+评审侧是 `mtg.verdicts.run_verdicts` 的第二消费者（Task 7）：解析/证据核验/
+value 聚合/批编排全部由引擎承载，这里钉的是 open_review 的包装与行回填——
+引擎行为本身已在 test_mtg_verdicts.py 钉死。行契约：成功行 = 终判各键 +
+`evidence_scene_ids`（= scenes）+ `pass`（verdict_pass 复算）+ `evaluated`；
+失败行 = 三维 {score: None, reason: 错误串}、pass None、evaluated False。
+"""
 from __future__ import annotations
 
 import json
@@ -62,7 +69,13 @@ def _rows(count: int = 2) -> list[dict]:
     return (head + tail)[:count]
 
 
-def _v(r=4, s=3, v=3, evidence=("scene_001", "scene_002"), reason="台词有据", decision=True, overall="提供独立检索价值，建议保留"):
+def _v(r=4, s=3, v=3, scenes=("scene_001", "scene_002"), quote=QUOTE,
+       confidence=0.85, reason="台词有据"):
+    """融合判决条目（VERDICT_OUTPUT_SPEC 形状）：无 pass、无总评 reason。
+
+    value 为三方向对象（v 传 dict 时整体覆盖）；默认三方向各 3 分 → content
+    聚合 3.0 ≥ 楼层 2，pass 由分数复算。
+    """
     if isinstance(v, dict):
         value_block = v
     else:
@@ -71,18 +84,19 @@ def _v(r=4, s=3, v=3, evidence=("scene_001", "scene_002"), reason="台词有据"
             "search": {"score": v, "reason": "搜索理由"},
             "recommendation": {"score": v, "reason": "推荐理由"},
         }
-    return {"pass": decision, "reason": overall,
-            "relevance": {"score": r, "reason": reason},
+    return {"relevance": {"score": r, "reason": reason},
             "semantics": {"score": s, "reason": "名称清晰"},
             "value": value_block,
-            "evidence_scene_ids": list(evidence)}
+            "quote": quote,
+            "scenes": list(scenes),
+            "confidence": confidence}
 
 
 class StubClient:
-    """按目标标签名返回整批固定判决。
+    """按目标标签名返回整批固定判决（融合协议 {"verdicts": [...]}）。
 
     by_name 映射名→判决 dict（或 Exception 抛出 / None 漏判）；default
-    兜底。handler 给出时优先（信封/截断用例）。记录每次调用消息。
+    兜底。handler 给出时优先（信封/截断/畸形用例）。记录每次调用消息。
     """
 
     def __init__(self, by_name=None, default=None, handler=None):
@@ -104,7 +118,7 @@ class StubClient:
                 raise verdict
             if verdict is not None:
                 rows.append({"id": target["id"], **verdict})
-        return json.dumps({"reviews": rows}, ensure_ascii=False)
+        return json.dumps({"verdicts": rows}, ensure_ascii=False)
 
 
 def _targets(messages):
@@ -116,49 +130,102 @@ class MainLLM:
     model = "main-model"
 
 
-# ---- 逐条消息形状 ----
+# ---- 请求形状 ----
 
 
-def test_batch_message_has_full_labels_without_judge_reference():
+def test_batch_message_has_full_labels_without_context_block():
     client = StubClient(default=_v())
     review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert len(client.calls) == 1
+    assert client.run_ids == ["r1:m1:t0-t1"]
+    assert client.calls[0][0]["content"] == REVIEW_PROMPT
+    user = client.calls[0][1]["content"]
+    # 材料在前、待评估标签视图在后，无「其他标签」上下文块（v14 瘦身）
+    assert user.startswith("电影：《逃离摄影棚》")
+    assert "- scene_001 [0-30000]" in user
+    assert "该片其他标签（上下文）" not in user
     assert [target["id"] for target in _targets(client.calls[0])] == ["t0", "t1"]
     assert _targets(client.calls[0])[1]["scene_ids"] == ["scene_001"]
-    assert "judge_reference" not in client.calls[0][1]["content"]
+    assert "judge_reference" not in user
 
 
-def test_normal_pass_and_fail():
-    client = StubClient(by_name={"逃离安排": _v(), "街道晨跑": _v(r=1, decision=False)})
+def test_format_retry_appends_hint_only_on_retry():
+    seen: list[str] = []
+
+    def handler(_i, messages):
+        seen.append(messages[1]["content"])
+        if len(seen) == 1:
+            return "不是 JSON"
+        return json.dumps({"verdicts": [{"id": "t0", **_v()}]}, ensure_ascii=False)
+
+    review_movie_tags(StubClient(handler=handler), _content(), _rows(1), run_id="r1:m1")
+    assert "上一响应缺少可用判决" not in seen[0]
+    assert "上一响应缺少可用判决" in seen[1]
+
+
+def test_derived_subset_request_carries_retry_hint_at_attempt_zero():
+    """legacy 语义复现：整批之外的派生请求（拆批/漏判子集）attempt 0 也带 hint。"""
+    seen: list[tuple[list[dict], str]] = []
+
+    def handler(_i, messages):
+        seen.append((_targets(messages), messages[1]["content"]))
+        targets = _targets(messages)
+        if len(targets) == 2:
+            return json.dumps({"verdicts": [{"id": "t0", **_v()}]})
+        return json.dumps({"verdicts": [{"id": targets[0]["id"], **_v()}]})
+
+    review_movie_tags(StubClient(handler=handler), _content(), _rows(), run_id="r1:m1")
+    assert "上一响应缺少可用判决" not in seen[0][1]
+    assert [t["id"] for t in seen[1][0]] == ["t1"]
+    assert "上一响应缺少可用判决" in seen[1][1]
+    assert "该片其他标签（上下文）" not in seen[1][1]
+
+
+# ---- 成功路径与行契约 ----
+
+
+def test_normal_pass_recomputed_and_fail():
+    client = StubClient(by_name={"逃离安排": _v(), "街道晨跑": _v(r=2, s=4)})
     rows = _rows()
     result = review_movie_tags(client, _content(), rows, run_id="r1:m1")
     assert result is rows
     assert result[0]["pass"] is True
     assert result[0]["relevance"] == {"score": 4, "reason": "台词有据"}
+    assert result[0]["quote"] == QUOTE
+    assert result[0]["confidence"] == 0.85
+    assert result[0]["scenes"] == ["scene_001", "scene_002"]
+    assert result[0]["evidence_scene_ids"] == ["scene_001", "scene_002"]
     assert result[1]["pass"] is False
-    assert result[1]["relevance"]["score"] == 1
+    assert result[1]["relevance"]["score"] == 2
 
 
 @pytest.mark.parametrize(("verdict", "expected"), [
-    (_v(4, 4, 4, decision=False, overall="同组标签已完整表达该信息"), False),
-    (_v(2, 2, 1, decision=True), True),
-    (_v(4, 4, 4, decision=None, overall="无法确认用途"), None),
+    (_v(4, 3, 3), True),        # (4, 3, 3.0) → True
+    (_v(2, 4, 3), False),       # relevance 低于楼层 3
+    (_v(4, 2, 3), False),       # semantics 低于楼层 3
+    (_v(4, 3, 0), False),       # value 聚合 0.0 低于楼层 2
+    (_v(4, None, 3), None),     # semantics null（无法判断）→ None
 ])
-def test_model_decision_and_overall_reason_are_independent_of_scores(verdict, expected):
+def test_pass_recomputed_from_scores(verdict, expected):
     result = review_movie_tags(StubClient(default=verdict), _content(),
                                _rows(1), run_id="r1:m1")[0]
     assert result["pass"] is expected
-    assert result["reason"] == verdict["reason"]
-    assert result["relevance"] == verdict["relevance"]
+    assert result["evaluated"] is True
 
 
-@pytest.mark.parametrize("field", ["pass", "reason"])
-def test_missing_decision_or_overall_reason_is_not_inferred(field):
-    incomplete = _v()
-    incomplete.pop(field)
-    client = StubClient(by_name={"街道晨跑": incomplete}, default=_v())
-    rows = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
-    assert rows[1]["evaluated"] is False and rows[1]["pass"] is None
+def test_success_row_contract_keys_and_derived_reason():
+    result = review_movie_tags(StubClient(default=_v()), _content(), _rows(1),
+                               run_id="r1:m1")[0]
+    assert set(result) >= {"relevance", "semantics", "value", "quote", "scenes",
+                           "confidence", "reason", "evidence_scene_ids",
+                           "pass", "evaluated"}
+    assert "verify_fail" not in result
+    assert result["value"]["score"] == 3.0
+    assert result["value"]["tag_kind"] == "content"
+    assert result["value"]["dimensions"]["presentation"] == {"score": 3, "reason": "呈现理由"}
+    assert result["reason"] == ("相关性(4)：台词有据；语义(3)：名称清晰；"
+                                "内容呈现(3)：呈现理由；内容搜索(3)：搜索理由；"
+                                "内容推荐(3)：推荐理由")
 
 
 def test_review_forwards_directory_and_aggregates_value_by_tag_kind():
@@ -196,7 +263,7 @@ def test_review_forwards_directory_and_aggregates_value_by_tag_kind():
     assert out[2]["value"]["tag_kind"] == "character"
 
 
-def test_review_rejects_legacy_scalar_value_and_retries():
+def test_legacy_scalar_value_is_protocol_error_and_retries_whole_batch():
     calls = {"n": 0}
 
     def handler(_i, messages):
@@ -204,13 +271,26 @@ def test_review_rejects_legacy_scalar_value_and_retries():
         targets = _targets(messages)
         if calls["n"] == 1:
             bad = {**_v(), "value": {"score": 3, "reason": "旧标量格式"}}
-            return json.dumps({"reviews": [{"id": targets[0]["id"], **bad}]})
-        return json.dumps({"reviews": [{"id": targets[0]["id"], **_v()}]})
+            return json.dumps({"verdicts": [{"id": targets[0]["id"], **bad}]})
+        return json.dumps({"verdicts": [{"id": targets[0]["id"], **_v()}]})
 
     out = review_movie_tags(StubClient(handler=handler), _content(), _rows(1), run_id="r1:m1")
     assert calls["n"] == 2
     assert out[0]["evaluated"] is True
     assert out[0]["value"]["score"] == 3.0
+
+
+def test_legacy_extra_fields_ignored_but_missing_scenes_presses():
+    """旧协议遗留字段（pass/总评/evidence_scene_ids）被解析器忽略：不判漏，
+    但 scenes 未按协议上报 → 场景计数核验失败压 1。"""
+    legacy = {key: val for key, val in _v().items() if key != "scenes"}
+    legacy.update({"pass": True, "reason": "模拟总评",
+                   "evidence_scene_ids": ["scene_001", "scene_002"]})
+    client = StubClient(by_name={"逃离安排": legacy})
+    result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
+    assert result[0]["evaluated"] is True
+    assert result[0]["relevance"]["score"] == 1
+    assert "引用场景不足" in result[0]["relevance"]["reason"]
 
 
 def test_missing_desc_keeps_low_semantics_defect_but_nulls_high_score():
@@ -224,42 +304,67 @@ def test_missing_desc_keeps_low_semantics_defect_but_nulls_high_score():
     assert out[1]["semantics"] == {"score": None, "reason": "缺少释义"}
 
 
-def test_film_high_relevance_requires_two_valid_distinct_scenes():
-    client = StubClient(default=_v(evidence=["scene_001", "scene_001", "invented"]))
+def test_whitespace_only_desc_counts_as_missing_desc():
+    """终审修复：legacy .strip() 语义——desc 仅空白 = 无释义（缺释义路径，
+    open_review 恒传 semantics_null_without_desc=True），semantics 高分置 null
+    而非因非空字符串被当作「有释义」放行。"""
+    row = {"id": "t0", "name": "空白释义", "desc": "   ", "level": "film",
+           "scene_ids": []}
+    result = review_movie_tags(StubClient(by_name={"空白释义": _v(s=3)}),
+                               _content(), [row], run_id="r1:m1")[0]
+    assert result["evaluated"] is True
+    assert result["semantics"] == {"score": None, "reason": "缺少释义"}
+
+
+# ---- 证据核验（引擎复算在行上的投影）----
+
+
+def test_film_single_valid_scene_presses_relevance_to_one():
+    client = StubClient(default=_v(scenes=["scene_001", "scene_001", "invented"]))
     result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")[0]
-    assert result["evaluated"] is True and result["pass"] is True
-    assert result["relevance"]["score"] is None
+    assert result["evaluated"] is True
+    assert result["relevance"]["score"] == 1
+    assert "引用场景不足" in result["relevance"]["reason"]
+    assert result["scenes"] == ["scene_001"]
     assert result["evidence_scene_ids"] == ["scene_001"]
+    assert result["pass"] is False
 
 
-def test_scene_evidence_must_be_in_target_scene_ids():
-    client = StubClient(default=_v(evidence=["scene_002"]))
-    result = review_movie_tags(client, _content(), [_rows()[1]], run_id="r1:m1")[0]
-    assert result["pass"] is True
-    assert result["relevance"]["score"] is None
-    assert result["evidence_scene_ids"] == []
-
-
-def test_rationale_supplies_full_valid_scene_ids_when_structured_field_is_incomplete():
-    client = StubClient(default=_v(
-        evidence=["scene_001"], reason="在scene_001确认起因", overall="scene_002体现结果，建议保留"))
+def test_quote_not_in_material_presses_relevance_to_one():
+    client = StubClient(default=_v(quote="完全不存在于材料里的逐字摘录"))
     result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")[0]
-    assert result["evidence_scene_ids"] == ["scene_001", "scene_002"]
-    assert result["relevance"]["score"] == 4
+    assert result["relevance"]["score"] == 1
+    assert "未引用" in result["relevance"]["reason"]
+    assert result["reason"] == result["relevance"]["reason"]
+    assert result["pass"] is False
 
 
-def test_rationale_cannot_supply_wrong_scene_or_a_partial_id():
-    client = StubClient(default=_v(
-        evidence=[], reason="scene_002 和 scene_001_extra", overall="引用了另一场"))
+def test_scene_evidence_outside_target_scene_ids_presses_relevance():
+    client = StubClient(default=_v(scenes=["scene_002"]))
     result = review_movie_tags(client, _content(), [_rows()[1]], run_id="r1:m1")[0]
+    assert result["relevance"]["score"] == 1
     assert result["evidence_scene_ids"] == []
-    assert result["relevance"]["score"] is None
-    assert "scene_001_extra" in result["relevance"]["reason"]
+    assert result["pass"] is False
+
+
+def test_scene_level_empty_scene_ids_falls_back_to_haystack_no_count_check():
+    row = {"id": "t0", "name": "无来源场景", "desc": "通用释义", "level": "scene",
+           "scene_ids": []}
+    client = StubClient(default=_v())
+    result = review_movie_tags(client, _content(), [row], run_id="r1:m1")[0]
+    assert result["relevance"]["score"] == 4
+    assert result["evidence_scene_ids"] == []
     assert result["pass"] is True
+
+
+def test_low_or_null_relevance_skips_verification():
+    result = review_movie_tags(StubClient(default=_v(r=2, quote="完全不存在")),
+                               _content(), _rows(1), run_id="r1:m1")[0]
+    assert result["relevance"]["score"] == 2
 
 
 def test_honors_modalities():
-    client = StubClient(default=_v())
+    client = StubClient(default=_v(quote="陈晓在小镇街道晨跑"))
     result = review_movie_tags(client, _content(), _rows(1), run_id="r1:m1",
                                modalities=("script",))
     assert result[0]["pass"] is True
@@ -281,13 +386,19 @@ def test_partial_miss_marks_none():
     assert result[0]["pass"] is True
     assert result[1]["pass"] is None
     assert result[1]["relevance"]["score"] is None
+    assert result[1]["evaluated"] is False
+    assert result[1]["evidence_scene_ids"] == []
+    # 空数组载荷的错误文案族位移（引擎 parse_verdicts 出串，见 run_verdicts）
+    assert result[1]["relevance"]["reason"] == "评审响应无法解析：审核输出为空数组"
+    assert result[1]["reason"] == result[1]["relevance"]["reason"]
 
 
-def test_explicit_null_is_not_missed():
+def test_explicit_null_semantics_is_not_missed_but_pass_is_none():
     result = review_movie_tags(StubClient(default=_v(s=None)), _content(),
-                               _rows(1), run_id="r1:m1")
-    assert result[0]["pass"] is True and result[0]["evaluated"] is True
-    assert result[0]["semantics"]["score"] is None
+                               _rows(1), run_id="r1:m1")[0]
+    assert result["evaluated"] is True
+    assert result["semantics"]["score"] is None
+    assert result["pass"] is None
 
 
 def test_all_missed_raises():
@@ -295,17 +406,16 @@ def test_all_missed_raises():
         review_movie_tags(StubClient(default=None), _content(), _rows(), run_id="r1:m1")
 
 
-def test_truncated_batch_splits_with_full_context_and_keeps_partial_results():
+def test_truncated_batch_splits_without_context_block_and_keeps_partial():
     def handler(attempt, messages):
         targets = _targets(messages)
         if len(targets) == 2:
             return LLMResponse("", {}, {"choices": [{"finish_reason": "length"}]}, True)
-        assert "该片其他标签（上下文）" in messages[1]["content"]
-        assert all(label["name"] in messages[1]["content"] for label in _rows())
+        assert "该片其他标签（上下文）" not in messages[1]["content"]
         target = targets[0]
         if target["id"] == "t1":
             raise RuntimeError("分批调用失败")
-        return json.dumps({"reviews": [{"id": target["id"], **_v()}]})
+        return json.dumps({"verdicts": [{"id": target["id"], **_v()}]})
 
     client = StubClient(handler=handler)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
@@ -314,25 +424,26 @@ def test_truncated_batch_splits_with_full_context_and_keeps_partial_results():
     assert result[1]["evaluated"] is False
 
 
-def test_input_limit_does_not_repeat_the_same_oversized_material():
+def test_call_failure_envelope_records_error_without_retry():
     client = StubClient(handler=lambda *_: LLMResponse(
         "", {}, {"error": "maximum context length exceeded"}, False))
-    with pytest.raises(ReviewRequestError, match="影片评审材料超出模型上下文"):
+    with pytest.raises(ReviewRequestError, match="评审调用失败"):
         review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
     assert len(client.calls) == 1
 
 
 def test_duplicate_id_never_accepted_even_if_it_appears_three_times():
-    client = StubClient(handler=lambda *_: json.dumps({"reviews": [{"id": "t0", **_v()}] * 3}))
+    client = StubClient(handler=lambda *_: json.dumps({"verdicts": [{"id": "t0", **_v()}] * 3}))
     with pytest.raises(ReviewRequestError):
         review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
 
 
-def test_truncated_single_tag_missed():
+def test_truncated_single_tag_gets_one_single_retry_then_raises():
     client = StubClient(handler=lambda i, m: LLMResponse(
         "", {}, {"choices": [{"finish_reason": "length"}]}, ok=True))
     with pytest.raises(ReviewRequestError):
         review_movie_tags(client, _content(), _rows(1), run_id="r1:m1")
+    assert len(client.calls) == 2
 
 
 def test_format_retry_then_ok():
@@ -342,7 +453,7 @@ def test_format_retry_then_ok():
         state["n"] += 1
         if state["n"] == 1:
             return "不是 JSON"
-        return json.dumps({"reviews": [{"id": "t0", **_v()}]}, ensure_ascii=False)
+        return json.dumps({"verdicts": [{"id": "t0", **_v()}]}, ensure_ascii=False)
 
     result = review_movie_tags(StubClient(handler=handler), _content(),
                                _rows(1), run_id="r1:m1")
@@ -356,8 +467,8 @@ def test_structural_failure_splits_the_batch():
     def handler(_i, messages):
         targets = _targets(messages)
         if len(targets) > 1:
-            return json.dumps({"reviews": [{"id": t["id"], "pass": True} for t in targets]})
-        return json.dumps({"reviews": [{"id": targets[0]["id"], **_v()}]})
+            return json.dumps({"verdicts": [{"id": t["id"], "pass": True} for t in targets]})
+        return json.dumps({"verdicts": [{"id": targets[0]["id"], **_v()}]})
 
     client = StubClient(handler=handler)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
@@ -369,9 +480,9 @@ def test_partial_verdicts_resend_only_the_missing_labels():
     def handler(_i, messages):
         targets = _targets(messages)
         if len(targets) > 1:
-            return json.dumps({"reviews": [{"id": "t0", **_v()}, {"id": "t1", "pass": True}]})
+            return json.dumps({"verdicts": [{"id": "t0", **_v()}, {"id": "t1", "pass": True}]})
         assert [t["id"] for t in targets] == ["t1"]
-        return json.dumps({"reviews": [{"id": "t1", **_v()}]})
+        return json.dumps({"verdicts": [{"id": "t1", **_v()}]})
 
     client = StubClient(handler=handler)
     result = review_movie_tags(client, _content(), _rows(), run_id="r1:m1")
@@ -387,7 +498,7 @@ def test_transport_failure_never_splits():
 
 
 def test_call_budget_caps_runaway_splitting():
-    client = StubClient(handler=lambda *_: json.dumps({"reviews": [{"id": "t0"}]}))
+    client = StubClient(handler=lambda *_: json.dumps({"verdicts": [{"id": "t0"}]}))
     with pytest.raises(ReviewRequestError):
         review_movie_tags(client, _content(), _rows(4), run_id="r1:m1")
     assert len(client.calls) <= 2 * 4 + 2
@@ -399,12 +510,12 @@ def test_every_singleton_gets_its_first_attempt_before_any_singleton_retry():
     def handler(_index, messages):
         targets = _targets(messages)
         if len(targets) != 1:
-            return '{"reviews":[]}'
+            return '{"verdicts":[]}'
         target_id = targets[0]["id"]
         attempted.append(target_id)
         if attempted.count(target_id) == 1:
-            return '{"reviews":[]}'
-        return json.dumps({"reviews": [{"id": target_id, **_v()}]})
+            return '{"verdicts":[]}'
+        return json.dumps({"verdicts": [{"id": target_id, **_v()}]})
 
     trace = {}
     client = StubClient(handler=handler)
@@ -418,8 +529,8 @@ def test_every_singleton_gets_its_first_attempt_before_any_singleton_retry():
 def test_all_singletons_can_recover_within_budget():
     def handler(_index, messages):
         targets = _targets(messages)
-        return json.dumps({"reviews": [{"id": target["id"], **_v()}
-                                       for target in targets if len(targets) == 1]})
+        return json.dumps({"verdicts": [{"id": target["id"], **_v()}
+                                        for target in targets if len(targets) == 1]})
 
     client = StubClient(handler=handler)
     rows = review_movie_tags(client, _content(), _rows(8), run_id="r1:m1")
@@ -434,6 +545,7 @@ def test_trace_keeps_raw_responses_and_failure_reasons():
         review_movie_tags(client, _content(), _rows(1), run_id="r1:m1", trace=trace)
     assert [row["raw"] for row in trace["batches"]] == ["不是 JSON", "不是 JSON"]
     assert trace["errors"]["t0"].startswith("评审响应无法解析")
+    assert trace["salvaged"] == 0
 
 
 def test_trace_records_successful_batches_too():
@@ -441,11 +553,41 @@ def test_trace_records_successful_batches_too():
     review_movie_tags(StubClient(default=_v()), _content(), _rows(1),
                       run_id="r1:m1", trace=trace)
     assert len(trace["batches"]) == 1
-    assert json.loads(trace["batches"][0]["raw"])["reviews"]
-    assert "errors" not in trace
+    assert trace["batches"][0]["error"] is None
+    assert trace["batches"][0]["missing"] == []
+    assert json.loads(trace["batches"][0]["raw"])["verdicts"]
+    assert trace["errors"] == {} and trace["salvaged"] == 0
 
 
-# ---- 实时回调 ----
+# ---- mock 客户端路径（MockLLMClient._quality_output 咬合）----
+
+
+def test_mock_client_review_path_produces_evaluated_rows():
+    rows = _rows()
+    result = review_movie_tags(MockLLMClient(), _content(), rows, run_id="r1:m1")
+    assert all(row["evaluated"] for row in result)
+    assert result[0]["pass"] is True
+    assert result[0]["relevance"]["score"] == 4
+    assert result[0]["quote"]
+    assert result[0]["evidence_scene_ids"] == ["scene_001", "scene_002"]
+    assert result[1]["pass"] is True
+
+
+def test_mock_client_without_scenes_keeps_relevance_null():
+    content = ContentJSON.model_validate({
+        "schema_version": "1.0",
+        "asset": {"asset_id": "m2", "asset_type": "movie", "title": "空场景",
+                  "duration_ms": 60000},
+        "content": {"summary": "只有摘要没有场景。", "characters": [], "scenes": []},
+        "metadata": {"source": "test", "recognition_status": "done"},
+    })
+    row = {"id": "t0", "name": "摘要标签", "desc": "通用释义", "level": "film",
+           "scene_ids": []}
+    result = review_movie_tags(MockLLMClient(), content, [row], run_id="r1:m2")[0]
+    assert result["evaluated"] is True
+    assert result["relevance"]["score"] is None
+    assert result["value"]["score"] == 3.0
+    assert result["pass"] is None
 
 
 def test_empty_rows_returns_empty():
@@ -501,10 +643,11 @@ def test_make_review_client_env_names_fall_back_to_main():
     assert client.api_key_env == settings.llm_api_key_env
 
 
-def test_review_calibre_independent_model():
+def test_review_calibre_independent_model_threshold_mode():
     settings = Settings(open_eval_review_model="review-x", llm_model="main-model")
     calibre = review_calibre(settings, MainLLM())
     assert calibre["model"] == "review-x" and calibre["same_model"] is False
+    assert calibre["pass_mode"] == "threshold"
 
 
 def test_review_calibre_same_name_is_same_model():

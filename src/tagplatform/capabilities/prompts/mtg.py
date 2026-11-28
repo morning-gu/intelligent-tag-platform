@@ -4,8 +4,9 @@
 Judge 审核、通用释义补写、相似度复核），以及仅在解析失败重试时追加的 `*_RETRY_HINT`。
 服务层渲染函数直接消费本模块模板，不再散落拼接指令文案。
 
-协议耦合提醒：本模块模板与其解析端互为协议——输出 JSON 形状与
-`parse.parse_judge_items` / `parse.parse_generation_items` /
+协议耦合提醒：本模块模板与其解析端互为协议——judge 判决输出形状与
+`mtg.verdicts.parse_verdicts`（生产 judge 与开放评测评审共用的融合解析器）、
+生成输出形状与 `parse.parse_generation_items`、
 `verify.parse_verify_results` / `descriptions._parse_items` 互为契约，
 `DESCRIPTION_TEMPLATE` 的通用性要求与 `descriptions.is_general` 对齐。
 修改字段名、取值范围或输出结构时，模板、重试提示与解析端必须同步更新。
@@ -16,6 +17,8 @@ tagplatform.services。
 
 from tagplatform.capabilities.prompts._evaluation import (
     UNIFIED_EVALUATION_CRITERIA as _UNIFIED_EVALUATION_CRITERIA,
+    VERDICT_OUTPUT_SPEC as _VERDICT_OUTPUT_SPEC,
+    VERDICT_RETRY_HINT as _VERDICT_RETRY_HINT,
 )
 
 # ---- 一阶段：逐场逐目录生成 ----
@@ -77,9 +80,14 @@ FILM_GENERATION_TEMPLATE = (
     '"scenes":["实际场景 ID"],"reason":"可核对的细节及其支撑标签的理由"}]}'
 )
 
-# ---- Judge 审核（与 parse.parse_judge_items 互为协议）----
+# ---- Judge 审核（与 parse 端互为协议）----
 # 三维评分标准与 capabilities/prompts/open_review.py 共享 _UNIFIED_EVALUATION_CRITERIA，
 # 目标目录匹配度已融合进语义准确性（semantics），不再单独返回 dir_fits。
+# 输出段嵌入共享 VERDICT_OUTPUT_SPEC（id 键、逐维 {score, reason}、value 三方向带理由、
+# quote/scenes/confidence）——与 open_review 评审同一输出协议，是否保留由程序复算。
+# 候选行/影片内容/目标目录区不动；「标为 excerpt / 候选行标有「候选 ID」时 /
+# ## 输出字段要求（共享输出规范的标题）」是 render_judge_messages 剥段锚点、
+# 规范末行示例由渲染时换成本地示例，不得改名。
 JUDGE_TEMPLATE = (
     "## 审核任务\n"
     "你是影视内容标签审核员。下面是候选标签和影片内容，"
@@ -92,36 +100,17 @@ JUDGE_TEMPLATE = (
     "下面给出候选所标目标目录的 ID、全路径、适用种类和定义，供语义准确性评估标签与目标目录的匹配度：\n"
     "{dirs}\n\n"
     + _UNIFIED_EVALUATION_CRITERIA
-    + "\n\n## 输出字段要求\n"
-    "- relevance：0–4 整数；缺少必要影片材料致使无法区分相邻档时填 null，并在 reason 写明缺失信息。\n"
-    "- semantics：0–4 整数；综合名称清晰度、释义一致性与目标目录匹配度评分。"
-    "缺少通用释义且未观察到明显名称或目录缺陷时填 null。\n"
-    "- value_scores：对象，包含 presentation、search、recommendation 三个键，"
-    "分别为内容呈现、内容搜索、内容推荐方向的 0–4 整数分。\n"
-    "- confidence：0–1，对本次评分结果的把握。\n"
-    "- scenes：引用的场景 id，取自上面出现过的真实场景 id；无引用时返回空数组。\n"
-    "- quote：用于核验 relevance 的连续逐字原文摘录，从场景描述或台词中连续截取完整上下文片段"
-    "（10–25 字）；找不到可引用原文时填空字符串。\n"
-    "- reason：一句话说明场景细节怎样支持标签核心含义，或说明缺少的关键证据。\n"
-    "按候选标明的作用域核查 relevance。film 的 relevance ≥3 时，scenes 必须列出"
+    + "\n\n按候选标明的作用域核查 relevance。film 的 relevance ≥3 时，scenes 必须列出"
     "至少两个共同支撑标签的独立场景。scene 只在候选标明的依据场景内核验并引用原文。"
     "relevance ≥3 必须有逐字摘录。先确定实际支撑结论的 scenes，再从其中选取能支撑核心含义的 quote。"
-    "仅能定位人物、地点或话题的摘录不足以证明标签断言的动作、状态或氛围。\n\n"
-    "标为 excerpt 的候选只用该行所列的来源场景核对 relevance 和摘录，"
-    "其中一个场景有充分证据即可。\n\n"
-    '候选行标有「候选 ID」时，在该条判决中原样输出 "candidate_id"。'
-    "同名候选也要各自给出判决，只用各自行的释义、证据和目标目录。\n\n"
-    "只输出一个 JSON 对象，不要解释、不要 Markdown 代码块：\n"
-    '{"verdicts":[{"tag":"候选标签原文","candidate_id":"候选 ID","relevance":4,'
-    '"semantics":3,"value_scores":{"presentation":3,"search":4,"recommendation":2},'
-    '"confidence":0.85,"scenes":["场景 id"],'
-    '"quote":"原文逐字摘录","reason":"30 字以内"}]}'
+    "仅能定位人物、地点或话题的摘录不足以证明标签断言的动作、状态或氛围。"
+    "\n\n标为 excerpt 的候选只用该行所列的来源场景核对 relevance 和摘录，"
+    "其中一个场景有充分证据即可。"
+    "\n\n候选行标有「候选 ID」时，在该条判决的 \"id\" 中原样输出该候选 ID。"
+    "同名候选也要各自给出判决，只用各自行的释义、证据和目标目录。"
+    + "\n\n" + _VERDICT_OUTPUT_SPEC
 )
-JUDGE_RETRY_HINT = (
-    "\n\n请按上面的同一输出格式返回这次列出的所有候选，每条只判一次。"
-    "保留候选完整名称和全部必填字段（候选行标有「候选 ID」时必须一并返回 candidate_id；"
-    "value_scores 必须包含 presentation、search、recommendation 三个 0-4 整数），逐条核对字段类型。"
-)
+JUDGE_RETRY_HINT = _VERDICT_RETRY_HINT
 
 # ---- 通用释义补写（与 descriptions._parse_items / is_general 互为协议）----
 DESCRIPTION_TEMPLATE = (

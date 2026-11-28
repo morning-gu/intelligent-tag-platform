@@ -1,11 +1,13 @@
 // 开放评测报告视图测试（三维评审口径，分支式内容组织）：以与后端
 // open_report.assemble_open_report 键逐一镜像的夹具驱动各块视图——
 // ① banner/warnings 逐条 Alert ② 汇总卡（通过率族
-// + 新词占比 + 三维满分率，null → 暂无）③ 评分分布表（0-4 五档 + 无法
-// 判断 + 联合满分率）④ judge 审计段（数量漏斗/三维聚合/dropped 中文键/
+// + 新词占比 + 三维满分率，null → 暂无）+ 一致性对照段（分歧率/三桶/
+// 逐维均差与一致率，null → —，评审归一 Task 9）③ 评分分布表（0-4 五档 +
+// 无法判断 + 联合满分率）④ judge 审计段（数量漏斗/三维聚合/dropped 中文键/
 // bands）⑤ 逐片折叠明细（默认折叠；展开后失败片置顶、评审失败次之；
-// 标签三维分 + 理由，展开行看评审理由/摘录/judge 参考）⑥ 失败清单两块
-// 分开 ⑦ 下载五链接 href 字面量 ⑧ calibre 小字（同模标注）。
+// 标签三维分 + 理由，展开行看评审理由（threshold 口径换评分口径文案）/
+// 评审摘录/摘录/judge 参考）⑥ 失败清单两块分开 ⑦ 下载五链接 href 字面量
+// ⑧ calibre 小字（同模标注）。
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import OpenEvalReport from './OpenEvalReport'
@@ -283,6 +285,54 @@ describe('OpenEvalReport 报告视图', () => {
     expect(screen.getByText(/与生成同模——通过率绝对值需打折解读/)).toBeInTheDocument()
   })
 
+  it('threshold 口径：评分口径标签 + 评审摘录行；model 口径标签不出现', async () => {
+    const threshold = baseReport()
+    threshold.calibre.review_config = { pass_mode: 'threshold' }
+    threshold.movies = [movie({
+      hits: [{
+        tag_id: 't1', tag_name: '悬疑', desc: null, level: 'film',
+        judge_reference: { relevance: 4, semantics: 3, value: 3, reason: 'judge 依据', quote: 'judge 摘录原文' },
+        review: { ...review(true), quote: '评审核验摘录', confidence: 0.9 },
+      }],
+      new_words: [],
+    })]
+    render(<OpenEvalReport report={threshold} runId={RUN_ID} />)
+    const section = screen.getByRole('region', { name: '逐片明细' })
+    fireEvent.click(within(section).getByText('铁道游击队'))
+    await within(section).findByText('悬疑')
+    const expandButtons = within(section).getAllByRole('button', { name: /展开行|Expand row/ })
+    fireEvent.click(expandButtons[0])
+    expect(await within(section).findByText('评分口径（通过按阈值复算）')).toBeInTheDocument()
+    expect(within(section).getByText('评审摘录')).toBeInTheDocument()
+    expect(within(section).getByText('评审核验摘录')).toBeInTheDocument()
+    expect(within(section).queryByText('评审理由')).not.toBeInTheDocument()
+    expect(within(section).queryByText('评分理由汇总')).not.toBeInTheDocument()
+  })
+
+  it('一致性对照段：分歧率/三桶计数/逐维均差与一致率，null 渲染 —', () => {
+    const report = baseReport({
+      summary: {
+        ...baseReport().summary,
+        consistency: {
+          denominator: 2, review_rejected: 1, disagreement_rate: 0.5,
+          review_undetermined: 1, no_judge_reference: 2,
+          axis_delta: {
+            relevance: { mean_abs: 1.5, exact_rate: 2 / 3, n: 3 },
+            semantics: { mean_abs: 0.25, exact_rate: 0.75, n: 4 },
+            value: { mean_abs: null, exact_rate: null, n: 0 },
+          },
+        },
+      },
+    })
+    render(<OpenEvalReport report={report} runId={RUN_ID} />)
+    const section = screen.getByRole('region', { name: '一致性对照' })
+    expect(within(section).getByText(/50\.0%（可判 2 行）/)).toBeInTheDocument()
+    expect(within(section).getByText('1 / 1 / 2')).toBeInTheDocument()
+    expect(within(section).getByText('均差 1.50 / 一致率 66.7%（3 行）')).toBeInTheDocument()
+    expect(within(section).getByText('均差 0.25 / 一致率 75.0%（4 行）')).toBeInTheDocument()
+    expect(within(section).getByText('均差 — / 一致率 —（0 行）')).toBeInTheDocument()
+  })
+
   it('最薄口径：metrics null 无分布段、空 movies 无明细段、judge 空段暂无', () => {
     const thin = baseReport({
       banner: [], warnings: [],
@@ -305,6 +355,7 @@ describe('OpenEvalReport 报告视图', () => {
     render(<OpenEvalReport report={thin} runId={RUN_ID} />)
     expect(screen.queryByRole('region', { name: '评分分布' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '逐片明细' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '一致性对照' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'produce 失败影片' })).not.toBeInTheDocument()
     expect(screen.getByText(/数量漏斗 暂无/)).toBeInTheDocument()
   })

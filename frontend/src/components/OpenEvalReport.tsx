@@ -1,12 +1,14 @@
 // 开放评测报告视图（三维评审口径，分支式内容组织）：report.json 的只读
 // 渲染——① banner 警示（list[str] 逐条 Alert.warning：部分运行/同模评审/
-// 小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维均分/
-// 满分率 + 新词占比）③ 评分分布表（0-4 五档 + 无法判断 + 联合满分率）
-// ④ judge 审计段（生产漏斗图 + 三维分聚合 + 淘汰原因 + 库内分档）
-// ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由/摘录/judge 参考；
-//    内层「生产审计」再展开时懒加载候选去向，0 条产出的影片也有现场可看）
-// ⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）⑦ 产物下载五链接
-// ⑧ calibre 口径小字。null 一律「暂无」（None≠0）。
+// 旧协议/小样本）+ warnings 口径警示 ② 汇总卡（样本核算 + 通过率族 + 三维
+// 均分/满分率 + 新词占比）+ 一致性对照段（judge↔评审分歧率/三桶/逐维均差，
+// schema v4 新增，缺键不渲染）③ 评分分布表（0-4 五档 + 无法判断 + 联合
+// 满分率）④ judge 审计段（生产漏斗图 + 三维分聚合 + 淘汰原因 + 库内分档）
+// ⑤ 逐片折叠明细（每标签三维分 + 理由，展开看评审理由（口径随 pass_mode）/
+// 评审摘录/judge 参考；内层「生产审计」再展开时懒加载候选去向，0 条产出
+// 的影片也有现场可看）⑥ 异常表（produce 失败 / 评审失败分开，产出不作废）
+// ⑦ 产物下载五链接 ⑧ calibre 口径小字。null 一律「暂无」（None≠0），
+// 一致性对照段内为「—」。
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import FunnelChart from './FunnelChart'
@@ -47,6 +49,48 @@ function percent(value: number | null | undefined): string {
 
 function average(value: number | null | undefined): string {
   return value === null || value === undefined ? NA : `${value.toFixed(2)} / 4`
+}
+
+/** 一致性对照段专用 null 口径：「—」而非「暂无」（段内三桶/逐维数字的
+ * 缺席语义与汇总卡的 None≠0 呈现分开）。 */
+function deltaPercent(value: number | null | undefined): string {
+  return value === null || value === undefined ? '—' : `${(value * 100).toFixed(1)}%`
+}
+
+function deltaMean(value: number | null | undefined): string {
+  return value === null || value === undefined ? '—' : value.toFixed(2)
+}
+
+/** judge↔评审一致性对照段（summary.consistency，schema v4 新增；缺键
+ * 整段不渲染——旧 run 无此块）：分歧率+三桶一行、逐维均差/一致率行。 */
+function ConsistencySection({ consistency }: {
+  consistency: NonNullable<OpenEvalReportData['summary']['consistency']>
+}) {
+  return (
+    <section aria-label="一致性对照">
+      <Typography.Title level={5}>judge↔评审一致性对照</Typography.Title>
+      <Descriptions size="small" column={2} items={[
+        {
+          key: 'rate',
+          label: '与 judge 分歧率',
+          children: `${deltaPercent(consistency.disagreement_rate)}（可判 ${consistency.denominator} 行）`,
+        },
+        {
+          key: 'buckets',
+          label: '评审否决 / 无法判定 / 缺 judge 参考',
+          children: `${consistency.review_rejected} / ${consistency.review_undetermined} / ${consistency.no_judge_reference}`,
+        },
+        ...DIMENSIONS.map(({ key, title }) => {
+          const delta = consistency.axis_delta?.[key]
+          return {
+            key,
+            label: `${title} judge 均差`,
+            children: `均差 ${deltaMean(delta?.mean_abs)} / 一致率 ${deltaPercent(delta?.exact_rate)}（${delta?.n ?? 0} 行）`,
+          }
+        }),
+      ]} />
+    </section>
+  )
 }
 
 /** 评分分布表（汇总与逐片共用）：逐维均分/满分率/0-4 分布/无法判断。 */
@@ -212,14 +256,24 @@ const labelColumns: TableProps<LabelRow>['columns'] = [
   { title: '评审', render: (_, row) => passTag(row) },
 ]
 
-/** 展开行：评审理由 / 摘录核验 / judge 参考（仅供参考，评审独立判断）。 */
-function labelDetail(row: LabelRow, modelDecision: boolean) {
+/** 展开行：评审理由（口径随 pass_mode）/评审摘录 / 摘录核验 / judge 参考
+ * （仅供参考，评审独立判断）。reason 标签三分支：model = 旧协议模型直出
+ * 保留意见；threshold = 阈值复算口径（模型只出分，reason 为评分口径文案）；
+ * 缺 pass_mode = 更旧的 run 照旧「评分理由汇总」。 */
+function reasonLabel(passMode: 'model' | 'threshold' | undefined): string {
+  if (passMode === 'model') return '评审理由'
+  if (passMode === 'threshold') return '评分口径（通过按阈值复算）'
+  return '评分理由汇总'
+}
+
+function labelDetail(row: LabelRow, passMode: 'model' | 'threshold' | undefined) {
   const reference = row.judge_reference
   return (
     <Descriptions size="small" column={1} items={[
-      { key: 'reason', label: modelDecision ? '评审理由' : '评分理由汇总', children: row.review?.reason || '—' },
+      { key: 'reason', label: reasonLabel(passMode), children: row.review?.reason || '—' },
       { key: 'source', label: '生成来源场景', children: row.sceneIds.join('、') || '—' },
       { key: 'evidence', label: '评审引用场景', children: row.review?.evidence_scene_ids?.join('、') || '—' },
+      ...(row.review?.quote ? [{ key: 'review-quote', label: '评审摘录', children: row.review.quote }] : []),
       { key: 'quote', label: '生产 judge 摘录', children: reference?.quote || '—' },
       {
         key: 'judge',
@@ -283,6 +337,8 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
           { key: 'undetermined', label: '无法判断', children: metrics ? `${metrics.undetermined_tags} 条` : NA },
         ]} />
       </section>
+
+      {summary.consistency && <ConsistencySection consistency={summary.consistency} />}
 
       {metrics && (
         <section aria-label="评分分布">
@@ -361,7 +417,7 @@ export default function OpenEvalReport({ report, runId }: { report: OpenEvalRepo
                     dataSource={movieLabelRows(movie)}
                     pagination={false}
                     scroll={{ x: 1040 }}
-                    expandable={{ expandedRowRender: (row) => labelDetail(row, calibre.review_config?.pass_mode === 'model') }}
+                    expandable={{ expandedRowRender: (row) => labelDetail(row, calibre.review_config?.pass_mode) }}
                   />
                 )}
                 {/* 产出为 0 的影片上面一张表都没有：候选去向只能从这里看 */}

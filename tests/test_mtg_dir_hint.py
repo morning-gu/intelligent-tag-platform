@@ -135,7 +135,7 @@ def test_filter_rejects_out_of_directory_via_semantics_even_when_label_exists(
             rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
             for row in rows:
                 if row["tag"] == "复仇":
-                    row["semantics"] = 1
+                    row["semantics"]["score"] = 1
             return _result(rows)
 
     spec = _spec(content_fixture, "mismatch", GenerationPolicy(dir_ids=["dir_theme"]))
@@ -186,8 +186,9 @@ def test_second_stage_uses_value_then_minimum_similarity(
             rows = json.loads(MOCK_LLM.complete(messages, run_id).content)
             for row in rows:
                 score = 2 if row["tag"] == names[2] else 4
-                row["value_scores"] = {
-                    "presentation": score, "search": score, "recommendation": score,
+                row["value"] = {
+                    direction: {"score": score, "reason": "桩判定"}
+                    for direction in ("presentation", "search", "recommendation")
                 }
             return _result(rows)
 

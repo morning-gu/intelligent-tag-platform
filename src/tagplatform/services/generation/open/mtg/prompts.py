@@ -380,16 +380,26 @@ def judge_dir_block(dirs: list[dict]) -> str:
 
 
 def _judge_output_example(*, with_candidate_ids: bool) -> str:
-    fields = ['"tag":"候选标签原文"']
-    if with_candidate_ids:
-        fields.append('"candidate_id":"候选 ID"')
-    fields.extend([
-        '"relevance":4', '"semantics":3',
-        '"value_scores":{"presentation":3,"search":4,"recommendation":2}',
-        '"confidence":0.85',
-        '"scenes":["场景 id"]', '"quote":"原文逐字摘录"', '"reason":"30 字以内"',
-    ])
-    return '{"verdicts":[{' + ",".join(fields) + '}]}'
+    """渲染输出示例行（与共享 VERDICT_OUTPUT_SPEC 同一融合形状，评审归一
+    Task 6 收口）：id 键 + relevance/semantics 与 value 三方向各
+    {"score","reason"} + quote/scenes/confidence；with_candidate_ids=False
+    （候选行无「候选 ID」标记）时 id 用 "t0" 占位。"""
+    entry = {
+        "id": "候选 ID" if with_candidate_ids else "t0",
+        "relevance": {"score": 4, "reason": "…"},
+        "semantics": {"score": 3, "reason": "…"},
+        "value": {
+            "presentation": {"score": 3, "reason": "…"},
+            "search": {"score": 4, "reason": "…"},
+            "recommendation": {"score": 2, "reason": "…"},
+        },
+        "quote": "原文逐字摘录",
+        "scenes": ["场景 id"],
+        "confidence": 0.85,
+    }
+    return ('{"verdicts":['
+            + json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+            + "]}")
 
 
 def render_judge_messages(body: str, candidate_lines: str, *,
@@ -403,7 +413,9 @@ def render_judge_messages(body: str, candidate_lines: str, *,
     if not with_excerpts:
         text = _strip_section(text, "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时")
     if not with_candidate_ids:
-        text = _strip_section(text, "\n\n候选行标有「候选 ID」时", "\n\n只输出一个 JSON 对象")
+        # 只剥「候选 ID」段：终止锚用共享输出规范自己的标题——若剥到
+        # "只输出一个 JSON 对象"，会把整段字段要求一并误剥（评审归一 Task 6 ③收口）。
+        text = _strip_section(text, "\n\n候选行标有「候选 ID」时", "\n\n## 输出字段要求")
     head, _ = text.rsplit("\n", 1)
     example = _judge_output_example(with_candidate_ids=with_candidate_ids)
     rendered = (

@@ -1,9 +1,12 @@
-// 单片生产审计与逐次模型响应，展开报告面板时取数。
+// 单片生产审计与逐次模型响应，展开报告面板时取数。judge trace 双形状
+// （评审归一 Task 10）：新键族 = 统一引擎 batches/errors dict/salvaged，
+// legacy = 旧 run 的 raw/errors 列表——按键存在性分流渲染，缺键「暂无」。
 import { Alert, Descriptions, Space, Spin, Table, Tag, Typography } from 'antd'
 import type { TableProps } from 'antd'
 import { useEffect, useState } from 'react'
 import {
   getOpenMovieDiagnostics,
+  type OpenMovieAudit,
   type OpenMovieDiagnostics,
 } from '../api/evalOpen'
 
@@ -131,6 +134,54 @@ function ResponseDetails({ title, responses }: { title: string; responses: Respo
   )
 }
 
+/** judge_trace 读侧视图：responses 喂 ResponseDetails；新键族另带 errors
+ * dict 键值对（最终未获判决目标）与 salvaged；legacy 只计失败调用次数。 */
+interface JudgeTraceView {
+  responses: ResponseRow[]
+  failedTargets: [string, string][]
+  failedCalls: number
+  salvaged: number
+}
+
+const EMPTY_JUDGE_TRACE: JudgeTraceView = {
+  responses: [], failedTargets: [], failedCalls: 0, salvaged: 0,
+}
+
+/** judge_trace 双形状按键分流（评审归一 Task 10）：新键族（统一引擎
+ * batches/errors dict/salvaged）逐批现场——注意 errors 恒为 dict，旧读法
+ * `errors?.map` 对新审计直接 TypeError（整页白屏），故按键存在性分流；
+ * legacy（旧 run raw/errors 列表）按 attempt 排序照旧。缺键 → 空视图。 */
+function judgeTraceView(trace: OpenMovieAudit['judge_trace']): JudgeTraceView {
+  if (!trace) return EMPTY_JUDGE_TRACE
+  const salvaged = trace.salvaged ?? 0
+  if ('batches' in trace) {
+    return {
+      responses: trace.batches.map((batch) => ({
+        label: `${batch.batch}#${batch.attempt}${batch.targets?.length ? ` · ${batch.targets.join('、')}` : ''}`,
+        raw: batch.raw,
+        error: batch.missing?.length
+          ? `${batch.error ?? ''}（缺少 ${batch.missing.join('、')}）`
+          : batch.error ?? undefined,
+      })),
+      failedTargets: Object.entries(trace.errors ?? {}),
+      failedCalls: 0,
+      salvaged,
+    }
+  }
+  const raw = new Map((trace.raw ?? []).map(({ attempt, content }) => [attempt, content]))
+  const errors = new Map((trace.errors ?? []).map(({ attempt, error }) => [attempt, error]))
+  return {
+    responses: [...new Set([...raw.keys(), ...errors.keys()])]
+      .sort((a, b) => a - b)
+      .map((attempt) => ({
+        label: `judge 第 ${attempt + 1} 次`, raw: raw.get(attempt), error: errors.get(attempt),
+      })),
+    failedTargets: [],
+    failedCalls: errors.size,
+    salvaged,
+  }
+}
+
 function buildColumns(showLegacyDirFit: boolean): TableProps<AuditRow>['columns'] {
   return [
     { title: '候选标签', dataIndex: 'tag' },
@@ -180,13 +231,7 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
   )
   const columns = buildColumns(showLegacyDirFit)
   const candidateLabel = rows.some((row) => row.stage) ? '送审候选' : '合并候选'
-  const judgeErrors = new Map(audit?.judge_trace?.errors?.map(({ attempt, error }) => [attempt, error]))
-  const judgeRaw = new Map(audit?.judge_trace?.raw?.map(({ attempt, content }) => [attempt, content]))
-  const judgeResponses = [...new Set([...judgeRaw.keys(), ...judgeErrors.keys()])]
-    .sort((a, b) => a - b)
-    .map((attempt) => ({
-      label: `judge 第 ${attempt + 1} 次`, raw: judgeRaw.get(attempt), error: judgeErrors.get(attempt),
-    }))
+  const judgeTrace = judgeTraceView(audit?.judge_trace)
   const reviewResponses = (review?.batches ?? []).map((batch) => ({
     label: `${batch.batch}#${batch.attempt}${batch.targets?.length ? ` · ${batch.targets.join('、')}` : ''}`,
     raw: batch.raw,
@@ -203,8 +248,20 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
             {candidateLabel} {rows.length} 条 · judge 判决 {audit.verdicts?.length ?? 0} 条
             {' '}· 最终保留 {audit.accepted?.length ?? 0} 条
           </Typography.Text>
-          {judgeErrors.size > 0 && (
-            <Alert type="warning" showIcon message={`judge 有 ${judgeErrors.size} 次调用出现异常`} />
+          {judgeTrace.failedCalls > 0 && (
+            <Alert type="warning" showIcon message={`judge 有 ${judgeTrace.failedCalls} 次调用出现异常`} />
+          )}
+          {judgeTrace.failedTargets.length > 0 && (
+            <Alert type="warning" showIcon
+              message={`judge 有 ${judgeTrace.failedTargets.length} 个候选未获判决`} />
+          )}
+          {judgeTrace.failedTargets.length > 0 && (
+            <Typography.Text type="secondary">
+              judge 未完成：{judgeTrace.failedTargets.map(([key, reason]) => `${key} ${reason}`).join('；')}
+            </Typography.Text>
+          )}
+          {judgeTrace.salvaged > 0 && (
+            <Typography.Text type="secondary">漏判恢复 {judgeTrace.salvaged} 条</Typography.Text>
           )}
           {rows.length > 0 ? (
             <Table<AuditRow>
@@ -234,7 +291,7 @@ export default function OpenEvalMovieAudit({ runId, tt }: { runId: string; tt: s
           评审未完成：{reviewErrors.map(([id, reason]) => `${id} ${reason}`).join('；')}
         </Typography.Text>
       )}
-      <ResponseDetails title="judge 原始响应" responses={judgeResponses} />
+      <ResponseDetails title="judge 原始响应" responses={judgeTrace.responses} />
       <ResponseDetails title="独立评审原始响应" responses={reviewResponses} />
     </Space>
   )

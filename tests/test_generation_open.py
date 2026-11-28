@@ -6,11 +6,13 @@
 - 证据锚点必须落在资产真实场景里，编造的 scene_id 一律淘汰；
 - 空目录不报错（全部 generated）；命中目录（相似度 ≥ 阈值）标 catalog；
 - LLM / judge 失败显式抛错（任务置 failed，不静默放行）；
-- `builds_prompt=True` + `prompt_version=mtg-v14-scoring-evidence`：runner 不再取 DB 模板。
+- `builds_prompt=True` + `prompt_version=mtg-v15-unified-verdict`：runner 不再取 DB 模板。
 
 Mock 说明：`MOCK_LLM` 对生成 prompt 固定返回三个候选（多线叙事/情感张力/
-视听风格），对审核 prompt 全部给过线三维分（4/3/3）、confidence=0.9；`MOCK_EMBEDDER`
-是哈希伪向量，不同标签近似正交，所以语义合并不额外合并——归一化去重负责合并同名词。
+视听风格），对审核 prompt 按融合协议全部给过线三维分（relevance 4 /
+semantics 3 / value 三方向 3，id 键 + 逐维 {score, reason}）、confidence=0.9；
+`MOCK_EMBEDDER` 是哈希伪向量，不同标签近似正交，所以语义合并不额外合并——
+归一化去重负责合并同名词。
 """
 
 import json
@@ -22,6 +24,7 @@ from conftest import MOCK_EMBEDDER, MOCK_LLM
 from tagplatform.services.generation import GenerationPolicy, GenerationSpec
 from tagplatform.services.generation.open.mtg import keyframes as keyframes_mod
 from tagplatform.services.generation.open.mtg import pipeline as mtg_pipeline
+from tagplatform.services.generation.open.mtg.merge import MergedCandidate
 from tagplatform.services.generation.open.producer import OpenTagProducer
 from tagplatform.capabilities.llm.client import LLMResponse
 from tagplatform.services.tags.library import try_load_library
@@ -51,12 +54,14 @@ def mtg_settings(tmp_path, monkeypatch):
 
 
 class _JudgeClient:
-    """固定评分的 judge 桩：三维分/confidence/scenes/quote 由构造参数决定。
+    """固定评分的 judge 桩：按融合协议回三维分（id 键 + 逐维 {score, reason}）。
 
     echo_full=True 复现真实调用的坏习惯：把整行候选（含维度/依据）抄进
     tag 字段——对齐逻辑必须仍能匹配回候选。
-    quote 缺省时从审核 prompt 的首个场景行截一段原文（模拟"引用原文"）。
-    value_map 按标签名给 value 分（队列排序用例用）。
+    quote 缺省时从所报依据场景的场景行截一段原文（模拟"引用原文"）。
+    scenes 显式给定时覆盖全部候选的引用场景；缺省引用候选行标注的依据
+    场景（引擎按候选来源场景圈定 allowed_scenes，引到外面会被核验压分）。
+    value_map 按标签名给 value 三方向分（队列排序用例用）。
     """
 
     def __init__(self, relevance=4, semantics=3, value=3, confidence=0.9,
@@ -88,23 +93,26 @@ class _JudgeClient:
             dirs = re.search(r"(?:〔|｜)目录 ([^〕｜]+)", row)
             identifier = re.search(r"｜候选 ID ([^〕｜]+)", row)
             source = re.search(r"｜依据场景 ([^〕｜]+)", row)
-            scene_id = source[1].split("、")[0] if source else next(iter(excerpts), "")
+            marked = source[1].split("、") if source else []
+            scene_id = marked[0] if marked else next(iter(excerpts), "")
+            cited = (self.scenes if self.scenes is not None
+                     else marked or ([scene_id] if scene_id else []))
             quote = excerpts.get(scene_id, "")[:12] if self.quote == "" else self.quote
             val = self.value_map.get(tag, self.value)
-            value_scores = (
+            directions = (
                 val if isinstance(val, dict)
                 else {"presentation": val, "search": val, "recommendation": val}
             )
             items.append({
-                **({"candidate_id": identifier[1]} if identifier else {}),
+                **({"id": identifier[1]} if identifier else {}),
                 "tag": row if self.echo_full else tag,
-                "relevance": self.relevance,
-                "semantics": self.semantics,
-                "value_scores": value_scores,
+                "relevance": {"score": self.relevance, "reason": "桩判定"},
+                "semantics": {"score": self.semantics, "reason": "桩判定"},
+                "value": {key: {"score": score, "reason": "桩判定"}
+                          for key, score in directions.items()},
                 "confidence": self.confidence,
-                "scenes": self.scenes if self.scenes is not None else [],
+                "scenes": cited,
                 "quote": quote,
-                "reason": "桩判定",
             })
         content = json.dumps(items, ensure_ascii=False)
         return LLMResponse(content=content, usage={"prompt_tokens": 10,
@@ -161,9 +169,11 @@ def test_open_end_to_end(session, content_fixture, mtg_settings, tmp_path):
     assert len(report["accepted"]) == 1
     assert report["clustering"]["input"] == 9
     assert len(report["clustering"]["clusters"]) == 1
-    # judge 原始响应随审计落盘：整片归零时能分清 null / 漏字段 / 格式漂移。
-    assert [row["attempt"] for row in report["judge_trace"]["raw"]] == [0]
-    assert json.loads(report["judge_trace"]["raw"][0]["content"])
+    # judge 原始响应随审计落盘（引擎统一键族 batches）：整片归零时能分清
+    # null / 漏字段 / 格式漂移。
+    assert [row["attempt"] for row in report["judge_trace"]["batches"]] == [0]
+    assert json.loads(report["judge_trace"]["batches"][0]["raw"])
+    assert report["judge_trace"]["errors"] == {} and report["judge_trace"]["salvaged"] == 0
 
 
 def test_open_judge_rejected_dropped(session, content_fixture, mtg_settings):
@@ -272,7 +282,7 @@ def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
             response = super().complete(messages, run_id)
             verdicts = json.loads(response.content)
             payload = ({"verdicts": verdicts} if not self.keyed
-                       else {row["candidate_id"]: row for row in verdicts})
+                       else {row["id"]: row for row in verdicts})
             return LLMResponse(content=json.dumps(payload), usage=response.usage,
                                raw={}, ok=True)
 
@@ -284,15 +294,18 @@ def test_open_judge_object_wrapped_output_still_parsed(session, content_fixture,
 
 
 def test_open_scene_evidence_stays_with_source(session, content_fixture, mtg_settings):
-    """场景级标签只挂原候选的证据场景。"""
+    """场景级标签只挂原候选的证据场景。
+
+    生成侧把逐场候选的 scenes 强制改写为请求场景（item 里另写的 scenes 被
+    覆盖），judge 按候选行标注的依据场景引用——证据链两头都只认来源场景。
+    """
     content = _scene_content(content_fixture, "tt0000003", 2)
     item = {"tag": "多线叙事", "dimension": "叙事",
             "scenes": ["tt0000003_story_001"], "reason": "生成侧"}
     generated = _FixedGenLLM(lambda run: [item] if ":scene-001-" in run else [])
     spec = _build_spec(session, content, "r12", GenerationPolicy(dir_ids=["dir_scene"]))
     out = OpenTagProducer().produce(
-        spec, session, generated, MOCK_EMBEDDER,
-        judge_client=_JudgeClient(scenes=["tt0000003_story_001"]))
+        spec, session, generated, MOCK_EMBEDDER, judge_client=_JudgeClient())
     assert len(out) == 1
     assert [e.scene_id for e in out[0].evidence] == ["tt0000003_story_000"]
 
@@ -474,7 +487,9 @@ def test_open_judge_parse_failure_raises(session, content_fixture, mtg_settings,
     audit = json.loads((tmp_path / "audit" / "t-r9.json").read_text(encoding="utf-8"))
     assert {row["tag"] for row in audit["merged"]} == {"多线叙事", "情感张力", "视听风格"}
     assert all(row["scope"] == "scene" for row in audit["merged"])
-    assert len(audit["judge_trace"]["errors"]) == 2
+    # 引擎统一 trace 键族：整批重试一轮共 2 批，漏判逐候选落 errors（dict）。
+    assert len(audit["judge_trace"]["batches"]) == 2
+    assert len(audit["judge_trace"]["errors"]) == len(audit["merged"])
 
 
 # ---- 关键帧装配 ----
@@ -592,3 +607,136 @@ def test_run_open_generation_settings_none_falls_back(session, content_fixture,
     assert len(out) == 1
     assert out[0].tag_name in {"多线叙事", "情感张力", "视听风格"}
     assert (tmp_path / "audit" / "t-r-fallback.json").exists()
+
+
+# ---- 审计投影与版本（评审归一 Task 6：mock 路径）----
+
+
+def test_mtg_version_bumped_for_unified_verdict():
+    """评审归一接引擎：口径版本升 mtg-v15-unified-verdict。"""
+    assert mtg_pipeline.MTG_VERSION == "mtg-v15-unified-verdict"
+    assert OpenTagProducer.prompt_version == "mtg-v15-unified-verdict"
+
+
+def test_mock_pipeline_audit_verdict_rows_are_flat_projection(
+        session, content_fixture, mtg_settings, tmp_path):
+    """mock 路径审计 verdicts 行 = 扁平投影：数值键保留（前端/漏斗不破），
+    新增理由与核验键（relevance_reason/value_reasons/verify_fail 等）。"""
+    spec = _build_spec(session, content_fixture, run_id="r15")
+    OpenTagProducer().produce(spec, session, MOCK_LLM, MOCK_EMBEDDER)
+    report = json.loads((tmp_path / "audit" / "t-r15.json").read_text(encoding="utf-8"))
+    rows = report["verdicts"]
+    assert rows
+    row = rows[0]
+    # 扁平数值键（open_report._judge_score_summary 与前端 JudgeVerdictRow 消费）
+    assert isinstance(row["relevance"], int) and row["relevance"] == 4
+    assert isinstance(row["semantics"], int) and row["semantics"] == 3
+    assert isinstance(row["value"], float) and row["value"] >= 2.0
+    assert set(row["value_scores"]) == {"presentation", "search", "recommendation"}
+    # 新增键：逐维理由、价值理由、派生理由、核验标注与证据直通
+    assert row["relevance_reason"] == "模拟内容评分"
+    assert row["semantics_reason"] == "模拟语义评分"
+    assert "内容呈现" in row["value_reasons"]
+    assert row["verify_fail"] is None
+    assert row["confidence"] == 0.9
+    assert row["quote"] and row["reason"] and row["scenes"]
+    assert row["tag_kind"] in {"content", "scene", "character"}
+    assert isinstance(row["candidate_id"], str)
+
+
+# ---- 小节 4 过滤段直测（构造终判 dict，钉淘汰原因映射）----
+
+
+def _final_verdict(**overrides):
+    """finalize_verdict 终判形状的最小构造（过滤段只读这些键）。"""
+    verdict = {
+        "relevance": {"score": 4, "reason": "内容强相关"},
+        "semantics": {"score": 3, "reason": "语义清楚"},
+        "value": {"score": 3.1, "reason": "价值汇总", "tag_kind": "content"},
+        "quote": "原文摘录",
+        "scenes": ["scene_001", "scene_002"],
+        "confidence": 0.9,
+        "reason": "派生理由",
+        "verify_fail": None,
+    }
+    verdict.update(overrides)
+    return verdict
+
+
+def _merged(tag, key, scope="film", scenes=("scene_001", "scene_002")):
+    return MergedCandidate(tag=tag, dimension=None, scenes=scenes, runs=1,
+                           aliases=(tag,), reason="生成依据", scope=scope,
+                           dir_raw="dir_theme", candidate_id=key)
+
+
+def test_filter_drops_quote_fail_with_dedicated_reason(content_fixture, mtg_settings):
+    """引擎核验压分（quote 失败）→ 专属淘汰原因，不吞成"未过线"。"""
+    verdicts = {"c1": _final_verdict(
+        verify_fail="quote",
+        relevance={"score": 1, "reason": "未引用可核对原文，相关性高分缺少逐字依据"})}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts, [_merged("标签甲", "c1")])
+    assert accepted == []
+    assert dropped[0]["why"] == "高相关分无逐字摘录支撑"
+
+
+def test_filter_drops_scenes_fail_without_evidence(content_fixture, mtg_settings):
+    verdicts = {"c1": _final_verdict(verify_fail="scenes", scenes=[])}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts, [_merged("标签甲", "c1")])
+    assert accepted == []
+    assert dropped[0]["why"] == "无有效场景证据"
+
+
+def test_filter_drops_film_single_cited_scene(content_fixture, mtg_settings):
+    """film 级 verify_fail=="scenes" 且只剩单场 → 全片级单场支撑淘汰。"""
+    verdicts = {"c1": _final_verdict(
+        verify_fail="scenes",
+        relevance={"score": 1, "reason": "有效引用场景不足，无法核验所给相关性高分"},
+        scenes=["scene_001"])}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts, [_merged("标签甲", "c1")])
+    assert accepted == []
+    assert dropped[0]["why"] == "全片级但只有单场支撑"
+
+
+def test_filter_drops_score_below_with_axis_notes(content_fixture, mtg_settings):
+    """未压分的低分（无 verify_fail）→ 未过线前缀 + 数值轴标注。"""
+    verdicts = {"c1": _final_verdict(
+        relevance={"score": 2, "reason": "偏题"}, verify_fail=None)}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts, [_merged("标签甲", "c1")])
+    assert accepted == []
+    why = dropped[0]["why"]
+    assert why.startswith("judge 评分未过线")
+    assert "relevance=2 < 3" in why
+
+
+def test_filter_annotates_null_axis_as_undecidable(content_fixture, mtg_settings):
+    """None 轴（无法判断）同样走未过线前缀，并带「无法判断」标注。"""
+    verdicts = {"c1": _final_verdict(
+        relevance={"score": None, "reason": "材料缺失"}, verify_fail=None)}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts, [_merged("标签甲", "c1")])
+    assert accepted == []
+    why = dropped[0]["why"]
+    assert why.startswith("judge 评分未过线")
+    assert "relevance=无法判断" in why
+
+
+def test_filter_accepts_passing_scene_verdict(content_fixture, mtg_settings):
+    """过线判决（证据场景真实）→ 接受，证据取自判决 scenes。"""
+    verdicts = {"c1": _final_verdict(scenes=["scene_001"])}
+    accepted, dropped = mtg_pipeline._filter_candidates(
+        mtg_settings, content_fixture, verdicts,
+        [_merged("标签甲", "c1", scope="scene", scenes=("scene_001",))])
+    assert dropped == []
+    candidate, verdict, evidence = accepted[0]
+    assert candidate.candidate_id == "c1"
+    assert [e.scene_id for e in evidence] == ["scene_001"]
+
+
+def test_quote_fail_reason_counts_as_filter_stage_drop():
+    """新专属淘汰原因必须进漏斗的过滤段分类，否则漏斗推导失真。"""
+    assert mtg_pipeline.is_filter_stage_drop("高相关分无逐字摘录支撑") is True
+    assert mtg_pipeline.is_filter_stage_drop("judge 评分未过线（relevance=无法判断）") is True
