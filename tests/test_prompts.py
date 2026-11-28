@@ -104,12 +104,14 @@ def test_judge_template_fuses_shared_output_spec():
     # render_judge_messages 按字面标记剥段/换示例行，标记缺失即渲染崩
     for marker in ("\n\n## 目标目录\n", "\n\n## 评分标准",
                    "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时",
-                   "\n\n只输出一个 JSON 对象"):
+                   "\n\n## 输出字段要求", "\n\n只输出一个 JSON 对象"):
         assert marker in template
 
 
 def test_judge_template_renders_across_all_section_variants():
-    """目录/excerpt/候选 ID 三个可剥段全组合渲染：占位符全部消费、不残留。"""
+    """目录/excerpt/候选 ID 三个可剥段全组合渲染：占位符全部消费、不残留；
+    无候选 ID 渲染保留共享字段要求（评审归一 Task 6 ③收口：剥段止步于
+    输出规范标题，字段 bullets 不再被整段误剥），示例行随候选 ID 开关换形。"""
     from tagplatform.services.generation.open.mtg.prompts import render_judge_messages
 
     for dir_block in ("", "- d1｜内容类标签/情感氛围｜适用种类：内容级｜描述情感基调。"):
@@ -122,6 +124,9 @@ def test_judge_template_renders_across_all_section_variants():
                 assert "{candidates}" not in text
                 assert "{content}" not in text
                 assert "{dirs}" not in text
+                assert "## 输出字段要求" in text
+                expected_id = '"id":"候选 ID"' if with_candidate_ids else '"id":"t0"'
+                assert expected_id in text
 
 
 def test_both_templates_embed_unified_criteria():

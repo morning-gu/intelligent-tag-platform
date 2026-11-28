@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, replace
 from functools import partial
@@ -45,15 +44,19 @@ from tagplatform.services.generation.open.mtg.normalization import normalize_key
 from tagplatform.services.generation.open.mtg.prompt_samples import SampledPromptClient
 from tagplatform.services.generation.open.mtg.prompts import (
     build_generation_template,
-    render_content,
-    render_scene,
+)
+from tagplatform.services.generation.open.mtg.verdicts import (
+    VERDICT_FLOORS,
+    verdict_pass,
 )
 from tagplatform.services.generation.open.mtg.verify import build_verify_template, verify_pairs
 from tagplatform.services.tags.library import (
     library_index,
 )
 from tagplatform.services.tags.mounting import resolve_mount
-from tagplatform.services.tags.value_scoring import format_score, normalize_tag_kind
+from tagplatform.services.tags.value_scoring import (
+    VALUE_DIRECTIONS, format_score, normalize_tag_kind,
+)
 from tagplatform.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -74,14 +77,17 @@ logger = logging.getLogger(__name__)
 # v13 = Judge 与开放评测对齐统一三维评分标准：目录匹配融合进 semantics，
 #       标签价值改为内容呈现/内容搜索/内容推荐三方向打分并按标签种类加权聚合。
 # v14 = 明确场景证据归属和各维评分边界。
-MTG_VERSION = "mtg-v14-scoring-evidence"
+# v15 = judge 接统一判决引擎（评审归一）：提示/解析/证据核验与开放评测同源，
+#       过滤段改 verdict_pass 复算，压分淘汰给专属原因（verify_fail 映射）。
+MTG_VERSION = "mtg-v15-unified-verdict"
 
 # 单条证据保留的场景数（审核卡展示用，多了没意义）
 _MAX_EVIDENCE = 3
 
-# judge 三维分数的保留阈值：relevance ≥3、semantics ≥3（已融合目录匹配度与释义一致性）、
-# value ≥2.0（三方向按标签种类权重加权聚合分）。null 分按未过线处理，绝不猜分放行。
-_JUDGE_SCORE_FLOORS = {"relevance": 3, "semantics": 3, "value": 2}
+# judge 三维分数的保留阈值收敛到 mtg.verdicts.VERDICT_FLOORS（评审归一 Task 1，
+# 与开放评测报告同源）：relevance ≥3、semantics ≥3（已融合目录匹配度与释义
+# 一致性）、value ≥2.0（三方向按标签种类权重加权聚合分）。null 分按未过线
+# 处理，绝不猜分放行。
 
 # 小节 4 过滤段（judge 判决 + 证据把关）的淘汰原因常量：审计读侧
 # （open_report 的数量漏斗）据 is_filter_stage_drop 把"过滤段淘汰"与
@@ -94,60 +100,27 @@ _DROP_SCORE_BELOW = "judge 评分未过线"
 _DROP_CONFIDENCE_BELOW = "judge 判定把握"
 _DROP_NO_EVIDENCE = "无有效场景证据"
 _DROP_SINGLE_SCENE = "全片级但只有单场支撑"
+# 引擎证据核验压分（verify_fail=="quote"）的专属原因：高 relevance 分给不出
+# 逐字摘录，等同没依据——单独成档让审计能区分"没引原文"与"分确实低"。
+_DROP_QUOTE_FAIL = "高相关分无逐字摘录支撑"
 
 
 def is_filter_stage_drop(why: str) -> bool:
     """审计 dropped.why 是否属于小节 4 过滤段（judge + 证据把关）。
 
     评分/把握度两类原因带动态后缀（具体分值），按前缀匹配；其余定值原因
-    （未判 / 目录契合未通过 / 无证据 / 单场支撑）是定值文案，精确匹配。目录归属段的
-    淘汰原因（无可归属目录等）不在此列——它们发生在排序配额之后，不影响
-    judge 通过数。
+    （未判 / 目录契合未通过 / 无证据 / 单场支撑 / 无逐字摘录）是定值文案，
+    精确匹配。目录归属段的淘汰原因（无可归属目录等）不在此列——它们发生
+    在排序配额之后，不影响 judge 通过数。
     """
-    return (why in (_DROP_NO_VERDICT, _DROP_DIR_MISMATCH, _DROP_DIR_UNJUDGED, _DROP_NO_EVIDENCE,
-                    _DROP_SINGLE_SCENE)
+    return (why in (_DROP_NO_VERDICT, _DROP_DIR_MISMATCH, _DROP_DIR_UNJUDGED,
+                    _DROP_NO_EVIDENCE, _DROP_SINGLE_SCENE, _DROP_QUOTE_FAIL)
             or why.startswith((_DROP_SCORE_BELOW, _DROP_CONFIDENCE_BELOW)))
 
 
-# judge 必须引用原文：判决里给出 quote，与内容逐字对上（容忍标点/省略号差异）
-# 才采信。这条把"judge 复读生成侧理由"变成可检测的失败：没有原文锚点的
-# 高 relevance 分一律降档淘汰，而不是凭一句"内容有依据"放行。
-_QUOTE_MIN_CHARS = 8
-_QUOTE_STRIP_RE = re.compile(
-    r"[\s「」『』“”‘’\"'…—·,，。、；;：:！!？?（）()\[\]【】]+")
-
-
-def _normalize_quote(text: str) -> str:
-    return _QUOTE_STRIP_RE.sub("", text or "")
-
-
-def _quote_ok(quote: str | None, haystack: str) -> bool:
-    """quote 与内容有 ≥8 字连续重合即视为有效引用。"""
-    normalized = _normalize_quote(str(quote or ""))
-    if len(normalized) < _QUOTE_MIN_CHARS:
-        return False
-    for start in range(len(normalized) - _QUOTE_MIN_CHARS + 1):
-        if normalized[start:start + _QUOTE_MIN_CHARS] in haystack:
-            return True
-    return False
-
-
-def _require_quotes(verdicts: dict[str, dict], haystack: str,
-                    excerpts: dict[str, list[str]]) -> None:
-    """引用不到原文的高 relevance 评分压到 1（只有话题、无可核验依据）。
-
-    并入评分本身（不单开一道闸、不加淘汰原因）：judge 给了 ≥3 的内容支持
-    分但给不出可核对的原文，等同于没依据——降档后自然过不了保留阈值。
-    """
-    for key, verdict in verdicts.items():
-        relevance = verdict.get("relevance")
-        if not isinstance(relevance, int) or relevance < _JUDGE_SCORE_FLOORS["relevance"]:
-            continue
-        if any(_quote_ok(verdict.get("quote"), source)
-               for source in excerpts.get(key, (haystack,))):
-            continue
-        verdict["relevance"] = 1
-        verdict["reason"] = (verdict.get("reason") or "未引用可核对原文")[:40]
+# 证据核验（quote 逐字 + 场景计数压分）已内建到 mtg.verdicts.finalize_verdict，
+# 由 judge 经统一引擎执行——过滤段只消费 verify_fail 标注与 verdict_pass 复算
+# 结果，不再保留引用核对的工具副本。
 
 
 def _make_stage_client(settings: Settings, llm, *, temperature: float,
@@ -286,6 +259,43 @@ def _merged_audit_rows(merged) -> list[dict]:
             for item in merged]
 
 
+def _audit_verdict_rows(verdicts: dict[str, dict], merged) -> list[dict]:
+    """verdicts 终判 → 审计扁平行（键族与前端 JudgeVerdictRow / open_report 对齐）。
+
+    终判嵌套形状（finalize_verdict 输出）投影成扁平行：数值键
+    relevance/semantics/value/value_scores 保留（`open_report._judge_score_summary`
+    与前端按裸数消费，不破）；新增 relevance_reason/semantics_reason/
+    value_reasons/verify_fail，quote/scenes/confidence/reason/tag_kind 直通。
+    tag 与 candidate_id 按送审候选回填（终判本身不含标识字段）。
+    """
+    meta = {candidate.candidate_id or normalize_key(candidate.tag): candidate
+            for candidate in merged}
+    rows = []
+    for key, verdict in verdicts.items():
+        candidate = meta.get(key)
+        value = verdict["value"]
+        rows.append({
+            "tag": candidate.tag if candidate else key,
+            **({"candidate_id": candidate.candidate_id}
+               if candidate is not None and candidate.candidate_id else {}),
+            "relevance": verdict["relevance"]["score"],
+            "semantics": verdict["semantics"]["score"],
+            "value": value["score"],
+            "value_scores": {direction: value["dimensions"][direction]["score"]
+                             for direction in VALUE_DIRECTIONS},
+            "tag_kind": value["tag_kind"],
+            "relevance_reason": verdict["relevance"]["reason"],
+            "semantics_reason": verdict["semantics"]["reason"],
+            "value_reasons": value["reason"],
+            "confidence": verdict["confidence"],
+            "quote": verdict["quote"],
+            "reason": verdict["reason"],
+            "verify_fail": verdict["verify_fail"],
+            "scenes": verdict["scenes"],
+        })
+    return rows
+
+
 def _judge_merged_candidates(settings: Settings, spec: GenerationSpec, llm,
                              judge_client, contents, merged, modalities,
                              usage: dict, frame_count: int, started: float,
@@ -343,22 +353,33 @@ def _is_numeric_score(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _below_floor_notes(verdict: dict) -> list[str]:
+    """未过线轴的审计标注：None 轴标「无法判断」，数值轴给分值与楼层。"""
+    notes = []
+    for axis in ("relevance", "semantics"):
+        score = verdict[axis]["score"]
+        if score is None:
+            notes.append(f"{axis}=无法判断")
+        elif not _is_numeric_score(score) or score < VERDICT_FLOORS[axis]:
+            notes.append(f"{axis}={format_score(score)} < {VERDICT_FLOORS[axis]}")
+    value = verdict["value"]["score"]
+    if value is None:
+        notes.append("value=无法判断")
+    elif not _is_numeric_score(value) or value < VERDICT_FLOORS["value"]:
+        notes.append(f"value={format_score(value)} < {VERDICT_FLOORS['value']}")
+    return notes
+
+
 def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
-                       modalities, merged) -> tuple[list, list[dict]]:
-    """小节 4：过滤 + 证据（judge 三维分与场景证据逐条把关，目录匹配已融合进 semantics）。"""
+                       merged) -> tuple[list, list[dict]]:
+    """小节 4：过滤 + 证据（judge 三维分与场景证据逐条把关，目录匹配已融合进 semantics）。
+
+    verdicts 为引擎终判（finalize_verdict 输出）：证据核验（quote 逐字 +
+    场景计数）已在引擎内建并把不过核验的 relevance 压 1 + verify_fail 标注，
+    这里把 verify_fail 映射成专属淘汰原因（压分优先专属原因，不吞成"未过
+    线"），未压分的低分经 verdict_pass 复算（None=无法判断 同淘汰）。
+    """
     scene_index = {scene.scene_id: scene for scene in contents.content.scenes}
-    if settings.mtg_judge_enabled:
-        # 引用核对的底本必须与生成侧同口径：消融关掉台词后再拿全文去核，
-        # 会让“引用了模型没看过的台词”误判为有效。
-        scene_texts = {scene_id: _normalize_quote(render_scene(scene, modalities))
-                       for scene_id, scene in scene_index.items()}
-        excerpts = {
-            candidate.candidate_id: [scene_texts[s] for s in candidate.scenes
-                                     if s in scene_texts]
-            for candidate in merged if candidate.candidate_id and candidate.scope == "scene"
-        }
-        _require_quotes(verdicts, _normalize_quote(render_content(contents, modalities)),
-                        excerpts)
     accepted: list[tuple[MergedCandidate, dict | None, list[Evidence]]] = []
     dropped: list[dict] = []
     for candidate in merged:
@@ -368,13 +389,23 @@ def _filter_candidates(settings: Settings, contents, verdicts: dict[str, dict],
             if verdict is None:
                 dropped.append({**audit, "why": _DROP_NO_VERDICT})
                 continue
-            below = [f"{axis}={format_score(verdict.get(axis))}"
-                     f" < {floor}"
-                     for axis, floor in _JUDGE_SCORE_FLOORS.items()
-                     if not _is_numeric_score(verdict.get(axis))
-                     or verdict[axis] < floor]
-            if below:
-                dropped.append({**audit, "why": _DROP_SCORE_BELOW + "（" + "；".join(below) + "）"})
+            verify_fail = verdict.get("verify_fail")
+            if verify_fail == "quote":
+                dropped.append({**audit, "why": _DROP_QUOTE_FAIL})
+                continue
+            if verify_fail == "scenes":
+                # 引擎核验只在引用场景不达下限（film<2 / scene<1）时压分：
+                # scenes 空 = 全无有效证据；film 非空 = 只剩单场。
+                if verdict.get("scenes") and candidate.scope == "film":
+                    dropped.append({**audit, "why": _DROP_SINGLE_SCENE})
+                else:
+                    dropped.append({**audit, "why": _DROP_NO_EVIDENCE})
+                continue
+            if not verdict_pass(verdict["relevance"]["score"],
+                                verdict["semantics"]["score"],
+                                verdict["value"]["score"]):
+                dropped.append({**audit, "why": _DROP_SCORE_BELOW
+                                + "（" + "；".join(_below_floor_notes(verdict)) + "）"})
                 continue
         evidence = _evidence_for(candidate, verdict, scene_index)
         if not evidence:
@@ -431,7 +462,8 @@ def _align_and_verify_candidates(settings: Settings, spec: GenerationSpec, llm,
 
 def _rank_by_value_and_similarity(alignment: dict[str, Alignment], row) -> tuple[float, float]:
     candidate, verdict, _ = row
-    value = (verdict or {}).get("value")
+    value_block = (verdict or {}).get("value")
+    value = value_block.get("score") if isinstance(value_block, dict) else None
     aligned = alignment.get(candidate.tag)
     if aligned is None:
         similarity = 0.0
@@ -641,7 +673,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
                   directory_targets: dict | None = None,
                   clustering: dict | None = None) -> dict:
     """小节 6：组装审计报告（落盘由 _write_report 负责）。"""
-    verdict_rows = list(verdicts.values())
+    verdict_rows = _audit_verdict_rows(verdicts, merged)
     total_limit = limits.total_limit
     scene_limit = limits.scene_limit
     scene_request_limit = limits.scene_request_limit
@@ -665,7 +697,7 @@ def _build_report(settings: Settings, spec: GenerationSpec, llm, contents,
             "max_frames": settings.mtg_max_frames,
             "cluster_target": clustering["target"],
             "max_film_tags": limits.film_limit,
-            "judge_score_floors": dict(_JUDGE_SCORE_FLOORS),
+            "judge_score_floors": dict(VERDICT_FLOORS),
             "value_weights": {kind: [round(w, 4) for w in triple]
                               for kind, triple in settings.tag_value_weights.items()},
             "max_final_tags": total_limit,
@@ -784,8 +816,7 @@ def run_open_generation(spec: GenerationSpec, session: Session, llm, embedder,
         directory_entries=directories, directory_targets=directory_targets, runs=runs)
 
     # ---- 4. 过滤 + 证据 + 目录匹配 ----
-    accepted, dropped = _filter_candidates(settings, contents, verdicts,
-                                           modalities, merged)
+    accepted, dropped = _filter_candidates(settings, contents, verdicts, merged)
 
     accepted, clustering, candidate_vectors = cluster_scene_candidates(
         accepted, embedder, scene_count=len(contents.content.scenes),

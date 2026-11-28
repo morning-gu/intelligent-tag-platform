@@ -4,8 +4,9 @@
 Judge 审核、通用释义补写、相似度复核），以及仅在解析失败重试时追加的 `*_RETRY_HINT`。
 服务层渲染函数直接消费本模块模板，不再散落拼接指令文案。
 
-协议耦合提醒：本模块模板与其解析端互为协议——输出 JSON 形状与
-`parse.parse_judge_items` / `parse.parse_generation_items` /
+协议耦合提醒：本模块模板与其解析端互为协议——judge 判决输出形状与
+`mtg.verdicts.parse_verdicts`（生产 judge 与开放评测评审共用的融合解析器）、
+生成输出形状与 `parse.parse_generation_items`、
 `verify.parse_verify_results` / `descriptions._parse_items` 互为契约，
 `DESCRIPTION_TEMPLATE` 的通用性要求与 `descriptions.is_general` 对齐。
 修改字段名、取值范围或输出结构时，模板、重试提示与解析端必须同步更新。
@@ -84,8 +85,9 @@ FILM_GENERATION_TEMPLATE = (
 # 目标目录匹配度已融合进语义准确性（semantics），不再单独返回 dir_fits。
 # 输出段嵌入共享 VERDICT_OUTPUT_SPEC（id 键、逐维 {score, reason}、value 三方向带理由、
 # quote/scenes/confidence）——与 open_review 评审同一输出协议，是否保留由程序复算。
-# 候选行/影片内容/目标目录区不动；「标为 excerpt / 候选行标有「候选 ID」时 / 只输出一个
-# JSON 对象」三个字面标记是 render_judge_messages 剥段与换示例行的锚点，不得改名。
+# 候选行/影片内容/目标目录区不动；「标为 excerpt / 候选行标有「候选 ID」时 /
+# ## 输出字段要求（共享输出规范的标题）」是 render_judge_messages 剥段锚点、
+# 规范末行示例由渲染时换成本地示例，不得改名。
 JUDGE_TEMPLATE = (
     "## 审核任务\n"
     "你是影视内容标签审核员。下面是候选标签和影片内容，"

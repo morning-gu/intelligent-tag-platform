@@ -329,13 +329,14 @@ def parse_verdicts(text: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 证据核验与终判（评审归一 Task 3）：生产 `_require_quotes` 与评审
-# open_review.py 200–241 行后处理的统一实现——quote 逐字核验 + 场景计数 +
-# 缺释义置 null + value 三方向聚合，产出两侧共用的终判 dict。
+# 证据核验与终判（评审归一 Task 3）：原生产 `_require_quotes`（Task 6 已删其
+# pipeline 副本，judge 经引擎走本实现）与评审 open_review.py 200–241 行后处理
+# （Task 7 收敛）的统一实现——quote 逐字核验 + 场景计数 + 缺释义置 null +
+# value 三方向聚合，产出两侧共用的终判 dict。
 # ---------------------------------------------------------------------------
 
-# quote 核验三件套从 pipeline.py 原样搬移（评审归一 Task 3）——与 pipeline
-# 副本暂时并存，Task 6 删 pipeline 侧副本改为 import 本模块，届时收敛。
+# quote 核验三件套从 pipeline.py 原样搬移（评审归一 Task 3）；Task 6 已删
+# pipeline 侧副本，judge 侧归一化文本构建改 import 本模块，两侧收敛完成。
 _QUOTE_MIN_CHARS = 8
 _QUOTE_STRIP_RE = re.compile(
     r"[\s「」『』“”‘’\"'…—·,，。、；;：:！!？?（）()\[\]【】]+")
@@ -601,7 +602,9 @@ def run_verdicts(client, targets: list[VerdictTarget], *,
     usage 传入 dict 时逐次真实响应累计（accumulate_usage，judge 同款）；
     trace 传入 dict 时记录统一键族 {"batches": [{batch, attempt, targets,
     raw, error, missing}], "errors": {key: msg}, "salvaged": int}——salvaged
-    为未配齐批次里保住的判决条数。命中目标逐条 finalize_verdict 出终判。
+    为每个未配齐批的已配条目**即时**计数累加（legacy 是末轮一次计 pending，
+    语义不同；audit 读侧只做计数消费，不受口径差影响）。命中目标逐条
+    finalize_verdict 出终判。
     """
     if not targets:
         return {}, {}

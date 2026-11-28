@@ -308,7 +308,7 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
         tasks = response.json()["tasks"]
         assert all(task["status"] == "succeeded" for task in tasks)
         initial_requests = {"generation_scene": ":scene-001-dir-001",
-                            "generation_film": ":film-dir-001", "judge": ":judge",
+                            "generation_film": ":film-dir-001",
                             "verify": ":verify", "description": ":desc"}
         for stage, suffix in initial_requests.items():
             phase_calls = [call for call in calls if call[0].endswith(suffix)]
@@ -326,6 +326,17 @@ def test_open_prompt_samples_capture_first_call_per_stage_and_batch(client, tmp_
                 frame_part = {"type": "image_url",
                               "image_url": {"url": f"data:image/png;base64,{image}"}}
                 assert frame_part in messages[0]["content"]
+        # judge：统一批编排引擎的调用 run_id 由批次键族构成（<task>:<首键>-<末键>，
+        # 评审归一 Task 6），不再以 ":judge" 结尾——按审核任务标志串识别阶段。
+        judge_calls = [call for call in calls
+                       if "## 审核任务" in str(call[1][0]["content"])]
+        assert len(judge_calls) == len(asset_ids)
+        run_id, messages, result = judge_calls[0]
+        assert run_id.startswith(tasks[0]["task_id"] + ":")
+        example = json.loads((sample_dir / "judge_example.json").read_text(encoding="utf-8"))
+        assert example == {"run_id": run_id, "model": "mock-1", "messages": messages}
+        assert (sample_dir / "judge_result.txt").read_bytes().decode("utf-8") == result
+        assert json.loads((sample_dir / "judge_template.json").read_text(encoding="utf-8"))["messages"]
 
     submit_and_check(["movie_001", "movie_002"])
     submit_and_check(["movie_002"])

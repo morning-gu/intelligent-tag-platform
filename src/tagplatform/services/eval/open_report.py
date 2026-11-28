@@ -59,7 +59,7 @@ _JUDGE_MISSING = "评审官审计（audit/）缺失或为空，judge 段无数�
 
 # 目录对齐分档的三个已知档位（catalog_align 的 BAND_* 常量）
 _BAND_KEYS = ("duplicate", "suspect", "new")
-# judge 三维评分轴（与 parse_judge_items / pipeline 阈值互为协议）
+# judge 三维评分轴（与 mtg.verdicts.parse_verdicts / pipeline 阈值互为协议）
 _SCORE_AXES = ("relevance", "semantics", "value")
 
 # metrics.csv 长表列（Excel/后续分析消费；None → 空格）

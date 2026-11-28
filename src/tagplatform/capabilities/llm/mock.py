@@ -229,10 +229,14 @@ def _verify_output(text: str) -> dict:
 
 
 def _judge_output(text: str, run_id: str) -> list[dict]:
-    """judge：解析候选行，全部给过线三维分（4/3/三方向3分，confidence 0.9，引用首场景并摘原文）。
+    """judge：解析候选行，按融合判决协议回过线三维分（评审归一 Task 6）。
 
-    必须给 quote：流水线要求"评分引用内容原文"，模拟客户端从首场景描述里
-    截一段，口径与真实 judge 一致。目录匹配已融合进 semantics，不再输出 dir_fits。
+    条目形状与共享 VERDICT_OUTPUT_SPEC 一致：id 键（有候选 ID 回候选 ID，
+    否则回标签名）+ relevance/semantics 与 value 三方向各 {"score","reason"}
+    + quote/scenes/confidence；tag 字段同时保留（名称兜底回配用）。必须给
+    quote：引擎证据核验要求"评分引用内容原文"，模拟客户端从所报依据场景
+    的描述里截一段；film 级候选至少报两个场景（与提示词同规）。目录匹配
+    已融合进 semantics，不再输出 dir_fits；是否保留由程序复算。
     """
     scenes = _parse_scenes(text)
     scene_id = scenes[0]["scene_id"] if scenes else None
@@ -246,15 +250,18 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
         candidate_id = re.search(r"(?:〔|｜)候选 ID ([^｜]+)", marks)
         cited = next((scene for scene in scenes if scene["scene_id"] in evidence), None)
         items.append({
+            "id": candidate_id[1] if candidate_id else tag.strip(),
             "tag": tag.strip(),
-            "relevance": 4,
-            "semantics": 3,
-            "value_scores": {"presentation": 3, "search": 3, "recommendation": 3},
+            "relevance": {"score": 4, "reason": "模拟内容评分"},
+            "semantics": {"score": 3, "reason": "模拟语义评分"},
+            "value": {
+                "presentation": {"score": 3, "reason": "模拟内容呈现评分"},
+                "search": {"score": 3, "reason": "模拟内容搜索评分"},
+                "recommendation": {"score": 3, "reason": "模拟内容推荐评分"},
+            },
             "confidence": 0.9,
             "scenes": evidence,
             "quote": cited["description"][:12] if cited else quote,
-            "reason": "模拟判定：所引原文支撑标签",
-            **({"candidate_id": candidate_id[1]} if candidate_id else {}),
         })
     return items
 
