@@ -266,33 +266,33 @@ def _judge_output(text: str, run_id: str) -> list[dict]:
     return items
 
 
-def _quality_output(text: str, *, open_review: bool = False) -> dict:
+def _quality_output(text: str) -> dict:
+    """评审：解析待评估标签块，按融合判决协议回三维分（评审归一 Task 7）。
+
+    条目形状与共享 VERDICT_OUTPUT_SPEC 一致：id 键 + relevance/semantics 与
+    value 三方向各 {"score","reason"} + quote/scenes/confidence。有场景行时
+    relevance 给 4 并引用全部场景（quote 取首场景描述前 12 字，可被证据核验
+    逐字命中）；无场景行时 relevance 置 null（无法判断），value 三方向给
+    3 分（协议不收 null）。是否保留由程序按分数复算，mock 不输出 pass。
+    """
     material, _, label_json = text.rpartition("\n\n## 待评估标签\n")
     labels = json.loads(label_json)
     scenes = _parse_scenes(material)
+    quote = scenes[0]["description"][:12] if scenes else ""
     rows = [{
         "id": label["id"],
         "relevance": {"score": 4 if scenes else None, "reason": "模拟内容评分"},
         "semantics": {"score": 4 if label["desc"] else None, "reason": "模拟语义评分"},
-        "value": (
-            {
-                "presentation": {"score": 4 if scenes else None, "reason": "模拟内容呈现评分"},
-                "search": {"score": 4 if scenes else None, "reason": "模拟内容搜索评分"},
-                "recommendation": {"score": 4 if scenes else None, "reason": "模拟内容推荐评分"},
-            }
-            if open_review
-            else {"score": 4 if scenes else None, "reason": "模拟标签价值评分"}
-        ),
-        "evidence": scenes[:1],
+        "value": {
+            "presentation": {"score": 4 if scenes else 3, "reason": "模拟内容呈现评分"},
+            "search": {"score": 4 if scenes else 3, "reason": "模拟内容搜索评分"},
+            "recommendation": {"score": 4 if scenes else 3, "reason": "模拟内容推荐评分"},
+        },
+        "quote": quote,
+        "scenes": [scene["scene_id"] for scene in scenes],
+        "confidence": 0.9,
     } for label in labels]
-    if open_review:
-        for row in rows:
-            row["pass"] = bool(scenes)
-            row["reason"] = "模拟总评：标签值得保留" if scenes else "模拟总评：影片缺少相关材料"
-            row["evidence_scene_ids"] = [scene["scene_id"] for scene in scenes[:2]]
-            del row["evidence"]
-        return {"reviews": rows}
-    return {"tags": rows}
+    return {"verdicts": rows}
 
 
 class MockLLMClient:
@@ -312,7 +312,7 @@ class MockLLMClient:
     def complete(self, messages: list[dict], run_id: str) -> LLMResponse:
         text = _extract_text(messages)
         if str(messages[0]["content"]).startswith("## 标签质量评估"):
-            out = _quality_output(text, open_review="## 开放评测补充规则" in str(messages[0]["content"]))
+            out = _quality_output(text)
         elif _MTG_JUDGE_MARKER in text:
             out = _judge_output(text, run_id)
         elif _MTG_VERIFY_MARKER in text:
