@@ -16,6 +16,7 @@ import pytest
 from tagplatform.capabilities.prompts import (
     ALLOWED_FIELDS,
     REQUIRED_PLACEHOLDERS,
+    _evaluation as evaluation_prompts,
     assets as assets_prompts,
     get_prompt,
     mtg as mtg_prompts,
@@ -71,6 +72,63 @@ def test_registry_covers_all_central_constants():
             f"缺 {sorted(expected[module] - actual[module])} /"
             f" 多 {sorted(actual[module] - expected[module])}"
         )
+
+
+def test_open_review_prompt_v14_fuses_shared_output_spec():
+    """open-review-v14：协议附注瘦身——字段要求由共享 VERDICT_OUTPUT_SPEC 承载，
+    两步/组内比较/pass/总评段退役（保留与否改由程序按分数复算）。
+
+    mock 分流标志串（startswith「## 标签质量评估」、「## 开放评测补充规则」节标题）不得改。
+    """
+    prompt = open_review_prompts.REVIEW_PROMPT
+    assert open_review_prompts.REVIEW_PROMPT_VERSION == "open-review-v14"
+    assert open_review_prompts.REVIEW_RETRY_HINT == evaluation_prompts.VERDICT_RETRY_HINT
+    assert evaluation_prompts.VERDICT_OUTPUT_SPEC in prompt
+    assert prompt.startswith("## 标签质量评估")
+    assert "## 开放评测补充规则" in prompt
+    assert "只对「待评估标签」" in prompt and "原样返回每个 id" in prompt
+    # quote 要求随共享块进入评审提示词
+    assert "relevance 达到 3 或 4 分时" in prompt
+    for banned in ("pass", "该片其他标签", "独立保留", "总评"):
+        assert banned not in prompt
+
+
+def test_judge_template_fuses_shared_output_spec():
+    """judge 输出段换共享块：融合形状（id 键）输出示例，value_scores 字段名退役。"""
+    template = mtg_prompts.JUDGE_TEMPLATE
+    assert evaluation_prompts.VERDICT_OUTPUT_SPEC in template
+    assert mtg_prompts.JUDGE_RETRY_HINT == evaluation_prompts.VERDICT_RETRY_HINT
+    assert "value_scores" not in template
+    assert '"id":"t0"' in template
+    assert '"tag":"候选标签原文"' not in template
+    # render_judge_messages 按字面标记剥段/换示例行，标记缺失即渲染崩
+    for marker in ("\n\n## 目标目录\n", "\n\n## 评分标准",
+                   "\n\n标为 excerpt 的候选", "\n\n候选行标有「候选 ID」时",
+                   "\n\n只输出一个 JSON 对象"):
+        assert marker in template
+
+
+def test_judge_template_renders_across_all_section_variants():
+    """目录/excerpt/候选 ID 三个可剥段全组合渲染：占位符全部消费、不残留。"""
+    from tagplatform.services.generation.open.mtg.prompts import render_judge_messages
+
+    for dir_block in ("", "- d1｜内容类标签/情感氛围｜适用种类：内容级｜描述情感基调。"):
+        for with_candidate_ids in (False, True):
+            for with_excerpts in (False, True):
+                text = render_judge_messages(
+                    "影片材料正文", "- 屋顶枪战追逐｜动作｜屋顶追逐交火",
+                    dir_block=dir_block, with_candidate_ids=with_candidate_ids,
+                    with_excerpts=with_excerpts)[0]["content"]
+                assert "{candidates}" not in text
+                assert "{content}" not in text
+                assert "{dirs}" not in text
+
+
+def test_both_templates_embed_unified_criteria():
+    """三维标准唯一权威源：两模板都内嵌同一份 UNIFIED_EVALUATION_CRITERIA 全文。"""
+    criteria = evaluation_prompts.UNIFIED_EVALUATION_CRITERIA
+    assert criteria in mtg_prompts.JUDGE_TEMPLATE
+    assert criteria in open_review_prompts.REVIEW_PROMPT
 
 
 def test_registry_endpoint_contract(client):

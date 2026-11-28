@@ -230,7 +230,9 @@ def test_judge_prompt_carries_desc_target_dir_and_unified_criteria_without_dir_f
     assert "〔scene｜依据场景 scene_001｜标签种类 内容级｜目录 dir_mood｜候选 ID scene-000001〕" in text
     assert "释义：角色在屋顶展开紧张追逐交火的动作桥段；依据：屋顶追逐交火" in text
     assert "dir_fits" not in text
-    assert "candidate_id" in JUDGE_RETRY_HINT and "value_scores" in JUDGE_RETRY_HINT
+    from tagplatform.capabilities.prompts._evaluation import VERDICT_RETRY_HINT
+    assert JUDGE_RETRY_HINT == VERDICT_RETRY_HINT
+    assert "verdicts" in JUDGE_RETRY_HINT and "quote" in JUDGE_RETRY_HINT
     assert "dir_fits" not in JUDGE_RETRY_HINT
 
 
