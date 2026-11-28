@@ -275,6 +275,12 @@ _OTHER_QUOTE = "雨夜里两人并肩走过长街"      # 全文有，但不在 
 _GARBAGE_QUOTE = "完全不存在于文本里的话"    # 归一化后 ≥8 字，全文找不到
 _SHORT_QUOTE = "真相大白"                    # 归一化后不足 8 字
 
+# render_content 归一化全文 = 场景文本 + 非场景段（摘要/人物行）；film 级核验
+# 基准是这份全文（legacy judge 口径），不是各场景文本的并集。
+_SYNOPSIS = "导演以极简手法呈现都市疏离。"
+_FULL_HAYSTACK = _normalize_quote("".join(_SCENE_RAW.values()) + _SYNOPSIS)
+_SYNOPSIS_QUOTE = "导演以极简手法呈现都市疏离"   # 13 字，只在摘要段
+
 
 def _target(**overrides) -> VerdictTarget:
     """film 级全场景目标，按需覆盖字段。"""
@@ -326,6 +332,23 @@ def test_finalize_film_happy_path():
     assert verdict["value"]["weights"] == weights_dict_for_kind("content", weights)
     assert verdict["value"]["tag_kind"] == "content"
     assert verdict["value"]["dimensions"] == _entry()["value"]
+
+
+def test_finalize_film_quote_from_synopsis_only_not_pressed():
+    """film 级 quote 只在全文非场景段（摘要行）、场景文本里没有 → 不压分（核验基准=全文 haystack）。"""
+    verdict = finalize_verdict(_entry(quote=_SYNOPSIS_QUOTE), _target(),
+                               haystack=_FULL_HAYSTACK, scene_texts=_SCENE_TEXTS)
+    assert verdict["verify_fail"] is None
+    assert verdict["relevance"] == {"score": 4, "reason": "主线强相关"}
+    assert verdict["scenes"] == ["scene_001", "scene_002"]
+
+
+def test_finalize_film_quote_in_scene_text_still_ok_with_full_haystack():
+    """film 级 quote 在场景文本 → 全文基准下依旧可寻，不压分（回归）。"""
+    verdict = finalize_verdict(_entry(), _target(),
+                               haystack=_FULL_HAYSTACK, scene_texts=_SCENE_TEXTS)
+    assert verdict["verify_fail"] is None
+    assert verdict["relevance"]["score"] == 4
 
 
 @pytest.mark.parametrize("quote", ["", _SHORT_QUOTE, _GARBAGE_QUOTE],

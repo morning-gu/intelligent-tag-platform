@@ -397,7 +397,8 @@ def finalize_verdict(item: dict, target: VerdictTarget, *, haystack: str,
 
     规则序：① scenes 求有效集（item.scenes ∩ scene_texts 键集，scene 级再
     ∩ allowed_scenes，排序输出）；② relevance 为 int 且 ≥3 时核验证据——
-    quote 须在 allowed 场景文本（空则退回全文 haystack）中 ≥8 字连续重合，
+    quote 在核验基准文本中 ≥8 字连续重合（film 级 = 归一化全文 haystack，
+    含摘要/人物行；scene 级 = allowed 场景文本，空则退回全文 haystack），
     且有效场景计数达下限（film≥2 / scene≥1；scene 级 allowed_scenes 为空集
     时计数免查、quote 核验退回全文 haystack），任一失败 relevance 压 1 并写
     核验失败说明 + verify_fail（quote 先查、失败即压，优先于 scenes）；
@@ -423,8 +424,13 @@ def finalize_verdict(item: dict, target: VerdictTarget, *, haystack: str,
     verify_reason = ""
     score = relevance["score"]
     if isinstance(score, int) and score >= VERDICT_FLOORS["relevance"]:
-        sources = [scene_texts[s] for s in sorted(target.allowed_scenes)
-                   if s in scene_texts] or [haystack]
+        if target.level == "film":
+            # film 级核验基准 = 归一化全文 haystack（render_content 含摘要/人物行），
+            # 与 legacy judge 全文基准一致——从非场景段摘的合法逐字引文不误杀。
+            sources = [haystack]
+        else:
+            sources = [scene_texts[s] for s in sorted(target.allowed_scenes)
+                       if s in scene_texts] or [haystack]
         if not any(_quote_ok(item.get("quote"), source) for source in sources):
             verify_fail, verify_reason = "quote", _QUOTE_FAIL_REASON
         elif not (target.level == "scene" and not target.allowed_scenes):
