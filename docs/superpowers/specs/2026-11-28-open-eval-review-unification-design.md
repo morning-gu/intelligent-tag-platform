@@ -1,6 +1,6 @@
 # 开放评测评审归一设计：一把尺子、一个引擎、裁决复算
 
-日期：2026-11-28 ｜ 状态：待用户确认 ｜ 分支：feat/open-eval-review-unification（自 origin/main @ 1378e6a）
+日期：2026-11-28 ｜ 状态：已批准（用户终审通过） ｜ 分支：feat/open-eval-review-unification（自 origin/main @ 1378e6a）
 
 ## 意图与动机
 
