@@ -347,11 +347,13 @@ raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None
 
 零漂移干跑整条开放管线（`build_spec` + `OpenTagProducer.produce`，与正式
 生成同一路径，只是结果不入库），对每片全部产出（库内命中 + 新词）做
-**三维独立评审**：模型逐维评 relevance、semantics 和 value（0–4 或 null），
-然后单独给出建议保留、不保留或无法判断，以及一条说明最终决定的总评理由。
-三维分为判断提供参考。生产 judge 继续使用自身的评分筛选规则。
+**三维独立评审**：模型逐维评 relevance、semantics 和 value（0–4；relevance/
+semantics 允许显式 null 表示无法判断，value 三方向不收 null），只输出评分与
+证据——**是否保留由程序按分数复算**，评审不再输出保留建议或总评，角色是
+「独立打分员」，只测执行偏差。
 干跑运行器在 `open_service.py`，报告组装/渲染/落盘在 `open_report.py`，
-评审调用、解析和场景引用核验在 `open_review.py`（报告只落
+评审调用经生产 judge 与开放评测共用的统一判决引擎 `mtg/verdicts.py`
+（`open_review.py` 为评审侧薄封装；报告只落
 `settings.open_eval_output_root/<run_id>/`）。
 
 **2026-11-23 口径变更**：闭环遗留的 gt 加载、θ 网格、集合准确率、nDCG、
@@ -360,6 +362,17 @@ raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None
 头条指标改为**评审通过率**（新词/命中分开）与**新词占比**，配三维均分/
 满分率/分布；开放评测报告仅在存在部分运行、同模评审或样本不足时展示对应警示，
 不再附带闭环银标准 `note` 提示。
+
+**2026-11-28 评审归一——四条口径变更声明**（生产 judge 与开放评审合并到
+一把尺子、一个引擎、裁决复算，设计文档逐字）：
+
+1. 评审通过率 = 生产规则阈值复算（不再是模型保留意见）——头条指标语义变化；
+2. 证据不足：评审侧 relevance 由「置 None 出分母」改为「压 1」（对齐生产）；
+3. 生产侧新增程序化 scenes 计数核验，且核验只认判决自引证据（不回落生成侧
+   场景）——**生产过滤收紧**（已拍板：暂不做离线预复算，直接上线；收紧幅度
+   以上线后审计 `dropped` 原因分布与漏斗对照观察，注意该读法分不清规则收紧
+   与模型波动）；
+4. 新旧 run 通过率不可横比（通用纪律 2），legacy 复算口径随报告标注。
 
 ### 样本构造
 
@@ -371,28 +384,34 @@ raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None
   异常）时**产出不作废**——hits/new_words 行原样保留（review=null）、
   review_error 落 raw，该片仍计 ok；通过率/三维指标整体排除出分母
   （None≠0：不是评审 0 分），计入 `sample_accounting.review_failed`；
-- 评审回复缺少条目或调用失败，计入漏判或失败。有效回复中的 null 分表示无法判断。
-  模型给出的保留结论为 null 时，该条不进入通过率分母。评分覆盖率分母为全部产出标签。
+- 评审回复缺少条目或调用失败，计入漏判或失败。有效回复中的 null 分表示无法判断——
+  relevance/semantics 显式 null 经 `verdict_pass` 复算为 None，该条不进入通过率
+  分母（None≠0）。评分覆盖率分母为全部产出标签。
 
-### 整片评审口径
+### 整片评审口径（open-review-v14 融合协议）
 
-使用起跑时选择的模态、最终标签名称、通用释义、挂载目录路径与定义、标签种类（`target_type`）、用途层级和来源场景整片盲评（提示词版本 `open-review-v13`，与 Judge 共用 `capabilities/prompts/_evaluation.py` 中的统一三维评价标准）。
-库内标签取起跑时词库中的正式释义与所属目录定义。评审高相关分须给出有效场景 ID，场景级须命中标签的来源场景（仅依据标签自身 `scene_ids`，不回退挂载点），全片级至少两处。标签价值由模型对内容呈现、内容搜索、内容推荐三个方向分别打 0–4 整数分，程序按标签种类权重聚合为保留两位小数的价值分（0–4 分布按四舍五入归档）。报告前端与 `report.md` 均展示生成阶段（一阶段/二阶段）、挂载目录、挂载层级（全片级/场景级/角色级）、生成来源与评审引用及三方向价值明细。结构化引用不足时，可以使用评审理由中明确写出的有效场景 ID 补充。
-生产 judge 的分数、理由和摘录只在报告审计中展示。评审结合整组标签判断重复与独立保留价值。
+使用起跑时选择的模态、最终标签名称、通用释义、挂载目录路径与定义、标签种类（`target_type`）、用途层级和来源场景整片盲评（提示词版本 `open-review-v14`；生产 judge 模板版本 `mtg-v15-unified-verdict`）。
+生产 judge 与开放评测评审现在**共用同一评分标准、同一输出协议、同一引擎与核验规则、同一裁决复算函数**：统一三维评分标准与判决输出协议（`VERDICT_OUTPUT_SPEC`/`VERDICT_RETRY_HINT`）唯一权威源在 `capabilities/prompts/_evaluation.py`，解析（`parse_verdicts`）、证据核验与终判（`finalize_verdict`）、批编排（`run_verdicts`）与裁决复算（`verdict_pass`）同驻 `mtg/verdicts.py`，两处模板只保留 header 与材料区差异。
 
-通过率统计经过生产筛选的产出中，模型建议保留的条数占有明确结论条数的比例。比较生成策略时一起查看每片产出量、自滤保留率、评分覆盖率和通过条数。
-生产 judge 与开放评测评审在内容相关性、语义准确性（融合名称清晰度、释义一致性与目标目录匹配度）和标签价值（三方向加权聚合）上采用完全一致的评分标准。
+**输出协议（融合 schema，两处唯一）**：模型对每个目标输出一条判决——`id` 原样返回、relevance/semantics 各 `{"score": 0–4 或 null, "reason"}`、value 三方向（内容呈现/内容搜索/内容推荐）各 `{"score": 0–4, "reason"}`、逐字摘录 `quote`（10–25 字，relevance 3–4 分必须给出）、引用场景 `scenes`（全片级至少两个独立场景，场景级取标签来源场景——仅依据标签自身 `scene_ids`，不回退挂载点）、`confidence`（0–1）。模型不输出任何裁决字段：pass/总评/组内比较指令与「该片其他标签（上下文）」请求块随归一退役（拆分子批同样不携带）。库内标签取起跑时词库中的正式释义与所属目录定义。标签价值由程序按标签种类权重聚合为保留两位小数的价值分（0–4 分布按四舍五入归档）。报告前端与 `report.md` 均展示生成阶段（一阶段/二阶段）、挂载目录、挂载层级（全片级/场景级/角色级）、生成来源、评审逐字摘录（quote）与三方向价值明细；生产 judge 的分数、理由和摘录在报告审计（judge_reference）中展示。
 
-默认每片一次请求。整批格式错误时重试一次，仍缺判就拆批。输出截断直接拆批，
-部分合格只补送漏判的子批。拆批仍保留其他标签作为重复判断的上下文。拆出的子批
-先分别评审，单条复试在其他子批都获首轮机会后执行。调用总量上限是 `2×标签数+2`，
-未发出的恢复请求会标记为预算耗尽。传输失败记录客户端错误。
-如果完整影片材料超出上下文窗口，报告记录评审失败原因。评审客户端默认 `reasoning_effort=low`、`max_tokens=8192`，
+**证据核验与压分（`finalize_verdict`）**：relevance ≥3 的判决须过两道核验——① `quote` 与核验文本有 ≥8 字连续重合（全片级基准为归一化全文，含摘要/人物行；场景级为来源场景文本）；② 有效场景计数达下限（全片级 ≥2、场景级 ≥1）。任一不满足 → **relevance 压 1**（quote 失败优先于场景计数），核验失败说明写进 `relevance.reason` 并派生为顶层 reason。核验只认判决自引证据（quote + 判决 scenes），不回落生成侧场景；评审侧原「证据不足置 None 出分母」与「理由文本挖场景 ID 兜底」一并退役。
+
+**裁决复算（`verdict_pass`）**：通过判定 = relevance≥3 ∧ semantics≥3 ∧ value≥2（三下限常量 `VERDICT_FLOORS` 共享，生产过滤段与报告 `_group_stats` 调同一个函数——通过率数字与生产闸门同源）。任一轴 null → None：评测不进通过率分母，生产按未过线淘汰。评审侧 semantics 缺释义置 null（「缺少释义」）仅评测侧生效。通过率统计的是复算可判条数中过线的比例；比较生成策略时一起查看每片产出量、自滤保留率、评分覆盖率和通过条数。
+
+**批编排（`run_verdicts`，预算 `2×标签数+2`）**：默认每片一次请求整批一队；整批零命中且未截断 → 整批重试一次（附共享重试提示）；有命中但有漏判 → 漏判子集另起一批（已判不重发，零命中对半拆）；单条漏判复试排在所有子批之后（一次机会）；输出截断不整批重试、直接走拆批口径。每次调用前查预算，耗尽后剩余目标记「预算耗尽」；传输失败记录客户端错误。如果完整影片材料超出上下文窗口，报告记录评审失败原因。每次调用的原始响应、漏判与错误进统一 trace 键族 `{batches: [{batch, attempt, targets, raw, error, missing}], errors: {id: 消息}, salvaged}`（judge 侧同族；旧 run 的旧形状 trace 由前端按键存在性容错渲染）。评审客户端默认 `reasoning_effort=low`、`max_tokens=8192`，
 同一开放评测服务最多 4 条评审请求并行。对应环境变量为
 `TAGPLT_OPEN_EVAL_REVIEW_REASONING_EFFORT`、`TAGPLT_OPEN_EVAL_REVIEW_MAX_TOKENS`、
 `TAGPLT_OPEN_EVAL_REVIEW_CONCURRENCY`。端点不支持推理强度时设空串。
 评审模型、网关环境变量名和密钥环境变量名可单独指定。空项沿用主客户端配置，
-评审参数仍生效。运行元数据记录实际客户端配置和保留判定方式。
+评审参数仍生效。运行元数据记录实际客户端配置与 `meta.review.pass_mode="threshold"`（复算口径标识，旧 run 为 `"model"`）。
+
+### 报告口径（schema 4）
+
+- **行契约**：hits/new_words 行的 review = 三维 `{score, reason}` + value 聚合块（含 `tag_kind`/`weights`/三方向明细）+ `quote` + `confidence` + `evidence_scene_ids`（= 判决 scenes，键保留兼容）+ 顶层 `reason`（派生：压分时 = 核验失败说明，否则拼接各维理由）+ `pass`（派生 = `verdict_pass` 复算）+ `evaluated`。
+- **通过率复算**：`_group_stats` 不信任行存 pass——一律按行内三维分经 `verdict_pass` 复算（新行幂等；旧 run 的行即 legacy 升级口径）；`passed = sum(pass is True)`、`judged = sum(pass is not None)`。
+- **一致性对照（summary.consistency）**：行级 judge↔评审一致性三桶响亮核算（None≠0 纪律延伸，不静默出分母）——`denominator` = 复算可判且 judge_reference 三维分齐的行（judge 参考按构造全放行，评审复算否决即分歧）；`review_undetermined` = 复算 None（轴 null）单独计；`no_judge_reference` = 复算可判但缺 judge 参考单独计。`disagreement_rate` = `review_rejected / denominator`（分母 0 → None）；`axis_delta` 逐维 `mean_abs`/`exact_rate`/`n`，只在两侧都有该维分的行上算。进 summary、`report.md` 与 `metrics.csv`（`disagreement_rate` 与逐维均差/一致率行，n 对应实际分母）。
+- **legacy 警示与惰性升级**：旧协议 run（`meta.review.prompt_version` ≠ `open-review-v14`）报告头部 banner「旧协议 run：通过率按阈值复算口径重算，与原模型保留率不可横比」；report.json 读侧发现 schema ≠ 4 时按原始材料（meta + raw_results + audit/）惰性升级重算并重写三件套（升级幂等），材料缺失按无报告容错。
 
 ### 产物与重评
 
@@ -400,18 +419,20 @@ raw 行无 `trace` 键 → 摘要 `funnel`、明细 `trace`、`lost_at` 全 None
 评审原始响应与失败原因（成功片同样保留）——报告里只有一句 `review_error` 时，
 据此还原是漏字段、id 错误还是顶层结构漂移。重评接口
 `POST /runs/{id}/rereview` 从原运行的完成影片和快照另存一份报告，
-返回新 `run_id` 和 `source_run_id`。原报告和生成样本状态保留。缺少材料快照的
+返回新 `run_id` 和 `source_run_id`（材料快照重评按当前 open-review-v14 融合协议
+执行）。原报告和生成样本状态保留。缺少材料快照的
 旧运行需要重新起跑。报告接口只提供当前格式的报告。
 
 `GET /runs/{id}/movies/{tt}/diagnostics` 按片透出生产审计与评审现场（两份都缺
 → 404）。报告页逐片明细里的「生产审计」展开时加载，显示逐候选的三维分、目录
-判决、摘录和去向。judge 中断时仍显示送审候选。逐次 judge 和独立评审响应可展开查看，
+判决、摘录和去向。judge 中断时仍显示送审候选。逐次 judge 和独立评审响应可展开查看
+（trace 统一键族 `{batches, errors, salvaged}`），
 未完成的评审条目会列出对应的失败或预算耗尽原因。
 
 `live.json` 在影片产出和整片评审完成时更新。前端轮询直到取得最终报告。
-最终产物包括 `meta.json`、`raw_results.json`、`report.json`、
+最终产物包括 `meta.json`、`raw_results.json`、`report.json`（schema 4）、
 `report.md`、`metrics.csv`、生产 `audit/` 和评审 `review/`。CSV 中每个比例的 `n`
-对应其实际分母。报告提示部分运行、共享模型可能带来的偏差和样本不足。
+对应其实际分母。报告提示部分运行、共享模型可能带来的偏差、旧协议 run 与样本不足。
 
 ---
 

@@ -1,6 +1,6 @@
 # 生成标签自动质量评估功能
 
-> **现状说明**：原内嵌在「生产任务」中的附带标签质量评估已退役并迁入独立的**开放评测（Open Eval）**模块（详见 [`docs/eval.md`](eval.md) §5）。本文 **§2.2–§2.5 的三维 0–4 评分口径**现由 Judge 过滤与开放评测独立盲评提示词 `open-review-v13` 共用（统一标准定义于 `src/tagplatform/capabilities/prompts/_evaluation.py`，分别嵌入 `mtg.py` 与 `open_review.py`）；§1、§3.2–§5 记录的是早期生产任务附带评估的流程设计，留作历史参考。
+> **现状说明**：原内嵌在「生产任务」中的附带标签质量评估已退役并迁入独立的**开放评测（Open Eval）**模块（详见 [`docs/eval.md`](eval.md) §5）。本文 **§2.2–§2.5 的三维 0–4 评分口径与输出协议**现由 Judge 过滤（`mtg-v15-unified-verdict`）与开放评测独立盲评提示词 `open-review-v14` 共用（统一标准与判决输出协议定义于 `src/tagplatform/capabilities/prompts/_evaluation.py`，分别嵌入 `mtg.py` 与 `open_review.py`；解析、证据核验、批编排与裁决复算共用引擎 `src/tagplatform/services/generation/open/mtg/verdicts.py`——模型只输出评分与证据，是否保留由程序按分数复算）；§1、§3.2–§5 记录的是早期生产任务附带评估的流程设计，留作历史参考。
 
 ## 1. 功能位置与运行方式（历史设计）
 
@@ -41,7 +41,7 @@
 
 ### 2.2 五档判定方式
 
-现行 Judge 过滤与开放评测盲评提示词 `open-review-v13` 共用同一份统一三维评分标准（`src/tagplatform/capabilities/prompts/_evaluation.py`），对三个维度按 0–4 档评价。各维独立确定分档。场景级证据须能定位到具体子场景，共享剧情摘要用于补充上下文。同片标签之间的信息重叠只影响最终保留结论。`level` 决定取证范围（`film` / `scene`），`target_type` 决定标签种类（`content` 内容级 / `scene` 场景级 / `character` 人物级）。如果缺少必要材料或缺少释义且无法区分相邻档，记为 `null`；只要已有证据足以判断反证、目录不匹配或表述缺陷，就按对应低档评分。
+现行 Judge 过滤与开放评测盲评提示词 `open-review-v14` 共用同一份统一三维评分标准与融合输出协议（`src/tagplatform/capabilities/prompts/_evaluation.py`），对三个维度按 0–4 档评价。各维独立确定分档。场景级证据须能定位到具体子场景，共享剧情摘要用于补充上下文。同片标签之间的信息重叠不进入各维评分——是否保留由程序按分数复算（`verdict_pass`：relevance≥3 / semantics≥3 / value≥2），不再由模型输出保留结论。`level` 决定取证范围（`film` / `scene`），`target_type` 决定标签种类（`content` 内容级 / `scene` 场景级 / `character` 人物级）。relevance/semantics 允许显式记为 `null`（缺少必要材料或缺少释义且无法区分相邻档时）；只要已有证据足以判断反证、目录不匹配或表述缺陷，就按对应低档评分。
 
 ### 2.3 内容相关性
 
@@ -100,7 +100,7 @@
 
 评估模型应同时获得影片内容和最终标签信息，并为每个标签分别给出三个维度的评分及简短理由。内容相关性尽可能提供对应的场景或内容证据，方便前端查看。
 
-评估提示词区分 `desc` 和 `reason` 的用途，要求模型只评估输入中的标签。现行开放评测使用 `open-review-v13`（`src/tagplatform/capabilities/prompts/open_review.py`），与 Judge 共用统一三维评分标准：按输入 `id` 对齐输出，每个条目返回 `relevance`、`semantics`（融合名称清晰度、释义一致性与目录匹配度）、`value` 下内容呈现/内容搜索/内容推荐三方向评分与理由（由程序按 `target_type` 权重聚合为保留两位小数的 `value.score`）、用于内容相关性取证的 `evidence_scene_ids`，以及综合后的保留结论 `pass` 与总评 `reason`；场景级评分统一以标签的 `scene_ids` 定位来源场景，不回退挂载点 `target_id`。（早期生产附带评估使用 `tag-quality-v5`，证据字段为 `evidence`。）
+评估提示词区分 `desc` 和 `reason` 的用途，要求模型只评估输入中的标签。现行开放评测使用 `open-review-v14`（`src/tagplatform/capabilities/prompts/open_review.py`），与 Judge 共用统一三维评分标准与融合输出协议（`VERDICT_OUTPUT_SPEC`）：按输入 `id` 对齐输出，每个条目返回 `relevance`、`semantics`（融合名称清晰度、释义一致性与目录匹配度，各 `{"score", "reason"}`，允许显式 null）、`value` 下内容呈现/内容搜索/内容推荐三方向评分与理由（由程序按 `target_type` 权重聚合为保留两位小数的 `value.score`）、逐字摘录 `quote`（relevance 3–4 分必须给出）、引用场景 `scenes` 与把握度 `confidence`；不再输出保留结论 `pass` 与总评 `reason`——是否保留由程序按 `verdict_pass` 阈值复算（relevance≥3 / semantics≥3 / value≥2），顶层 `reason` 为程序派生（证据核验压分时即核验失败说明）。报告层继续以 `evidence_scene_ids` 键透出判决场景（兼容别名）；场景级评分统一以标签的 `scene_ids` 定位来源场景，不回退挂载点 `target_id`。（早期生产附带评估使用 `tag-quality-v5`，证据字段为 `evidence`。）
 
 ### 3.2 影片级指标
 
